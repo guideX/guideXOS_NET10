@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <OutputType>Exe</OutputType>
+    <PublishAot>true</PublishAot>
+    <SelfContained>true</SelfContained>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <IlcGenerateMapFile>true</IlcGenerateMapFile>
+    <StripSymbols>false</StripSymbols>
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <TrimMode>partial</TrimMode>
+    <IlcScanReflection>false</IlcScanReflection>
+    <StackTraceSupport>false</StackTraceSupport>
+    <EventSourceSupport>false</EventSourceSupport>
+    <DebuggerSupport>false</DebuggerSupport>
+    <InvariantTimezone>true</InvariantTimezone>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedEntryProbe</PathMap>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>GuideXOS.Net10.ManagedEntryProbe</RootNamespace>
+    <AssemblyName>gxos-managed-entry-probe</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <LinkerArg Include="/Brepro" Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
+  </ItemGroup>
+
+</Project>

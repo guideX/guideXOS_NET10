@@ -6,30 +6,38 @@ This repository is intentionally starting as an archaeology and bootstrap projec
 
 ## Current state
 
-The local checkout was empty at the start of the audit:
+The repository now contains a small .NET 10 NativeAOT managed-entry probe and a narrowly scoped UEFI PE loader harness. The four-gate result is:
 
-- branch: `main`
-- commits: none (`HEAD` is unborn)
-- tracked files: none
-- untracked files: none before this audit
-- configured remote: `git@github.com:guideX/guideXOS_NET10.git`
-- remote heads: none observed through a read-only HTTPS `ls-remote` probe
-- SSH connectivity: not verified because the local SSH client rejected the GitHub host key
+- Gate 1: passed — standard .NET 10 NativeAOT PE artifacts build reproducibly.
+- Gate 2: passed — the linked runtime and platform dependency census is recorded.
+- Gate 3: passed — PE/COFF anatomy and byte-for-byte staging are machine-checked; no PE-to-ELF converter is adopted.
+- Gate 4: not passed — the fresh QEMU runs load, relocate, and inspect the PE, then stop at ten unresolved Windows/CRT import descriptors before managed transfer.
 
-This audit adds documentation only. No solution, project, bootloader, runtime, or kernel source has been copied into the new repository yet.
+The final marker `GXOS_NET10:MANAGED_ENTRY_OK` was therefore not claimed. This is an intentional, documented negative result rather than a native shim pretending to be managed execution.
 
-## Intended first milestone
+## Provisional first-image path
 
 ```text
 UEFI firmware
-  -> guideXOS-owned bootloader
-  -> native bootstrap
-  -> .NET 10 NativeAOT module/runtime initialization
-  -> managed KernelMain entry
-  -> one deterministic serial or framebuffer diagnostic
+  -> minimal guideXOS-owned PE loader
+  -> NativeAOT PE validation and relocation
+  -> platform/runtime dependency resolution (not yet available)
+  -> managed ManagedMain entry
+  -> deterministic serial marker
 ```
 
-The first milestone deliberately excludes the desktop, filesystem, networking, full GC, and application loading.
+The first milestone deliberately excludes the desktop, filesystem, networking, allocation, exceptions, threading, synchronization, reflection, dynamic loading, and broad framework compatibility.
+
+## NativeAOT feasibility documents
+
+- [Build and toolchain record](docs/BUILD_TOOLCHAIN_RECORD.md)
+- [NativeAOT artifact anatomy](docs/NATIVEAOT_ARTIFACT_ANATOMY.md)
+- [Dependency census](docs/DEPENDENCY_CENSUS.md)
+- [Image-format decision](docs/IMAGE_FORMAT_DECISION.md)
+- [Boot ABI](docs/BOOT_ABI.md)
+- [Managed-entry proof procedure](docs/MANAGED_ENTRY_PROOF.md)
+- [Evidence ledger](docs/EVIDENCE_LEDGER.md)
+- [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 
 ## Audit documents
 

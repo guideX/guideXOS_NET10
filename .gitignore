@@ -1,0 +1,26 @@
+# Build and generated evidence outputs
+**/bin/
+**/obj/
+artifacts/
+evidence/generated/
+
+# Local tool caches and emulator state
+.dotnet/
+*.fd
+*.img
+*.iso
+*.elf
+*.efi
+*.exe
+*.dll
+*.pdb
+*.lib
+*.map
+*.rsp
+*.log
+
+# Developer-local files
+.vs/
+.idea/
+*.user
+*.suo
