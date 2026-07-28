@@ -7,7 +7,9 @@ Generated binaries, emulator firmware, logs, and manifests remain under ignored 
 | Evidence | Result |
 | --- | --- |
 | Branch at start of this pass | `main` |
-| HEAD at start of this pass | `34dbe0a6becf500eeb1474670197e31a396271dd` |
+| HEAD at start of this pass | `3f36766ba535f8d3fa545c3724f466d5a27784e0` |
+| Upstream at start | `origin/main` |
+| Remote at start | `origin git@github.com:guideX/guideXOS_NET10.git` (fetch/push) |
 | Worktree at start | clean; no pre-existing dirty files in this pass |
 | Reference repositories | read-only evidence only; no edits, formatting, regeneration, commits, or staging |
 | Prior Gate 4 loader hash | `C92E4286AEE275212128C6B6718AF8B0C23A0EAB7BAB8EBD5D0E7B07D3256E1A` |
@@ -24,6 +26,16 @@ Generated binaries, emulator firmware, logs, and manifests remain under ignored 
 | ILC response retained from Gate 1 | `7E33D44C6E1ECF354F732A56565521DD87C086A194C557641882B4FE4232BF85` |
 | linker response retained from Gate 1 | `4A0B63F84FA712D4C30556C532C6F1F62C825257B5C78B45DDFBE5C6605C704A` |
 
+### Current allocation milestone artifacts
+
+| Artifact | SHA-256 | Size |
+| --- | --- | ---: |
+| no-allocation control shared PE | `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861` | 729,600 |
+| allocation-enabled shared PE | `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379` | 731,136 |
+| no-allocation map XML | `E38DB968C40F19F427D4AEF64D7BF5B19E3E16B3010F8DA83FD07CFB449899FC` | — |
+| allocation-enabled map XML | `65DDD404B161E26E5B33A158EFA678A0AC33F4CCA474BD697F17DDE85C84D34F` | — |
+| allocation differential JSON | `A1F78E6C7F7983690A24370EFC74441F1F7FC90EB52D9C1FF28E498352308DE3` | — |
+
 ## Final loader and firmware
 
 | Artifact | SHA-256 |
@@ -33,6 +45,8 @@ Generated binaries, emulator firmware, logs, and manifests remain under ignored 
 | QEMU | `11.0.0 (v11.0.0-12122-ga4bb4b10c9)` |
 
 Harness command: `tools\Build-Gate4Harness.ps1`. Positive command: `tools\Run-Gate4.ps1 -RunCount 3 -TimeoutSeconds 15 -ExpectedLoaderSha256 92C8371430116BA459A8EC1B5CC445DBF4222B40A57265BC1BDACF24FD46BEA0`.
+
+Current-source fresh control: `gate4-20260728-063011-635-run1`, artifact `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`, loader `8382E6579D2ED3E6E12EC26A86E6DA1683A849A5E01BC26BBBDD98AFFB1E2A71`, firmware `33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`.
 
 ## Positive validation matrix
 
@@ -63,6 +77,10 @@ The normal staged artifact was re-hashed after the negative builds and restored 
 
 The prior three-run evidence used loader `C92E4286AEE275212128C6B6718AF8B0C23A0EAB7BAB8EBD5D0E7B07D3256E1A` and stopped after relocation at the ten-descriptor import boundary. That evidence is not overwritten and explains why the first pass did not claim managed entry.
 
+## Allocation milestone evidence
+
+The pre-startup allocation run `allocation-probe-before-gc-20260728-060732-637` used the allocation-enabled PE and reached managed status `-10`; it emitted no first-allocation marker. The clean standard-startup blocker run `allocation-startup-blocker-20260728-0630` used loader `CB48F1CACF18207EB71BB3B7D3255B0B8E82C485E688167753E84ECEB71C56C8` and stopped at `UNEXPECTED_IMPORT_CALL:KERNEL32.dll!GetSystemTimeAsFileTime`. These are bounded negative results, not Gate 4 failures.
+
 ## Conclusions
 
 | Gate | Conclusion |
@@ -71,3 +89,6 @@ The prior three-run evidence used loader `C92E4286AEE275212128C6B6718AF8B0C23A0E
 | 2 | Passed: exact runtime/platform census recorded. |
 | 3 | Passed: direct PE/COFF load, relocation, and byte-identity staging. |
 | 4 | Passed: three consecutive fresh QEMU processes entered the legitimate NativeAOT export path, emitted the managed marker, returned zero, and halted with zero unresolved required imports. |
+| 5 | Bounded negative: the opt-in standard NativeAOT DLL/bootstrap entrypoint is reached, but its freestanding process-time dependency is not supplied. |
+| 6 | Not passed: the generated `RhpNewFast` allocation path is present, but no GC-backed first allocation is proven; the probe returns `-10` before startup. |
+| 7 | Not run: repeated allocation/exhaustion is gated on a proven first allocation. |

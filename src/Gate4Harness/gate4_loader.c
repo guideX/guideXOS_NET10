@@ -559,6 +559,8 @@ static uint8_t g_fls_allocated[64];
 static void *g_fls_values[64];
 static FlsCleanupCallback g_fls_callbacks[64];
 
+typedef int (EFIAPI *NativeAotDllEntry)(uintptr_t module_handle, uint32_t reason, void *reserved);
+
 static uint32_t EFIAPI platform_fls_alloc(FlsCleanupCallback callback)
 {
     uint32_t index;
@@ -1241,6 +1243,22 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
     install_fault_handlers();
     initialize_nativeaot_tls(&image, boot_services);
+#ifdef GXOS_ENABLE_NATIVEAOT_STARTUP
+    if (image.entry_rva == 0 || image.entry_rva >= image.loaded_size) fail("nativeaot-entrypoint-missing");
+    serial_text("GXOS_NET10:NATIVEAOT_STARTUP_BEGIN\r\n");
+    {
+        NativeAotDllEntry nativeaot_entry = (NativeAotDllEntry)(uintptr_t)(image.actual_base + image.entry_rva);
+        int nativeaot_result = nativeaot_entry((uintptr_t)image.actual_base, 1, 0);
+        serial_field_hex("GXOS_NET10:NATIVEAOT_STARTUP_RETURN=0x", (uint64_t)(uint32_t)nativeaot_result);
+        serial_text("\r\n");
+        if (nativeaot_result == 0) fail("nativeaot-startup-failed");
+    }
+    serial_text("GXOS_NET10:NATIVEAOT_STARTUP_OK\r\n");
+    serial_field_hex("GXOS_NET10:TLS_ALLOC_LIMIT=0x", *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x30));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:TLS_ALLOC_PTR=0x", *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x38));
+    serial_text("\r\n");
+#endif
     g_boot_info_address = (uint64_t)(uintptr_t)&g_boot_info;
     g_boot_info.Magic = GUIDEX_BOOT_MAGIC;
     g_boot_info.Version = GUIDEX_BOOT_VERSION;

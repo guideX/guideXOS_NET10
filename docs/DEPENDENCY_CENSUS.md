@@ -1,10 +1,10 @@
 # Dependency census
 
-This document records the exact imports of the Gate 1 shared NativeAOT artifact and the Gate 4 reachability experiment. The artifact is the reproducible `win-x64` shared image whose SHA-256 is `2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837`.
+This document records the exact imports of the Gate 1 shared NativeAOT artifact, the Gate 4 reachability experiment, and the allocation differential. The current no-allocation control is the reproducible `win-x64` shared image whose SHA-256 is `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`.
 
-The initial Gate 4 stop was a correct ten-descriptor/124-symbol census. The completed experiment patches every IAT slot: 18 imports have bounded functional implementations and the other 106 receive deterministic guideXOS-owned fail-fast stubs. A fail-fast stub is not support for the service; it proves that the symbol is not reached by the legitimate no-allocation path.
+The initial Gate 4 stop was a correct ten-descriptor/124-symbol census. The control experiment patches every IAT slot: 18 imports have bounded functional implementations and the other 106 receive deterministic guideXOS-owned fail-fast stubs. A fail-fast stub is not support for the service; it proves that the symbol is not reached by the legitimate no-allocation path. The allocation-enabled variant keeps the same 10/124 import set and adds only managed allocation code and metadata; it does not make the 106 services functional.
 
-Final treatment totals for this proof are A=functional `18`, B=deterministic fail-fast `106`, C=import elimination `0`, and D=deferred required symbols `0`. Later runtime features remain blockers, but no symbol required by the demonstrated entry path is deferred.
+Final control treatment totals are A=functional `18`, B=deterministic fail-fast `106`, C=import elimination `0`, and D=deferred required symbols `0`. The allocation/startup follow-on is a bounded negative result: the standard PE entrypoint trace stops at `KERNEL32.dll!GetSystemTimeAsFileTime`, and the first allocation probe returns `-10` without a GC allocation context.
 
 ## Exact descriptor and symbol inventory
 
@@ -42,6 +42,14 @@ The resolver first installed a unique fail-fast stub in every IAT slot and then 
 The remaining 106 imports were not declared unused merely because they were absent from one trace: the link response and disassembly identify their retaining components, and the negative fail-fast stubs prove that any accidental reachability is detected. They are deferred runtime services, not silently supported services.
 
 ## NativeAOT components and deferred boundaries
+
+## Allocation differential and startup trace
+
+The allocation-enabled shared artifact has SHA-256 `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379` and remains 10 descriptors / 124 symbols. `tools\Compare-AllocationArtifacts.ps1` compares the two manifests and map XML files; the retained report is `artifacts\allocation-enabled-final-20260728-060439-726\allocation-differential.json` and passes because the import sets are identical while the allocation probe's EEType, constructor, and `AllocateOne` appear only in the staged map.
+
+The clean opt-in startup trace calls the allocation PE's actual entry RVA `0x77840` with process-attach arguments after the existing loader TLS setup. It reaches the standard DLL/bootstrap path and stops at the first unprovided import, `KERNEL32.dll!GetSystemTimeAsFileTime`. Temporary exploratory shims were not retained; no dummy time, CRT, virtual-memory, event, or thread implementation is counted as support.
+
+The separate pre-startup allocation run reaches the generated `RhpNewFast` path with TLS allocation limit and pointer both zero, and the managed probe returns `-10`. This is the exact current first-allocation blocker, not evidence of a successful allocation.
 
 `link.rsp` retains `dllmain.obj`, `bootstrapperdll.obj`, `Runtime.WorkstationGC.lib`, `aotminipal.lib`, disabled EventPipe/standalone-GC components, compression/native support, and Windows import libraries. The map contains `ModuleInitializerList`, `RuntimeConfigurationBlob`, TLS, GC statics, exception metadata, and thread-static metadata. The current proof provides only the minimum one-thread transition state; it does not provide a GC heap, virtual-memory allocator, process/threading system, COM, CRT, exceptions, or unwinding.
 

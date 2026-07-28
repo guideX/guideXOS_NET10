@@ -22,6 +22,12 @@ $loader = (Get-FileHash .\artifacts\gate4\ESP\EFI\BOOT\BOOTX64.EFI -Algorithm SH
 
 The script requires, in order, PE validation, relocation, `PE_IMPORT_DESCRIPTORS=10`, `PE_IMPORT_SYMBOLS=124`, `PE_IMPORT_RESOLVED=124`, `PE_IMPORT_FUNCTIONAL=18`, `PE_IMPORT_FAILFAST=106`, `UNRESOLVED_REQUIRED_IMPORTS=0`, `BEFORE_MANAGED_CALL`, the exact managed marker, a zero return, and `MANAGED_ENTRY_COMPLETE`. It also verifies the artifact and loader hashes in each fresh process. A successful run ends with `GATE4_PROOF=PASSED` and `GATE4_RESULT=MANAGED_ENTRY`.
 
+## Current-source fresh control baseline
+
+The allocation-probe source was rebuilt with the no-allocation branch disabled. Fresh control run `gate4-20260728-063011-635-run1` passed with artifact SHA-256 `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`, loader SHA-256 `8382E6579D2ED3E6E12EC26A86E6DA1683A849A5E01BC26BBBDD98AFFB1E2A71`, QEMU `11.0.0 (v11.0.0-12122-ga4bb4b10c9)`, and firmware SHA-256 `33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`. It recorded 10 descriptors, 124 symbols, 18 functional imports, 106 fail-fast imports, zero unresolved imports, the managed marker, return zero, and `MANAGED_ENTRY_COMPLETE`.
+
+The allocation-enabled artifact is a separate negative experiment. Its opt-in startup trace is documented in [ALLOCATION_GC_PROBE.md](ALLOCATION_GC_PROBE.md); it must not be passed to this Gate 4 success validator because it emits `FIRST_ALLOCATION_OK` only after an unproven GC-backed object allocation.
+
 Representative positive serial sequence:
 
 ```text

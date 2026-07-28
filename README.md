@@ -15,6 +15,8 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
+The allocation/GC follow-on is a bounded negative result: the allocation artifact and differential census pass, but authentic NativeAOT startup stops at an unprovided process-time import and the first allocation remains unproven.
+
 ## Provisional first-image path
 
 ```text
@@ -37,6 +39,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Image-format decision](docs/IMAGE_FORMAT_DECISION.md)
 - [Boot ABI](docs/BOOT_ABI.md)
 - [Managed-entry proof procedure](docs/MANAGED_ENTRY_PROOF.md)
+- [NativeAOT allocation and GC probe](docs/ALLOCATION_GC_PROBE.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 

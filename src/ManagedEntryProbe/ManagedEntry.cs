@@ -23,6 +23,24 @@ public static unsafe class ManagedEntry
 {
     private const int MarkerLength = 29;
 
+#if GXOS_ALLOCATION_PROBE
+    private const ulong AllocationValue = 0x1122334455667788UL;
+    private const int FirstAllocationMarkerLength = 32;
+
+    internal sealed class AllocationProbeObject
+    {
+        public nuint Value;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static AllocationProbeObject AllocateOne(nuint value)
+    {
+        AllocationProbeObject instance = new AllocationProbeObject();
+        instance.Value = value;
+        return instance;
+    }
+#endif
+
     [UnmanagedCallersOnly(EntryPoint = "ManagedMain")]
     public static int ManagedMain(nint bootInfoAddress)
     {
@@ -44,6 +62,49 @@ public static unsafe class ManagedEntry
         delegate* unmanaged<byte*, nuint, void> serialWrite =
             (delegate* unmanaged<byte*, nuint, void>)(nuint)bootInfo->SerialWrite;
 
+#if GXOS_ALLOCATION_PROBE
+        AllocationProbeObject instance = AllocateOne((nuint)AllocationValue);
+        if (instance is null || instance.Value != (nuint)AllocationValue)
+        {
+            return -10;
+        }
+
+        byte* markerAddress = stackalloc byte[FirstAllocationMarkerLength];
+        markerAddress[0] = (byte)'G';
+        markerAddress[1] = (byte)'X';
+        markerAddress[2] = (byte)'O';
+        markerAddress[3] = (byte)'S';
+        markerAddress[4] = (byte)'_';
+        markerAddress[5] = (byte)'N';
+        markerAddress[6] = (byte)'E';
+        markerAddress[7] = (byte)'T';
+        markerAddress[8] = (byte)'1';
+        markerAddress[9] = (byte)'0';
+        markerAddress[10] = (byte)':';
+        markerAddress[11] = (byte)'F';
+        markerAddress[12] = (byte)'I';
+        markerAddress[13] = (byte)'R';
+        markerAddress[14] = (byte)'S';
+        markerAddress[15] = (byte)'T';
+        markerAddress[16] = (byte)'_';
+        markerAddress[17] = (byte)'A';
+        markerAddress[18] = (byte)'L';
+        markerAddress[19] = (byte)'L';
+        markerAddress[20] = (byte)'O';
+        markerAddress[21] = (byte)'C';
+        markerAddress[22] = (byte)'A';
+        markerAddress[23] = (byte)'T';
+        markerAddress[24] = (byte)'I';
+        markerAddress[25] = (byte)'O';
+        markerAddress[26] = (byte)'N';
+        markerAddress[27] = (byte)'_';
+        markerAddress[28] = (byte)'O';
+        markerAddress[29] = (byte)'K';
+        markerAddress[30] = (byte)'\r';
+        markerAddress[31] = (byte)'\n';
+        serialWrite(markerAddress, (nuint)FirstAllocationMarkerLength);
+        return 0;
+#else
 #if GXOS_NEGATIVE_RETURN
         return 7;
 #endif
@@ -85,6 +146,7 @@ public static unsafe class ManagedEntry
         serialWrite(markerAddress, (nuint)MarkerLength);
 
         return 0;
+#endif
     }
 
     // Keeps this NativeAOT executable independently runnable without using a host API.

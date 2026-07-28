@@ -3,7 +3,8 @@ param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
     [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast')]
-    [string]$Scenario = 'Normal'
+    [string]$Scenario = 'Normal',
+    [switch]$EnableNativeAotStartup
 )
 
 Set-StrictMode -Version Latest
@@ -58,6 +59,7 @@ switch ($Scenario) {
     'UnresolvedImport' { $gccArguments += '-DGXOS_NEGATIVE_UNRESOLVED_IMPORT' }
     'InvokeFailfast' { $gccArguments += '-DGXOS_NEGATIVE_INVOKE_FAILFAST' }
 }
+if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
 
 & $gccCommand.Source @gccArguments 1> $buildLog 2> $buildErrorLog
 if ($LASTEXITCODE -ne 0) {

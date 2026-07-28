@@ -5,7 +5,7 @@ param(
     [string]$GateDirectory = '',
     [string]$OvmfPath = '',
     [string]$OvmfVarsTemplate = '',
-    [string]$ExpectedArtifactSha256 = '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837',
+    [string]$ExpectedArtifactSha256 = 'C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861',
     [string]$ExpectedLoaderSha256 = '',
     [int]$ExpectedImportDescriptors = 10,
     [int]$ExpectedImportSymbols = 124,

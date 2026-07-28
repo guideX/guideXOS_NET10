@@ -74,3 +74,11 @@ Each of the 106 unreachable symbols is patched to a guideXOS-owned stub that emi
 - The exact native call target is the relocated `ManagedMain` export VA, not PE entry RVA `0x77700`.
 
 The current path is therefore a legitimate direct exported NativeAOT entry for this no-allocation artifact, with its required transition state explicitly supplied by the loader. It is not a general NativeAOT process-start contract.
+
+## Allocation-enabled variant
+
+The follow-on allocation artifact is intentionally a differential build, not a replacement for the Gate 4 control. Its shared PE is 731,136 bytes with SHA-256 `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`; the no-allocation control used for the fresh baseline is 729,600 bytes with SHA-256 `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`. The two manifests have identical 10 import descriptors and 124 import symbols. The allocation map adds the probe EEType, writable data, constructor, and `ManagedEntry__AllocateOne`; it does not add a platform import.
+
+In the allocation variant the managed path is `ManagedMain -> AllocateOne -> RhpNewFast`, with the helper reading the current TLS allocation context at TLS block `+0x30` (`limit`) and `+0x38` (`allocation pointer`). The probe validates a non-null object and a fixed field value before emitting its first-allocation marker. The pre-startup run returned managed status `-10` because those TLS slots remained zero; no object or GC success is claimed.
+
+The allocation variant's PE entry RVA is `0x77840`, distinct from the no-allocation control's `0x77700` because adding the managed allocation path changes the linked image. An opt-in harness mode calls that actual PE entrypoint with DLL process-attach arguments after the existing relocation/IAT/TLS work. The clean retained trace stops at `KERNEL32.dll!GetSystemTimeAsFileTime`; the full DLL/CRT startup and GC contract therefore remain unclosed.
