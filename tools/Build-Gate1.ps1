@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [string[]]$AdditionalProperties = @()
 )
 
 Set-StrictMode -Version Latest
@@ -19,7 +20,7 @@ function Publish([string]$Name, [string[]]$Extra)
     $publish = Join-Path $out $Name
     $binlog = Join-Path $out ($Name + '.binlog')
     New-Item -ItemType Directory -Force -Path $publish | Out-Null
-    $arguments = @('publish', $project, '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishAot=true', "-p:PublishDir=$publish\", "-bl:$binlog") + $Extra
+    $arguments = @('publish', $project, '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true', '-p:PublishAot=true', "-p:PublishDir=$publish\", "-bl:$binlog") + $AdditionalProperties + $Extra
     & $dotnet.Source @arguments 1> (Join-Path $out ($Name + '.stdout.log')) 2> (Join-Path $out ($Name + '.stderr.log'))
     if ($LASTEXITCODE -ne 0) { throw "Gate 1 publish failed for $Name (exit $LASTEXITCODE)." }
     Get-FileHash -LiteralPath (Get-ChildItem -LiteralPath $publish -File | Select-Object -ExpandProperty FullName) -Algorithm SHA256 | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $out ($Name + '.hashes.json')) -Encoding utf8

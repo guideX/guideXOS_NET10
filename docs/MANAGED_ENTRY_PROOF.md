@@ -1,100 +1,88 @@
 # Managed-entry proof procedure
 
-This procedure is intentionally bounded and fail-closed. The current result is a negative Gate 4 proof: the harness executes and reaches the dependency boundary, but it does not enter managed code.
+This is the bounded Gate 4 proof. It uses a fresh QEMU process for every run, an isolated serial log, the exact staged NativeAOT PE, a hash-checked UEFI loader, and a fail-closed import/runtime boundary.
 
-## 1. Build the NativeAOT artifacts
+## Build and inspect
 
 ```powershell
 Set-Location D:\dev\guideXOS_NET10
 & .\tools\Build-Gate1.ps1
-```
-
-For the checked evidence, the shared artifact is `artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll`. Run the host executable separately when checking Gate 1:
-
-```powershell
-& .\artifacts\gate1-brepro-1\gxos-managed-entry-probe.exe
-if ($LASTEXITCODE -ne 0) { throw "host artifact failed: $LASTEXITCODE" }
-```
-
-## 2. Inspect and compare the PE
-
-```powershell
 & .\tools\Build-Gate3Evidence.ps1
-```
-
-The command creates a timestamped evidence directory, emits two PE manifests, compares the source artifact with the exact ESP-staged copy, and writes an `objdump -p` report. It must print:
-
-```text
-GATE3_COMPARISON=PASS
-GATE3_PROOF=PE_IDENTITY_AND_MANIFEST_PASS
-```
-
-The current checked run is `artifacts\gate3-evidence-20260727-191336-817`.
-
-## 3. Build the UEFI harness
-
-```powershell
 & .\tools\Build-Gate4Harness.ps1
 ```
 
-The harness is a freestanding PE/COFF EFI application built without CRT or platform imports. It creates an ignored ESP staging directory containing:
+The intended shared payload is `artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll`. The harness stages it at `ESP\GXOS\gxos-managed-entry-probe.dll`. Gate 3 must report `GATE3_COMPARISON=PASS` before the QEMU step.
 
-```text
-ESP\EFI\BOOT\BOOTX64.EFI
-ESP\GXOS\gxos-managed-entry-probe.dll
-ESP\startup.nsh
-```
-
-`startup.nsh` is present because fresh QEMU firmware variable stores may select the embedded UEFI shell before the fallback boot path. It invokes the same `BOOTX64.EFI` and does not print the managed marker.
-
-## 4. Run fresh emulator processes
+## Positive validation
 
 ```powershell
-& .\tools\Run-Gate4.ps1 -RunCount 3 -TimeoutSeconds 5
+$loader = (Get-FileHash .\artifacts\gate4\ESP\EFI\BOOT\BOOTX64.EFI -Algorithm SHA256).Hash
+& .\tools\Run-Gate4.ps1 -RunCount 3 -TimeoutSeconds 15 -ExpectedLoaderSha256 $loader
 ```
 
-The script detects QEMU, copies the firmware code image into the per-run directory, copies a fresh variable image for every run, starts QEMU with no display and a bounded timeout, captures serial/stdout/stderr separately, and rejects stale logs by using a new timestamped run directory. The expected current result is:
+The script requires, in order, PE validation, relocation, `PE_IMPORT_DESCRIPTORS=10`, `PE_IMPORT_SYMBOLS=124`, `PE_IMPORT_RESOLVED=124`, `PE_IMPORT_FUNCTIONAL=18`, `PE_IMPORT_FAILFAST=106`, `UNRESOLVED_REQUIRED_IMPORTS=0`, `BEFORE_MANAGED_CALL`, the exact managed marker, a zero return, and `MANAGED_ENTRY_COMPLETE`. It also verifies the artifact and loader hashes in each fresh process. A successful run ends with `GATE4_PROOF=PASSED` and `GATE4_RESULT=MANAGED_ENTRY`.
 
-```text
-GATE4_PROOF=NOT_PASSED
-GATE4_RESULT=BLOCKED_IMPORTS
-```
-
-The loader serial sequence proving the deepest current gate is:
+Representative positive serial sequence:
 
 ```text
 GXOS_NET10:LOADER_START
 GXOS_NET10:PE_READ_OK
 GXOS_NET10:PE_RELOCATIONS_OK
 GXOS_NET10:MANAGED_EXPORT_RVA=0x0000000000024724
-GXOS_NET10:PE_IMPORT_COUNT=10
-GXOS_NET10:GATE4_BLOCKED_IMPORTS
+GXOS_NET10:PE_IMPORT_DESCRIPTORS=10
+GXOS_NET10:PE_IMPORT_SYMBOLS=124
+GXOS_NET10:PE_IMPORT_RESOLVED=124
+GXOS_NET10:UNRESOLVED_REQUIRED_IMPORTS=0
+GXOS_NET10:BOOT_INFO_PTR=0x...
+GXOS_NET10:CALL_TARGET_VA=0x...
+GXOS_NET10:BEFORE_MANAGED_CALL
+GXOS_NET10:MANAGED_ENTRY_OK
+GXOS_NET10:STACK_RSP_BEFORE_CALL=0x...
+GXOS_NET10:STACK_RSP_MOD16=0
+GXOS_NET10:AFTER_MANAGED_RETURN=0x0000000000000000
+GXOS_NET10:MANAGED_ENTRY_COMPLETE
 ```
 
-The import-boundary marker is native loader evidence and is intentionally different from `GXOS_NET10:MANAGED_ENTRY_OK`.
+## Negative controls
 
-## 5. Pass criteria for a future positive run
+Each control uses an isolated harness or NativeAOT artifact. `Run-Gate4-Negative.ps1` requires expected diagnostic tokens and rejects the exact success marker.
 
-A future run may be called a managed-entry pass only when all of these are true:
+```powershell
+& .\tools\Build-Gate4Harness.ps1 -OutputDirectory .\artifacts\gate4-negative-invalid -Scenario InvalidBootInfo
+& .\tools\Run-Gate4-Negative.ps1 -GateDirectory .\artifacts\gate4-negative-invalid -ExpectedPresent 'GXOS_NET10:AFTER_MANAGED_RETURN=0x00000000FFFFFFFE','GXOS_NET10:FAIL:managed-return-nonzero'
 
-1. Gate 1 hash and Gate 3 manifest checks pass.
-2. A fresh QEMU process emits `LOADER_START`, PE validation, relocation, and export evidence.
-3. The loader has a documented and verified import/runtime treatment, or the artifact is proven import-free.
-4. The serial stream contains `GXOS_NET10:MANAGED_ENTRY_OK` only after the loader’s before-entry markers.
-5. A controlled mutation of the managed return value or marker changes the observed result.
-6. Three consecutive fresh processes pass with the same artifact and loader hashes.
+& .\tools\Build-Gate4Harness.ps1 -OutputDirectory .\artifacts\gate4-negative-null -Scenario NullSerial
+& .\tools\Run-Gate4-Negative.ps1 -GateDirectory .\artifacts\gate4-negative-null -ExpectedPresent 'GXOS_NET10:AFTER_MANAGED_RETURN=0x00000000FFFFFFFE','GXOS_NET10:FAIL:managed-return-nonzero'
 
-The current run satisfies 1, 2, and 6 for the negative import-boundary result. It does not satisfy 3–5 and must not be reported as a managed-entry success.
+& .\tools\Build-Gate4Harness.ps1 -OutputDirectory .\artifacts\gate4-negative-unresolved -Scenario UnresolvedImport
+& .\tools\Run-Gate4-Negative.ps1 -GateDirectory .\artifacts\gate4-negative-unresolved -ExpectedPresent 'GXOS_NET10:UNRESOLVED_REQUIRED_IMPORTS=1','GXOS_NET10:FAIL:negative-unresolved-import'
 
-## Failure diagnosis
+& .\tools\Build-Gate4Harness.ps1 -OutputDirectory .\artifacts\gate4-negative-failfast -Scenario InvokeFailfast
+& .\tools\Run-Gate4-Negative.ps1 -GateDirectory .\artifacts\gate4-negative-failfast -ExpectedPresent 'GXOS_NET10:UNEXPECTED_IMPORT_CALL:ADVAPI32.dll!RegisterEventSourceW'
 
-| Observation | Meaning |
-| --- | --- |
-| Host executable returns nonzero | Gate 1 failed; inspect the publish logs and hashes. |
-| Gate 3 comparison fails | Staging or a loader transformation changed important image content; do not continue. |
-| No serial output | Firmware/image discovery or harness startup failure; inspect per-run stderr and firmware paths. |
-| `PE_READ_OK` absent | File-system read or PE header validation failed. |
-| `PE_RELOCATIONS_OK` absent | Image allocation, section copy, or relocation validation failed. |
-| Export RVA absent | The artifact is not the expected shared NativeAOT form. |
-| `PE_IMPORT_COUNT=10` and blocked marker | Current expected negative result; the artifact still requires Windows/CRT support. |
-| Managed marker appears without a managed-entry proof | Treat as failure; stale output or native pre-printing is not acceptable. |
+& .\tools\Build-Gate1.ps1 -OutputDirectory .\artifacts\gate1-negative-return -AdditionalProperties @('-p:DefineConstants=GXOS_NEGATIVE_RETURN')
+& .\tools\Build-Gate4Harness.ps1 -OutputDirectory .\artifacts\gate4-negative-return -ManagedArtifact .\artifacts\gate1-negative-return\shared\gxos-managed-entry-probe.dll
+& .\tools\Run-Gate4-Negative.ps1 -GateDirectory .\artifacts\gate4-negative-return -ExpectedPresent 'GXOS_NET10:AFTER_MANAGED_RETURN=0x0000000000000007','GXOS_NET10:FAIL:managed-return-nonzero'
+
+& .\tools\Build-Gate1.ps1 -OutputDirectory .\artifacts\gate1-negative-marker -AdditionalProperties @('-p:DefineConstants=GXOS_NEGATIVE_MARKER')
+& .\tools\Build-Gate4Harness.ps1 -OutputDirectory .\artifacts\gate4-negative-marker -ManagedArtifact .\artifacts\gate1-negative-marker\shared\gxos-managed-entry-probe.dll
+& .\tools\Run-Gate4-Negative.ps1 -GateDirectory .\artifacts\gate4-negative-marker -ExpectedPresent 'GXOS_NET10:MANAGED_ENTRY_OX','GXOS_NET10:AFTER_MANAGED_RETURN=0x0000000000000000'
+```
+
+The normal artifact hash is rechecked after all mutations. None of the controls may contain `GXOS_NET10:MANAGED_ENTRY_OK`.
+
+## Why the marker is managed-origin evidence
+
+The proof has independent checks:
+
+1. Native `BEFORE_MANAGED_CALL` precedes the marker; native code does not print the marker.
+2. Native `AFTER_MANAGED_RETURN=0` follows the marker and changes to `7` in the managed-return mutation.
+3. The managed marker mutation changes the exact serial bytes from `...ENTRY_OK` to `...ENTRY_OX` while the native return remains zero.
+4. Invalid version and null callback controls return `-2` without the marker.
+5. The export RVA, relocated target VA, and `objdump` disassembly link the call to the `[UnmanagedCallersOnly]` export and its callback invocation.
+
+## ABI and fault diagnosis
+
+`call_managed_entry` is an explicit `ms_abi` function pointer call. The wrapper clears DF and loads MXCSR `0x1F80` and x87 control `0x037F`. In the positive runs it recorded `RSP=0x0000000007E65820`, so `RSP mod 16 = 0` immediately before `CALL`; the call boundary supplies the 32-byte Microsoft x64 shadow space and the callee sees the normal return-address layout. The harness is compiled `-mno-red-zone`, preserves nonvolatile registers through the compiler-generated wrapper, and restores GS/interrupt state after the call. The loader stack is writable as provided by firmware; stack execution is not required, and the probe did not emit stack probing.
+
+The local IDT records vector, error code, RIP, RSP, CR2, image base, managed target, boot-info pointer, and deepest marker. Phase state classifies faults as `FAULT_BEFORE_MANAGED`, `FAULT_IN_MANAGED`, or `FAULT_AFTER_MANAGED_RETURN`; arbitrary recovery is not attempted.

@@ -4,7 +4,13 @@ param(
     [int]$TimeoutSeconds = 15,
     [string]$GateDirectory = '',
     [string]$OvmfPath = '',
-    [string]$OvmfVarsTemplate = ''
+    [string]$OvmfVarsTemplate = '',
+    [string]$ExpectedArtifactSha256 = '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837',
+    [string]$ExpectedLoaderSha256 = '',
+    [int]$ExpectedImportDescriptors = 10,
+    [int]$ExpectedImportSymbols = 124,
+    [int]$ExpectedFunctionalImports = 18,
+    [int]$ExpectedFailfastImports = 106
 )
 
 Set-StrictMode -Version Latest
@@ -43,7 +49,7 @@ New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 $codePath = Join-Path $runRoot 'edk2-x86_64-code.fd'
 Copy-Item -LiteralPath $OvmfPath -Destination $codePath -Force
 $qemuVersion = (& $qemuPath '--version' 2>$null | Select-Object -First 1).Trim()
-$allBlocked = $true
+$allPassed = $true
 
 function Read-SerialLog([string]$Path)
 {
@@ -86,24 +92,40 @@ for ($i = 1; $i -le $RunCount; $i++) {
     $serial = Read-SerialLog $serialLog
     if ($null -eq $serial) { $serial = '' }
     $managed = $serial.Contains('GXOS_NET10:MANAGED_ENTRY_OK')
-    $blocked = $serial.Contains('GXOS_NET10:GATE4_BLOCKED_IMPORTS')
-    if ($managed -or -not $blocked) { $allBlocked = $false }
+    $before = $serial.IndexOf('GXOS_NET10:BEFORE_MANAGED_CALL', [StringComparison]::Ordinal)
+    $managedIndex = $serial.IndexOf('GXOS_NET10:MANAGED_ENTRY_OK', [StringComparison]::Ordinal)
+    $after = $serial.IndexOf('GXOS_NET10:AFTER_MANAGED_RETURN=0x0000000000000000', [StringComparison]::Ordinal)
+    $complete = $serial.IndexOf('GXOS_NET10:MANAGED_ENTRY_COMPLETE', [StringComparison]::Ordinal)
+    $resolved = $serial.Contains('GXOS_NET10:UNRESOLVED_REQUIRED_IMPORTS=0')
+    $stackAligned = $serial.Contains('GXOS_NET10:STACK_RSP_MOD16=0')
+    $imports = $serial.Contains("GXOS_NET10:PE_IMPORT_DESCRIPTORS=$ExpectedImportDescriptors") -and
+        $serial.Contains("GXOS_NET10:PE_IMPORT_SYMBOLS=$ExpectedImportSymbols") -and
+        $serial.Contains("GXOS_NET10:PE_IMPORT_FUNCTIONAL=$ExpectedFunctionalImports") -and
+        $serial.Contains("GXOS_NET10:PE_IMPORT_FAILFAST=$ExpectedFailfastImports")
+    $fault = $serial.Contains('GXOS_NET10:FAULT_')
+    $artifactHash = (Get-FileHash (Join-Path $espDirectory 'GXOS\gxos-managed-entry-probe.dll') -Algorithm SHA256).Hash
+    $loaderHash = (Get-FileHash (Join-Path $espDirectory 'EFI\BOOT\BOOTX64.EFI') -Algorithm SHA256).Hash
+    $runPass = $managed -and $resolved -and $imports -and $stackAligned -and $before -ge 0 -and $managedIndex -gt $before -and $after -gt $managedIndex -and $complete -gt $after -and -not $fault -and $artifactHash -eq $ExpectedArtifactSha256
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedLoaderSha256)) { $runPass = $runPass -and $loaderHash -eq $ExpectedLoaderSha256 }
+    if (-not $runPass) { $allPassed = $false }
     [PSCustomObject]@{
         RunId = $runId
-        Classification = if ($managed) { 'UNEXPECTED_MANAGED_MARKER' } elseif ($blocked) { 'BLOCKED_IMPORTS_CONFIRMED' } else { $classification }
+        Classification = if ($runPass) { 'MANAGED_ENTRY_PASS' } elseif ($managed) { 'MANAGED_MARKER_WITH_FAILED_PROOF' } else { $classification }
+        Pass = $runPass
         QemuVersion = $qemuVersion
         FirmwareSha256 = (Get-FileHash $codePath -Algorithm SHA256).Hash
-        ArtifactSha256 = (Get-FileHash (Join-Path $espDirectory 'GXOS\gxos-managed-entry-probe.dll') -Algorithm SHA256).Hash
-        LoaderSha256 = (Get-FileHash (Join-Path $espDirectory 'EFI\BOOT\BOOTX64.EFI') -Algorithm SHA256).Hash
+        ArtifactSha256 = $artifactHash
+        LoaderSha256 = $loaderHash
         SerialLog = $serialLog
         Serial = $serial.Trim()
     } | ConvertTo-Json -Compress
 }
 
-if ($allBlocked) {
-    Write-Output 'GATE4_PROOF=NOT_PASSED'
-    Write-Output 'GATE4_RESULT=BLOCKED_IMPORTS'
-    exit 2
+if ($allPassed) {
+    Write-Output 'GATE4_PROOF=PASSED'
+    Write-Output 'GATE4_RESULT=MANAGED_ENTRY'
+    exit 0
 }
-Write-Output 'GATE4_PROOF=UNEXPECTED_RESULT'
-exit 1
+Write-Output 'GATE4_PROOF=NOT_PASSED'
+Write-Output 'GATE4_RESULT=MANAGED_ENTRY_VALIDATION_FAILED'
+exit 2

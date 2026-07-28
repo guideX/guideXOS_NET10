@@ -2,31 +2,32 @@
 
 Experimental guideXOS reimagining on .NET 10 NativeAOT.
 
-This repository is intentionally starting as an archaeology and bootstrap project. It is not a direct upgrade of `guideXOS` Legacy, and it does not replace `guideXOSUEFI` or guideXOS Server. Those repositories remain active references and experiments.
+This repository is an archaeology and bootstrap project. It is not a direct upgrade of `guideXOS` Legacy, and it does not replace `guideXOSUEFI` or guideXOS Server. Those repositories remain read-only references and experiments.
 
 ## Current state
 
-The repository now contains a small .NET 10 NativeAOT managed-entry probe and a narrowly scoped UEFI PE loader harness. The four-gate result is:
+The repository contains a small .NET 10 NativeAOT managed-entry probe and a narrowly scoped UEFI PE loader harness. The four-gate result is:
 
-- Gate 1: passed — standard .NET 10 NativeAOT PE artifacts build reproducibly.
+- Gate 1: passed — reproducible standard .NET 10 NativeAOT PE artifacts.
 - Gate 2: passed — the linked runtime and platform dependency census is recorded.
-- Gate 3: passed — PE/COFF anatomy and byte-for-byte staging are machine-checked; no PE-to-ELF converter is adopted.
-- Gate 4: not passed — the fresh QEMU runs load, relocate, and inspect the PE, then stop at ten unresolved Windows/CRT import descriptors before managed transfer.
+- Gate 3: passed — PE/COFF anatomy and byte-for-byte staging are machine-checked.
+- Gate 4: passed — all 124 imported symbols are satisfied; the 18-symbol bounded platform boundary establishes the one-thread NativeAOT state needed by this probe; three fresh QEMU processes entered managed code and returned deterministically.
 
-The final marker `GXOS_NET10:MANAGED_ENTRY_OK` was therefore not claimed. This is an intentional, documented negative result rather than a native shim pretending to be managed execution.
+The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
 ## Provisional first-image path
 
 ```text
 UEFI firmware
-  -> minimal guideXOS-owned PE loader
+  -> guideXOS-owned PE/COFF loader
   -> NativeAOT PE validation and relocation
-  -> platform/runtime dependency resolution (not yet available)
-  -> managed ManagedMain entry
-  -> deterministic serial marker
+  -> exact import resolution
+  -> bounded TLS, stack, FLS, handle, virtual-query, and one-thread lock state
+  -> exported ManagedMain reverse-P/Invoke entry
+  -> managed serial callback and deterministic return
 ```
 
-The first milestone deliberately excludes the desktop, filesystem, networking, allocation, exceptions, threading, synchronization, reflection, dynamic loading, and broad framework compatibility.
+This milestone deliberately excludes allocation, garbage collection, exceptions, unwinding, threads, synchronization beyond the startup contract, reflection, dynamic loading, networking, globalization, filesystem support, and broad framework compatibility.
 
 ## NativeAOT feasibility documents
 
@@ -54,4 +55,4 @@ The first milestone deliberately excludes the desktop, filesystem, networking, a
 
 ## Working rules
 
-`D:\dev\guideXOS_NET10` is the only writable repository for this effort. Legacy, UEFI, and Server are read-only code vaults. Audit documents distinguish confirmed observations from recommendations; a recommendation is not evidence that the corresponding implementation already works.
+`D:\dev\guideXOS_NET10` is the only writable repository for this effort. Legacy, UEFI, and Server are read-only code vaults. Audit documents distinguish confirmed observations from recommendations; a recommendation is not evidence that a later runtime feature already works.

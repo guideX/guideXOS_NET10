@@ -44,6 +44,10 @@ public static unsafe class ManagedEntry
         delegate* unmanaged<byte*, nuint, void> serialWrite =
             (delegate* unmanaged<byte*, nuint, void>)(nuint)bootInfo->SerialWrite;
 
+#if GXOS_NEGATIVE_RETURN
+        return 7;
+#endif
+
         byte* markerAddress = stackalloc byte[MarkerLength];
         markerAddress[0] = (byte)'G';
         markerAddress[1] = (byte)'X';
@@ -71,7 +75,11 @@ public static unsafe class ManagedEntry
         markerAddress[23] = (byte)'Y';
         markerAddress[24] = (byte)'_';
         markerAddress[25] = (byte)'O';
+#if GXOS_NEGATIVE_MARKER
+        markerAddress[26] = (byte)'X';
+#else
         markerAddress[26] = (byte)'K';
+#endif
         markerAddress[27] = (byte)'\r';
         markerAddress[28] = (byte)'\n';
         serialWrite(markerAddress, (nuint)MarkerLength);

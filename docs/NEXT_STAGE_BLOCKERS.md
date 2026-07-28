@@ -1,25 +1,23 @@
 # Next-stage blockers
 
-Managed entry has not yet been reached. The table records what is known and avoids turning a successful host build into a claim about later runtime features.
+Gate 4 proves only the first no-allocation managed handoff. The loader's 18 functional imports are a bounded startup contract, not implementation of the following runtime services. None of these items is started by this milestone.
 
-| Feature | Current evidence | Status / smallest next experiment |
+| Feature | Gate 4 boundary | Next blocker / smallest next experiment |
 | --- | --- | --- |
-| Static initialization | ILC contains `--initassembly` for CoreLib, TypeLoader, and Reflection.Execution; the map contains `ModuleInitializerList` and runtime configuration data. | Unproven. First isolate the minimum NativeAOT startup sequence and identify which initialization is needed before `ManagedMain`. |
-| Strings | The method emits bytes from stack memory and contains no managed string literal. Runtime composition still contains string/format helpers and CRT imports. | Method-level use is avoided; runtime string support remains unresolved. Build a no-string static experiment only after runtime startup is understood. |
-| First managed allocation | The object has `RhpNewFast`, `RhpNewArrayFast`, `RhAllocateNewObject`, `RhAllocateNewArray`, and CRT heap imports. | Blocked. Do not add allocation until a real GC/heap initialization contract exists. |
-| Repeated allocation | `RhpCollect`, handles, finalization, and GC helpers are present in the runtime composition. | Blocked. Requires stress/repetition tests after first allocation, not inferred from entry success. |
-| Memory reclamation | Workstation GC is physically linked and imports Windows virtual memory APIs. | Blocked. Need page/heap ownership, GC segment setup, protection, and reclamation evidence. |
-| Runtime thread state | `_tls_index`, `RhpReversePInvoke`, `RhpPInvoke`, FLS/thread APIs, and thread-related runtime helpers are present. | Current direct PE handoff stops before these execute. Establish one documented boot CPU thread state before attempting transfer. |
-| Exceptions | `RhpThrowEx`, catch/filter/finally helpers, `RaiseException`, and fail-fast support are present. | Explicit non-goal for this milestone. Keep exceptions disabled in the proof and document every startup assumption. |
-| Stack unwinding | `.pdata` and PE exception metadata are present; the static experiment needs Windows unwind/context APIs. | Blocked. Register or replace unwind support only through a separately verified ABI experiment. |
-| `finally` | `RhpCallFinallyFunclet` is present in the object even though the source has no `try/finally`. | Unproven and out of scope. No `finally` claim follows from the no-exception entry. |
-| Synchronization | Event, wait, critical-section, interlocked, and thread helpers are present in the runtime library/import set. | Blocked. No locks, events, waits, or synchronization should be introduced. |
-| GC integration | `Runtime.WorkstationGC.lib` is selected by the standard Windows NativeAOT link response; static linking leaves broad platform dependencies. | Blocked. The next milestone should first determine whether a supported no-GC startup configuration exists; do not port a full GC here. |
+| First managed allocation | The probe uses only primitive fields, `stackalloc`, and a raw callback. `RhpNew*` and CRT heap imports remain fail-fast. | Establish a supported NativeAOT heap/GC initialization contract, then run one fixed allocation with explicit ownership evidence. |
+| Repeated allocation | No object allocation or collection is exercised. | Stress a bounded allocation loop only after first allocation and collection are proven. |
+| Virtual memory | `VirtualQuery` is functional only for the active loader stack; `VirtualAlloc`, `VirtualFree`, `VirtualAllocExNuma`, `VirtualUnlock`, and related imports fail fast. | Define page ownership, protection, reservation/commit, and release semantics for a real UEFI substrate. |
+| GC initialization | `Runtime.WorkstationGC.lib` is physically linked, but no heap, segments, frozen roots, or collection are initialized. | Determine whether the toolchain exposes a supported no-GC startup or requires a bounded GC port. |
+| Runtime thread state | One boot CPU has a synthesized TLS vector, TLS block, TEB-like stack fields, FLS slots, identity, pseudo handles, and one-thread lock state. | Prove the supported representation for additional threads and lifecycle teardown. |
+| TLS | The PE TLS template and `_tls_index` are initialized for one thread; the image has no TLS callback work in this probe. | Prove TLS allocation/reclamation and callbacks across actual thread creation. |
+| Exceptions | No managed exception path is present; `RhpThrowEx`, `RaiseException`, and broad diagnostics are fail-fast. | Decide whether to implement an exception ABI or keep exceptions outside the freestanding profile. |
+| Unwinding | `.pdata` is loaded as image data, but Windows `RtlVirtualUnwind`/context services and registration are not implemented. | Build a separately verified x64 unwind registration/lookup experiment before any exception or stack walk. |
+| `finally` | No `try/finally` is in the probe; `RhpCallFinallyFunclet` is only linked runtime composition. | Test only after exceptions/unwinding have a proven contract. |
+| Synchronization | The functional critical-section implementation supports one-thread recursion and deterministic contention failure solely for startup; events, waits, thread suspension, and scheduler services fail fast. | Define a scheduler/locking contract before exposing synchronization to managed code. |
+| Static constructor behavior | This artifact has no reachable user static constructor; NativeAOT still contains module-initializer metadata. | Build one controlled static-constructor variant and trace whether legitimate startup requires module initialization. |
 
-Additional blockers are PE TLS initialization, `.pdata` unwind registration, module/DLL initialization, import resolution, and a documented termination path. The current harness deliberately halts after reporting the import boundary.
+Other deferred areas are CRT startup/termination, COM, process environment, diagnostics, networking, filesystem, globalization, and broad Windows compatibility. The 106 fail-fast imports make accidental entry into those areas visible. Do not port them as no-op shims.
 
 ## Recommended next milestone
 
-Create a minimal NativeAOT runtime-startup reproducer that differs only by one controlled variable at a time: shared PE versus static object, startup initialization enabled versus isolated, and standard GC runtime versus a supported no-GC configuration if the toolchain exposes one. Capture the resulting imports, undefined symbols, TLS, module initializer, and transition-helper changes before writing any UEFI platform replacement.
-
-The next milestone should not port guideXOS kernel or desktop code, copy the legacy runtime, add broad stubs, or claim managed execution from a native pre-print.
+Create a one-variable-at-a-time NativeAOT runtime-startup reproducer for the first allocation/GC boundary. Capture imports, undefined symbols, TLS, module initializer behavior, and transition-helper changes before writing any additional UEFI platform code.

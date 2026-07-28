@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [string]$ManagedArtifact = '',
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast')]
+    [string]$Scenario = 'Normal'
 )
 
 Set-StrictMode -Version Latest
@@ -21,7 +24,11 @@ $startupSource = Join-Path $root 'src\Gate4Harness\startup.nsh'
 $efi = Join-Path $efiDirectory 'BOOTX64.EFI'
 $payload = Join-Path $payloadDirectory 'gxos-managed-entry-probe.dll'
 $startupScript = Join-Path $espDirectory 'startup.nsh'
-$managedArtifact = Join-Path $root 'artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll'
+if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
+    $managedArtifact = Join-Path $root 'artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll'
+} else {
+    $managedArtifact = [IO.Path]::GetFullPath($ManagedArtifact)
+}
 
 if (-not (Test-Path -LiteralPath $source)) { throw "Harness source not found: $source" }
 if (-not (Test-Path -LiteralPath $startupSource)) { throw "UEFI startup script not found: $startupSource" }
@@ -45,6 +52,12 @@ $gccArguments = @(
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
     '-o', $efi, $source
 )
+switch ($Scenario) {
+    'InvalidBootInfo' { $gccArguments += '-DGXOS_NEGATIVE_INVALID_BOOT_INFO' }
+    'NullSerial' { $gccArguments += '-DGXOS_NEGATIVE_NULL_SERIAL' }
+    'UnresolvedImport' { $gccArguments += '-DGXOS_NEGATIVE_UNRESOLVED_IMPORT' }
+    'InvokeFailfast' { $gccArguments += '-DGXOS_NEGATIVE_INVOKE_FAILFAST' }
+}
 
 & $gccCommand.Source @gccArguments 1> $buildLog 2> $buildErrorLog
 if ($LASTEXITCODE -ne 0) {

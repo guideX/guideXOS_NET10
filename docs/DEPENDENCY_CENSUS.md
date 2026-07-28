@@ -1,113 +1,48 @@
 # Dependency census
 
-This census explains why the minimal source still produces a platform-bound artifact. It separates what is physically linked from what the PE expects from Windows/CRT, and it records the negative static-link experiment.
+This document records the exact imports of the Gate 1 shared NativeAOT artifact and the Gate 4 reachability experiment. The artifact is the reproducible `win-x64` shared image whose SHA-256 is `2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837`.
 
-## Causal summary
+The initial Gate 4 stop was a correct ten-descriptor/124-symbol census. The completed experiment patches every IAT slot: 18 imports have bounded functional implementations and the other 106 receive deterministic guideXOS-owned fail-fast stubs. A fail-fast stub is not support for the service; it proves that the symbol is not reached by the legitimate no-allocation path.
 
-The causal chain is:
+Final treatment totals for this proof are A=functional `18`, B=deterministic fail-fast `106`, C=import elimination `0`, and D=deferred required symbols `0`. Later runtime features remain blockers, but no symbol required by the demonstrated entry path is deferred.
 
-```text
-ManagedMain with an unmanaged callback
-  -> NativeAOT transition helpers and CoreLib metadata
-  -> standard NativeAOT startup/runtime-pack composition
-  -> workstation GC, minipal, unwind/exception, TLS, diagnostics support
-  -> Windows and Universal CRT imports
-  -> PE/COFF shared image is not freestanding
-```
+## Exact descriptor and symbol inventory
 
-The managed body does not call allocation, exceptions, threads, or host I/O. The NativeAOT composition still carries support for those runtime paths and its Windows implementation imports their platform primitives. This is composition evidence, not evidence that all those paths are executed by `ManagedMain`.
+IAT RVAs below are relative to the preferred image base `0x180000000`. Each `symbol (RVA)` pair is one imported symbol; no ordinal-only import exists in this artifact. “Before” means before the first instruction of the exported `ManagedMain` thunk. “Probe” means the legitimate path from that thunk through validation, the borrowed callback, and return.
 
-## PE import census
+| Module | Symbol or ordinal and IAT RVA | Referenced by / earliest possible call site | Required before ManagedMain | Required during probe | Proposed treatment | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ADVAPI32.dll` | `RegisterEventSourceW (0x7d000)`; `ReportEventW (0x7d008)`; `OpenProcessToken (0x7d010)`; `AdjustTokenPrivileges (0x7d018)`; `LookupPrivilegeValueW (0x7d020)`; `DeregisterEventSource (0x7d028)` | NativeAOT diagnostics and Windows privilege/large-page support retained by `aotminipal`/runtime composition; no reachable call in the successful export path; PE thunks are in the `.text` import-thunk region near `0x1800772xx` | No call; IAT must be patched | No | B: unique `UNEXPECTED_IMPORT_CALL:ADVAPI32.dll!<symbol>` stub, halt | `objdump -p`; `link.rsp`; fail-fast negative control invoked `RegisterEventSourceW` and halted before managed entry |
+| `bcrypt.dll` | `BCryptGenRandom (0x7d3f8)` | NativeAOT PAL random-byte support; no reachable call in the successful path | No call; IAT must be patched | No | B: fail-fast stub | `objdump -p`; `link.rsp`; no call in three positive traces |
+| `KERNEL32.dll` | `InitializeCriticalSectionEx (0x7d038)`; `CloseHandle (0x7d048)`; `DuplicateHandle (0x7d058)`; `GetCurrentProcess (0x7d070)`; `GetCurrentThread (0x7d080)`; `GetLastError (0x7d090)`; `SetLastError (0x7d0e8)`; `FlsAlloc (0x7d160)`; `FlsGetValue (0x7d168)`; `FlsSetValue (0x7d170)`; `GetCurrentProcessId (0x7d190)`; `GetCurrentThreadId (0x7d1a8)`; `VirtualQuery (0x7d238)`; `InitializeCriticalSection (0x7d2b8)`; `EnterCriticalSection (0x7d2c0)`; `LeaveCriticalSection (0x7d2c8)`; `DeleteCriticalSection (0x7d2d0)`; `FlsFree (0x7d2d8)` | Reverse-P/Invoke/thread-state helpers, NativeAOT PAL handle identity, stack-boundary discovery, and one-thread runtime synchronization. Observed call sites include `FlsGetValue` at `0x18003c68f`, `FlsSetValue` thunk at `0x18003c6b8`, `FlsAlloc` at `0x18003cd40`, `GetCurrentThreadId` at `0x18003c8b4`, `GetCurrentProcess/GetCurrentThread/DuplicateHandle` at `0x180032bc9/0x180032bd2/0x180032bfa` and `0x180033579/0x180033582/0x1800335aa`, `VirtualQuery` at `0x18003d102`, and critical-section calls through `0x180077270/0x1800772a0` | No call before export; the export transition reaches these after entry | Yes: all 18 are reached by the current probe's runtime initialization | A: guideXOS one-thread contract. FLS has 64 bounded slots; pseudo process/thread identity is explicit; handles are validated; `VirtualQuery` describes only the loader stack; critical sections honor ownership, recursion, and contention failure | `objdump -d -Mintel`; controlled fail-fast sequence: `FlsGetValue -> GetCurrentThreadId -> DuplicateHandle -> VirtualQuery -> EnterCriticalSection`; success after the 18-symbol layer |
+| `KERNEL32.dll` | `EncodePointer (0x7d040)`; `CreateEventExW (0x7d050)`; `FormatMessageW (0x7d060)`; `GetConsoleOutputCP (0x7d068)`; `GetCurrentProcessorNumberEx (0x7d078)`; `GetEnvironmentVariableW (0x7d088)`; `GetModuleFileNameW (0x7d098)`; `GetStdHandle (0x7d0a0)`; `GetThreadPriority (0x7d0a8)`; `GetTickCount64 (0x7d0b0)`; `LocalFree (0x7d0b8)`; `MultiByteToWideChar (0x7d0c0)`; `QueryPerformanceCounter (0x7d0c8)`; `QueryPerformanceFrequency (0x7d0d0)`; `RaiseFailFastException (0x7d0d8)`; `SetEvent (0x7d0e0)`; `Sleep (0x7d0f0)`; `VirtualAlloc (0x7d0f8)`; `VirtualFree (0x7d100)`; `WaitForMultipleObjectsEx (0x7d108)`; `WideCharToMultiByte (0x7d110)`; `WriteFile (0x7d118)`; `RaiseException (0x7d120)`; `AddVectoredExceptionHandler (0x7d128)`; `GetModuleHandleW (0x7d130)`; `GetProcAddress (0x7d138)`; `RtlVirtualUnwind (0x7d140)`; `RtlCaptureContext (0x7d148)`; `RtlRestoreContext (0x7d150)`; `VerSetConditionMask (0x7d158)`; `ResetEvent (0x7d178)`; `WaitForSingleObjectEx (0x7d180)`; `CreateEventW (0x7d188)`; `SwitchToThread (0x7d198)`; `CreateThread (0x7d1a0)`; `SetThreadPriority (0x7d1b0)`; `SuspendThread (0x7d1b8)`; `ResumeThread (0x7d1c0)`; `FlushProcessWriteBuffers (0x7d1c8)`; `GetThreadContext (0x7d1d0)`; `SetThreadContext (0x7d1d8)`; `GetSystemTimeAsFileTime (0x7d1e0)`; `CreateMemoryResourceNotification (0x7d1e8)`; `QueryInformationJobObject (0x7d1f0)`; `GetModuleHandleExW (0x7d1f8)`; `LoadLibraryExW (0x7d200)`; `GetProcessAffinityMask (0x7d208)`; `VerifyVersionInfoW (0x7d210)`; `InitializeContext (0x7d218)`; `GetEnabledXStateFeatures (0x7d220)`; `LocateXStateFeature (0x7d228)`; `SetXStateFeaturesMask (0x7d230)`; `DebugBreak (0x7d240)`; `WaitForSingleObject (0x7d248)`; `SleepEx (0x7d250)`; `GlobalMemoryStatusEx (0x7d258)`; `GetSystemInfo (0x7d260)`; `GetLogicalProcessorInformation (0x7d268)`; `GetLogicalProcessorInformationEx (0x7d270)`; `GetLargePageMinimum (0x7d278)`; `VirtualUnlock (0x7d280)`; `VirtualAllocExNuma (0x7d288)`; `IsProcessInJob (0x7d290)`; `GetNumaHighestNodeNumber (0x7d298)`; `GetProcessGroupAffinity (0x7d2a0)`; `K32GetProcessMemoryInfo (0x7d2a8)`; `IsDebuggerPresent (0x7d2b0)`; `RtlPcToFileHeader (0x7d2e0)`; `InterlockedFlushSList (0x7d2e8)`; `RtlUnwindEx (0x7d2f0)`; `InitializeSListHead (0x7d2f8)` | Windows PAL, GC, thread, wait, diagnostics, unwind, NUMA, and process-support components retained by the broad runtime image; only PE import thunks observed, no call in the successful path | No | No | B: per-symbol unique fail-fast stub; intentionally unsupported, not a no-op compatibility layer | `objdump -p`, `objdump -d -Mintel`, `link.rsp`; three positive traces and the fail-fast control |
+| `ole32.dll` | `CoGetApartmentType (0x7d408)`; `CoInitializeEx (0x7d410)`; `CoUninitialize (0x7d418)`; `CoWaitForMultipleHandles (0x7d420)` | COM apartment/wait support retained by PAL/runtime; no reachable call in the successful path | No | No | B: fail-fast stubs | `objdump -p`; no calls in positive traces |
+| `api-ms-win-crt-math-l1-1-0.dll` | `log (0x7d340)` | Workstation GC/runtime configuration math; no reachable call in the successful path | No | No | B: fail-fast stub | `objdump -p`; runtime-pack/link response; no calls in positive traces |
+| `api-ms-win-crt-string-l1-1-0.dll` | `strcmp (0x7d3c8)`; `strcpy_s (0x7d3d0)`; `strcpy (0x7d3d8)`; `_stricmp (0x7d3e0)`; `strlen (0x7d3e8)` | CRT/PAL configuration and diagnostics support; no reachable call in the successful path | No | No | B: fail-fast stubs | `objdump -p`; `link.rsp`; no calls in positive traces |
+| `api-ms-win-crt-convert-l1-1-0.dll` | `strtoull (0x7d308)` | Runtime configuration parsing; no reachable call in the successful path | No | No | B: fail-fast stub | `objdump -p`; no calls in positive traces |
+| `api-ms-win-crt-stdio-l1-1-0.dll` | `__stdio_common_vsnprintf_s (0x7d3b8)` | CRT diagnostic formatting; no reachable call in the successful path | No | No | B: fail-fast stub | `objdump -p`; no calls in positive traces |
+| `api-ms-win-crt-runtime-l1-1-0.dll` | `abort (0x7d350)`; `_register_onexit_function (0x7d358)`; `terminate (0x7d360)`; `_cexit (0x7d368)`; `_crt_atexit (0x7d370)`; `_execute_onexit_table (0x7d378)`; `_initterm_e (0x7d380)`; `_initialize_onexit_table (0x7d388)`; `_initterm (0x7d390)`; `_initialize_narrow_environment (0x7d398)`; `_seh_filter_dll (0x7d3a0)`; `_configure_narrow_argv (0x7d3a8)` | CRT/DLL bootstrap and termination objects (`dllmain.obj`, `bootstrapperdll.obj`); the UEFI contract does not enter that CRT DLL lifecycle | No | No | B: fail-fast stubs; direct export path returns to the UEFI harness and does not invoke CRT termination | `link.rsp`; PE entry RVA `0x77700`; no calls in positive traces |
+| `api-ms-win-crt-heap-l1-1-0.dll` | `free (0x7d318)`; `_callnewh (0x7d320)`; `calloc (0x7d328)`; `malloc (0x7d330)` | CRT allocation and NativeAOT GC/runtime support; no allocation is attempted by this probe | No | No | B: fail-fast stubs; allocation is a later blocker | `objdump -p`; `Runtime.WorkstationGC.lib`; no calls in positive traces |
 
-The Gate 3 manifest records ten import descriptors. In the table, “required” means required to load this shared PE through the current direct-PE contract, not necessarily reached by the method body.
+The table contains all ten descriptors and all 124 symbols. It is intentionally grouped into functional and fail-fast KERNEL32 rows so the 18/106 treatment split is visible without hiding any symbol.
 
-| Dependency | Emitted because | NativeAOT-provided | Platform-provided | Required for first proof | Proposed treatment | Evidence |
-| --- | --- | :-: | :-: | :-: | --- | --- |
-| `ADVAPI32.dll`: `RegisterEventSourceW`, `ReportEventW`, `OpenProcessToken`, `AdjustTokenPrivileges`, `LookupPrivilegeValueW`, `DeregisterEventSource` | diagnostics and large-page/runtime support in Windows runtime composition | No | Yes | Yes for this PE loader; the current proof stops before resolution | Do not stub. Either use a platform support layer with proven reachability or change artifact/composition | shared PE import directory; `objdump -p` |
-| `bcrypt.dll`: `BCryptGenRandom` | NativeAOT/runtime random-byte support | No | Yes | Yes for this PE loader | Provide a real entropy contract later, or remove the dependency through a measured configuration change | shared PE import directory; `nm -u` |
-| `KERNEL32.dll` | Windows PAL, GC, threads, waits, memory, timing, process and error paths | No | Yes | Yes for this PE loader | No broad shim set. Isolate and replace only a proven path in a later experiment | shared PE import directory; `link.rsp` |
-| `ole32.dll`: `CoGetApartmentType`, `CoInitializeEx`, `CoUninitialize`, `CoWaitForMultipleHandles` | Windows PAL COM/FLS initialization and wait support | No | Yes | Yes for this PE loader | Must be removed or replaced by a real UEFI/runtime contract before entry | shared PE import directory; static link attempt |
-| `api-ms-win-crt-math-l1-1-0.dll`: `log` | GC/runtime configuration math | No | Yes | Yes for this PE loader | Do not add a CRT wholesale; determine whether a no-GC startup configuration can eliminate it | PE import directory; `Runtime.WorkstationGC.lib` |
-| `api-ms-win-crt-string-l1-1-0.dll`: `strcmp`, `strcpy_s`, `strcpy`, `_stricmp`, `strlen` | runtime configuration/PAL support | No | Yes | Yes for this PE loader | Replace only with audited freestanding routines if still reachable | PE import directory; static link attempt |
-| `api-ms-win-crt-convert-l1-1-0.dll`: `strtoull` | GC/runtime configuration parsing | No | Yes | Yes for this PE loader | Remove configuration path or provide a deliberate parser later | PE import directory; static link attempt |
-| `api-ms-win-crt-stdio-l1-1-0.dll`: `__stdio_common_vsnprintf_s` | diagnostic/fail-fast formatting | No | Yes | Yes for this PE loader | Keep diagnostics out of the first proof; do not fake formatting | PE import directory; static link attempt |
-| `api-ms-win-crt-runtime-l1-1-0.dll` | CRT startup/termination/on-exit support | No | Yes | Yes for this PE loader | Do not invoke CRT startup from the freestanding contract | PE import directory; static link attempt |
-| `api-ms-win-crt-heap-l1-1-0.dll`: `free`, `_callnewh`, `calloc`, `malloc` | CRT/runtime allocation support | No | Yes | Yes for this PE loader; also a direct signal of future allocation work | Keep allocation out of the first proof; later replace through a deliberate allocator contract | PE import directory; `RhpNew*`/`RhAllocate*` symbols |
+## Reachability experiments
 
-The current UEFI loader proves that the import directory is present and counts exactly ten descriptors. It refuses to call `ManagedMain` when that count is nonzero. No import has been hidden with a no-op implementation.
+The resolver first installed a unique fail-fast stub in every IAT slot and then ran the actual exported method. Rebuilding the harness with one functional target at a time produced this sequence:
 
-## Physically linked NativeAOT components
+| Experiment | Deepest marker / first observed target | Conclusion |
+| --- | --- | --- |
+| TLS only | `KERNEL32.dll!FlsGetValue`, IAT `0x7d168`, call `0x18003c68f` | NativeAOT reverse-P/Invoke thread setup reads FLS before managed validation. |
+| TLS + FLS | `KERNEL32.dll!GetCurrentThreadId`, IAT `0x7d1a8`, call `0x18003c8b4` | Runtime thread identity is needed for the first transition. |
+| TLS + FLS + identity | `KERNEL32.dll!DuplicateHandle`, IAT `0x7d058`, calls `0x180032bfa`/`0x1800335aa` | NativeAOT creates/records a current-thread handle. |
+| Add bounded handles | `KERNEL32.dll!VirtualQuery`, IAT `0x7d238`, call `0x18003d102` | Stack limits are queried through the PAL and must describe the active loader stack. |
+| Add bounded stack query/TEB | `KERNEL32.dll!EnterCriticalSection`, thunk `0x180077270` | One-thread runtime initialization enters a lock. |
+| Add the 18-symbol layer | `MANAGED_ENTRY_OK`, then return `0` | The no-allocation managed probe is reachable and deterministic. |
 
-The linker response physically brings in these standard runtime-pack components:
+The remaining 106 imports were not declared unused merely because they were absent from one trace: the link response and disassembly identify their retaining components, and the negative fail-fast stubs prove that any accidental reachability is detected. They are deferred runtime services, not silently supported services.
 
-| Component | Category | Why it is present | First-proof status |
-| --- | --- | --- | --- |
-| `dllmain.obj`, `bootstrapperdll.obj` | NativeAOT startup | DLL/process startup and runtime initialization | Not executed by the UEFI loader |
-| `Runtime.WorkstationGC.lib` | GC, memory, thread state, synchronization | Runtime-pack default workstation GC implementation | Physically linked; platform dependent |
-| `eventpipe-disabled.lib`, `standalonegc-disabled.lib`, `Runtime.VxsortDisabled.lib` | diagnostics/GC composition | Standard NativeAOT composition with optional paths disabled | Physically linked or selected by response; not evidence of freestanding support |
-| `aotminipal.lib` | platform abstraction, timing, CPU/debug | NativeAOT PAL and support routines | Physically linked; Windows imports remain |
-| compression and globalization native libraries | runtime-pack composition | Standard NativeAOT link response | Present in the response; not called by the managed body |
-| Windows import libraries | platform abstraction | Resolve the PAL’s Windows API references | Explicitly incompatible with the current UEFI loader |
+## NativeAOT components and deferred boundaries
 
-The exact linker response is retained under `src\ManagedEntryProbe\obj\Release\net10.0\win-x64\native\link.rsp`.
+`link.rsp` retains `dllmain.obj`, `bootstrapperdll.obj`, `Runtime.WorkstationGC.lib`, `aotminipal.lib`, disabled EventPipe/standalone-GC components, compression/native support, and Windows import libraries. The map contains `ModuleInitializerList`, `RuntimeConfigurationBlob`, TLS, GC statics, exception metadata, and thread-static metadata. The current proof provides only the minimum one-thread transition state; it does not provide a GC heap, virtual-memory allocator, process/threading system, COM, CRT, exceptions, or unwinding.
 
-## NativeAOT helper census
-
-`nm -u` on the NativeAOT object reported 115 unique undefined symbols. The complete set is grouped below so later experiments can identify what changed:
-
-### Runtime helpers and metadata
-
-```text
-RhAllocateNewArray RhAllocateNewObject RhBulkMoveWithWriteBarrier
-RhCompatibleReentrantWaitAny RhCurrentOSThreadId RhFindBlob
-RhFindMethodStartAddress RhGetCrashInfoBuffer RhGetGcCollectionCount
-RhGetKnobValues RhGetMaxGcGeneration RhGetMemoryInfo RhGetModuleFileName
-RhGetOSModuleFromPointer RhGetProcessCpuCount RhGetRuntimeVersion
-RhHandleFree RhHandleGetDependent RhHandleSet RhNewString
-RhpAssignRef RhpByRefAssignRef RhpCallCatchFunclet RhpCallFilterFunclet
-RhpCallFinallyFunclet RhpCheckedAssignRef RhpCheckedLockCmpXchg
-RhpCheckedXchg RhpCollect RhpCopyContextFromExInfo RhpCreateTypeManager
-RhpEHEnumInitFromStackFrameIterator RhpEHEnumNext RhpEndNoGCRegion
-RhpFallbackFailFast RhpFirstChanceExceptionNotification RhpGcPoll
-RhpGcSafeZeroMemory RhpGetClasslibFunctionFromCodeAddress
-RhpGetClasslibFunctionFromEEType RhpGetCurrentThreadStackTrace
-RhpGetDispatchCellInfo RhpGetGcTotalMemory RhpGetModuleSection
-RhpGetNextFinalizableObject RhpGetThreadAbortException RhpHandleAlloc
-RhpHandleAllocDependent RhpInitialDynamicInterfaceDispatch RhpNewArrayFast
-RhpNewFast RhpNewFinalizable RhpNewPtrArrayFast RhpPInvoke RhpPInvokeReturn
-RhpRegisterOsModule RhpRethrow RhpReversePInvoke RhpReversePInvokeReturn
-RhpSearchDispatchCellCache RhpSetThreadDoNotTriggerGC RhpSfiInit RhpSfiNext
-RhpSignalFinalizationComplete RhpStartNoGCRegion RhpThrowEx RhpTrapThreads
-RhpUpdateDispatchCellCache RhpWaitForFinalizerRequest RhRegisterFrozenSegment
-RhRegisterInlinedThreadStaticRoot RhReRegisterForFinalize RhSetThreadExitCallback
-RhSpinWait RhSuppressFinalize RhUpdateFrozenSegment
-```
-
-These symbols fall into compiler-generated transitions, GC/allocation, handles, finalization, exception handling, type/module registration, synchronization, and thread-state categories. Presence does not prove reachability from this method; it does prove that the standard object/runtime composition is not a tiny method-only library.
-
-### Platform, CRT, TLS, and diagnostics
-
-```text
-__security_cookie _tls_index DebugDebugger_IsNativeDebuggerAttached
-BCryptGenRandom CloseHandle CoGetApartmentType CoInitializeEx CoUninitialize
-CreateEventExW DeregisterEventSource DuplicateHandle FormatMessageW
-GetConsoleOutputCP GetCurrentProcess GetCurrentProcessorNumberEx
-GetCurrentThread GetEnvironmentVariableW GetLastError GetModuleFileNameW
-GetStdHandle GetThreadPriority GetTickCount64 LocalFree memmove memset
-MultiByteToWideChar QueryPerformanceCounter QueryPerformanceFrequency
-RaiseFailFastException RegisterEventSourceW ReportEventW SetEvent SetLastError
-Sleep VirtualAlloc VirtualFree WaitForMultipleObjectsEx WideCharToMultiByte
-WriteFile
-```
-
-The unresolved `Rhp*`/`Rh*` names are expected from NativeAOT runtime support libraries. The Windows/CRT names are expected from platform support libraries and are not supplied by UEFI. `_tls_index` is a concrete thread-local-state assumption. `__security_cookie`, memory routines, and fail-fast/diagnostic symbols are startup or safety support.
-
-## Static-link experiment
-
-The static form was linked with the standard NativeAOT runtime-pack libraries and no Windows import libraries. The attempt failed with 158 unresolved externals, including `VirtualAlloc`, `VirtualFree`, `CreateThread`, `FlsAlloc`, `CoInitializeEx`, `RtlCaptureContext`, `_tls_index`, CRT string/math/heap functions, `__chkstk`, and C++ runtime allocation operators. The full stdout is in `artifacts\gate4\static-link-attempt\link.stdout.log`.
-
-This is the decisive reason the current milestone does not add a large platform shim. The missing set spans memory management, thread-local state, synchronization, exception/unwind, timing, process/diagnostic services, and CRT support. Adding no-op stubs would hide the actual runtime contract and violate the failure policy.
-
-## Feature-removal observations
-
-The ILC response confirms that the following feature switches changed the NativeAOT composition as intended: invariant globalization/timezone, disabled EventPipe, disabled debugger, disabled stack-trace support, non-server/non-concurrent GC, and reflection scan disabled. They did not make the runtime freestanding; the Windows PAL and GC runtime still required the platform set above. The response also contains `--initassembly` entries, so module initialization remains an unproven startup requirement.
+The prior static-link attempt remains evidence that removing the import directory by linking the standard static runtime is not a clean solution: it produced 158 unresolved externals spanning memory, threads/FLS, COM, unwind/context, TLS, CRT, stack probing, and allocation operators.

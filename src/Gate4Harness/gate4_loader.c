@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stddef.h>
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -11,11 +12,16 @@ typedef uint64_t EFI_LBA;
 typedef uint64_t EFI_UINTN;
 typedef void *EFI_INTERFACE;
 
+#if defined(__x86_64__)
+#define EFIAPI __attribute__((ms_abi))
+#else
 #define EFIAPI
+#endif
 #define EFI_SUCCESS ((EFI_STATUS)0)
 #define EFI_ERROR(status) (((status) >> 63) != 0)
 #define EFI_OPEN_MODE_READ ((uint64_t)1)
 #define EFI_ALLOCATE_ANY_PAGES ((uint32_t)0)
+#define EFI_LOADER_CODE ((uint32_t)1)
 #define EFI_LOADER_DATA ((uint32_t)4)
 #define EFI_PAGE_SIZE ((uint64_t)4096)
 #define EFI_LOADED_IMAGE_PROTOCOL_REVISION ((uint32_t)0x1000)
@@ -138,6 +144,47 @@ typedef struct {
 static const EFI_GUID gLoadedImageProtocol = {0x5B1B31A1, 0x9562, 0x11D2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static const EFI_GUID gSimpleFileSystemProtocol = {0x964E5B22, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t Magic;
+    uint16_t Version;
+    uint16_t Size;
+    uint32_t Architecture;
+    uint32_t Flags;
+    uint64_t SerialWrite;
+} GuideXBootInfo;
+#pragma pack(pop)
+
+typedef void (EFIAPI *GuideXSerialWrite)(const uint8_t *bytes, EFI_UINTN length);
+typedef int (EFIAPI *ManagedMainEntry)(uintptr_t boot_info_address);
+
+enum {
+    GUIDEX_BOOT_MAGIC = 0x534F5847u,
+    GUIDEX_BOOT_VERSION = 1u,
+    GUIDEX_BOOT_SIZE = 24u,
+    GUIDEX_BOOT_ARCH_X64 = 0x8664u
+};
+
+_Static_assert(sizeof(GuideXBootInfo) == 24, "GuideXBootInfo size must remain 24 bytes");
+_Static_assert(offsetof(GuideXBootInfo, Magic) == 0, "GuideXBootInfo.Magic offset");
+_Static_assert(offsetof(GuideXBootInfo, Version) == 4, "GuideXBootInfo.Version offset");
+_Static_assert(offsetof(GuideXBootInfo, Size) == 6, "GuideXBootInfo.Size offset");
+_Static_assert(offsetof(GuideXBootInfo, Architecture) == 8, "GuideXBootInfo.Architecture offset");
+_Static_assert(offsetof(GuideXBootInfo, Flags) == 12, "GuideXBootInfo.Flags offset");
+_Static_assert(offsetof(GuideXBootInfo, SerialWrite) == 16, "GuideXBootInfo.SerialWrite offset");
+_Static_assert(sizeof(uintptr_t) == 8, "Gate 4 requires x64 pointers");
+_Static_assert(GUIDEX_BOOT_MAGIC == 0x534F5847u, "GuideXBootInfo magic");
+_Static_assert(GUIDEX_BOOT_VERSION == 1u, "GuideXBootInfo version");
+_Static_assert(GUIDEX_BOOT_SIZE == sizeof(GuideXBootInfo), "GuideXBootInfo size constant");
+_Static_assert(GUIDEX_BOOT_ARCH_X64 == 0x8664u, "GuideXBootInfo architecture");
+_Static_assert(sizeof(GuideXSerialWrite) == sizeof(uintptr_t), "GuideXSerialWrite pointer ABI");
+
+static uint32_t g_phase;
+static uint64_t g_managed_target;
+static uint64_t g_managed_image_base;
+static uint64_t g_boot_info_address;
+static GuideXBootInfo g_boot_info;
+
 static void serial_out8(uint16_t port, uint8_t value)
 {
     __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -172,6 +219,11 @@ static void serial_text(const char *text)
     while (*text != 0) {
         serial_char((uint8_t)*text++);
     }
+}
+
+static void EFIAPI serial_write(const uint8_t *bytes, EFI_UINTN length)
+{
+    while (length-- != 0) serial_char(*bytes++);
 }
 
 static void serial_hex64(uint64_t value)
@@ -212,6 +264,193 @@ static void fail(const char *reason)
     serial_text(reason);
     serial_text("\r\n");
     halt_forever();
+}
+
+static void serial_field_hex(const char *name, uint64_t value)
+{
+    serial_text(name);
+    serial_hex64(value);
+}
+
+static void serial_field_u32(const char *name, uint32_t value)
+{
+    serial_text(name);
+    serial_u32(value);
+}
+
+static void halt_forever(void);
+
+__attribute__((used)) static void fault_handler(uint64_t *frame)
+{
+    uint64_t cr2;
+    __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+    if (g_phase < 2) serial_text("GXOS_NET10:FAULT_BEFORE_MANAGED\r\n");
+    else if (g_phase == 2) serial_text("GXOS_NET10:FAULT_IN_MANAGED\r\n");
+    else serial_text("GXOS_NET10:FAULT_AFTER_MANAGED_RETURN\r\n");
+    serial_field_u32("GXOS_NET10:FAULT_VECTOR=0x", (uint32_t)frame[0]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_ERROR=0x", frame[1]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_RIP=0x", frame[2]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_RSP=0x", frame[5]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_CR2=0x", cr2);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_IMAGE_BASE=0x", g_managed_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_MANAGED_TARGET=0x", g_managed_target);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_BOOT_INFO=0x", g_boot_info_address);
+    serial_text("\r\n");
+    halt_forever();
+}
+
+__attribute__((used, naked)) static void fault_common(void)
+{
+    __asm__(
+        "movq %rsp, %rcx\n"
+        "andq $-16, %rsp\n"
+        "subq $32, %rsp\n"
+        "call fault_handler\n"
+        "cli\n"
+        "1: hlt\n"
+        "jmp 1b\n");
+}
+
+#define GX_FAULT_NO_ERROR(number) \
+    __attribute__((naked)) static void fault_no_error_##number(void) \
+    { __asm__("pushq $0\n" "pushq $" #number "\n" "jmp fault_common\n"); }
+#define GX_FAULT_WITH_ERROR(number) \
+    __attribute__((naked)) static void fault_with_error_##number(void) \
+    { __asm__("pushq $" #number "\n" "jmp fault_common\n"); }
+
+GX_FAULT_NO_ERROR(0)
+GX_FAULT_NO_ERROR(1)
+GX_FAULT_NO_ERROR(2)
+GX_FAULT_NO_ERROR(3)
+GX_FAULT_NO_ERROR(4)
+GX_FAULT_NO_ERROR(5)
+GX_FAULT_NO_ERROR(6)
+GX_FAULT_NO_ERROR(7)
+GX_FAULT_WITH_ERROR(8)
+GX_FAULT_NO_ERROR(9)
+GX_FAULT_WITH_ERROR(10)
+GX_FAULT_WITH_ERROR(11)
+GX_FAULT_WITH_ERROR(12)
+GX_FAULT_WITH_ERROR(13)
+GX_FAULT_WITH_ERROR(14)
+GX_FAULT_NO_ERROR(15)
+GX_FAULT_NO_ERROR(16)
+GX_FAULT_NO_ERROR(17)
+GX_FAULT_NO_ERROR(18)
+GX_FAULT_NO_ERROR(19)
+GX_FAULT_WITH_ERROR(20)
+GX_FAULT_WITH_ERROR(21)
+GX_FAULT_NO_ERROR(22)
+GX_FAULT_NO_ERROR(23)
+GX_FAULT_NO_ERROR(24)
+GX_FAULT_NO_ERROR(25)
+GX_FAULT_NO_ERROR(26)
+GX_FAULT_NO_ERROR(27)
+GX_FAULT_NO_ERROR(28)
+GX_FAULT_NO_ERROR(29)
+GX_FAULT_NO_ERROR(30)
+GX_FAULT_NO_ERROR(31)
+
+typedef struct {
+    uint16_t limit;
+    uint64_t base;
+} IDTR;
+
+typedef struct {
+    uint16_t offset_low;
+    uint16_t selector;
+    uint8_t ist;
+    uint8_t attributes;
+    uint16_t offset_middle;
+    uint32_t offset_high;
+    uint32_t reserved;
+} IDT_GATE;
+
+static IDTR g_saved_idtr;
+static IDT_GATE g_gate4_idt[32] __attribute__((aligned(16)));
+
+static void read_idtr(IDTR *idtr)
+{
+    __asm__ volatile ("sidt %0" : "=m"(*idtr));
+}
+
+static void write_idtr(const IDTR *idtr)
+{
+    __asm__ volatile ("lidt %0" : : "m"(*idtr));
+}
+
+static uint16_t read_cs(void)
+{
+    uint16_t cs;
+    __asm__ volatile ("mov %%cs, %0" : "=r"(cs));
+    return cs;
+}
+
+static void set_idt_gate(IDT_GATE *gate, void (*handler)(void))
+{
+    uint64_t address = (uint64_t)(uintptr_t)handler;
+    gate->offset_low = (uint16_t)address;
+    gate->selector = read_cs();
+    gate->ist = 0;
+    gate->attributes = 0x8E;
+    gate->offset_middle = (uint16_t)(address >> 16);
+    gate->offset_high = (uint32_t)(address >> 32);
+    gate->reserved = 0;
+}
+
+static void install_fault_handlers(void)
+{
+    uint32_t i;
+    read_idtr(&g_saved_idtr);
+    for (i = 0; i != 32; i++) set_idt_gate(&g_gate4_idt[i], fault_no_error_0);
+    set_idt_gate(&g_gate4_idt[0], fault_no_error_0);
+    set_idt_gate(&g_gate4_idt[1], fault_no_error_1);
+    set_idt_gate(&g_gate4_idt[2], fault_no_error_2);
+    set_idt_gate(&g_gate4_idt[3], fault_no_error_3);
+    set_idt_gate(&g_gate4_idt[4], fault_no_error_4);
+    set_idt_gate(&g_gate4_idt[5], fault_no_error_5);
+    set_idt_gate(&g_gate4_idt[6], fault_no_error_6);
+    set_idt_gate(&g_gate4_idt[7], fault_no_error_7);
+    set_idt_gate(&g_gate4_idt[8], fault_with_error_8);
+    set_idt_gate(&g_gate4_idt[9], fault_no_error_9);
+    set_idt_gate(&g_gate4_idt[10], fault_with_error_10);
+    set_idt_gate(&g_gate4_idt[11], fault_with_error_11);
+    set_idt_gate(&g_gate4_idt[12], fault_with_error_12);
+    set_idt_gate(&g_gate4_idt[13], fault_with_error_13);
+    set_idt_gate(&g_gate4_idt[14], fault_with_error_14);
+    set_idt_gate(&g_gate4_idt[15], fault_no_error_15);
+    set_idt_gate(&g_gate4_idt[16], fault_no_error_16);
+    set_idt_gate(&g_gate4_idt[17], fault_no_error_17);
+    set_idt_gate(&g_gate4_idt[18], fault_no_error_18);
+    set_idt_gate(&g_gate4_idt[19], fault_no_error_19);
+    set_idt_gate(&g_gate4_idt[20], fault_with_error_20);
+    set_idt_gate(&g_gate4_idt[21], fault_with_error_21);
+    set_idt_gate(&g_gate4_idt[22], fault_no_error_22);
+    set_idt_gate(&g_gate4_idt[23], fault_no_error_23);
+    set_idt_gate(&g_gate4_idt[24], fault_no_error_24);
+    set_idt_gate(&g_gate4_idt[25], fault_no_error_25);
+    set_idt_gate(&g_gate4_idt[26], fault_no_error_26);
+    set_idt_gate(&g_gate4_idt[27], fault_no_error_27);
+    set_idt_gate(&g_gate4_idt[28], fault_no_error_28);
+    set_idt_gate(&g_gate4_idt[29], fault_no_error_29);
+    set_idt_gate(&g_gate4_idt[30], fault_no_error_30);
+    set_idt_gate(&g_gate4_idt[31], fault_no_error_31);
+    {
+        IDTR idtr = { (uint16_t)(sizeof(g_gate4_idt) - 1), (uint64_t)(uintptr_t)g_gate4_idt };
+        write_idtr(&idtr);
+    }
+}
+
+static void restore_fault_handlers(void)
+{
+    write_idtr(&g_saved_idtr);
 }
 
 static void zero_bytes(uint8_t *destination, uint64_t count)
@@ -269,7 +508,275 @@ typedef struct {
     uint32_t export_rva;
     uint32_t export_size;
     uint32_t managed_main_rva;
+    uint32_t tls_template_rva;
+    uint32_t tls_template_size;
+    uint32_t tls_index_rva;
+    uint32_t tls_callbacks_rva;
 } PE_IMAGE;
+
+typedef struct {
+    const char *module;
+    const char *symbol;
+} IMPORT_RECORD;
+
+#define MAX_IMPORT_SYMBOLS 256
+static IMPORT_RECORD g_import_records[MAX_IMPORT_SYMBOLS];
+static EFI_PHYSICAL_ADDRESS g_import_stub_pages;
+static uint32_t g_import_symbol_count;
+
+static void import_failfast(const IMPORT_RECORD *record)
+{
+    serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
+    serial_text(record->module);
+    serial_text("!");
+    serial_text(record->symbol);
+    serial_text("\r\n");
+    halt_forever();
+}
+
+static void emit_import_failfast_stub(uint8_t *stub, const IMPORT_RECORD *record)
+{
+    uint64_t record_address = (uint64_t)(uintptr_t)record;
+    uint64_t handler_address = (uint64_t)(uintptr_t)import_failfast;
+    uint32_t cursor = 0;
+
+    /* mov rcx, record; mov rax, import_failfast; jmp rax */
+    stub[cursor++] = 0x48;
+    stub[cursor++] = 0xB9;
+    *(uint64_t *)(stub + cursor) = record_address;
+    cursor += 8;
+    stub[cursor++] = 0x48;
+    stub[cursor++] = 0xB8;
+    *(uint64_t *)(stub + cursor) = handler_address;
+    cursor += 8;
+    stub[cursor++] = 0xFF;
+    stub[cursor++] = 0xE0;
+    while (cursor < 32) stub[cursor++] = 0xCC;
+}
+
+typedef void (EFIAPI *FlsCleanupCallback)(void *value);
+static uint8_t g_fls_allocated[64];
+static void *g_fls_values[64];
+static FlsCleanupCallback g_fls_callbacks[64];
+
+static uint32_t EFIAPI platform_fls_alloc(FlsCleanupCallback callback)
+{
+    uint32_t index;
+    for (index = 0; index != 64; index++) {
+        if (!g_fls_allocated[index]) {
+            g_fls_allocated[index] = 1;
+            g_fls_values[index] = 0;
+            g_fls_callbacks[index] = callback;
+            return index;
+        }
+    }
+    return 0xFFFFFFFFu;
+}
+
+static void *EFIAPI platform_fls_get(uint32_t index)
+{
+    if (index >= 64 || !g_fls_allocated[index]) return 0;
+    return g_fls_values[index];
+}
+
+static int EFIAPI platform_fls_set(uint32_t index, void *value)
+{
+    if (index >= 64 || !g_fls_allocated[index]) return 0;
+    g_fls_values[index] = value;
+    return 1;
+}
+
+static int EFIAPI platform_fls_free(uint32_t index)
+{
+    void *value;
+    if (index >= 64 || !g_fls_allocated[index]) return 0;
+    value = g_fls_values[index];
+    if (value != 0 && g_fls_callbacks[index] != 0) g_fls_callbacks[index](value);
+    g_fls_allocated[index] = 0;
+    g_fls_values[index] = 0;
+    g_fls_callbacks[index] = 0;
+    return 1;
+}
+
+static uint32_t g_platform_last_error;
+
+static uint32_t EFIAPI platform_get_current_thread_id(void)
+{
+    return 1;
+}
+
+static uint32_t EFIAPI platform_get_current_process_id(void)
+{
+    return 1;
+}
+
+static void *EFIAPI platform_get_current_thread(void)
+{
+    return (void *)(intptr_t)-2;
+}
+
+static void *EFIAPI platform_get_current_process(void)
+{
+    return (void *)(intptr_t)-1;
+}
+
+static uint32_t EFIAPI platform_get_last_error(void)
+{
+    return g_platform_last_error;
+}
+
+static void EFIAPI platform_set_last_error(uint32_t error)
+{
+    g_platform_last_error = error;
+}
+
+static uint64_t g_platform_thread_handle = 1;
+
+static int EFIAPI platform_duplicate_handle(void *source_process, void *source_handle,
+                                            void *target_process, void **target_handle,
+                                            uint32_t desired_access, int inherit_handle,
+                                            uint32_t options)
+{
+    (void)desired_access;
+    (void)inherit_handle;
+    (void)options;
+    if (source_process != (void *)(intptr_t)-1 || target_process != (void *)(intptr_t)-1 ||
+        source_handle != (void *)(intptr_t)-2 || target_handle == 0) {
+        g_platform_last_error = 6;
+        return 0;
+    }
+    *target_handle = (void *)(uintptr_t)&g_platform_thread_handle;
+    return 1;
+}
+
+static int EFIAPI platform_close_handle(void *handle)
+{
+    if (handle == (void *)(uintptr_t)&g_platform_thread_handle ||
+        handle == (void *)(intptr_t)-1 || handle == (void *)(intptr_t)-2) return 1;
+    g_platform_last_error = 6;
+    return 0;
+}
+
+typedef struct {
+    uint64_t BaseAddress;
+    uint64_t AllocationBase;
+    uint32_t AllocationProtect;
+    uint32_t Padding0;
+    uint64_t RegionSize;
+    uint32_t State;
+    uint32_t Protect;
+    uint32_t Type;
+    uint32_t Padding1;
+} PlatformMemoryBasicInformation;
+
+static uint64_t g_stack_lower;
+static uint64_t g_stack_upper;
+
+static EFI_UINTN EFIAPI platform_virtual_query(const void *address,
+                                               PlatformMemoryBasicInformation *information,
+                                               EFI_UINTN length)
+{
+    uint64_t address_value = (uint64_t)(uintptr_t)address;
+    if (information == 0 || length < sizeof(PlatformMemoryBasicInformation) ||
+        address_value < g_stack_lower || address_value >= g_stack_upper) return 0;
+    zero_bytes((uint8_t *)information, sizeof(*information));
+    information->BaseAddress = g_stack_lower;
+    information->AllocationBase = g_stack_lower;
+    information->AllocationProtect = 0x04;
+    information->RegionSize = g_stack_upper - g_stack_lower;
+    information->State = 0x1000;
+    information->Protect = 0x04;
+    information->Type = 0x20000;
+    return sizeof(*information);
+}
+
+typedef struct {
+    void *DebugInfo;
+    int32_t LockCount;
+    int32_t RecursionCount;
+    void *OwningThread;
+    void *LockSemaphore;
+    uintptr_t SpinCount;
+} PlatformCriticalSection;
+
+static int EFIAPI platform_initialize_critical_section_ex(PlatformCriticalSection *section,
+                                                           uint32_t spin_count,
+                                                           uint32_t flags)
+{
+    (void)flags;
+    if (section == 0) return 0;
+    section->DebugInfo = 0;
+    section->LockCount = -1;
+    section->RecursionCount = 0;
+    section->OwningThread = 0;
+    section->LockSemaphore = 0;
+    section->SpinCount = spin_count;
+    return 1;
+}
+
+static void EFIAPI platform_initialize_critical_section(PlatformCriticalSection *section)
+{
+    if (!platform_initialize_critical_section_ex(section, 0, 0)) fail("critical-section-init");
+}
+
+static void EFIAPI platform_enter_critical_section(PlatformCriticalSection *section)
+{
+    void *current_thread = (void *)(intptr_t)-2;
+    if (section == 0) fail("critical-section-null");
+    if (section->OwningThread == 0) {
+        section->OwningThread = current_thread;
+        section->RecursionCount = 1;
+        section->LockCount = 0;
+        return;
+    }
+    if (section->OwningThread == current_thread) {
+        section->RecursionCount++;
+        return;
+    }
+    fail("critical-section-contention");
+}
+
+static void EFIAPI platform_leave_critical_section(PlatformCriticalSection *section)
+{
+    if (section == 0 || section->OwningThread != (void *)(intptr_t)-2 || section->RecursionCount <= 0) {
+        fail("critical-section-leave");
+    }
+    section->RecursionCount--;
+    if (section->RecursionCount == 0) {
+        section->OwningThread = 0;
+        section->LockCount = -1;
+    }
+}
+
+static void EFIAPI platform_delete_critical_section(PlatformCriticalSection *section)
+{
+    if (section == 0) fail("critical-section-delete");
+    if (section->OwningThread != 0 || section->RecursionCount != 0) fail("critical-section-delete-owned");
+    zero_bytes((uint8_t *)section, sizeof(*section));
+}
+
+static void *platform_import_target(const char *module, const char *symbol)
+{
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsAlloc")) return (void *)(uintptr_t)platform_fls_alloc;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsGetValue")) return (void *)(uintptr_t)platform_fls_get;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsSetValue")) return (void *)(uintptr_t)platform_fls_set;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsFree")) return (void *)(uintptr_t)platform_fls_free;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetCurrentThreadId")) return (void *)(uintptr_t)platform_get_current_thread_id;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetCurrentProcessId")) return (void *)(uintptr_t)platform_get_current_process_id;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetCurrentThread")) return (void *)(uintptr_t)platform_get_current_thread;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetCurrentProcess")) return (void *)(uintptr_t)platform_get_current_process;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetLastError")) return (void *)(uintptr_t)platform_get_last_error;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "SetLastError")) return (void *)(uintptr_t)platform_set_last_error;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "DuplicateHandle")) return (void *)(uintptr_t)platform_duplicate_handle;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "CloseHandle")) return (void *)(uintptr_t)platform_close_handle;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "VirtualQuery")) return (void *)(uintptr_t)platform_virtual_query;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "InitializeCriticalSectionEx")) return (void *)(uintptr_t)platform_initialize_critical_section_ex;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "InitializeCriticalSection")) return (void *)(uintptr_t)platform_initialize_critical_section;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "EnterCriticalSection")) return (void *)(uintptr_t)platform_enter_critical_section;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "LeaveCriticalSection")) return (void *)(uintptr_t)platform_leave_critical_section;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "DeleteCriticalSection")) return (void *)(uintptr_t)platform_delete_critical_section;
+    return 0;
+}
 
 static const uint8_t *rva_to_file(const PE_IMAGE *image, uint32_t rva, uint32_t size)
 {
@@ -342,22 +849,176 @@ static void apply_relocations(PE_IMAGE *image)
     }
 }
 
-static uint32_t count_import_descriptors(const PE_IMAGE *image)
+static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
+                            uint32_t *descriptor_count, uint32_t *symbol_count,
+                            uint32_t *functional_count, uint32_t *failfast_count,
+                            uint32_t *unresolved_count)
 {
-    uint32_t count = 0;
+    uint32_t descriptors = 0;
+    uint32_t symbols = 0;
+    uint32_t functional = 0;
+    uint32_t failfast = 0;
+    uint32_t unresolved = 0;
     uint32_t cursor = 0;
-    while (cursor + 20 <= image->import_size && count < 4096) {
+    uint8_t *stub_page;
+
+    if (image->import_rva == 0 || image->import_size < 20) {
+        *descriptor_count = 0;
+        *symbol_count = 0;
+        *functional_count = 0;
+        *failfast_count = 0;
+        *unresolved_count = 0;
+        return;
+    }
+    if (EFI_ERROR(boot_services->AllocatePages(EFI_ALLOCATE_ANY_PAGES, EFI_LOADER_CODE, 1, &g_import_stub_pages))) {
+        fail("allocate-import-stubs");
+    }
+    stub_page = (uint8_t *)(uintptr_t)g_import_stub_pages;
+    zero_bytes(stub_page, EFI_PAGE_SIZE);
+
+    while (cursor + 20 <= image->import_size) {
         const uint8_t *descriptor = rva_to_file(image, image->import_rva + cursor, 20);
+        uint32_t lookup_rva;
+        uint32_t name_rva;
+        uint32_t first_thunk_rva;
+        uint32_t index = 0;
+        const char *module;
         if (!descriptor) fail("import-bounds");
         if (read_u32(descriptor) == 0 && read_u32(descriptor + 4) == 0 &&
             read_u32(descriptor + 8) == 0 && read_u32(descriptor + 12) == 0 &&
-            read_u32(descriptor + 16) == 0) {
-            break;
+            read_u32(descriptor + 16) == 0) break;
+        lookup_rva = read_u32(descriptor);
+        name_rva = read_u32(descriptor + 12);
+        first_thunk_rva = read_u32(descriptor + 16);
+        if (lookup_rva == 0) lookup_rva = first_thunk_rva;
+        module = (const char *)rva_to_file(image, name_rva, 1);
+        if (!module || lookup_rva == 0 || first_thunk_rva == 0) fail("import-descriptor");
+        descriptors++;
+        while (1) {
+            const uint8_t *lookup = rva_to_file(image, lookup_rva + index * 8, 8);
+            uint64_t lookup_value;
+            const uint8_t *hint_name;
+            uint64_t *iat;
+            if (!lookup) fail("import-lookup-bounds");
+            lookup_value = read_u64(lookup);
+            if (lookup_value == 0) break;
+            if ((lookup_value & 0x8000000000000000ULL) != 0) {
+                serial_text("GXOS_NET10:UNSUPPORTED_IMPORT_ORDINAL\r\n");
+                fail("import-ordinal");
+            }
+            if (lookup_value > 0xFFFFFFFFULL) fail("import-name-rva");
+            hint_name = rva_to_file(image, (uint32_t)lookup_value, 2);
+            iat = (uint64_t *)rva_to_loaded(image, first_thunk_rva + index * 8, 8);
+            if (!hint_name || !iat) fail("import-iat-bounds");
+            if (symbols >= MAX_IMPORT_SYMBOLS) fail("import-symbol-capacity");
+            g_import_records[symbols].module = module;
+            g_import_records[symbols].symbol = (const char *)(hint_name + 2);
+            {
+                void *target = platform_import_target(module, g_import_records[symbols].symbol);
+#ifdef GXOS_NEGATIVE_UNRESOLVED_IMPORT
+                if (symbols == 0) {
+                    *iat = 0;
+                    unresolved++;
+                    symbols++;
+                    index++;
+                    continue;
+                }
+#endif
+                if (target != 0) {
+                    *iat = (uint64_t)(uintptr_t)target;
+                    functional++;
+                }
+                else {
+                    emit_import_failfast_stub(stub_page + symbols * 32, &g_import_records[symbols]);
+                    *iat = (uint64_t)(uintptr_t)(stub_page + symbols * 32);
+                    failfast++;
+                }
+            }
+            symbols++;
+            index++;
         }
-        count++;
         cursor += 20;
     }
-    return count;
+    g_import_symbol_count = symbols;
+    *descriptor_count = descriptors;
+    *symbol_count = symbols;
+    *functional_count = functional;
+    *failfast_count = failfast;
+    *unresolved_count = unresolved;
+}
+
+static uint64_t read_msr(uint32_t number)
+{
+    uint32_t low;
+    uint32_t high;
+    __asm__ volatile ("rdmsr" : "=a"(low), "=d"(high) : "c"(number));
+    return ((uint64_t)high << 32) | low;
+}
+
+static void write_msr(uint32_t number, uint64_t value)
+{
+    uint32_t low = (uint32_t)value;
+    uint32_t high = (uint32_t)(value >> 32);
+    __asm__ volatile ("wrmsr" : : "c"(number), "a"(low), "d"(high));
+}
+
+static uint64_t g_saved_gs_base;
+static uint64_t g_saved_flags;
+static EFI_PHYSICAL_ADDRESS g_gs_area;
+static EFI_PHYSICAL_ADDRESS g_tls_vector;
+static EFI_PHYSICAL_ADDRESS g_tls_block;
+static EFI_PHYSICAL_ADDRESS g_teb_area;
+
+static void initialize_nativeaot_tls(const PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
+{
+    uint32_t tls_index;
+    uint64_t *vector;
+    uint8_t *template_start;
+    uint8_t *tls_block;
+    uint8_t *gs_area;
+    uint8_t *teb_area;
+    uint64_t flags;
+    uint64_t vector_pages = 1;
+    uint64_t rsp;
+
+    if (image->tls_template_size == 0 || image->tls_index_rva == 0) fail("tls-directory-missing");
+    tls_index = read_u32(rva_to_loaded(image, image->tls_index_rva, 4));
+    if (tls_index >= 512) fail("tls-index-too-large");
+    if (EFI_ERROR(boot_services->AllocatePages(EFI_ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, vector_pages, &g_tls_vector))) fail("allocate-tls-vector");
+    if (EFI_ERROR(boot_services->AllocatePages(EFI_ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, 1, &g_tls_block))) fail("allocate-tls-block");
+    if (EFI_ERROR(boot_services->AllocatePages(EFI_ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, 1, &g_gs_area))) fail("allocate-gs-area");
+    if (EFI_ERROR(boot_services->AllocatePages(EFI_ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, 1, &g_teb_area))) fail("allocate-teb-area");
+    vector = (uint64_t *)(uintptr_t)g_tls_vector;
+    zero_bytes((uint8_t *)vector, EFI_PAGE_SIZE);
+    tls_block = (uint8_t *)(uintptr_t)g_tls_block;
+    zero_bytes(tls_block, EFI_PAGE_SIZE);
+    template_start = rva_to_loaded(image, image->tls_template_rva, image->tls_template_size);
+    if (!template_start) fail("tls-template-bounds");
+    copy_bytes(tls_block, template_start, image->tls_template_size);
+    vector[tls_index] = (uint64_t)(uintptr_t)tls_block;
+    gs_area = (uint8_t *)(uintptr_t)g_gs_area;
+    zero_bytes(gs_area, EFI_PAGE_SIZE);
+    __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp));
+    g_stack_lower = rsp & ~((uint64_t)EFI_PAGE_SIZE - 1);
+    g_stack_upper = g_stack_lower + 0x100000;
+    teb_area = (uint8_t *)(uintptr_t)g_teb_area;
+    zero_bytes(teb_area, EFI_PAGE_SIZE);
+    *(uint64_t *)(teb_area + 0x08) = g_stack_upper;
+    *(uint64_t *)(teb_area + 0x10) = g_stack_lower;
+    *(uint64_t *)(gs_area + 0x30) = (uint64_t)(uintptr_t)teb_area;
+    *(uint64_t *)(gs_area + 0x58) = (uint64_t)(uintptr_t)vector;
+    flags = 0;
+    __asm__ volatile ("pushfq\n\tpopq %0" : "=r"(flags));
+    g_saved_flags = flags;
+    g_saved_gs_base = read_msr(0xC0000101);
+    __asm__ volatile ("cli");
+    write_msr(0xC0000101, (uint64_t)(uintptr_t)gs_area);
+}
+
+static void restore_nativeaot_tls(void)
+{
+    write_msr(0xC0000101, g_saved_gs_base);
+    if ((g_saved_flags & 0x200) != 0) __asm__ volatile ("sti");
 }
 
 static void find_managed_main(PE_IMAGE *image)
@@ -405,6 +1066,7 @@ static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
     uint16_t i;
     uint64_t pages;
     EFI_PHYSICAL_ADDRESS physical_base = 0;
+    uint32_t tls_rva;
 
     if (image->file_size < 0x40 || read_u16(image->file) != 0x5A4D) fail("dos-header");
     if ((uint64_t)read_u32(image->file + 0x3C) + 24 > image->file_size) fail("nt-header-bounds");
@@ -425,6 +1087,7 @@ static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
     image->export_size = read_u32(optional + 0x74);
     image->reloc_rva = read_u32(optional + 0x70 + 5 * 8);
     image->reloc_size = read_u32(optional + 0x70 + 5 * 8 + 4);
+    tls_rva = read_u32(optional + 0x70 + 9 * 8);
     if (size_of_image == 0 || image->size_of_headers > image->file_size) fail("image-size");
 
     pages = ((uint64_t)size_of_image + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
@@ -445,6 +1108,48 @@ static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
     }
     apply_relocations(image);
     find_managed_main(image);
+    if (tls_rva != 0) {
+        const uint8_t *tls = rva_to_file(image, tls_rva, 40);
+        uint64_t tls_start;
+        uint64_t tls_end;
+        uint64_t tls_index;
+        uint64_t tls_callbacks;
+        if (!tls) fail("tls-directory-bounds");
+        tls_start = read_u64(tls);
+        tls_end = read_u64(tls + 8);
+        tls_index = read_u64(tls + 16);
+        tls_callbacks = read_u64(tls + 24);
+        if (tls_start < image->preferred_base || tls_end < tls_start ||
+            tls_end - tls_start > 0x100000 || tls_index < image->preferred_base ||
+            tls_index - image->preferred_base > 0xFFFFFFFFULL ||
+            tls_start - image->preferred_base > 0xFFFFFFFFULL) {
+            fail("tls-directory-values");
+        }
+        image->tls_template_rva = (uint32_t)(tls_start - image->preferred_base);
+        image->tls_template_size = (uint32_t)(tls_end - tls_start);
+        image->tls_index_rva = (uint32_t)(tls_index - image->preferred_base);
+        if (tls_callbacks != 0) {
+            if (tls_callbacks < image->preferred_base ||
+                tls_callbacks - image->preferred_base > 0xFFFFFFFFULL) fail("tls-callbacks-address");
+            image->tls_callbacks_rva = (uint32_t)(tls_callbacks - image->preferred_base);
+        }
+    }
+}
+
+static int EFIAPI call_managed_entry(ManagedMainEntry entry, uintptr_t argument, uint64_t *rsp_before_call)
+{
+    uint64_t rsp;
+    uint32_t mxcsr = 0x1F80;
+    uint16_t x87_control = 0x037F;
+    __asm__ volatile (
+        "cld\n"
+        "ldmxcsr %0\n"
+        "fldcw %1\n"
+        :
+        : "m"(mxcsr), "m"(x87_control));
+    __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp));
+    *rsp_before_call = rsp;
+    return entry(argument);
 }
 
 static const uint16_t gPayloadPath[] = {
@@ -482,10 +1187,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 {
     PE_IMAGE image = {0};
     EFI_BOOT_SERVICES *boot_services;
-    uint32_t import_count;
+    uint32_t import_descriptors;
+    uint32_t import_symbols;
+    uint32_t import_functional;
+    uint32_t import_failfast;
+    uint32_t unresolved_imports;
+    uint32_t managed_result;
+    uint64_t rsp_before_call;
+    ManagedMainEntry managed_entry;
 
     serial_init();
     serial_text("GXOS_NET10:LOADER_START\r\n");
+    g_phase = 0;
     boot_services = system_table->BootServices;
     read_payload(image_handle, system_table, &image);
     serial_text("GXOS_NET10:PE_READ_OK\r\n");
@@ -494,14 +1207,80 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_EXPORT_RVA=0x");
     serial_hex64(image.managed_main_rva);
     serial_text("\r\n");
-    import_count = count_import_descriptors(&image);
-    serial_text("GXOS_NET10:PE_IMPORT_COUNT=");
-    serial_u32(import_count);
+    g_managed_image_base = image.actual_base;
+    g_managed_target = image.actual_base + image.managed_main_rva;
+    serial_field_hex("GXOS_NET10:IMAGE_BASE=0x", image.actual_base);
     serial_text("\r\n");
-    if (import_count != 0) {
-        serial_text("GXOS_NET10:GATE4_BLOCKED_IMPORTS\r\n");
-        halt_forever();
-    }
-    fail("unexpected-import-free-path-not-implemented");
+    serial_field_hex("GXOS_NET10:MANAGED_TARGET_VA=0x", g_managed_target);
+    serial_text("\r\n");
+    resolve_imports(&image, boot_services, &import_descriptors, &import_symbols,
+                    &import_functional, &import_failfast, &unresolved_imports);
+    serial_text("GXOS_NET10:PE_IMPORT_DESCRIPTORS=");
+    serial_u32(import_descriptors);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PE_IMPORT_SYMBOLS=");
+    serial_u32(import_symbols);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PE_IMPORT_RESOLVED=");
+    serial_u32(import_symbols);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PE_IMPORT_FUNCTIONAL=");
+    serial_u32(import_functional);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PE_IMPORT_FAILFAST=");
+    serial_u32(import_failfast);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:UNRESOLVED_REQUIRED_IMPORTS=");
+    serial_u32(unresolved_imports);
+    serial_text("\r\n");
+    if (unresolved_imports != 0) fail("negative-unresolved-import");
+#ifdef GXOS_NEGATIVE_INVOKE_FAILFAST
+    serial_text("GXOS_NET10:NEGATIVE_INVOKE_FAILFAST\r\n");
+    g_phase = 1;
+    ((void (EFIAPI *)(void))(uintptr_t)g_import_stub_pages)();
+#endif
+    install_fault_handlers();
+    initialize_nativeaot_tls(&image, boot_services);
+    g_boot_info_address = (uint64_t)(uintptr_t)&g_boot_info;
+    g_boot_info.Magic = GUIDEX_BOOT_MAGIC;
+    g_boot_info.Version = GUIDEX_BOOT_VERSION;
+    g_boot_info.Size = GUIDEX_BOOT_SIZE;
+    g_boot_info.Architecture = GUIDEX_BOOT_ARCH_X64;
+    g_boot_info.Flags = 0;
+    g_boot_info.SerialWrite = (uint64_t)(uintptr_t)serial_write;
+#ifdef GXOS_NEGATIVE_INVALID_BOOT_INFO
+    g_boot_info.Version = 2;
+#endif
+#ifdef GXOS_NEGATIVE_NULL_SERIAL
+    g_boot_info.SerialWrite = 0;
+#endif
+    managed_entry = (ManagedMainEntry)(uintptr_t)g_managed_target;
+    serial_field_hex("GXOS_NET10:BOOT_INFO_PTR=0x", (uint64_t)(uintptr_t)&g_boot_info);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CALL_TARGET_VA=0x", g_managed_target);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CPU_DF=0\r\n");
+    serial_field_hex("GXOS_NET10:CPU_MXCSR=0x", 0x1F80);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CPU_X87_CONTROL=0x", 0x037F);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:BEFORE_MANAGED_CALL\r\n");
+    g_phase = 2;
+    managed_result = (uint32_t)call_managed_entry(managed_entry, (uintptr_t)&g_boot_info, &rsp_before_call);
+    g_phase = 3;
+    restore_nativeaot_tls();
+    restore_fault_handlers();
+    serial_field_hex("GXOS_NET10:STACK_RSP_BEFORE_CALL=0x", rsp_before_call);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:STACK_RSP_MOD16=");
+    serial_u32((uint32_t)(rsp_before_call & 0xFULL));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:AFTER_MANAGED_RETURN=0x");
+    serial_hex64(managed_result);
+    serial_text("\r\n");
+    if (managed_result != 0) fail("managed-return-nonzero");
+    g_phase = 4;
+    serial_text("GXOS_NET10:MANAGED_ENTRY_COMPLETE\r\n");
+    halt_forever();
     return EFI_SUCCESS;
 }
