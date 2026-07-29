@@ -40,6 +40,7 @@ $arguments = @(
     '-drive', "if=pflash,format=raw,readonly=on,file=$code",
     '-drive', "if=pflash,format=raw,file=$vars",
     '-drive', 'file=fat:rw:ESP,format=raw,if=ide,index=0,media=disk',
+    '-rtc', 'base=utc,clock=vm',
     '-boot', 'order=c', '-serial', "file:$serial",
     '-monitor', 'none', '-display', 'none', '-no-reboot', '-no-shutdown'
 )

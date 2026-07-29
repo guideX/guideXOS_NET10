@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
+#include "platform_time.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -109,7 +110,7 @@ typedef struct {
     void *ConOut;
     EFI_HANDLE StandardErrorHandle;
     void *StdErr;
-    void *RuntimeServices;
+    GXOS_EFI_RUNTIME_SERVICES *RuntimeServices;
     EFI_BOOT_SERVICES *BootServices;
     EFI_UINTN NumberOfTableEntries;
     void *ConfigurationTable;
@@ -179,10 +180,30 @@ _Static_assert(GUIDEX_BOOT_SIZE == sizeof(GuideXBootInfo), "GuideXBootInfo size 
 _Static_assert(GUIDEX_BOOT_ARCH_X64 == 0x8664u, "GuideXBootInfo architecture");
 _Static_assert(sizeof(GuideXSerialWrite) == sizeof(uintptr_t), "GuideXSerialWrite pointer ABI");
 
+enum {
+    PHASE_LOADER = 0,
+    PHASE_NEGATIVE = 1,
+    PHASE_BEFORE_TIME_CALL = 2,
+    PHASE_IN_TIME_CALL = 3,
+    PHASE_AFTER_TIME_CALL = 4,
+    PHASE_IN_TIME_CONSUMER = 5,
+    PHASE_AFTER_TIME_CONSUMER = 6,
+    PHASE_BEFORE_MANAGED_CALL = 7,
+    PHASE_IN_MANAGED = 8,
+    PHASE_AFTER_MANAGED_RETURN = 9,
+    PHASE_COMPLETE = 10
+};
+
 static uint32_t g_phase;
 static uint64_t g_managed_target;
 static uint64_t g_managed_image_base;
 static uint64_t g_boot_info_address;
+static uint64_t g_last_time_caller;
+static uint64_t g_last_time_output;
+static uint64_t g_last_time_firmware_status;
+static uint64_t g_last_time_filetime;
+static uint64_t g_time_call_count;
+static EFI_PHYSICAL_ADDRESS g_tls_block;
 static GuideXBootInfo g_boot_info;
 
 static void serial_out8(uint16_t port, uint8_t value)
@@ -280,12 +301,53 @@ static void serial_field_u32(const char *name, uint32_t value)
 
 static void halt_forever(void);
 
+static void time_trace(const char *marker, uint64_t value, uint32_t has_value)
+{
+    serial_text("GXOS_NET10:");
+    serial_text(marker);
+    if (has_value != 0) {
+        serial_text("=0x");
+        serial_hex64(value);
+    }
+    serial_text("\r\n");
+}
+
+static void time_set_phase(uint32_t phase)
+{
+    g_phase = phase;
+}
+
+static void time_halt(void)
+{
+    halt_forever();
+}
+
+static void configure_platform_time(GXOS_EFI_RUNTIME_SERVICES *runtime_services)
+{
+    GXOS_TIME_CONTEXT context;
+    context.runtime_services = runtime_services;
+#ifdef GXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC
+    context.unspecified_timezone_is_utc = 1;
+#else
+    context.unspecified_timezone_is_utc = 0;
+#endif
+    context.trace = time_trace;
+    context.set_phase = time_set_phase;
+    context.halt = time_halt;
+    context.last_caller = &g_last_time_caller;
+    context.last_output = &g_last_time_output;
+    context.last_firmware_status = &g_last_time_firmware_status;
+    context.last_filetime = &g_last_time_filetime;
+    context.call_count = &g_time_call_count;
+    gxos_time_configure(&context);
+}
+
 __attribute__((used)) static void fault_handler(uint64_t *frame)
 {
     uint64_t cr2;
     __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
-    if (g_phase < 2) serial_text("GXOS_NET10:FAULT_BEFORE_MANAGED\r\n");
-    else if (g_phase == 2) serial_text("GXOS_NET10:FAULT_IN_MANAGED\r\n");
+    if (g_phase <= PHASE_AFTER_TIME_CALL) serial_text("GXOS_NET10:FAULT_BEFORE_MANAGED\r\n");
+    else if (g_phase == PHASE_IN_MANAGED || g_phase == PHASE_BEFORE_MANAGED_CALL) serial_text("GXOS_NET10:FAULT_IN_MANAGED\r\n");
     else serial_text("GXOS_NET10:FAULT_AFTER_MANAGED_RETURN\r\n");
     serial_field_u32("GXOS_NET10:FAULT_VECTOR=0x", (uint32_t)frame[0]);
     serial_text("\r\n");
@@ -302,6 +364,18 @@ __attribute__((used)) static void fault_handler(uint64_t *frame)
     serial_field_hex("GXOS_NET10:FAULT_MANAGED_TARGET=0x", g_managed_target);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:FAULT_BOOT_INFO=0x", g_boot_info_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_CALLER=0x", g_last_time_caller);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_OUTPUT=0x", g_last_time_output);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_FIRMWARE_STATUS=0x", g_last_time_firmware_status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_FILETIME=0x", g_last_time_filetime);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_TIME_CALL_COUNT=0x", g_time_call_count);
+    serial_text("\r\n");
+    serial_field_u32("GXOS_NET10:FAULT_PHASE=0x", g_phase);
     serial_text("\r\n");
     halt_forever();
 }
@@ -526,11 +600,20 @@ static uint32_t g_import_symbol_count;
 
 static void import_failfast(const IMPORT_RECORD *record)
 {
+    if (g_phase == PHASE_AFTER_TIME_CALL) g_phase = PHASE_IN_TIME_CONSUMER;
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
     serial_text(record->symbol);
     serial_text("\r\n");
+    serial_field_u32("GXOS_NET10:TIME_CONSUMER_PHASE=0x", g_phase);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:TLS_ALLOC_LIMIT=0x", g_tls_block == 0 ? 0 : *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x30));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:TLS_ALLOC_PTR=0x", g_tls_block == 0 ? 0 : *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x38));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_THREAD_REGISTERED=0\r\n");
+    serial_text("GXOS_NET10:ALLOCATION_CONTEXT_VALID=0\r\n");
     halt_forever();
 }
 
@@ -759,6 +842,9 @@ static void EFIAPI platform_delete_critical_section(PlatformCriticalSection *sec
 
 static void *platform_import_target(const char *module, const char *symbol)
 {
+#ifndef GXOS_DISABLE_TIME_IMPLEMENTATION
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetSystemTimeAsFileTime")) return (void *)(uintptr_t)gxos_get_system_time_as_file_time;
+#endif
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsAlloc")) return (void *)(uintptr_t)platform_fls_alloc;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsGetValue")) return (void *)(uintptr_t)platform_fls_get;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsSetValue")) return (void *)(uintptr_t)platform_fls_set;
@@ -968,7 +1054,6 @@ static uint64_t g_saved_gs_base;
 static uint64_t g_saved_flags;
 static EFI_PHYSICAL_ADDRESS g_gs_area;
 static EFI_PHYSICAL_ADDRESS g_tls_vector;
-static EFI_PHYSICAL_ADDRESS g_tls_block;
 static EFI_PHYSICAL_ADDRESS g_teb_area;
 
 static void initialize_nativeaot_tls(const PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
@@ -1200,8 +1285,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 
     serial_init();
     serial_text("GXOS_NET10:LOADER_START\r\n");
-    g_phase = 0;
+    g_phase = PHASE_LOADER;
     boot_services = system_table->BootServices;
+    configure_platform_time(system_table->RuntimeServices);
     read_payload(image_handle, system_table, &image);
     serial_text("GXOS_NET10:PE_READ_OK\r\n");
     load_pe_image(&image, boot_services);
@@ -1238,13 +1324,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     if (unresolved_imports != 0) fail("negative-unresolved-import");
 #ifdef GXOS_NEGATIVE_INVOKE_FAILFAST
     serial_text("GXOS_NET10:NEGATIVE_INVOKE_FAILFAST\r\n");
-    g_phase = 1;
+    g_phase = PHASE_NEGATIVE;
     ((void (EFIAPI *)(void))(uintptr_t)g_import_stub_pages)();
 #endif
     install_fault_handlers();
     initialize_nativeaot_tls(&image, boot_services);
 #ifdef GXOS_ENABLE_NATIVEAOT_STARTUP
     if (image.entry_rva == 0 || image.entry_rva >= image.loaded_size) fail("nativeaot-entrypoint-missing");
+    g_phase = PHASE_BEFORE_TIME_CALL;
+    serial_text("GXOS_NET10:TIME_SOURCE=");
+#ifdef GXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC
+    serial_text("UEFI_GETTIME_QEMU_RTC_UTC_POLICY\r\n");
+#else
+    serial_text("UEFI_GETTIME_STRICT_TIMEZONE\r\n");
+#endif
+    serial_text("GXOS_NET10:GC_STARTUP_BEGIN\r\n");
     serial_text("GXOS_NET10:NATIVEAOT_STARTUP_BEGIN\r\n");
     {
         NativeAotDllEntry nativeaot_entry = (NativeAotDllEntry)(uintptr_t)(image.actual_base + image.entry_rva);
@@ -1254,6 +1348,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         if (nativeaot_result == 0) fail("nativeaot-startup-failed");
     }
     serial_text("GXOS_NET10:NATIVEAOT_STARTUP_OK\r\n");
+    g_phase = PHASE_AFTER_TIME_CONSUMER;
+    serial_text("GXOS_NET10:GC_STARTUP_ADVANCED\r\n");
     serial_field_hex("GXOS_NET10:TLS_ALLOC_LIMIT=0x", *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x30));
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:TLS_ALLOC_PTR=0x", *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x38));
@@ -1283,9 +1379,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:CPU_X87_CONTROL=0x", 0x037F);
     serial_text("\r\n");
     serial_text("GXOS_NET10:BEFORE_MANAGED_CALL\r\n");
-    g_phase = 2;
+    g_phase = PHASE_IN_MANAGED;
     managed_result = (uint32_t)call_managed_entry(managed_entry, (uintptr_t)&g_boot_info, &rsp_before_call);
-    g_phase = 3;
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
     restore_nativeaot_tls();
     restore_fault_handlers();
     serial_field_hex("GXOS_NET10:STACK_RSP_BEFORE_CALL=0x", rsp_before_call);
@@ -1297,7 +1393,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_hex64(managed_result);
     serial_text("\r\n");
     if (managed_result != 0) fail("managed-return-nonzero");
-    g_phase = 4;
+    g_phase = PHASE_COMPLETE;
     serial_text("GXOS_NET10:MANAGED_ENTRY_COMPLETE\r\n");
     halt_forever();
     return EFI_SUCCESS;

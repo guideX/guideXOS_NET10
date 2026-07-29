@@ -49,6 +49,10 @@ GXOS_NET10:AFTER_MANAGED_RETURN=0x0000000000000000
 GXOS_NET10:MANAGED_ENTRY_COMPLETE
 ```
 
+## Separate allocation-startup path
+
+The Gate 4 managed-entry proof above remains independent and passing. The allocation-enabled artifact is a separate opt-in path: its authentic PE entry reaches the verified `GetSystemTimeAsFileTime` contract during compiler/CRT security-cookie initialization, then reaches `KERNEL32.dll!QueryPerformanceCounter`. This path is documented in `docs\PLATFORM_TIME_CONTRACT.md` and `docs\ALLOCATION_GC_PROBE.md`; it is not part of the managed-entry success criterion. The allocation probe still returns `-10` before startup with zero allocation-context slots, and no allocation marker is claimed.
+
 ## Negative controls
 
 Each control uses an isolated harness or NativeAOT artifact. `Run-Gate4-Negative.ps1` requires expected diagnostic tokens and rejects the exact success marker.

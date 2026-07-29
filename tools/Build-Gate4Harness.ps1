@@ -2,9 +2,10 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation')]
     [string]$Scenario = 'Normal',
-    [switch]$EnableNativeAotStartup
+    [switch]$EnableNativeAotStartup,
+    [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
 Set-StrictMode -Version Latest
@@ -21,6 +22,7 @@ $payloadDirectory = Join-Path $espDirectory 'GXOS'
 $buildLog = Join-Path $outputDirectory 'harness-build.stdout.log'
 $buildErrorLog = Join-Path $outputDirectory 'harness-build.stderr.log'
 $source = Join-Path $root 'src\Gate4Harness\gate4_loader.c'
+$timeSource = Join-Path $root 'src\Gate4Harness\platform_time.c'
 $startupSource = Join-Path $root 'src\Gate4Harness\startup.nsh'
 $efi = Join-Path $efiDirectory 'BOOTX64.EFI'
 $payload = Join-Path $payloadDirectory 'gxos-managed-entry-probe.dll'
@@ -32,6 +34,7 @@ if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
 }
 
 if (-not (Test-Path -LiteralPath $source)) { throw "Harness source not found: $source" }
+if (-not (Test-Path -LiteralPath $timeSource)) { throw "Platform time source not found: $timeSource" }
 if (-not (Test-Path -LiteralPath $startupSource)) { throw "UEFI startup script not found: $startupSource" }
 if (-not (Test-Path -LiteralPath $managedArtifact)) {
     throw "Build the Gate 1 shared artifact first: $managedArtifact"
@@ -51,15 +54,22 @@ $gccArguments = @(
     '-fno-ident', '-mno-red-zone', '-O2', '-Wall', '-Wextra', '-Werror',
     '-nostdlib', '-Wl,--entry,efi_main', '-Wl,--subsystem,10',
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
-    '-o', $efi, $source
+    '-o', $efi, $source, $timeSource
 )
 switch ($Scenario) {
     'InvalidBootInfo' { $gccArguments += '-DGXOS_NEGATIVE_INVALID_BOOT_INFO' }
     'NullSerial' { $gccArguments += '-DGXOS_NEGATIVE_NULL_SERIAL' }
     'UnresolvedImport' { $gccArguments += '-DGXOS_NEGATIVE_UNRESOLVED_IMPORT' }
     'InvokeFailfast' { $gccArguments += '-DGXOS_NEGATIVE_INVOKE_FAILFAST' }
+    'TimeDisabled' { $gccArguments += '-DGXOS_DISABLE_TIME_IMPLEMENTATION' }
+    'TimeInvalidMonth' { $gccArguments += '-DGXOS_TIME_TEST_INVALID_MONTH' }
+    'TimeInvalidDay' { $gccArguments += '-DGXOS_TIME_TEST_INVALID_DAY' }
+    'TimeInvalidTimezone' { $gccArguments += '-DGXOS_TIME_TEST_INVALID_TIMEZONE' }
+    'TimeFixedZero' { $gccArguments += '-DGXOS_TIME_TEST_FIXED_ZERO' }
+    'TimeMarkerMutation' { $gccArguments += '-DGXOS_TIME_MARKER_MUTATION' }
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
+if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }
 
 & $gccCommand.Source @gccArguments 1> $buildLog 2> $buildErrorLog
 if ($LASTEXITCODE -ne 0) {

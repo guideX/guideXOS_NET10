@@ -7,7 +7,7 @@ Generated binaries, emulator firmware, logs, and manifests remain under ignored 
 | Evidence | Result |
 | --- | --- |
 | Branch at start of this pass | `main` |
-| HEAD at start of this pass | `3f36766ba535f8d3fa545c3724f466d5a27784e0` |
+| HEAD at start of this pass | `03b8e420dc82bcd1e013bf713ea1efec66d0f792` |
 | Upstream at start | `origin/main` |
 | Remote at start | `origin git@github.com:guideX/guideXOS_NET10.git` (fetch/push) |
 | Worktree at start | clean; no pre-existing dirty files in this pass |
@@ -47,6 +47,8 @@ Generated binaries, emulator firmware, logs, and manifests remain under ignored 
 Harness command: `tools\Build-Gate4Harness.ps1`. Positive command: `tools\Run-Gate4.ps1 -RunCount 3 -TimeoutSeconds 15 -ExpectedLoaderSha256 92C8371430116BA459A8EC1B5CC445DBF4222B40A57265BC1BDACF24FD46BEA0`.
 
 Current-source fresh control: `gate4-20260728-063011-635-run1`, artifact `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`, loader `8382E6579D2ED3E6E12EC26A86E6DA1683A849A5E01BC26BBBDD98AFFB1E2A71`, firmware `33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`.
+
+Final current-source control after the time implementation and diagnostics were stabilized: `gate4-20260728-183949-461-run1`, artifact `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`, loader `D54D783066263B62057AC0B2F7B8692FA38B370339094A38AFF3F5A70ED9F94E`, firmware `33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`, managed marker present, return zero, deterministic halt.
 
 ## Positive validation matrix
 
@@ -92,3 +94,53 @@ The pre-startup allocation run `allocation-probe-before-gc-20260728-060732-637` 
 | 5 | Bounded negative: the opt-in standard NativeAOT DLL/bootstrap entrypoint is reached, but its freestanding process-time dependency is not supplied. |
 | 6 | Not passed: the generated `RhpNewFast` allocation path is present, but no GC-backed first allocation is proven; the probe returns `-10` before startup. |
 | 7 | Not run: repeated allocation/exhaustion is gated on a proven first allocation. |
+
+## GetSystemTimeAsFileTime milestone addendum
+
+This addendum is the authoritative record for the bounded time-contract pass. Baseline branch was `main`, HEAD was `03b8e420dc82bcd1e013bf713ea1efec66d0f792`, upstream was `origin/main`, and `git status --short --branch` was `## main...origin/main` with no pre-existing dirty files. No commit, push, staging, or reference-repository write occurred.
+
+Tool versions: .NET SDK `10.0.302`; GCC `15.2.0` MinGW-W64; GNU objdump `2.46.0.20260210`; Git `2.54.0.windows.1`; QEMU `11.0.0 (v11.0.0-12122-ga4bb4b10c9)`. Firmware code SHA-256 is `33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`.
+
+Commands used:
+
+```powershell
+.\tools\Build-Gate4Harness.ps1 -OutputDirectory .\artifacts\time-allocation-authoritative-20260728 -ManagedArtifact .\artifacts\allocation-startup-blocker-20260728-0630\ESP\GXOS\gxos-managed-entry-probe.dll -EnableNativeAotStartup -AssumeUnspecifiedTimezoneUtc
+.\tools\Run-PlatformTimeTests.ps1 -OutputDirectory .\artifacts\platform-time-tests-final-20260728
+.\tools\Run-PlatformTimeTests.ps1 -OutputDirectory .\artifacts\platform-time-tests-wrong-epoch-final-20260728 -WrongEpoch -ExpectFailure
+.\tools\Build-Gate4Harness.ps1 -OutputDirectory .\artifacts\time-noalloc-control-final-20260728 -ManagedArtifact .\artifacts\baseline-noalloc-control-20260728\ESP\GXOS\gxos-managed-entry-probe.dll
+.\tools\Run-Gate4.ps1 -GateDirectory .\artifacts\time-noalloc-control-final-20260728 -RunCount 1 -TimeoutSeconds 15 -ExpectedLoaderSha256 9BD280D9E82D38EACE3518C172776A2C9A84BF2E884503A0C735B71A9DAD4069
+.\tools\Run-NativeAotTimeContract.ps1 -GateDirectory .\artifacts\time-allocation-authoritative-20260728 -ExpectedArtifactSha256 6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379 -ExpectedLoaderSha256 37F8D02CDC9536871D06C1CDCD7356D1FADD44C91338F16CC7837EC15B67A845 -RunCount 1 -TimeoutSeconds 15
+```
+
+The current time-source implementation hashes are: `platform_time.c` `EB09B3A3E190C7CA279DA5FDA87F056576524EB05F2B4DA0F041524258E4648E`; `platform_time.h` `EDBE9BB1033883D25F1DC3D7A0E3A2090EA4642E5EC982F8E77206F13DB0B37A`; host vector source `87313FB93C958F687D75E87E9BDCD9EF98A9488490F89CF6B22B7E76575EE10E`; loader source `D4E150720DB0B17F4F11BBD94CD632F292089EDEA83B4F5173931FEEFB4A46AC`. The host test executable from the final vector run is `2E000A5E14A89E5EF4BCF0B7C1F2A858A61C19FAB190B76E48C9DF07BA07181`.
+
+The allocation PE remained `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`, with 10 import descriptors and 124 imported symbols. The successful three-run time sequence used loader SHA-256 `37F8D02CDC9536871D06C1CDCD7356D1FADD44C91338F16CC7837EC15B67A845` and these isolated serial logs:
+
+| Sequence | Run ID | FILETIME | Time source | Count | Next boundary | Context | Pass |
+| ---: | --- | ---: | --- | ---: | --- | --- | ---: |
+| 1 | `time-contract-20260728-181753-150-run1` | `0x01DD1EF8155B2380` | UEFI `GetTime`, QEMU UTC VM-clock policy | 1 | `KERNEL32.dll!QueryPerformanceCounter` | TLS limit/pointer `0/0`; thread `0`; allocation valid `0` | yes |
+| 2 | `time-contract-20260728-181813-050-run1` | `0x01DD1EF82146E580` | same | 1 | same | same | yes |
+| 3 | `time-contract-20260728-181832-511-run1` | `0x01DD1EF82C9A1100` | same | 1 | same | same | yes |
+
+Each run verified the managed payload hash, loader hash, firmware hash, `TIME_API_ENTER`, firmware status `0`, `UEFI_TIME_OK`, explicit unspecified-timezone policy marker, valid conversion, `TIME_API_RETURN`, `TIME_CONSUMER_PHASE=0x5`, and no fault. The pre-change reproduction was `gate4-20260728-174524-533-run1`, which stopped at `GetSystemTimeAsFileTime`; the final fresh no-allocation control was `gate4-20260728-181908-176-run1`, which emitted `MANAGED_ENTRY_OK` and returned zero.
+
+The final diagnostic-only source update (storing the caller address for fault records) was rebuilt as loader `FE4AB87302757580183826D81679783BAB15D4715883641E93FE82848FE5C331`; fresh run `time-contract-20260728-184130-390-run1` also passed through the time contract and reached QPC with FILETIME `0x01DD1EFB61F42E00`.
+
+Negative controls passed: time disabled restored the original fail-fast boundary; invalid firmware month, day, and timezone halted with the exact class markers; null output, pre-1601, overflow, invalid civil fields, EFI invalid timezone, pending daylight, leap-day, nanosecond truncation, and deterministic test-clock vectors behaved as expected; the one-byte marker mutation changed `TIME_API_ENTER` to `TIME_API_ENTEr`; the wrong-epoch isolated build failed known vectors; and the fixed-zero experiment wrote zero and reached QPC but was not treated as authoritative. All negative harnesses used isolated directories and the authoritative payload was not mutated.
+
+## Loader-code classification
+
+| Category | Lines/components | Permanent | Temporary | Generated | Retain | Refactor later | Evidence |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| PE loader logic | PE headers, section loading, relocations, export lookup, bounds checks, EFI image staging | 1 | 0 | 0 | 1 | 0 | Gate 3/4 traces and PE reports |
+| Import resolver | Descriptor/name walk, IAT patching, 19 functional targets, 105 fail-fast targets | 1 | 0 | 0 | 1 | 0 | 10/124 census; positive and negative traces |
+| TLS/runtime substrate | TLS vector/block, GS/TEB-like state, FLS, identity, handles, stack query, critical sections | 0 | 1 | 0 | 1 | 1 | Managed-entry proof; allocation context remains zero |
+| GC/startup tracing | `GC_STARTUP_BEGIN`, time phases, startup markers, consumer-state fields | 0 | 1 | 0 | 1 | 1 | Time serial logs and fault fields |
+| Time contract | Isolated civil conversion, EFI validation, FILETIME writer, exact import target | 1 | 0 | 0 | 1 | 0 | Host vectors and three positive QEMU runs |
+| Diagnostic instrumentation | Serial markers, IDT/fault capture, bounded phase-aware state | 0 | 1 | 0 | 1 | 1 | Prior Gate 4 and current negative controls |
+| Generated import tables | NativeAOT PE import directory and IAT | 0 | 0 | 1 | 1 | 0 | Artifact/map/PE reports; not hand-authored loader logic |
+| Negative controls | Build-script scenarios and isolated mutation builds | 0 | 1 | 0 | 1 | 0 | Negative serial logs and wrong-epoch host run |
+| Abandoned attempts | Fake allocator, fake GC startup, broad compatibility shims | 0 | 0 | 0 | 0 | 0 | None retained; no dead compatibility helper was needed |
+| Duplicated helpers | Date conversion is isolated; existing byte-copy/zero helpers are reused | 0 | 0 | 0 | 1 | 1 | No conclusively abandoned duplicate removed in this pass |
+
+The old `~1,981`-line loader addition is therefore retained as evidence-bearing loader/substrate code, with time conversion kept outside the giant loader function. No broad refactor was performed.

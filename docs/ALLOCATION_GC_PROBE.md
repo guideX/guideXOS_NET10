@@ -1,6 +1,8 @@
 # NativeAOT allocation and GC probe
 
-Status: bounded negative result. The repository now builds an allocation-enabled NativeAOT artifact and traces its authentic runtime boundary, but it does not claim a successful managed allocation or GC startup.
+Status: bounded negative result at the next authentic import. The repository builds an allocation-enabled NativeAOT artifact, proves the exact startup time contract, and traces the next boundary. It does not claim a successful managed allocation or GC startup.
+
+The Gate C row below preserves the pre-change boundary for auditability; the current time-enabled result is recorded immediately after the table as `TIME_CONTRACT_PASSED_NEXT_IMPORT`.
 
 ## Gate results
 
@@ -13,6 +15,8 @@ Status: bounded negative result. The repository now builds an allocation-enabled
 | E — GC startup | Not passed | The standard entrypoint is not closed in the freestanding UEFI environment |
 | F — first authentic allocation | Not passed | Without startup, `RhpNewFast` sees zero TLS allocation-context slots and the managed probe returns `-10` |
 | G — repeated allocation/exhaustion | Not run | Correctly gated on F; no repeated-allocation claim is made |
+
+The pre-change C-row above records the original boundary. After this pass, the exact time contract is functional and the current C result is `TIME_CONTRACT_PASSED_NEXT_IMPORT`: startup returns from `GetSystemTimeAsFileTime` and stops at `KERNEL32.dll!QueryPerformanceCounter`. The allocation, GC, managed-thread, and allocation-context rows remain negative.
 
 ## Artifact anatomy and differential
 
@@ -37,7 +41,7 @@ GXOS_NET10:AFTER_MANAGED_RETURN=0x00000000FFFFFFF6
 
 That is managed status `-10`, the null-or-invalid first-allocation result. No custom arena, object header, EEType, or allocator was supplied to make this pass.
 
-## Standard startup trace
+## Standard startup trace and time dependency
 
 The opt-in harness calls the allocation PE’s actual entrypoint (`entry_rva=0x77840`) with the DLL process-attach convention `(image_base, 1, null)` after relocation, import patching, fault setup, and NativeAOT TLS setup. It does not call an inferred private runtime function.
 
@@ -50,8 +54,12 @@ GXOS_NET10:UNEXPECTED_IMPORT_CALL:KERNEL32.dll!GetSystemTimeAsFileTime
 
 The prior Gate 4 control remains independently valid: fresh run `gate4-20260728-063011-635-run1` used loader SHA-256 `8382E6579D2ED3E6E12EC26A86E6DA1683A849A5E01BC26BBBDD98AFFB1E2A71`, entered managed code, returned zero, and emitted `MANAGED_ENTRY_COMPLETE` with no fault.
 
+The new trace is recorded in `docs\PLATFORM_TIME_CONTRACT.md` and the fresh serial logs under `artifacts\time-allocation-authoritative-20260728\time-contract-runs-*`. The exact path is `0x180077840` entry wrapper -> `0x180078290` security-cookie initializer -> direct call at `0x1800782ca` -> IAT RVA `0x7e1e0` -> `gxos_get_system_time_as_file_time` -> UEFI `GetTime`. The caller's output is `[rsp+0x40]`, exactly eight bytes. On return, the consumer reaches QPC at call site `0x1800782f9` / IAT RVA `0x7e0c8`.
+
+Before the time call, the loader-created TLS/FLS substrate exists but `TLS_ALLOC_LIMIT=0`, `TLS_ALLOC_PTR=0`, `MANAGED_THREAD_REGISTERED=0`, and `ALLOCATION_CONTEXT_VALID=0`. After a successful time return, those values remain zero; the next import is reached in `TIME_CONSUMER_PHASE=0x5`. `GC_STARTUP_ADVANCED` is not emitted, and no first allocation is run.
+
 ## Ownership boundary and next blocker
 
 The current loader’s page ownership is limited to loading the PE, TLS vector/block, GS/TEB-like storage, import stubs, and its own diagnostic state. Its `VirtualQuery` implementation describes the active loader stack for Gate 4. It does not own GC segments, allocation contexts, write-barrier/card-table state, thread creation, thread teardown, or collection synchronization.
 
-The next legitimate experiment is a UEFI-owned platform substrate for the NativeAOT PAL: time and process identity, virtual reserve/commit/release, current-thread attachment, TLS/FLS lifetime, event/wait semantics, and actual thread creation. It must be wired to the linked runtime contracts and validated with ownership evidence before re-running Gate F. Returning dummy success from those services would invalidate the allocation claim.
+The next legitimate experiment is a UEFI-owned platform substrate for the next NativeAOT PAL boundary: the exact `QueryPerformanceCounter` contract, process identity, virtual reserve/commit/release, current-thread attachment, TLS/FLS lifetime, event/wait semantics, and actual thread creation. It must be wired to the linked runtime contracts and validated with ownership evidence before re-running Gate F. Returning dummy success from those services would invalidate the allocation claim.

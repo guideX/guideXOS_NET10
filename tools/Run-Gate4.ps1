@@ -9,8 +9,8 @@ param(
     [string]$ExpectedLoaderSha256 = '',
     [int]$ExpectedImportDescriptors = 10,
     [int]$ExpectedImportSymbols = 124,
-    [int]$ExpectedFunctionalImports = 18,
-    [int]$ExpectedFailfastImports = 106
+    [int]$ExpectedFunctionalImports = 19,
+    [int]$ExpectedFailfastImports = 105
 )
 
 Set-StrictMode -Version Latest
@@ -76,6 +76,7 @@ for ($i = 1; $i -le $RunCount; $i++) {
         '-drive', "if=pflash,format=raw,readonly=on,file=$codePath",
         '-drive', "if=pflash,format=raw,file=$varsPath",
         '-drive', 'file=fat:rw:ESP,format=raw,if=ide,index=0,media=disk',
+    '-rtc', 'base=utc,clock=vm',
         '-boot', 'order=c', '-serial', "file:$serialLog",
         '-monitor', 'none', '-display', 'none', '-no-reboot', '-no-shutdown'
     )
