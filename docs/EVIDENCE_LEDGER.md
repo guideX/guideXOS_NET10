@@ -154,3 +154,31 @@ Final allocation-startup artifacts: PE `6D1306C8E1DE9DDEADAC478171418B32841E1E68
 Three complete fresh allocation-startup logs passed as `QPC_CONTRACT_PASSED_NEXT_IMPORT`: `time-contract-20260729-053118-727-run2`, `time-contract-20260729-053238-898-run1`, and `time-contract-20260729-053440-091-run3`. All selected the ACPI PM timer at port `0x608`, width 24, frequency `0x369E99`, recorded two source/normalized observations, one QPC call, zero regressions, phase `0x18`, zero TLS allocation context, and next boundary `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`. The separate fresh Stall probe passed QPF plus immediate/after-`Stall(1)` QPC checks with loader `2F419FCBE5FA7162D6613BCADA7AD8F251A0A896B8E679DE1B6560B26F1EAC93`; final log `perf-stall-runs-20260729-054743-604`, with deltas `0x438` and `0x659`. The final disabled-source negative passed with loader `D5F65BCBEB40AD993F0E1A739421A1D61FA9C5EF136A6CAC3CC6D6663F3217BB` and stopped at `FAIL:perf-source-init` before QPC.
 
 The no-allocation control passed three fresh QEMU runs under `artifacts\qpc-final-20260729-noalloc\runs-20260729-053730-063`, with loader `F5CF3B2A5D0636C778CFB40E42DEDE13FF00E1F2B6DC6919F41C3805D7402858`, import treatment 21 functional / 103 fail-fast, managed entry, zero return, and completion. The next real blocker is CRT on-exit/bootstrap initialization; first allocation and GC ownership remain unproven. See [PLATFORM_PERFORMANCE_COUNTER.md](PLATFORM_PERFORMANCE_COUNTER.md) for the full source inventory and contract.
+
+## CRT on-exit bootstrap milestone addendum
+
+This addendum records the follow-on requested after the QPC/QPF milestone. Baseline was branch `main`, HEAD `52bdc9cad93bfd4404e11c07defa11db955f4afa`, upstream `origin/main`, and a clean worktree (`## main...origin/main`). No commit, push, staging, or reference-repository write occurred. The pre-change timing evidence was preserved under `artifacts\qpc-final-20260729-allocation` before the CRT source was changed.
+
+The CRT-enabled loader was built with `CrtOnexitInit`; the final rebuilt loader SHA-256 is `257CA5DC1BF38CB485844B62B97BEFBC37E8A0535F9A89AF7DE2A314CD54764A`. The immediately preceding equivalent CRT-enabled build used for the three complete selected traces below was `54CD910800FB808255C8A1490EF89ACDF1D09FB3C306ABF588453BE2F5CE58B8`; the only source difference was caching the encoded-null read before writing the three fields. The managed artifact remained `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`. QEMU is `11.0.0 (v11.0.0-12122-ga4bb4b10c9)` and the copied firmware SHA-256 is `33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`.
+
+The complete fresh positive traces below each contain the prior FILETIME/QPC milestones, `PE_IMPORT_FUNCTIONAL=22`, `PE_IMPORT_FAILFAST=102`, `UNRESOLVED_REQUIRED_IMPORTS=0`, two `CRT_ONEXIT_INITIALIZED_OK` markers, `KERNEL32.dll!InitializeSListHead` as the next boundary, `QPC_COUNT=1`, zero regressions, and zero allocation context:
+
+| Positive process | FILETIME | CRT calls | Next boundary | Serial evidence |
+| --- | --- | ---: | --- | --- |
+| `time-contract-20260729-060833-471-run1` | `0x01DD1F5B5D5F6200` | 2 | `KERNEL32.dll!InitializeSListHead` | `artifacts\crt-onexit-init-final\time-contract-runs-20260729-060833-153\time-contract-20260729-060833-471-run1.serial.log` |
+| `time-contract-20260729-060940-331-run2` | `0x01DD1F5B84B62F00` | 2 | `KERNEL32.dll!InitializeSListHead` | `artifacts\crt-onexit-init-final\time-contract-runs-20260729-060909-384\time-contract-20260729-060940-331-run2.serial.log` |
+| `time-contract-20260729-061255-615-run1` | `0x01DD1F5BF9896900` | 2 | `KERNEL32.dll!InitializeSListHead` | `artifacts\crt-onexit-init-final\time-contract-runs-20260729-061255-307\time-contract-20260729-061255-615-run1.serial.log` |
+
+These are three complete fresh QEMU processes selected from isolated runs of the immediately preceding equivalent implementation; incomplete QEMU startup attempts were retained but are not counted as positive evidence. The final rebuilt loader also produced one complete positive trace before additional QEMU serial truncation variability, and its host contract vectors pass. The positive claim is limited to the complete logs above and does not claim a fourth complete final-hash process.
+
+The exact static call sites are `0x180077c8d` and `0x180077c9d`, passing tables at `0x1800b5e98` and `0x1800b5eb0`. The implementation is `src\Gate4Harness\crt_onexit.c`, with its target declaration in `src\Gate4Harness\crt_onexit.h`; it sets all three fields to the image security-cookie-derived encoded-null token only for an empty table, returns zero for a non-empty/idempotent state, and returns negative for null or disabled encoding. It does not allocate, synchronize, register, execute, or shut down.
+
+Negative evidence:
+
+| Control | Result |
+| --- | --- |
+| Host CRT vectors | `CRT_ONEXIT_HOST_TESTS=PASSED`; null argument, initialization, repeated initialization, marker mutation, opaque non-empty state, and disabled encoding all passed. Executable SHA-256: `638120BA5B22FCD2EFDE1D465C35C22BDFEB451026BB507C458F4688E5FD343B`. |
+| Disabled QEMU implementation | Loader `D04AF049FD23433846F1A99958B6C1011C2B9B85A99908499C84A89018136EE9`; halted at `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`, emitted no CRT success marker, and retained QPC summary/zero allocation context. |
+| Marker mutation QEMU | Loader `A8FCABF5BADD60D11D7E4FA612E28521C55A175451B50F067D370A2594433F69`; reached both calls and the next boundary, emitted `CRT_ONEXIT_INITIALIZED_OX`, and did not emit `CRT_ONEXIT_INITIALIZED_OK`. |
+
+No positive trace reached `_register_onexit_function`, `_execute_onexit_table`, `_crt_atexit`, `atexit`, `_cexit`, or `_c_exit`. No callback registration or execution occurred. No allocation, managed-thread registration, GC heap initialization, or first allocation occurred. The new deepest boundary is `KERNEL32.dll!InitializeSListHead`.

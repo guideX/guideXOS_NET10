@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include "platform_time.h"
 #include "platform_performance.h"
+#include "crt_onexit.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -740,6 +741,7 @@ typedef struct {
     uint32_t tls_template_size;
     uint32_t tls_index_rva;
     uint32_t tls_callbacks_rva;
+    uint32_t security_cookie_rva;
 } PE_IMAGE;
 
 typedef struct {
@@ -996,6 +998,31 @@ static void EFIAPI platform_delete_critical_section(PlatformCriticalSection *sec
     zero_bytes((uint8_t *)section, sizeof(*section));
 }
 
+#ifdef GXOS_ENABLE_CRT_ONEXIT
+static uint64_t g_crt_onexit_initialize_calls;
+
+static int GXOS_CRT_EFIAPI platform_initialize_onexit_table(GXOS_CRT_ONEXIT_TABLE *table)
+{
+    int result;
+    g_crt_onexit_initialize_calls++;
+    serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_CALL=0x", g_crt_onexit_initialize_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_ONEXIT_TABLE=0x", (uint64_t)(uintptr_t)table);
+    serial_text("\r\n");
+    result = gxos_crt_initialize_onexit_table(table);
+    serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_RETURN=0x", (uint64_t)(uint32_t)result);
+    serial_text("\r\n");
+    if (result == 0 && table != 0 && table->first == table->last && table->last == table->end) {
+#ifdef GXOS_CRT_ONEXIT_MARKER_MUTATION
+        serial_text("GXOS_NET10:CRT_ONEXIT_INITIALIZED_OX\r\n");
+#else
+        serial_text("GXOS_NET10:CRT_ONEXIT_INITIALIZED_OK\r\n");
+#endif
+    }
+    return result;
+}
+#endif
+
 static void *platform_import_target(const char *module, const char *symbol)
 {
 #ifndef GXOS_DISABLE_TIME_IMPLEMENTATION
@@ -1023,6 +1050,10 @@ static void *platform_import_target(const char *module, const char *symbol)
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "EnterCriticalSection")) return (void *)(uintptr_t)platform_enter_critical_section;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "LeaveCriticalSection")) return (void *)(uintptr_t)platform_leave_critical_section;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "DeleteCriticalSection")) return (void *)(uintptr_t)platform_delete_critical_section;
+#ifdef GXOS_ENABLE_CRT_ONEXIT
+    if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
+        equal_text(symbol, "_initialize_onexit_table")) return (void *)(uintptr_t)platform_initialize_onexit_table;
+#endif
     return 0;
 }
 
@@ -1335,6 +1366,23 @@ static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
     image->reloc_rva = read_u32(optional + 0x70 + 5 * 8);
     image->reloc_size = read_u32(optional + 0x70 + 5 * 8 + 4);
     tls_rva = read_u32(optional + 0x70 + 9 * 8);
+    {
+        uint32_t load_config_rva = read_u32(optional + 0x70 + 10 * 8);
+        uint32_t load_config_size = read_u32(optional + 0x70 + 10 * 8 + 4);
+        if (load_config_rva != 0 && load_config_size >= 0x60) {
+            const uint8_t *load_config = rva_to_file(image, load_config_rva, 0x60);
+            uint64_t security_cookie;
+            if (!load_config) fail("load-config-bounds");
+            security_cookie = read_u64(load_config + 0x58);
+            if (security_cookie != 0) {
+                if (security_cookie < image->preferred_base ||
+                    security_cookie - image->preferred_base > 0xFFFFFFFFULL) {
+                    fail("security-cookie-address");
+                }
+                image->security_cookie_rva = (uint32_t)(security_cookie - image->preferred_base);
+            }
+        }
+    }
     if (size_of_image == 0 || image->size_of_headers > image->file_size) fail("image-size");
 
     pages = ((uint64_t)size_of_image + EFI_PAGE_SIZE - 1) / EFI_PAGE_SIZE;
@@ -1455,6 +1503,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:PE_READ_OK\r\n");
     load_pe_image(&image, boot_services);
     serial_text("GXOS_NET10:PE_RELOCATIONS_OK\r\n");
+#ifdef GXOS_ENABLE_CRT_ONEXIT
+    if (image.security_cookie_rva == 0) fail("security-cookie-missing");
+    gxos_crt_onexit_set_encoded_null_address(
+        (const uintptr_t *)rva_to_loaded(&image, image.security_cookie_rva, sizeof(uintptr_t)));
+    if (gxos_crt_onexit_get_encoded_null() == 0) fail("security-cookie-uninitialized");
+    serial_text("GXOS_NET10:CRT_ONEXIT_ENCODED_NULL_SOURCE=SECURITY_COOKIE\r\n");
+#endif
     serial_text("GXOS_NET10:MANAGED_EXPORT_RVA=0x");
     serial_hex64(image.managed_main_rva);
     serial_text("\r\n");

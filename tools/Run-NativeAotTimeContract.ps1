@@ -9,7 +9,9 @@ param(
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 20,
     [int]$ExpectedFunctionalImports = 21,
-    [int]$ExpectedFailfastImports = 103
+    [int]$ExpectedFailfastImports = 103,
+    [string]$RequiredNextBoundary = '',
+    [string[]]$RequiredMarkers = @()
 )
 
 Set-StrictMode -Version Latest
@@ -40,6 +42,22 @@ $firmwareHash = (Get-FileHash -LiteralPath $code -Algorithm SHA256).Hash
 $results = @()
 
 function Read-SerialText([string]$path) {
+    $lastLength = -1
+    $stableReads = 0
+    for ($attempt = 1; $attempt -le 60; $attempt++) {
+        try {
+            if (-not (Test-Path -LiteralPath $path)) {
+                Start-Sleep -Milliseconds 100
+                continue
+            }
+            $text = [IO.File]::ReadAllText($path)
+            if ($text.Length -eq $lastLength) { $stableReads++ } else { $stableReads = 0 }
+            $lastLength = $text.Length
+            if ($stableReads -ge 2) { return $text }
+        } catch [IO.IOException] {
+        }
+        Start-Sleep -Milliseconds 100
+    }
     try { return [IO.File]::ReadAllText($path) } catch { return '' }
 }
 
@@ -66,13 +84,45 @@ for ($i = 1; $i -le $RunCount; $i++) {
         '-monitor', 'none', '-display', 'none', '-no-reboot', '-no-shutdown'
     )
     $process = Start-Process -FilePath $qemuPath -ArgumentList $arguments -WorkingDirectory $gate -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-    $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+    $completed = $false
+    $boundaryObserved = $false
+    $terminalSummaryObserved = $false
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $process.Refresh()
+        if ($process.HasExited) {
+            $completed = $true
+            break
+        }
+        try {
+            if (Test-Path -LiteralPath $serial) {
+                $liveText = [IO.File]::ReadAllText($serial)
+                if ($liveText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:') -or
+                    $liveText.Contains('GXOS_NET10:FAIL:')) {
+                    $boundaryObserved = $true
+                    # The loader emits the QPC summary after recording the
+                    # boundary.  Let that summary drain before stopping QEMU
+                    # so a valid boundary is not mistaken for a truncated run.
+                    if ($liveText.Contains('GXOS_NET10:QPC_REGRESSIONS=')) {
+                        $terminalSummaryObserved = $true
+                        break
+                    }
+                }
+            }
+        } catch [IO.IOException] {
+        }
+        Start-Sleep -Milliseconds 100
+    }
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        Wait-Process -Id $process.Id -Timeout 3 -ErrorAction SilentlyContinue
+        Wait-Process -Id $process.Id -Timeout 5 -ErrorAction SilentlyContinue
     }
-    Start-Sleep -Milliseconds 500
-    $classification = if ($completed) { 'EXITED' } else { 'TIMEOUT_AT_BOUNDARY' }
+    for ($cleanupAttempt = 1; $cleanupAttempt -le 20; $cleanupAttempt++) {
+        if (-not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Start-Sleep -Milliseconds 300
+    $classification = if ($completed) { 'EXITED' } elseif ($boundaryObserved) { 'BOUNDARY_OBSERVED' } else { 'TIMEOUT_AT_BOUNDARY' }
     $serialText = if (Test-Path -LiteralPath $serial) { Read-SerialText $serial } else { '' }
     $filetime = Read-HexMarker $serialText 'GXOS_NET10:FILETIME_CONVERSION_OK'
     $frequency = Read-HexMarker $serialText 'GXOS_NET10:PERF_FREQUENCY'
@@ -86,6 +136,8 @@ for ($i = 1; $i -le $RunCount; $i++) {
     $qpcRegressions = Read-HexMarker $serialText 'GXOS_NET10:QPC_REGRESSIONS'
     $nextMatch = [regex]::Match($serialText, 'GXOS_NET10:UNEXPECTED_IMPORT_CALL:([^\r\n]+)')
     $nextBoundary = if ($nextMatch.Success) { $nextMatch.Groups[1].Value } else { 'unknown' }
+    $requiredBoundaryPass = [string]::IsNullOrWhiteSpace($RequiredNextBoundary) -or $nextBoundary -eq $RequiredNextBoundary
+    $requiredMarkersPass = @($RequiredMarkers | Where-Object { -not $serialText.Contains($_) }).Count -eq 0
     $source = if ($serialText.Contains('GXOS_NET10:PERF_SOURCE_ACPI_PM_TIMER')) { 'ACPI_PM_TIMER' }
               elseif ($serialText.Contains('GXOS_NET10:PERF_SOURCE_TSC_INVARIANT_CPUID_15')) { 'INVARIANT_TSC_CPUID_15' }
               else { 'unknown' }
@@ -117,6 +169,7 @@ for ($i = 1; $i -le $RunCount; $i++) {
         $serialText.Contains('GXOS_NET10:ALLOCATION_CONTEXT_VALID=0') -and
         $serialText.Contains('GXOS_NET10:TIME_API_COUNT=0x0000000000000001') -and
         $filetime -ne $null -and $filetime -ne 0 -and $artifactHash -eq $ExpectedArtifactSha256 -and
+        $requiredBoundaryPass -and $requiredMarkersPass -and
         -not $serialText.Contains('GXOS_NET10:GC_STARTUP_ADVANCED') -and
         -not $serialText.Contains('GXOS_NET10:FIRST_ALLOCATION_OK') -and
         -not $serialText.Contains('GXOS_NET10:FAULT_')

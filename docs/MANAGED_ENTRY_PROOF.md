@@ -26,7 +26,7 @@ The script requires, in order, PE validation, relocation, `PE_IMPORT_DESCRIPTORS
 
 The allocation-probe source was rebuilt with the no-allocation branch disabled. Final control runs `gate4-20260729-053730-218-run1`, `gate4-20260729-053750-777-run2`, and `gate4-20260729-053811-101-run3` passed with artifact SHA-256 `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`, loader SHA-256 `F5CF3B2A5D0636C778CFB40E42DEDE13FF00E1F2B6DC6919F41C3805D7402858`, QEMU `11.0.0 (v11.0.0-12122-ga4bb4b10c9)`, and firmware SHA-256 `33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`. Each recorded 10 descriptors, 124 symbols, 21 functional imports, 103 fail-fast imports, zero unresolved imports, the managed marker, return zero, and `MANAGED_ENTRY_COMPLETE`.
 
-The allocation-enabled artifact is a separate negative experiment. Its opt-in startup trace is documented in [ALLOCATION_GC_PROBE.md](ALLOCATION_GC_PROBE.md); it must not be passed to this Gate 4 success validator because its later allocation path remains unproven.
+The allocation-enabled artifact is a separate negative experiment. Its opt-in startup trace is documented in [ALLOCATION_GC_PROBE.md](ALLOCATION_GC_PROBE.md); it must not be passed to this Gate 4 success validator because its later allocation path remains unproven. The CRT-enabled variant is a separate bounded startup experiment documented in [CRT_ONEXIT_BOOTSTRAP.md](CRT_ONEXIT_BOOTSTRAP.md); it does not change the managed-entry success criterion.
 
 Representative positive serial sequence:
 
@@ -96,3 +96,7 @@ The proof has independent checks:
 `call_managed_entry` is an explicit `ms_abi` function pointer call. The wrapper clears DF and loads MXCSR `0x1F80` and x87 control `0x037F`. In the positive runs it recorded `RSP=0x0000000007E65820`, so `RSP mod 16 = 0` immediately before `CALL`; the call boundary supplies the 32-byte Microsoft x64 shadow space and the callee sees the normal return-address layout. The harness is compiled `-mno-red-zone`, preserves nonvolatile registers through the compiler-generated wrapper, and restores GS/interrupt state after the call. The loader stack is writable as provided by firmware; stack execution is not required, and the probe did not emit stack probing.
 
 The local IDT records vector, error code, RIP, RSP, CR2, image base, managed target, boot-info pointer, and deepest marker. Phase state classifies faults as `FAULT_BEFORE_MANAGED`, `FAULT_IN_MANAGED`, or `FAULT_AFTER_MANAGED_RETURN`; arbitrary recovery is not attempted.
+
+## CRT-enabled allocation-startup follow-on
+
+The separate allocation-enabled NativeAOT entry now has a CRT opt-in profile with 22 functional imports and 102 deterministic fail-fast imports. After the already-proven FILETIME and QPC/QPF sequence, the attach helper calls `_initialize_onexit_table` twice. Each call returns zero and emits `CRT_ONEXIT_INITIALIZED_OK`; the next boundary is `KERNEL32.dll!InitializeSListHead`. No `_register_onexit_function`, `_execute_onexit_table`, `_crt_atexit`, `atexit`, `_cexit`, or `_c_exit` call was reached. The serial traces retain `TLS_ALLOC_LIMIT=0`, `TLS_ALLOC_PTR=0`, `MANAGED_THREAD_REGISTERED=0`, and `ALLOCATION_CONTEXT_VALID=0`, so this follow-on does not prove managed allocation or GC startup.

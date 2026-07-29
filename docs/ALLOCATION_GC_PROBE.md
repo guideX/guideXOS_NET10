@@ -1,6 +1,6 @@
 # NativeAOT allocation and GC probe
 
-Status: bounded negative result at the next authentic import. The repository builds an allocation-enabled NativeAOT artifact, proves the exact FILETIME and monotonic performance contracts, and traces the next CRT boundary. It does not claim a successful managed allocation or GC startup.
+Status: bounded negative result at the next authentic import. The repository builds an allocation-enabled NativeAOT artifact, proves the exact FILETIME, monotonic performance, and minimal CRT on-exit initialization contracts, and traces the next runtime boundary. It does not claim a successful managed allocation or GC startup.
 
 The Gate C row below preserves the pre-change boundary for auditability; the current performance-enabled result is recorded immediately after the table as `QPC_CONTRACT_PASSED_NEXT_IMPORT`.
 
@@ -16,7 +16,7 @@ The Gate C row below preserves the pre-change boundary for auditability; the cur
 | F — first authentic allocation | Not passed | Without startup, `RhpNewFast` sees zero TLS allocation-context slots and the managed probe returns `-10` |
 | G — repeated allocation/exhaustion | Not run | Correctly gated on F; no repeated-allocation claim is made |
 
-The pre-change C-row above records the original boundary. After this pass, the exact FILETIME and monotonic performance contracts are functional and the current C result is `QPC_CONTRACT_PASSED_NEXT_IMPORT`: startup returns from `GetSystemTimeAsFileTime`, obtains a normalized QPC value, and stops at `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`. The allocation, GC, managed-thread, and allocation-context rows remain negative.
+The pre-change C-row above records the original boundary. After the CRT pass, the exact FILETIME, monotonic performance, and empty on-exit table contracts are functional and the current C result is `QPC_CONTRACT_PASSED_NEXT_IMPORT`: startup returns from `GetSystemTimeAsFileTime`, obtains a normalized QPC value, initializes two on-exit tables, and stops at `KERNEL32.dll!InitializeSListHead`. The allocation, GC, managed-thread, and allocation-context rows remain negative.
 
 ## Artifact anatomy and differential
 
