@@ -29,7 +29,7 @@ byte-for-byte PE payload
 
 The positive serial evidence is `PE_IMPORT_DESCRIPTORS=10`, `PE_IMPORT_SYMBOLS=124`, `PE_IMPORT_RESOLVED=124`, `UNRESOLVED_REQUIRED_IMPORTS=0`, followed by `BEFORE_MANAGED_CALL`, the managed marker, `AFTER_MANAGED_RETURN=0`, and `MANAGED_ENTRY_COMPLETE`.
 
-The 106 imports not reached by this path are fail-fast guarded. The 18 functional imports are intentionally limited to the observed NativeAOT transition. No broad Windows API or CRT layer was added.
+The historical 106 imports not reached by the original path were fail-fast guarded. The current performance-enabled harness has 21 bounded functional imports and 103 fail-fast imports, still intentionally limited to the observed NativeAOT transition. No broad Windows API or CRT layer was added.
 
 ## Decision boundary
 

@@ -1,8 +1,8 @@
 # NativeAOT allocation and GC probe
 
-Status: bounded negative result at the next authentic import. The repository builds an allocation-enabled NativeAOT artifact, proves the exact startup time contract, and traces the next boundary. It does not claim a successful managed allocation or GC startup.
+Status: bounded negative result at the next authentic import. The repository builds an allocation-enabled NativeAOT artifact, proves the exact FILETIME and monotonic performance contracts, and traces the next CRT boundary. It does not claim a successful managed allocation or GC startup.
 
-The Gate C row below preserves the pre-change boundary for auditability; the current time-enabled result is recorded immediately after the table as `TIME_CONTRACT_PASSED_NEXT_IMPORT`.
+The Gate C row below preserves the pre-change boundary for auditability; the current performance-enabled result is recorded immediately after the table as `QPC_CONTRACT_PASSED_NEXT_IMPORT`.
 
 ## Gate results
 
@@ -10,13 +10,13 @@ The Gate C row below preserves the pre-change boundary for auditability; the cur
 | --- | --- | --- |
 | A — allocation artifact | Passed | `allocation-enabled-final-20260728-060439-726`; shared PE SHA-256 `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379` |
 | B — differential census | Passed | `allocation-differential.json`; imports remain 10 descriptors / 124 symbols with no additions or removals |
-| C — NativeAOT startup trace | Bounded negative | Opt-in `GXOS_ENABLE_NATIVEAOT_STARTUP` invokes the PE entry RVA after TLS setup; the clean trace stops at `KERNEL32.dll!GetSystemTimeAsFileTime` because no Windows process-time contract is supplied |
+| C — NativeAOT startup trace | Bounded negative | Opt-in `GXOS_ENABLE_NATIVEAOT_STARTUP` invokes the PE entry RVA after TLS setup; the current trace passes FILETIME/QPC/QPF and stops at `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table` |
 | D — memory substrate | Not passed | The existing loader owns image/TLS pages and stack-query state only; no GC heap or NativeAOT virtual-memory ownership contract was added |
 | E — GC startup | Not passed | The standard entrypoint is not closed in the freestanding UEFI environment |
 | F — first authentic allocation | Not passed | Without startup, `RhpNewFast` sees zero TLS allocation-context slots and the managed probe returns `-10` |
 | G — repeated allocation/exhaustion | Not run | Correctly gated on F; no repeated-allocation claim is made |
 
-The pre-change C-row above records the original boundary. After this pass, the exact time contract is functional and the current C result is `TIME_CONTRACT_PASSED_NEXT_IMPORT`: startup returns from `GetSystemTimeAsFileTime` and stops at `KERNEL32.dll!QueryPerformanceCounter`. The allocation, GC, managed-thread, and allocation-context rows remain negative.
+The pre-change C-row above records the original boundary. After this pass, the exact FILETIME and monotonic performance contracts are functional and the current C result is `QPC_CONTRACT_PASSED_NEXT_IMPORT`: startup returns from `GetSystemTimeAsFileTime`, obtains a normalized QPC value, and stops at `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`. The allocation, GC, managed-thread, and allocation-context rows remain negative.
 
 ## Artifact anatomy and differential
 
@@ -62,4 +62,6 @@ Before the time call, the loader-created TLS/FLS substrate exists but `TLS_ALLOC
 
 The current loader’s page ownership is limited to loading the PE, TLS vector/block, GS/TEB-like storage, import stubs, and its own diagnostic state. Its `VirtualQuery` implementation describes the active loader stack for Gate 4. It does not own GC segments, allocation contexts, write-barrier/card-table state, thread creation, thread teardown, or collection synchronization.
 
-The next legitimate experiment is a UEFI-owned platform substrate for the next NativeAOT PAL boundary: the exact `QueryPerformanceCounter` contract, process identity, virtual reserve/commit/release, current-thread attachment, TLS/FLS lifetime, event/wait semantics, and actual thread creation. It must be wired to the linked runtime contracts and validated with ownership evidence before re-running Gate F. Returning dummy success from those services would invalidate the allocation claim.
+The next legitimate experiment is the CRT on-exit/startup boundary and, separately, the UEFI-owned substrate for virtual reserve/commit/release, current-thread attachment, TLS/FLS lifetime, event/wait semantics, and actual thread creation. QPC/QPF are no longer blockers. Each service must be wired to the linked runtime contracts and validated with ownership evidence before re-running Gate F. Returning dummy success from those services would invalidate the allocation claim.
+
+The final performance-enabled trace is documented in `docs\PLATFORM_PERFORMANCE_COUNTER.md`. The isolated QEMU Stall probe proves that the selected PM source advances across `Stall(1)` and that QPF returns the same positive frequency; the default startup path deliberately does not call Stall before the FILETIME consumer.

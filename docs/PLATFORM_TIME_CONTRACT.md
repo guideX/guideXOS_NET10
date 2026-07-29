@@ -1,6 +1,6 @@
 # NativeAOT platform time contract
 
-Status: passed for the bounded `GetSystemTimeAsFileTime` milestone. Three fresh QEMU processes reached a valid time value and the same next NativeAOT boundary, `KERNEL32.dll!QueryPerformanceCounter`. No GC startup or managed allocation is claimed.
+Status: the bounded FILETIME milestone is passed, and the paired monotonic performance milestone is passed. Three selected fresh QEMU processes reached a valid time value, one normalized QPC result, and the same next NativeAOT boundary, `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`. No GC startup or managed allocation is claimed. See [PLATFORM_PERFORMANCE_COUNTER.md](PLATFORM_PERFORMANCE_COUNTER.md) for the separate counter contract.
 
 ## Exact call chain
 
@@ -13,7 +13,7 @@ The allocation-enabled artifact is the PE with SHA-256 `6D1306C8E1DE9DDEADAC4781
 | 2 | `0x180078290`, call site `0x1800782ca` | Compiler-generated security-cookie initializer | `RCX = RSP + 0x40`; `[RSP+0x40]` is a writable zeroed 8-byte local | Requests system time to mix into the process/module security cookie. The output is read at `0x1800782d0`; it is not passed to a GC heuristic. | Disassembly; direct serial caller `0x54f12d0` |
 | 3 | IAT slot RVA `0x7e1e0`, VA `0x18007e1e0` | `KERNEL32.dll` import table | `RCX` points to the caller's `FILETIME` storage; no return value | Imported function boundary. The normal import thunk also exists at RVA `0x3ca70` (`0x18003ca70`), but this call site uses the direct IAT slot. | `objdump -p`; disassembly |
 | 4 | `gxos_get_system_time_as_file_time` | `platform_time.c` | Calls UEFI `RuntimeServices->GetTime(&EFI_TIME, NULL)`, converts, writes exactly 8 bytes | Allocation-free guideXOS implementation. It emits bounded phase markers and halts deterministically on invalid or unavailable time. | Source, host vectors, serial traces |
-| 5 | Return to `0x1800782d0`; then `GetCurrentThreadId`, `GetCurrentProcessId`, and `QueryPerformanceCounter` | Same security-cookie initializer | Reads the 64-bit output and mixes identity, address, and counter values | The time contract is complete when the function returns. The next import is reached in the same consumer at call site `0x1800782f9`, IAT RVA `0x7e0c8`. | Three positive serial traces; QPC fail-fast trace |
+| 5 | Return to `0x1800782d0`; then `GetCurrentThreadId`, `GetCurrentProcessId`, and `QueryPerformanceCounter` | Same security-cookie initializer | Reads the 64-bit output and mixes identity, address, and counter values | The time contract returns a valid FILETIME; the paired QPC contract returns a normalized value, after which the next import is `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`. | Three positive serial traces; QPC and QPF probe |
 
 The call occurs once during the DLL process-attach path when the security-cookie global contains its sentinel. It is before GC singleton construction, managed-thread registration, and creation of a nonzero NativeAOT allocation context. The loader's one-thread TLS substrate exists, but the allocation slots remain zero before and after the call.
 
@@ -94,7 +94,7 @@ The host test executable was built with `gcc -std=c11 -Wall -Wextra -Werror -O2`
 
 The isolated `GXOS_TEST_WRONG_EPOCH` build fails the known vectors, confirming that the epoch constant is tested rather than assumed. The controlled fixed-zero build writes zero and proceeds to the next QPC import only as a negative experiment.
 
-## Runtime validation
+## Historical time-only runtime validation
 
 The three authoritative positive runs used QEMU `11.0.0 (v11.0.0-12122-ga4bb4b10c9)`, firmware SHA-256 `33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`, managed artifact SHA-256 above, and loader SHA-256 `37F8D02CDC9536871D06C1CDCD7356D1FADD44C91338F16CC7837EC15B67A845`.
 
@@ -105,3 +105,5 @@ The three authoritative positive runs used QEMU `11.0.0 (v11.0.0-12122-ga4bb4b10
 | `time-contract-20260728-181832-511-run1` | `0x01DD1EF82C9A1100` | 1 | same | `0/0` | same | `TIME_CONTRACT_PASSED_NEXT_IMPORT` |
 
 All three contain `TIME_API_RETURN`, `TIME_CONSUMER_PHASE=0x5`, no fault marker, and no unresolved required import at the old boundary. `GC_STARTUP_ADVANCED` is intentionally not emitted because the immediate security-cookie consumer reaches the next fail-fast import before the NativeAOT runtime startup path completes.
+
+The later performance-enabled startup pass is recorded separately in [PLATFORM_PERFORMANCE_COUNTER.md](PLATFORM_PERFORMANCE_COUNTER.md). It preserves this FILETIME contract, then proves QPC/QPF and advances the next boundary to `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`.

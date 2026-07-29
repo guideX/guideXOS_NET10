@@ -9,8 +9,8 @@ param(
     [string]$ExpectedLoaderSha256 = '',
     [int]$ExpectedImportDescriptors = 10,
     [int]$ExpectedImportSymbols = 124,
-    [int]$ExpectedFunctionalImports = 19,
-    [int]$ExpectedFailfastImports = 105
+    [int]$ExpectedFunctionalImports = 21,
+    [int]$ExpectedFailfastImports = 103
 )
 
 Set-StrictMode -Version Latest

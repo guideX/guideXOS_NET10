@@ -133,10 +133,10 @@ Negative controls passed: time disabled restored the original fail-fast boundary
 | Category | Lines/components | Permanent | Temporary | Generated | Retain | Refactor later | Evidence |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | PE loader logic | PE headers, section loading, relocations, export lookup, bounds checks, EFI image staging | 1 | 0 | 0 | 1 | 0 | Gate 3/4 traces and PE reports |
-| Import resolver | Descriptor/name walk, IAT patching, 19 functional targets, 105 fail-fast targets | 1 | 0 | 0 | 1 | 0 | 10/124 census; positive and negative traces |
+| Import resolver | Descriptor/name walk, 21 functional targets, 103 fail-fast targets | 1 | 0 | 0 | 1 | 0 | 10/124 census; positive and negative traces |
 | TLS/runtime substrate | TLS vector/block, GS/TEB-like state, FLS, identity, handles, stack query, critical sections | 0 | 1 | 0 | 1 | 1 | Managed-entry proof; allocation context remains zero |
 | GC/startup tracing | `GC_STARTUP_BEGIN`, time phases, startup markers, consumer-state fields | 0 | 1 | 0 | 1 | 1 | Time serial logs and fault fields |
-| Time contract | Isolated civil conversion, EFI validation, FILETIME writer, exact import target | 1 | 0 | 0 | 1 | 0 | Host vectors and three positive QEMU runs |
+| Time/performance contracts | Isolated civil conversion, EFI validation, FILETIME writer, ACPI PM/TSC source selection, QPC/QPF wrappers | 1 | 0 | 0 | 1 | 0 | Host vectors, three positive QEMU runs, and Stall probe |
 | Diagnostic instrumentation | Serial markers, IDT/fault capture, bounded phase-aware state | 0 | 1 | 0 | 1 | 1 | Prior Gate 4 and current negative controls |
 | Generated import tables | NativeAOT PE import directory and IAT | 0 | 0 | 1 | 1 | 0 | Artifact/map/PE reports; not hand-authored loader logic |
 | Negative controls | Build-script scenarios and isolated mutation builds | 0 | 1 | 0 | 1 | 0 | Negative serial logs and wrong-epoch host run |
@@ -144,3 +144,13 @@ Negative controls passed: time disabled restored the original fail-fast boundary
 | Duplicated helpers | Date conversion is isolated; existing byte-copy/zero helpers are reused | 0 | 0 | 0 | 1 | 1 | No conclusively abandoned duplicate removed in this pass |
 
 The old `~1,981`-line loader addition is therefore retained as evidence-bearing loader/substrate code, with time conversion kept outside the giant loader function. No broad refactor was performed.
+
+## QueryPerformanceCounter milestone addendum
+
+This is the current-source evidence for the performance-counter pass. The final host vector run reported `PLATFORM_PERFORMANCE_TESTS=PASSED failures=0`; `platform_performance.c` SHA-256 is `354B1741AE278E620239AE0AEF00000E1B912200C757E38BACFF78ABCEEADC38`, `platform_performance.h` is `AFFB6A28D685EEF9D9CEA0EB6F9BD0C45F1762F2F97964E61A9C154B698B146E`, the host vector source is `8ED08BCA7C6A0632003FE9FA80D365AF3478E15704CCF3270217ECB5B9C08543`, and the test executable is `D956E93F9C034395B5CB2D4E6BB8E9BE2B5F3D9BF0ACCA4DE22A4F023A944285`.
+
+Final allocation-startup artifacts: PE `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`, loader `45CEC283943BD3B7A2F96C55285829C833EA454DE3F8E7F0113AA2350FD73927`. Final no-allocation artifacts: PE `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`, loader `F5CF3B2A5D0636C778CFB40E42DEDE13FF00E1F2B6DC6919F41C3805D7402858`. QEMU and firmware remained `11.0.0 (v11.0.0-12122-ga4bb4b10c9)` and `33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`.
+
+Three complete fresh allocation-startup logs passed as `QPC_CONTRACT_PASSED_NEXT_IMPORT`: `time-contract-20260729-053118-727-run2`, `time-contract-20260729-053238-898-run1`, and `time-contract-20260729-053440-091-run3`. All selected the ACPI PM timer at port `0x608`, width 24, frequency `0x369E99`, recorded two source/normalized observations, one QPC call, zero regressions, phase `0x18`, zero TLS allocation context, and next boundary `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`. The separate fresh Stall probe passed QPF plus immediate/after-`Stall(1)` QPC checks with loader `2F419FCBE5FA7162D6613BCADA7AD8F251A0A896B8E679DE1B6560B26F1EAC93`; final log `perf-stall-runs-20260729-054743-604`, with deltas `0x438` and `0x659`. The final disabled-source negative passed with loader `D5F65BCBEB40AD993F0E1A739421A1D61FA9C5EF136A6CAC3CC6D6663F3217BB` and stopped at `FAIL:perf-source-init` before QPC.
+
+The no-allocation control passed three fresh QEMU runs under `artifacts\qpc-final-20260729-noalloc\runs-20260729-053730-063`, with loader `F5CF3B2A5D0636C778CFB40E42DEDE13FF00E1F2B6DC6919F41C3805D7402858`, import treatment 21 functional / 103 fail-fast, managed entry, zero return, and completion. The next real blocker is CRT on-exit/bootstrap initialization; first allocation and GC ownership remain unproven. See [PLATFORM_PERFORMANCE_COUNTER.md](PLATFORM_PERFORMANCE_COUNTER.md) for the full source inventory and contract.

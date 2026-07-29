@@ -2,9 +2,9 @@
 
 This document records the exact imports of the Gate 1 shared NativeAOT artifact, the Gate 4 reachability experiment, and the allocation differential. The current no-allocation control is the reproducible `win-x64` shared image whose SHA-256 is `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`.
 
-The initial Gate 4 stop was a correct ten-descriptor/124-symbol census. The control experiment patches every IAT slot: 19 imports now have bounded functional implementations, including the exact `GetSystemTimeAsFileTime` contract, and the other 105 receive deterministic guideXOS-owned fail-fast stubs. A fail-fast stub is not support for the service; it proves that the symbol is not reached by the legitimate path. The allocation-enabled variant keeps the same 10/124 import set and adds only managed allocation code and metadata; it does not make the remaining services functional.
+The initial Gate 4 stop was a correct ten-descriptor/124-symbol census. The current control experiment patches every IAT slot: 21 imports now have bounded functional implementations, including the exact `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency` contracts, and the other 103 receive deterministic guideXOS-owned fail-fast stubs. A fail-fast stub is not support for the service; it proves that the symbol is not reached by the legitimate path. The allocation-enabled variant keeps the same 10/124 import set and adds only managed allocation code and metadata; it does not make the remaining services functional.
 
-Final control treatment totals for the time-enabled build are A=functional `19`, B=deterministic fail-fast `105`, C=import elimination `0`, and D=deferred required symbols `0`. The no-allocation control still passes managed entry. The allocation/startup follow-on now passes the time contract and stops at the next authentic import, `KERNEL32.dll!QueryPerformanceCounter`; the first allocation probe remains `-10` without a GC allocation context.
+Final control treatment totals for the performance-enabled build are A=functional `21`, B=deterministic fail-fast `103`, C=import elimination `0`, and D=deferred required symbols `0`. The no-allocation control still passes managed entry. The allocation/startup follow-on now passes both process-time contracts and stops at the next authentic import, `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`; the first allocation probe remains `-10` without a GC allocation context.
 
 ## Exact descriptor and symbol inventory
 
@@ -30,20 +30,23 @@ For the current time-enabled census, the single exception to that historical gro
 
 | Module | Symbol | IAT | Current treatment | Exact caller | Current reachability |
 | --- | --- | ---: | --- | --- | --- |
-| `KERNEL32.dll` | `GetSystemTimeAsFileTime` | `0x7e1e0` | A: isolated UEFI-backed `FILETIME` implementation | security-cookie initializer `0x180078290`, direct call `0x1800782ca` | returns once; next boundary is `QueryPerformanceCounter` |
+| `KERNEL32.dll` | `GetSystemTimeAsFileTime` | `0x7e1e0` | A: isolated UEFI-backed `FILETIME` implementation | security-cookie initializer `0x180078290`, direct call `0x1800782ca` | returns once; QPC is reached next |
+| `KERNEL32.dll` | `QueryPerformanceCounter` | `0x7e0c8` | A: allocation-free UEFI-backed monotonic counter wrapper | security-cookie initializer `0x1800782f9` | returns one normalized reading; next boundary is `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table` |
+| `KERNEL32.dll` | `QueryPerformanceFrequency` | `0x7e0d0` | A: paired positive-frequency query for the selected source | QPF diagnostic path at the NativeAOT startup boundary | returns `0x369e99` on the ACPI PM profile; not reached by the default startup trace |
 
-The resulting current allocation-startup treatment is 19 functional / 105 fail-fast. The historical 18/106 table remains to preserve the prior Gate 4 evidence.
+The resulting current allocation-startup treatment is 21 functional / 103 fail-fast. The historical 18/106 and 19/105 tables remain in earlier evidence to preserve the prior Gate 4 sequence.
 
 ## Proven time reachability transition
 
 Before this pass, `GetSystemTimeAsFileTime` was the first allocation-enabled startup boundary. The exact caller is the compiler/CRT security-cookie initializer at `0x180078290`, with a direct IAT call at `0x1800782ca` through allocation-PE IAT slot RVA `0x7e1e0` (`0x18007e1e0`). The normal import thunk also exists at RVA `0x3ca70` (`0x18003ca70`), but this call site uses the direct IAT slot. The consumer writes a security-cookie input through local `[rsp+0x40]`, then continues to `GetCurrentThreadId`, `GetCurrentProcessId`, and the next fail-fast import, `QueryPerformanceCounter` at IAT RVA `0x7e0c8`.
 
-The guideXOS implementation is `src/Gate4Harness/platform_time.c`, backed by UEFI `RuntimeServices->GetTime`, with explicit checked Gregorian conversion and little-endian `FILETIME` output. In the QEMU profile, `-rtc base=utc,clock=vm` plus `GXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC` handles firmware `TimeZone=2047` explicitly; strict builds reject unspecified timezone data. Three fresh positive runs reached `TIME_API_RETURN` with one call, a nonzero value, phase `0x5` in the time consumer, and zero TLS allocation limit/pointer. The reachability transition is therefore:
+The guideXOS implementation is `src/Gate4Harness/platform_time.c`, backed by UEFI `RuntimeServices->GetTime`, with explicit checked Gregorian conversion and little-endian `FILETIME` output. In the QEMU profile, `-rtc base=utc,clock=vm` plus `GXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC` handles firmware `TimeZone=2047` explicitly; strict builds reject unspecified timezone data. The performance implementation is `src/Gate4Harness/platform_performance.c`; it selects the ACPI PM timer on the default QEMU CPU and exposes paired QPC/QPF wrappers. Three fresh positive runs reached `TIME_API_RETURN`, one QPC result, phase `0x18`, and zero TLS allocation limit/pointer. The reachability transition is therefore:
 
 ```text
 GetSystemTimeAsFileTime: fail-fast boundary
   -> verified guideXOS UEFI time contract
-  -> KERNEL32.dll!QueryPerformanceCounter: next authentic boundary
+  -> verified guideXOS QueryPerformanceCounter / QueryPerformanceFrequency contract
+  -> api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table: next authentic boundary
 ```
 
 The returned value is consumed by security-cookie initialization, not GC heuristics, and is read once during process attach. No GC singleton, managed-thread registration, or allocation context is proven by this transition.
@@ -60,9 +63,10 @@ The resolver first installed a unique fail-fast stub in every IAT slot and then 
 | Add bounded handles | `KERNEL32.dll!VirtualQuery`, IAT `0x7d238`, call `0x18003d102` | Stack limits are queried through the PAL and must describe the active loader stack. |
 | Add bounded stack query/TEB | `KERNEL32.dll!EnterCriticalSection`, thunk `0x180077270` | One-thread runtime initialization enters a lock. |
 | Add the 18-symbol layer | `MANAGED_ENTRY_OK`, then return `0` | The no-allocation managed probe is reachable and deterministic. |
-| Add the exact time contract | `TIME_API_RETURN`, then `KERNEL32.dll!QueryPerformanceCounter` | Time is proven; the next dependency is reached without making unrelated imports functional. |
+| Add the exact time contract | `TIME_API_RETURN`, then QPC returns a normalized reading | FILETIME and monotonic performance contracts are proven without making unrelated imports functional. |
+| Add the performance counter contract | `QPC_OK`, then `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table` | The next dependency is the CRT on-exit table, not GC allocation. |
 
-The remaining 106 imports were not declared unused merely because they were absent from one trace: the link response and disassembly identify their retaining components, and the negative fail-fast stubs prove that any accidental reachability is detected. They are deferred runtime services, not silently supported services.
+The remaining 103 current imports were not declared unused merely because they were absent from one trace: the link response and disassembly identify their retaining components, and the negative fail-fast stubs prove that any accidental reachability is detected. The historical 106-symbol fail-fast set is retained in prior evidence. These are deferred runtime services, not silently supported services.
 
 ## NativeAOT components and deferred boundaries
 
@@ -70,7 +74,7 @@ The remaining 106 imports were not declared unused merely because they were abse
 
 The allocation-enabled shared artifact has SHA-256 `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379` and remains 10 descriptors / 124 symbols. `tools\Compare-AllocationArtifacts.ps1` compares the two manifests and map XML files; the retained report is `artifacts\allocation-enabled-final-20260728-060439-726\allocation-differential.json` and passes because the import sets are identical while the allocation probe's EEType, constructor, and `AllocateOne` appear only in the staged map.
 
-The pre-change clean opt-in startup trace called the allocation PE's actual entry RVA `0x77840` with process-attach arguments after the existing loader TLS setup and stopped at `KERNEL32.dll!GetSystemTimeAsFileTime`. The current time-enabled trace passes that import and stops at `KERNEL32.dll!QueryPerformanceCounter`. Temporary exploratory shims were not retained; no dummy CRT, virtual-memory, event, or thread implementation is counted as support.
+The pre-change clean opt-in startup trace called the allocation PE's actual entry RVA `0x77840` with process-attach arguments after the existing loader TLS setup and stopped at `KERNEL32.dll!GetSystemTimeAsFileTime`. The current performance-enabled trace passes FILETIME, QPC, and QPF, then stops at `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`. Temporary exploratory shims were not retained; no dummy CRT, virtual-memory, event, or thread implementation is counted as support.
 
 The separate pre-startup allocation run reaches the generated `RhpNewFast` path with TLS allocation limit and pointer both zero, and the managed probe returns `-10`. This is the exact current first-allocation blocker, not evidence of a successful allocation.
 

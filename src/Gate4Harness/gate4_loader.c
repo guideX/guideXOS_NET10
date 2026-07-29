@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "platform_time.h"
+#include "platform_performance.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -68,6 +69,9 @@ typedef EFI_STATUS (EFIAPI *EFI_START_IMAGE)(EFI_HANDLE ImageHandle, EFI_UINTN *
 typedef EFI_STATUS (EFIAPI *EFI_EXIT)(EFI_HANDLE ImageHandle, EFI_STATUS ExitStatus, EFI_UINTN ExitDataSize, uint16_t *ExitData);
 typedef EFI_STATUS (EFIAPI *EFI_UNLOAD_IMAGE)(EFI_HANDLE ImageHandle);
 typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(EFI_HANDLE ImageHandle, EFI_UINTN MapKey);
+typedef EFI_STATUS (EFIAPI *EFI_GET_NEXT_MONOTONIC_COUNT)(uint64_t *Count);
+typedef EFI_STATUS (EFIAPI *EFI_STALL)(uint64_t Microseconds);
+typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER)(uint64_t Timeout, uint64_t WatchdogCode, EFI_UINTN DataSize, uint16_t *WatchdogData);
 
 typedef struct {
     EFI_TABLE_HEADER Hdr;
@@ -98,6 +102,9 @@ typedef struct {
     EFI_EXIT Exit;
     EFI_UNLOAD_IMAGE UnloadImage;
     EFI_EXIT_BOOT_SERVICES ExitBootServices;
+    EFI_GET_NEXT_MONOTONIC_COUNT GetNextMonotonicCount;
+    EFI_STALL Stall;
+    EFI_SET_WATCHDOG_TIMER SetWatchdogTimer;
 } EFI_BOOT_SERVICES;
 
 typedef struct {
@@ -113,8 +120,13 @@ typedef struct {
     GXOS_EFI_RUNTIME_SERVICES *RuntimeServices;
     EFI_BOOT_SERVICES *BootServices;
     EFI_UINTN NumberOfTableEntries;
-    void *ConfigurationTable;
+    struct EFI_CONFIGURATION_TABLE *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
+
+typedef struct EFI_CONFIGURATION_TABLE {
+    EFI_GUID VendorGuid;
+    void *VendorTable;
+} EFI_CONFIGURATION_TABLE;
 
 typedef struct {
     uint64_t Revision;
@@ -191,7 +203,15 @@ enum {
     PHASE_BEFORE_MANAGED_CALL = 7,
     PHASE_IN_MANAGED = 8,
     PHASE_AFTER_MANAGED_RETURN = 9,
-    PHASE_COMPLETE = 10
+    PHASE_COMPLETE = 10,
+    PHASE_BEFORE_PERF_SOURCE_DISCOVERY = 11,
+    PHASE_IN_PERF_SOURCE_DISCOVERY = 12,
+    PHASE_BEFORE_PERF_SOURCE_INIT = 13,
+    PHASE_IN_PERF_SOURCE_INIT = 14,
+    PHASE_BEFORE_QPC_CALL = 15,
+    PHASE_IN_QPC_CALL = 16,
+    PHASE_AFTER_QPC_CALL = 17,
+    PHASE_AFTER_SECURITY_COOKIE_INIT = 18
 };
 
 static uint32_t g_phase;
@@ -203,6 +223,17 @@ static uint64_t g_last_time_output;
 static uint64_t g_last_time_firmware_status;
 static uint64_t g_last_time_filetime;
 static uint64_t g_time_call_count;
+static uint64_t g_perf_source_code;
+static uint64_t g_perf_source_address;
+static uint64_t g_perf_frequency;
+static uint64_t g_perf_last_raw;
+static int64_t g_perf_last_normalized;
+static uint64_t g_perf_qpc_call_count;
+static int64_t g_perf_qpc_first;
+static int64_t g_perf_qpc_last;
+static uint64_t g_perf_qpc_min_delta;
+static uint64_t g_perf_qpc_max_delta;
+static uint64_t g_perf_qpc_regressions;
 static EFI_PHYSICAL_ADDRESS g_tls_block;
 static GuideXBootInfo g_boot_info;
 
@@ -342,11 +373,122 @@ static void configure_platform_time(GXOS_EFI_RUNTIME_SERVICES *runtime_services)
     gxos_time_configure(&context);
 }
 
+__attribute__((unused)) static void configure_platform_performance(const EFI_SYSTEM_TABLE *system_table)
+{
+    GXOS_PERF_CONTEXT context;
+    context.trace = time_trace;
+    context.set_phase = time_set_phase;
+    context.halt = time_halt;
+    context.configuration_table = system_table == 0 ? 0 : system_table->ConfigurationTable;
+    context.configuration_table_count = system_table == 0 ? 0 : system_table->NumberOfTableEntries;
+    context.source_code = &g_perf_source_code;
+    context.source_address = &g_perf_source_address;
+    context.frequency = &g_perf_frequency;
+    context.last_raw = &g_perf_last_raw;
+    context.last_normalized = &g_perf_last_normalized;
+    context.call_count = &g_perf_qpc_call_count;
+    context.first_value = &g_perf_qpc_first;
+    context.last_value = &g_perf_qpc_last;
+    context.minimum_delta = &g_perf_qpc_min_delta;
+    context.maximum_delta = &g_perf_qpc_max_delta;
+    context.regressions = &g_perf_qpc_regressions;
+    if (!gxos_perf_configure(&context)) fail("perf-source-init");
+}
+
+static void emit_qpc_summary(void)
+{
+    serial_field_hex("GXOS_NET10:QPC_COUNT=0x", g_perf_qpc_call_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QPC_FIRST=0x", (uint64_t)g_perf_qpc_first);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QPC_LAST=0x", (uint64_t)g_perf_qpc_last);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QPC_MIN_DELTA=0x", g_perf_qpc_min_delta);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QPC_MAX_DELTA=0x", g_perf_qpc_max_delta);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QPC_REGRESSIONS=0x", g_perf_qpc_regressions);
+    serial_text("\r\n");
+}
+
+__attribute__((unused)) static void emit_performance_diagnostics(void)
+{
+    serial_field_hex("GXOS_NET10:PERF_SOURCE_CODE=0x", g_perf_source_code);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PERF_SOURCE_ADDRESS=0x", g_perf_source_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PERF_FREQUENCY=0x", g_perf_frequency);
+    serial_text("\r\n");
+    emit_qpc_summary();
+    serial_field_hex("GXOS_NET10:PERF_LAST_RAW=0x", g_perf_last_raw);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PERF_LAST_NORMALIZED=0x", (uint64_t)g_perf_last_normalized);
+    serial_text("\r\n");
+}
+
+__attribute__((unused)) static void run_performance_diagnostics(EFI_BOOT_SERVICES *boot_services)
+{
+    int64_t frequency_first;
+#ifdef GXOS_PERF_STALL_DIAGNOSTIC
+    int64_t frequency_second;
+#endif
+    int64_t first;
+#ifdef GXOS_PERF_STALL_DIAGNOSTIC
+    int64_t immediate;
+    int64_t delayed;
+    EFI_STATUS stall_status;
+#endif
+
+    (void)boot_services;
+    if (!gxos_query_performance_frequency(&frequency_first) || frequency_first <= 0) {
+        fail("perf-frequency-contract");
+    }
+#ifdef GXOS_PERF_STALL_DIAGNOSTIC
+    if (!gxos_query_performance_frequency(&frequency_second) || frequency_first != frequency_second) {
+        fail("perf-frequency-contract");
+    }
+#endif
+    serial_field_hex("GXOS_NET10:PERF_FREQUENCY_QUERY=0x", (uint64_t)frequency_first);
+    serial_text("\r\n");
+    g_phase = PHASE_BEFORE_QPC_CALL;
+    if (!gxos_query_performance_counter(&first)) fail("qpc-first-read");
+#ifndef GXOS_PERF_STALL_DIAGNOSTIC
+    serial_field_hex("GXOS_NET10:QPC_STARTUP_DIAGNOSTIC=0x", (uint64_t)first);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PERF_STALL_NOT_RUN_IN_STARTUP\r\n");
+    return;
+#else
+    g_phase = PHASE_BEFORE_QPC_CALL;
+    if (!gxos_query_performance_counter(&immediate)) fail("qpc-immediate-read");
+    if (immediate < first) fail("qpc-immediate-regression");
+    serial_field_hex("GXOS_NET10:QPC_IMMEDIATE_DELTA=0x", (uint64_t)(immediate - first));
+    serial_text("\r\n");
+    if (boot_services != 0 && boot_services->Stall != 0) {
+#ifdef GXOS_PERF_STALL_DIAGNOSTIC
+        stall_status = boot_services->Stall(1);
+        serial_field_hex("GXOS_NET10:PERF_STALL_STATUS=0x", stall_status);
+        serial_text("\r\n");
+        if (stall_status != EFI_SUCCESS) fail("perf-stall-diagnostic");
+        g_phase = PHASE_BEFORE_QPC_CALL;
+        if (!gxos_query_performance_counter(&delayed)) fail("qpc-delayed-read");
+        if (delayed < immediate) fail("qpc-stall-regression");
+        serial_field_hex("GXOS_NET10:QPC_STALL_DELTA=0x", (uint64_t)(delayed - immediate));
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PERF_STALL_TEST_OK\r\n");
+#else
+        serial_text("GXOS_NET10:PERF_STALL_NOT_RUN_IN_STARTUP\r\n");
+#endif
+    } else {
+        serial_text("GXOS_NET10:PERF_STALL_UNAVAILABLE\r\n");
+    }
+#endif
+}
+
 __attribute__((used)) static void fault_handler(uint64_t *frame)
 {
     uint64_t cr2;
     __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
-    if (g_phase <= PHASE_AFTER_TIME_CALL) serial_text("GXOS_NET10:FAULT_BEFORE_MANAGED\r\n");
+    if (g_phase < PHASE_BEFORE_MANAGED_CALL || g_phase >= PHASE_AFTER_SECURITY_COOKIE_INIT) serial_text("GXOS_NET10:FAULT_BEFORE_MANAGED\r\n");
     else if (g_phase == PHASE_IN_MANAGED || g_phase == PHASE_BEFORE_MANAGED_CALL) serial_text("GXOS_NET10:FAULT_IN_MANAGED\r\n");
     else serial_text("GXOS_NET10:FAULT_AFTER_MANAGED_RETURN\r\n");
     serial_field_u32("GXOS_NET10:FAULT_VECTOR=0x", (uint32_t)frame[0]);
@@ -374,6 +516,18 @@ __attribute__((used)) static void fault_handler(uint64_t *frame)
     serial_field_hex("GXOS_NET10:FAULT_FILETIME=0x", g_last_time_filetime);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:FAULT_TIME_CALL_COUNT=0x", g_time_call_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_PERF_SOURCE=0x", g_perf_source_code);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_PERF_SOURCE_ADDRESS=0x", g_perf_source_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_PERF_FREQUENCY=0x", g_perf_frequency);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_PERF_LAST_RAW=0x", g_perf_last_raw);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_PERF_LAST_NORMALIZED=0x", (uint64_t)g_perf_last_normalized);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FAULT_QPC_CALL_COUNT=0x", g_perf_qpc_call_count);
     serial_text("\r\n");
     serial_field_u32("GXOS_NET10:FAULT_PHASE=0x", g_phase);
     serial_text("\r\n");
@@ -601,6 +755,7 @@ static uint32_t g_import_symbol_count;
 static void import_failfast(const IMPORT_RECORD *record)
 {
     if (g_phase == PHASE_AFTER_TIME_CALL) g_phase = PHASE_IN_TIME_CONSUMER;
+    if (g_phase == PHASE_AFTER_QPC_CALL) g_phase = PHASE_AFTER_SECURITY_COOKIE_INIT;
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
@@ -614,6 +769,7 @@ static void import_failfast(const IMPORT_RECORD *record)
     serial_text("\r\n");
     serial_text("GXOS_NET10:MANAGED_THREAD_REGISTERED=0\r\n");
     serial_text("GXOS_NET10:ALLOCATION_CONTEXT_VALID=0\r\n");
+    emit_qpc_summary();
     halt_forever();
 }
 
@@ -844,6 +1000,10 @@ static void *platform_import_target(const char *module, const char *symbol)
 {
 #ifndef GXOS_DISABLE_TIME_IMPLEMENTATION
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetSystemTimeAsFileTime")) return (void *)(uintptr_t)gxos_get_system_time_as_file_time;
+#endif
+#ifndef GXOS_DISABLE_PERF_IMPLEMENTATION
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "QueryPerformanceCounter")) return (void *)(uintptr_t)gxos_query_performance_counter;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "QueryPerformanceFrequency")) return (void *)(uintptr_t)gxos_query_performance_frequency;
 #endif
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsAlloc")) return (void *)(uintptr_t)platform_fls_alloc;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsGetValue")) return (void *)(uintptr_t)platform_fls_get;
@@ -1288,6 +1448,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     g_phase = PHASE_LOADER;
     boot_services = system_table->BootServices;
     configure_platform_time(system_table->RuntimeServices);
+#ifdef GXOS_ENABLE_NATIVEAOT_STARTUP
+    configure_platform_performance(system_table);
+#endif
     read_payload(image_handle, system_table, &image);
     serial_text("GXOS_NET10:PE_READ_OK\r\n");
     load_pe_image(&image, boot_services);
@@ -1340,6 +1503,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
     serial_text("GXOS_NET10:GC_STARTUP_BEGIN\r\n");
     serial_text("GXOS_NET10:NATIVEAOT_STARTUP_BEGIN\r\n");
+#ifdef GXOS_PERF_STALL_ONLY
+    run_performance_diagnostics(boot_services);
+    serial_text("GXOS_NET10:PERF_STALL_PROBE_COMPLETE\r\n");
+    halt_forever();
+#endif
     {
         NativeAotDllEntry nativeaot_entry = (NativeAotDllEntry)(uintptr_t)(image.actual_base + image.entry_rva);
         int nativeaot_result = nativeaot_entry((uintptr_t)image.actual_base, 1, 0);
@@ -1348,6 +1516,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         if (nativeaot_result == 0) fail("nativeaot-startup-failed");
     }
     serial_text("GXOS_NET10:NATIVEAOT_STARTUP_OK\r\n");
+    g_phase = PHASE_AFTER_SECURITY_COOKIE_INIT;
+    emit_performance_diagnostics();
     g_phase = PHASE_AFTER_TIME_CONSUMER;
     serial_text("GXOS_NET10:GC_STARTUP_ADVANCED\r\n");
     serial_field_hex("GXOS_NET10:TLS_ALLOC_LIMIT=0x", *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x30));

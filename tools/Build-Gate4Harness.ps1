@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -23,6 +23,7 @@ $buildLog = Join-Path $outputDirectory 'harness-build.stdout.log'
 $buildErrorLog = Join-Path $outputDirectory 'harness-build.stderr.log'
 $source = Join-Path $root 'src\Gate4Harness\gate4_loader.c'
 $timeSource = Join-Path $root 'src\Gate4Harness\platform_time.c'
+$performanceSource = Join-Path $root 'src\Gate4Harness\platform_performance.c'
 $startupSource = Join-Path $root 'src\Gate4Harness\startup.nsh'
 $efi = Join-Path $efiDirectory 'BOOTX64.EFI'
 $payload = Join-Path $payloadDirectory 'gxos-managed-entry-probe.dll'
@@ -35,6 +36,7 @@ if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
 
 if (-not (Test-Path -LiteralPath $source)) { throw "Harness source not found: $source" }
 if (-not (Test-Path -LiteralPath $timeSource)) { throw "Platform time source not found: $timeSource" }
+if (-not (Test-Path -LiteralPath $performanceSource)) { throw "Platform performance source not found: $performanceSource" }
 if (-not (Test-Path -LiteralPath $startupSource)) { throw "UEFI startup script not found: $startupSource" }
 if (-not (Test-Path -LiteralPath $managedArtifact)) {
     throw "Build the Gate 1 shared artifact first: $managedArtifact"
@@ -54,7 +56,7 @@ $gccArguments = @(
     '-fno-ident', '-mno-red-zone', '-O2', '-Wall', '-Wextra', '-Werror',
     '-nostdlib', '-Wl,--entry,efi_main', '-Wl,--subsystem,10',
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
-    '-o', $efi, $source, $timeSource
+    '-o', $efi, $source, $timeSource, $performanceSource
 )
 switch ($Scenario) {
     'InvalidBootInfo' { $gccArguments += '-DGXOS_NEGATIVE_INVALID_BOOT_INFO' }
@@ -67,6 +69,11 @@ switch ($Scenario) {
     'TimeInvalidTimezone' { $gccArguments += '-DGXOS_TIME_TEST_INVALID_TIMEZONE' }
     'TimeFixedZero' { $gccArguments += '-DGXOS_TIME_TEST_FIXED_ZERO' }
     'TimeMarkerMutation' { $gccArguments += '-DGXOS_TIME_MARKER_MUTATION' }
+    'PerfDisabled' { $gccArguments += '-DGXOS_PERF_TEST_DISABLED' }
+    'PerfStallProbe' {
+        $gccArguments += '-DGXOS_PERF_STALL_DIAGNOSTIC'
+        $gccArguments += '-DGXOS_PERF_STALL_ONLY'
+    }
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
 if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }

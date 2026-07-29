@@ -15,7 +15,7 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
-The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, the exact UEFI-backed `GetSystemTimeAsFileTime` contract advances authentic startup, and the next boundary is `KERNEL32.dll!QueryPerformanceCounter`. The first allocation remains unproven.
+The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, the exact UEFI-backed FILETIME and monotonic performance contracts advance authentic startup, and the next boundary is `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`. The first allocation remains unproven.
 
 ## Provisional first-image path
 
@@ -41,6 +41,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Managed-entry proof procedure](docs/MANAGED_ENTRY_PROOF.md)
 - [NativeAOT allocation and GC probe](docs/ALLOCATION_GC_PROBE.md)
 - [NativeAOT platform time contract](docs/PLATFORM_TIME_CONTRACT.md)
+- [NativeAOT platform performance counter](docs/PLATFORM_PERFORMANCE_COUNTER.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 

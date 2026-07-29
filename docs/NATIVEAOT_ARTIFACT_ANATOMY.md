@@ -56,12 +56,12 @@ The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatmen
 PE_IMPORT_DESCRIPTORS=10
 PE_IMPORT_SYMBOLS=124
 PE_IMPORT_RESOLVED=124
-PE_IMPORT_FUNCTIONAL=18
-PE_IMPORT_FAILFAST=106
+PE_IMPORT_FUNCTIONAL=21
+PE_IMPORT_FAILFAST=103
 UNRESOLVED_REQUIRED_IMPORTS=0
 ```
 
-Each of the 106 unreachable symbols in the historical Gate 4 control is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The time-enabled allocation-startup build adds exactly one functional target, `GetSystemTimeAsFileTime`, for 19 functional / 105 fail-fast.
+Each of the 103 currently unreachable symbols is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The current allocation-startup build adds `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency`, for 21 functional / 103 fail-fast. The historical 18/106 and intermediate 19/105 counts remain audit evidence.
 
 ## TLS, unwind, and initialization answers
 
@@ -81,4 +81,25 @@ The follow-on allocation artifact is intentionally a differential build, not a r
 
 In the allocation variant the managed path is `ManagedMain -> AllocateOne -> RhpNewFast`, with the helper reading the current TLS allocation context at TLS block `+0x30` (`limit`) and `+0x38` (`allocation pointer`). The probe validates a non-null object and a fixed field value before emitting its first-allocation marker. The pre-startup run returned managed status `-10` because those TLS slots remained zero; no object or GC success is claimed.
 
-The allocation variant's PE entry RVA is `0x77840`, distinct from the no-allocation control's `0x77700` because adding the managed allocation path changes the linked image. An opt-in harness mode calls that actual PE entrypoint with DLL process-attach arguments after the existing relocation/IAT/TLS work. The first call is the compiler/CRT security-cookie initializer at `0x180078290`, whose direct call at `0x1800782ca` reads IAT slot RVA `0x7e1e0` (`GetSystemTimeAsFileTime`) into `[rsp+0x40]`. The normal thunk at `0x18003ca70` points to the same slot. The verified UEFI-backed implementation returns a valid 64-bit FILETIME, after which the same initializer reaches `QueryPerformanceCounter` at `0x1800782f9`, IAT RVA `0x7e0c8`. Full DLL/CRT startup and the GC contract therefore remain unclosed at that next boundary.
+The allocation variant's PE entry RVA is `0x77840`, distinct from the no-allocation control's `0x77700` because adding the managed allocation path changes the linked image. An opt-in harness mode calls that actual PE entrypoint with DLL process-attach arguments after the existing relocation/IAT/TLS work. The first call is the compiler/CRT security-cookie initializer at `0x180078290`, whose direct call at `0x1800782ca` reads IAT slot RVA `0x7e1e0` (`GetSystemTimeAsFileTime`) into `[rsp+0x40]`. The normal thunk at `0x18003ca70` points to the same slot. The verified UEFI-backed implementation returns a valid 64-bit FILETIME, after which the same initializer reaches `QueryPerformanceCounter` at `0x1800782f9`, IAT RVA `0x7e0c8`; QPC returns and the next observed import is `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table`. Full DLL/CRT startup and the GC contract therefore remain unclosed at that next boundary.
+
+## Monotonic performance contract
+
+The current allocation-startup build maps the two performance imports to `src/Gate4Harness/platform_performance.c`:
+
+| Import | IAT RVA | Contract | Current QEMU source |
+| --- | ---: | --- | --- |
+| `QueryPerformanceCounter` | `0x7e0c8` | Microsoft x64 ABI, writable `int64_t*`, return `1` on success and `0` on null/unavailable/regression; normalized signed-64 counter units | ACPI PM timer port `0x608`, 24-bit raw counter |
+| `QueryPerformanceFrequency` | `0x7e0d0` | Microsoft x64 ABI, writable `int64_t*`, positive stable frequency | `0x369E99` = 3,579,545 Hz |
+
+The source-selection order is deliberate. The implementation first checks CPUID for invariant TSC and an exact CPUID leaf `0x15` ratio; the default QEMU CPU reports max basic leaf `0xD`, invariant-TSC bit `0`, and zero leaf-15 metadata, so it is rejected. It then reads the ACPI configuration-table pointer from the UEFI system table, validates RSDP/root/FADT checksums and lengths, reads the FADT legacy PM-timer block at offset `76`, and honors the 24-bit/32-bit flag at offset `112`. OVMF exposes port `0x608`, width 24, and the standard ACPI PM frequency `3,579,545` Hz. HPET, PIT, and APIC timers are not substituted: they were not required by the observed source path and would add interrupt or scheduler dependencies.
+
+The PM raw counter is extended across its 24-bit wrap with checked delta arithmetic; regressions, ambiguous half-range deltas, invalid metadata, and signed-output overflow return failure. Initialization records a raw observation and QPC records a normalized observation. In the authoritative startup trace the authentic security-cookie call makes one QPC call (`QPC_COUNT=1`); the separate `PerfStallProbe` makes two immediate/after-stall reads and verifies a positive post-`Stall(1)` delta. No allocation, libc, host OS, Boot Services, events, or threads are used by the wrappers after source initialization. The harness does not call `ExitBootServices`; the retained ACPI table metadata and hardware PM port are the source lifetime for this bounded UEFI profile.
+
+The exact current path is:
+
+```text
+GetSystemTimeAsFileTime -> QPC -> api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table
+```
+
+The three selected fresh positive logs are under `artifacts\qpc-final-20260729-allocation\time-contract-runs-*`; each has source `ACPI_PM_TIMER`, frequency `0x369E99`, two source/normalized observations, one QPC call, zero regressions, and zero TLS allocation context. The first allocation remains unproven.
