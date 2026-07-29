@@ -1,6 +1,6 @@
 # NativeAOT platform performance-counter contract
 
-Status: passed for the bounded `QueryPerformanceCounter` / `QueryPerformanceFrequency` milestone. The allocation-enabled NativeAOT startup path returns from FILETIME, obtains a monotonic normalized counter value, passes the minimal CRT on-exit initialization, and now stops at `KERNEL32.dll!InitializeSListHead`. No GC heap, managed allocation, or thread runtime is claimed.
+Status: passed for the bounded `QueryPerformanceCounter` / `QueryPerformanceFrequency` milestone. The allocation-enabled NativeAOT startup path returns from FILETIME, obtains a monotonic normalized counter value, passes the minimal CRT and SLIST-head initialization contracts, and now stops at `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`. No GC heap, managed allocation, or thread runtime is claimed.
 
 ## Exact imports and semantics
 
@@ -61,4 +61,4 @@ The separate fresh `PerfStallProbe` uses loader `2F419FCBE5FA7162D6613BCADA7AD8F
 
 The final `PerfDisabled` loader is `D5F65BCBEB40AD993F0E1A739421A1D61FA9C5EF136A6CAC3CC6D6663F3217BB`. Its fresh serial log contains `PERF_SOURCE_DISCOVERY_BEGIN`, `PERF_SOURCE_UNAVAILABLE`, and `FAIL:perf-source-init`, and contains neither `PERF_SOURCE_INIT_OK` nor `QPC_OK`. This proves that the QPC result is not a marker-only or unconditional-success shim. Historical FILETIME negative controls remain documented in `PLATFORM_TIME_CONTRACT.md`.
 
-The CRT on-exit initialization boundary is now closed only for two empty tables; registration and execution remain unimplemented and untested. The next real blocker is `KERNEL32.dll!InitializeSListHead`. GC heap ownership, virtual memory, managed-thread registration, and first allocation remain separate unresolved contracts.
+The CRT on-exit initialization boundary is closed only for two empty tables, and the current SLIST scope is closed only for one aligned empty header; registration, execution, and all SLIST companion operations remain unimplemented and untested. The next real blocker is `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`. GC heap ownership, virtual memory, managed-thread registration, and first allocation remain separate unresolved contracts.

@@ -4,7 +4,7 @@ This document records the exact imports of the Gate 1 shared NativeAOT artifact,
 
 The initial Gate 4 stop was a correct ten-descriptor/124-symbol census. The current control experiment patches every IAT slot: 21 imports now have bounded functional implementations, including the exact `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency` contracts, and the other 103 receive deterministic guideXOS-owned fail-fast stubs. A fail-fast stub is not support for the service; it proves that the symbol is not reached by the legitimate path. The allocation-enabled variant keeps the same 10/124 import set and adds only managed allocation code and metadata; it does not make the remaining services functional.
 
-Final control treatment totals for the performance-enabled build are A=functional `21`, B=deterministic fail-fast `103`, C=import elimination `0`, and D=deferred required symbols `0`. The CRT opt-in follow-on adds exactly one functional import, `_initialize_onexit_table`, for A=`22` / B=`102`; all other deferred symbols retain their fail-fast treatment. The no-allocation control still passes managed entry. The CRT-enabled allocation/startup follow-on initializes both empty on-exit tables and stops at the next authentic import, `KERNEL32.dll!InitializeSListHead`; the first allocation probe remains `-10` without a GC allocation context.
+Final control treatment totals for the performance-enabled build are A=functional `21`, B=deterministic fail-fast `103`, C=import elimination `0`, and D=deferred required symbols `0`. The CRT opt-in follow-on adds exactly one functional import, `_initialize_onexit_table`, for A=`22` / B=`102`; the current SLIST opt-in adds exactly one more, `InitializeSListHead`, for A=`23` / B=`101`. All other deferred symbols retain their fail-fast treatment. The no-allocation control still passes managed entry. The current allocation/startup trace initializes both empty on-exit tables, initializes one x64 SLIST header, and stops at the next authentic import, `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`; the first allocation probe remains `-10` without a GC allocation context.
 
 ## Exact descriptor and symbol inventory
 
@@ -34,13 +34,42 @@ For the current time-enabled census, the single exception to that historical gro
 | `KERNEL32.dll` | `QueryPerformanceCounter` | `0x7e0c8` | A: allocation-free UEFI-backed monotonic counter wrapper | security-cookie initializer `0x1800782f9` | returns one normalized reading; next boundary is CRT on-exit initialization |
 | `KERNEL32.dll` | `QueryPerformanceFrequency` | `0x7e0d0` | A: paired positive-frequency query for the selected source | QPF diagnostic path at the NativeAOT startup boundary | returns `0x369e99` on the ACPI PM profile; not reached by the default startup trace |
 
-The resulting current allocation-startup treatment is 21 functional / 103 fail-fast before the CRT opt-in. The CRT-enabled treatment is 22 functional / 102 fail-fast. The historical 18/106 and 19/105 tables remain in earlier evidence to preserve the prior Gate 4 sequence.
+The resulting current allocation-startup treatment is 21 functional / 103 fail-fast before the CRT opt-in. The CRT-enabled treatment is 22 functional / 102 fail-fast, and the SLIST-enabled treatment is 23 functional / 101 fail-fast. The historical 18/106 and 19/105 tables remain in earlier evidence to preserve the prior Gate 4 sequence.
 
 ## CRT on-exit bootstrap census
 
 The current NativeAOT attach helper at preferred address `0x180077c70` calls `_initialize_onexit_table` twice, with table addresses `0x1800b5e98` and `0x1800b5eb0`. Both calls returned zero in the complete CRT-enabled traces, and both tables ended with equal `first`, `last`, and `end` fields. The next observed import was `KERNEL32.dll!InitializeSListHead`.
 
 `_register_onexit_function`, `_execute_onexit_table`, `_crt_atexit`, and `_cexit` are imported or statically present but were not dynamically reached. `atexit` and `_c_exit` are not present in this PE's import census. Static disassembly shows the nearby `_crt_atexit` helper can reference registration and `_cexit`; that is a reachability fact, not evidence that startup registration or shutdown occurred. The complete routine-by-routine contract and negative controls are in [CRT_ONEXIT_BOOTSTRAP.md](CRT_ONEXIT_BOOTSTRAP.md).
+
+## SLIST family census and current reachability
+
+The current allocation payload has two relevant KERNEL32 imports in its actual PE import table: `InterlockedFlushSList` at IAT RVA `0x7e2e8` and `InitializeSListHead` at IAT RVA `0x7e2f8`. `InitializeSListHead` is the only SLIST-family operation reached by the current startup path. It is routed functionally in the SLIST-enabled harness, while the other imported `InterlockedFlushSList` remains a unique fail-fast target. The reachability trace is:
+
+```text
+0x180077550  NativeAOT attach/bootstrap helper
+  -> 0x180078350  lea rcx, [0x1800b5ed0]; tail-jump through InitializeSListHead IAT
+  -> 0x180078380  post-initialization static state helper
+  -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e  next boundary
+```
+
+The header's relocated address in the fresh QEMU profile was `0x552eed0`, with low alignment bits `0`. It is a static writable image location at preferred RVA `0xb5ed0`, not TLS, stack, heap, or loader scratch. The current trace initializes one header once; no push, pop, flush, depth query, or compiler-generated atomic operation on that header is reached.
+
+| Operation | Current classification | Evidence / scope |
+| --- | --- | --- |
+| `InitializeSListHead` | Imported and currently reached; functional in the SLIST-enabled harness | Exact caller/helper above; one aligned header; next boundary is `_initterm_e` |
+| `InterlockedFlushSList` | Imported but not reached; later-runtime or shutdown-only is possible but unproven | IAT RVA `0x7e2e8`; static helper at preferred `0x180079430`; no positive marker |
+| `InterlockedPushEntrySList` | Absent from current PE import census | No import, symbol, or startup call found |
+| `InterlockedPopEntrySList` | Absent from current PE import census | No import, symbol, or startup call found |
+| `QueryDepthSList` | Absent from current PE import census | No import, symbol, or startup call found |
+| `RtlInitializeSListHead` | Absent from current PE import census | SDK declaration only; no current PE import or call |
+| `RtlInterlockedPushEntrySList` | Absent from current PE import census | SDK declaration only; no current PE import or call |
+| `RtlInterlockedPopEntrySList` | Absent from current PE import census | SDK declaration only; no current PE import or call |
+| `RtlInterlockedFlushSList` | Absent from current PE import census | SDK declaration only; no current PE import or call |
+| `RtlQueryDepthSList` | Absent from current PE import census | SDK declaration only; no current PE import or call |
+| Direct atomic header manipulation | Not identified on the current startup path | Focused disassembly found no compiler intrinsic or direct atomic operation on `0x1800b5ed0`; later code remains unclaimed |
+
+This census does not implement or imply general lock-free SLIST support. The exact x64 layout, initialization-only contract, and validation results are in [PLATFORM_SLIST_CONTRACT.md](PLATFORM_SLIST_CONTRACT.md).
 
 ## Proven time reachability transition
 
@@ -72,6 +101,7 @@ The resolver first installed a unique fail-fast stub in every IAT slot and then 
 | Add the exact time contract | `TIME_API_RETURN`, then QPC returns a normalized reading | FILETIME and monotonic performance contracts are proven without making unrelated imports functional. |
 | Add the performance counter contract | `QPC_OK`, then `api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table` | The next dependency is the CRT on-exit table, not GC allocation. |
 | Add the CRT empty-table contract | Two `CRT_ONEXIT_INITIALIZED_OK` markers, then `KERNEL32.dll!InitializeSListHead` | `_initialize_onexit_table` is closed for the two startup tables; registration, execution, and GC remain unproven. |
+| Add the x64 SLIST-head initialization contract | One `SLIST_HEAD_INITIALIZED_OK` marker, then `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e` | Only the 16-byte empty header is closed; SLIST companions, registration, execution, and GC remain unproven. |
 
 The remaining 103 current imports were not declared unused merely because they were absent from one trace: the link response and disassembly identify their retaining components, and the negative fail-fast stubs prove that any accidental reachability is detected. The historical 106-symbol fail-fast set is retained in prior evidence. These are deferred runtime services, not silently supported services.
 
@@ -81,7 +111,7 @@ The remaining 103 current imports were not declared unused merely because they w
 
 The allocation-enabled shared artifact has SHA-256 `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379` and remains 10 descriptors / 124 symbols. `tools\Compare-AllocationArtifacts.ps1` compares the two manifests and map XML files; the retained report is `artifacts\allocation-enabled-final-20260728-060439-726\allocation-differential.json` and passes because the import sets are identical while the allocation probe's EEType, constructor, and `AllocateOne` appear only in the staged map.
 
-The pre-change clean opt-in startup trace called the allocation PE's actual entry RVA `0x77840` with process-attach arguments after the existing loader TLS setup and stopped at `KERNEL32.dll!GetSystemTimeAsFileTime`. The current CRT-enabled trace passes FILETIME, QPC, and QPF, initializes both on-exit tables, and stops at `KERNEL32.dll!InitializeSListHead`. Temporary exploratory shims were not retained; no dummy CRT, virtual-memory, event, or thread implementation is counted as support.
+The pre-change clean opt-in startup trace called the allocation PE's actual entry RVA `0x77840` with process-attach arguments after the existing loader TLS setup and stopped at `KERNEL32.dll!GetSystemTimeAsFileTime`. The current SLIST-enabled trace passes FILETIME, QPC, and QPF, initializes both on-exit tables, initializes one x64 SLIST header, and reaches `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`. Temporary exploratory shims were not retained; no dummy CRT, virtual-memory, event, or thread implementation is counted as support.
 
 The separate pre-startup allocation run reaches the generated `RhpNewFast` path with TLS allocation limit and pointer both zero, and the managed probe returns `-10`. This is the exact current first-allocation blocker, not evidence of a successful allocation.
 

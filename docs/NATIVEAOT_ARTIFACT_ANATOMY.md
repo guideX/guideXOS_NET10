@@ -56,12 +56,12 @@ The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatmen
 PE_IMPORT_DESCRIPTORS=10
 PE_IMPORT_SYMBOLS=124
 PE_IMPORT_RESOLVED=124
-PE_IMPORT_FUNCTIONAL=21
-PE_IMPORT_FAILFAST=103
+PE_IMPORT_FUNCTIONAL=23
+PE_IMPORT_FAILFAST=101
 UNRESOLVED_REQUIRED_IMPORTS=0
 ```
 
-Each of the 103 currently unreachable symbols is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The current allocation-startup build adds `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency`, for 21 functional / 103 fail-fast. The historical 18/106 and intermediate 19/105 counts remain audit evidence.
+Each of the 103 currently unreachable symbols is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The current allocation-startup build adds `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency`, for 21 functional / 103 fail-fast. The CRT opt-in adds `_initialize_onexit_table`, for 22 / 102, and the current SLIST opt-in adds `InitializeSListHead`, for 23 / 101. The historical 18/106, 19/105, and 21/103 counts remain audit evidence.
 
 ## TLS, unwind, and initialization answers
 
@@ -81,7 +81,9 @@ The follow-on allocation artifact is intentionally a differential build, not a r
 
 In the allocation variant the managed path is `ManagedMain -> AllocateOne -> RhpNewFast`, with the helper reading the current TLS allocation context at TLS block `+0x30` (`limit`) and `+0x38` (`allocation pointer`). The probe validates a non-null object and a fixed field value before emitting its first-allocation marker. The pre-startup run returned managed status `-10` because those TLS slots remained zero; no object or GC success is claimed.
 
-The allocation variant's PE entry RVA is `0x77840`, distinct from the no-allocation control's `0x77700` because adding the managed allocation path changes the linked image. An opt-in harness mode calls that actual PE entrypoint with DLL process-attach arguments after the existing relocation/IAT/TLS work. The first call is the compiler/CRT security-cookie initializer at `0x180078290`, whose direct call at `0x1800782ca` reads IAT slot RVA `0x7e1e0` (`GetSystemTimeAsFileTime`) into `[rsp+0x40]`. The normal thunk at `0x18003ca70` points to the same slot. The verified UEFI-backed implementation returns a valid 64-bit FILETIME, after which the same initializer reaches `QueryPerformanceCounter` at `0x1800782f9`, IAT RVA `0x7e0c8`; QPC returns, both empty on-exit tables initialize at `0x180077c8d`/`0x180077c9d`, and the next observed import is `KERNEL32.dll!InitializeSListHead`. Full DLL/CRT startup and the GC contract remain unclosed at that next boundary.
+The allocation variant's PE entry RVA is `0x77840`, distinct from the no-allocation control's `0x77700` because adding the managed allocation path changes the linked image. An opt-in harness mode calls that actual PE entrypoint with DLL process-attach arguments after the existing relocation/IAT/TLS work. The first call is the compiler/CRT security-cookie initializer at `0x180078290`, whose direct call at `0x1800782ca` reads IAT slot RVA `0x7e1e0` (`GetSystemTimeAsFileTime`) into `[rsp+0x40]`. The normal thunk at `0x18003ca70` points to the same slot. The verified UEFI-backed implementation returns a valid 64-bit FILETIME, after which the same initializer reaches `QueryPerformanceCounter` at `0x1800782f9`, IAT RVA `0x7e0c8`; QPC returns, both empty on-exit tables initialize at the current payload's attach sites `0x180077595`/`0x1800775a3`, and the following helper calls `KERNEL32.dll!InitializeSListHead` through IAT RVA `0x7e2f8`. The guideXOS wrapper validates one aligned header at preferred RVA `0xb5ed0`, then startup reaches `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`. Full DLL/CRT startup and the GC contract remain unclosed at that next boundary.
+
+The current SLIST caller is the NativeAOT attach/bootstrap helper at preferred address `0x180077550`. It calls the helper at `0x180078350`, which loads the static image address `0x1800b5ed0` and tail-jumps through the `InitializeSListHead` IAT slot. The header is in the loaded image's writable zero-filled static-data region, not TLS, stack, loader-owned scratch, or heap memory. The next helper at `0x180078380` and the `_initterm_e` call at `0x1800775bb` are reached only after the guideXOS function returns. The initialization-only contract and family census are recorded in [PLATFORM_SLIST_CONTRACT.md](PLATFORM_SLIST_CONTRACT.md).
 
 ## Monotonic performance contract
 
@@ -99,7 +101,9 @@ The PM raw counter is extended across its 24-bit wrap with checked delta arithme
 The exact current path is:
 
 ```text
-GetSystemTimeAsFileTime -> QPC -> api-ms-win-crt-runtime-l1-1-0.dll!_initialize_onexit_table
+GetSystemTimeAsFileTime -> QPC -> _initialize_onexit_table (twice)
+  -> KERNEL32.dll!InitializeSListHead
+  -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e
 ```
 
 The three selected fresh positive logs are under `artifacts\qpc-final-20260729-allocation\time-contract-runs-*`; each has source `ACPI_PM_TIMER`, frequency `0x369E99`, two source/normalized observations, one QPC call, zero regressions, and zero TLS allocation context. The first allocation remains unproven.

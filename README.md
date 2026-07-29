@@ -15,7 +15,7 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
-The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, the exact UEFI-backed FILETIME, monotonic performance, and minimal CRT on-exit initialization contracts advance authentic startup, and the next boundary is `KERNEL32.dll!InitializeSListHead`. The first allocation remains unproven.
+The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, the exact UEFI-backed FILETIME, monotonic performance, CRT on-exit initialization, and x64 SLIST-head initialization contracts advance authentic startup. The current deepest boundary is `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`; no allocation, GC startup, managed-thread registration, or general SLIST operation is claimed. The first allocation remains unproven.
 
 ## Provisional first-image path
 
@@ -42,6 +42,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [NativeAOT allocation and GC probe](docs/ALLOCATION_GC_PROBE.md)
 - [NativeAOT platform time contract](docs/PLATFORM_TIME_CONTRACT.md)
 - [NativeAOT platform performance counter](docs/PLATFORM_PERFORMANCE_COUNTER.md)
+- [Windows x64 SLIST initialization contract](docs/PLATFORM_SLIST_CONTRACT.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 

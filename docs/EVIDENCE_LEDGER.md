@@ -182,3 +182,27 @@ Negative evidence:
 | Marker mutation QEMU | Loader `A8FCABF5BADD60D11D7E4FA612E28521C55A175451B50F067D370A2594433F69`; reached both calls and the next boundary, emitted `CRT_ONEXIT_INITIALIZED_OX`, and did not emit `CRT_ONEXIT_INITIALIZED_OK`. |
 
 No positive trace reached `_register_onexit_function`, `_execute_onexit_table`, `_crt_atexit`, `atexit`, `_cexit`, or `_c_exit`. No callback registration or execution occurred. No allocation, managed-thread registration, GC heap initialization, or first allocation occurred. The new deepest boundary is `KERNEL32.dll!InitializeSListHead`.
+
+## SLIST initialization contract addendum
+
+This addendum records the follow-on from the committed CRT on-exit milestone. Baseline was re-recorded before source changes on branch `main`, HEAD `cd59ff5edd25d21b998b64148c79eb2712d17f3f`, upstream `origin/main`, with a clean worktree. The baseline loader was a fresh `CrtOnexitInit` build in `artifacts\slist-baseline-20260729-091209-685`; it preserved PE loading, relocation, TLS/GS/TEB/FLS, FILETIME, QPC/QPF, both CRT table markers, zero unresolved imports, zero allocation context, and stopped at `KERNEL32.dll!InitializeSListHead`.
+
+The SLIST-enabled final harness was rebuilt in `artifacts\slist-final-20260729-104138-993`. The managed payload SHA-256 is `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`; the positive loader SHA-256 is `67284C49FE561EB9E53B5990E58CAD1F76AB8348F7255AF05AFCC50BB7C34909`; the disabled loader is `950D28D84D35A6AF6F0E243DA0940D9763E7A9C71CE8EF80EE3B866966A9FDD7`; the marker-mutation loader is `AD3B65DA2C92F2906FC44FE2919CF524BE9E34AECFCCC62AC18E3BC8A8FD1CEF`. The current SLIST-enabled import treatment is 23 functional / 101 fail-fast, with zero unresolved required imports.
+
+The current payload import/disassembly census found `InterlockedFlushSList` at IAT RVA `0x7e2e8` and `InitializeSListHead` at `0x7e2f8`; the other requested SLIST names are absent from the PE import census. The exact caller is the preferred `0x180077550` NativeAOT attach/bootstrap helper, through `0x180078350`, with a static writable image header at preferred `0x1800b5ed0` and relocated QEMU address `0x552eed0`. One call occurs, with zero alignment remainder. The wrapper verifies all 16 bytes and the x64 depth/sequence/reserved/next fields before emitting `GXOS_NET10:SLIST_HEAD_INITIALIZED_OK`. The next observed dependency is `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`. No push, pop, flush, depth, atomic header operation, allocation, GC initialization, managed-thread registration, or scheduler activity was observed.
+
+The complete host suite was rerun after the ABI-explicit header change:
+
+| Host evidence | Result |
+| --- | --- |
+| Exact empty bytes, fields, guards, repeated and opaque reset | `SLIST_TEST_INITIALIZATION=PASS`, `SLIST_TEST_REINITIALIZATION=PASS`, `SLIST_TEST_OPAQUE_STATE=PASS` |
+| Null and misalignment | `SLIST_TEST_NULL=PASS`, `SLIST_TEST_MISALIGNMENT=PASS`; no writes occurred |
+| Size/alignment assertions | `SLIST_TEST_LAYOUT_ASSERTIONS=PASS` |
+| No allocation/platform services | `SLIST_TEST_NO_ALLOCATION_OR_PLATFORM_SERVICES=PASS` |
+| Host suite | `SLIST_HOST_TESTS=PASSED` |
+| Incorrect-layout compile control | `SLIST_TEST_INCORRECT_LAYOUT_CONTROL=PASS` |
+| No external core references | `SLIST_TEST_NO_EXTERNAL_REFERENCES=PASS` |
+
+The disabled QEMU control is complete and positive as a negative control: the final disabled binary was rebuilt in `artifacts\slist-final-20260729-104138-993\disabled` and the earlier complete disabled trace at `artifacts\slist-final-20260729-100119-060\disabled\time-contract-runs-20260729-101316-870\time-contract-20260729-101317-171-run1.serial.log` passed the full validator, stopped at the original `KERNEL32.dll!InitializeSListHead` import boundary, emitted no SLIST success marker, retained `QPC_REGRESSIONS=0`, and retained zero TLS allocation context. An earlier monitored positive run for the equivalent SLIST-enabled build is retained at `artifacts\slist-positive-20260729-092308-876\debug-monitor\serial.log`; it reached `_initterm_e` and emitted the full terminal summary.
+
+The final-hash positive attempts are retained under `artifacts\slist-final-20260729-100119-060\time-contract-runs-*`, `monitor-run1`, `tcp-run1`, `priority-run1`, `nopoll-run1`, and `tcg-multi-run1`; the final rebuilt binary is retained under `artifacts\slist-final-20260729-104138-993`. They reached the SLIST success marker and, in the monitored attempt, the `_initterm_e` boundary, but several QEMU runs were truncated by host execution stalls before the complete QPC summary. They are deliberately not counted as complete Gate I runs. The marker-mutation QEMU attempt was likewise not counted because the host stall occurred before the mutated marker; the host marker and layout controls remain deterministic. Therefore this pass does not claim the required three consecutive final-hash QEMU runs; the implementation and next-boundary result are proven, but the three-run evidence gate remains open pending a clean QEMU host run.

@@ -3,6 +3,7 @@
 #include "platform_time.h"
 #include "platform_performance.h"
 #include "crt_onexit.h"
+#include "platform_slist.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -237,6 +238,9 @@ static uint64_t g_perf_qpc_max_delta;
 static uint64_t g_perf_qpc_regressions;
 static EFI_PHYSICAL_ADDRESS g_tls_block;
 static GuideXBootInfo g_boot_info;
+#ifdef GXOS_ENABLE_SLIST
+static uint64_t g_slist_initialize_calls;
+#endif
 
 static void serial_out8(uint16_t port, uint8_t value)
 {
@@ -1023,6 +1027,39 @@ static int GXOS_CRT_EFIAPI platform_initialize_onexit_table(GXOS_CRT_ONEXIT_TABL
 }
 #endif
 
+#ifdef GXOS_ENABLE_SLIST
+static void GXOS_SLIST_EFIAPI platform_initialize_slist_head(GXOS_SLIST_HEADER *head)
+{
+    uintptr_t address = (uintptr_t)head;
+    int result;
+
+    g_slist_initialize_calls++;
+    if (g_slist_initialize_calls <= 8) {
+        serial_text("GXOS_NET10:SLIST_IMPORT_FUNCTIONAL=1\r\n");
+        serial_field_hex("GXOS_NET10:SLIST_HEAD_INIT_CALL=0x", g_slist_initialize_calls);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:SLIST_HEAD_ADDRESS=0x", (uint64_t)address);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:SLIST_HEAD_ALIGNMENT=0x", (uint64_t)(address & 0x0Fu));
+        serial_text("\r\n");
+    }
+    result = gxos_initialize_slist_head(head);
+    if (result != 0) fail("slist-head-invalid");
+    if (head->Original.Alignment != 0 || head->Original.Region != 0 ||
+        head->HeaderX64.Depth != 0 || head->HeaderX64.Sequence != 0 ||
+        head->HeaderX64.Reserved != 0 || head->HeaderX64.NextEntry != 0) {
+        fail("slist-head-contract");
+    }
+    serial_field_hex("GXOS_NET10:SLIST_HEAD_INITIALIZED_COUNT=0x", g_slist_initialize_calls);
+    serial_text("\r\n");
+#ifdef GXOS_SLIST_MARKER_MUTATION
+    serial_text("GXOS_NET10:SLIST_HEAD_INITIALIZED_OX\r\n");
+#else
+    serial_text("GXOS_NET10:SLIST_HEAD_INITIALIZED_OK\r\n");
+#endif
+}
+#endif
+
 static void *platform_import_target(const char *module, const char *symbol)
 {
 #ifndef GXOS_DISABLE_TIME_IMPLEMENTATION
@@ -1050,6 +1087,9 @@ static void *platform_import_target(const char *module, const char *symbol)
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "EnterCriticalSection")) return (void *)(uintptr_t)platform_enter_critical_section;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "LeaveCriticalSection")) return (void *)(uintptr_t)platform_leave_critical_section;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "DeleteCriticalSection")) return (void *)(uintptr_t)platform_delete_critical_section;
+#ifdef GXOS_ENABLE_SLIST
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "InitializeSListHead")) return (void *)(uintptr_t)platform_initialize_slist_head;
+#endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initialize_onexit_table")) return (void *)(uintptr_t)platform_initialize_onexit_table;

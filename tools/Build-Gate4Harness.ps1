@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -56,7 +56,9 @@ $gccArguments = @(
     '-fno-ident', '-mno-red-zone', '-O2', '-Wall', '-Wextra', '-Werror',
     '-nostdlib', '-Wl,--entry,efi_main', '-Wl,--subsystem,10',
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
-    '-o', $efi, $source, $timeSource, $performanceSource, (Join-Path $root 'src\Gate4Harness\crt_onexit.c')
+    '-o', $efi, $source, $timeSource, $performanceSource,
+    (Join-Path $root 'src\Gate4Harness\crt_onexit.c'),
+    (Join-Path $root 'src\Gate4Harness\platform_slist.c')
 )
 switch ($Scenario) {
     'InvalidBootInfo' { $gccArguments += '-DGXOS_NEGATIVE_INVALID_BOOT_INFO' }
@@ -79,6 +81,16 @@ switch ($Scenario) {
     'CrtOnexitMarkerMutation' {
         $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
         $gccArguments += '-DGXOS_CRT_ONEXIT_MARKER_MUTATION'
+    }
+    'SlistInit' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+    }
+    'SlistDisabled' { $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT' }
+    'SlistMarkerMutation' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_SLIST_MARKER_MUTATION'
     }
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }

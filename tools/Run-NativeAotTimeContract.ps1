@@ -10,8 +10,10 @@ param(
     [int]$TimeoutSeconds = 20,
     [int]$ExpectedFunctionalImports = 21,
     [int]$ExpectedFailfastImports = 103,
+    [int]$ExpectedSlistHeaders = -1,
     [string]$RequiredNextBoundary = '',
-    [string[]]$RequiredMarkers = @()
+    [string[]]$RequiredMarkers = @(),
+    [string[]]$ForbiddenMarkers = @()
 )
 
 Set-StrictMode -Version Latest
@@ -134,10 +136,12 @@ for ($i = 1; $i -le $RunCount; $i++) {
     $qpcMinimumDelta = Read-HexMarker $serialText 'GXOS_NET10:QPC_MIN_DELTA'
     $qpcMaximumDelta = Read-HexMarker $serialText 'GXOS_NET10:QPC_MAX_DELTA'
     $qpcRegressions = Read-HexMarker $serialText 'GXOS_NET10:QPC_REGRESSIONS'
+    $slistHeaders = Read-HexMarker $serialText 'GXOS_NET10:SLIST_HEAD_INITIALIZED_COUNT'
     $nextMatch = [regex]::Match($serialText, 'GXOS_NET10:UNEXPECTED_IMPORT_CALL:([^\r\n]+)')
     $nextBoundary = if ($nextMatch.Success) { $nextMatch.Groups[1].Value } else { 'unknown' }
     $requiredBoundaryPass = [string]::IsNullOrWhiteSpace($RequiredNextBoundary) -or $nextBoundary -eq $RequiredNextBoundary
     $requiredMarkersPass = @($RequiredMarkers | Where-Object { -not $serialText.Contains($_) }).Count -eq 0
+    $forbiddenMarkersPass = @($ForbiddenMarkers | Where-Object { $serialText.Contains($_) }).Count -eq 0
     $source = if ($serialText.Contains('GXOS_NET10:PERF_SOURCE_ACPI_PM_TIMER')) { 'ACPI_PM_TIMER' }
               elseif ($serialText.Contains('GXOS_NET10:PERF_SOURCE_TSC_INVARIANT_CPUID_15')) { 'INVARIANT_TSC_CPUID_15' }
               else { 'unknown' }
@@ -157,6 +161,8 @@ for ($i = 1; $i -le $RunCount; $i++) {
         $qpcFirst -ne $null -and $qpcLast -ne $null -and $qpcLast -ge $qpcFirst -and
         $qpcMinimumDelta -ne $null -and $qpcMaximumDelta -ne $null -and $qpcMaximumDelta -ge $qpcMinimumDelta -and
         $qpcRegressions -eq 0 -and
+        $serialText.Contains('GXOS_NET10:UNRESOLVED_REQUIRED_IMPORTS=0') -and
+        ($ExpectedSlistHeaders -lt 0 -or $slistHeaders -eq $ExpectedSlistHeaders) -and
         $serialText.Contains('GXOS_NET10:TIME_SOURCE=UEFI_GETTIME_QEMU_RTC_UTC_POLICY') -and
         $serialText.Contains('GXOS_NET10:TIME_API_ENTER') -and
         $serialText.Contains('GXOS_NET10:TIME_API_RETURN=0x') -and
@@ -169,7 +175,7 @@ for ($i = 1; $i -le $RunCount; $i++) {
         $serialText.Contains('GXOS_NET10:ALLOCATION_CONTEXT_VALID=0') -and
         $serialText.Contains('GXOS_NET10:TIME_API_COUNT=0x0000000000000001') -and
         $filetime -ne $null -and $filetime -ne 0 -and $artifactHash -eq $ExpectedArtifactSha256 -and
-        $requiredBoundaryPass -and $requiredMarkersPass -and
+        $requiredBoundaryPass -and $requiredMarkersPass -and $forbiddenMarkersPass -and
         -not $serialText.Contains('GXOS_NET10:GC_STARTUP_ADVANCED') -and
         -not $serialText.Contains('GXOS_NET10:FIRST_ALLOCATION_OK') -and
         -not $serialText.Contains('GXOS_NET10:FAULT_')
@@ -194,6 +200,7 @@ for ($i = 1; $i -le $RunCount; $i++) {
         MinDelta = if ($null -eq $qpcMinimumDelta) { 'unknown' } else { ('0x{0:X}' -f $qpcMinimumDelta) }
         MaxDelta = if ($null -eq $qpcMaximumDelta) { 'unknown' } else { ('0x{0:X}' -f $qpcMaximumDelta) }
         Regressions = $qpcRegressions
+        SlistHeaders = if ($null -eq $slistHeaders) { 'not-run' } else { $slistHeaders }
         AdvancedBeyondBlocker = $serialText.Contains('GXOS_NET10:TIME_API_RETURN=0x') -and $nextBoundary -ne 'unknown' -and $nextBoundary -ne 'KERNEL32.dll!QueryPerformanceCounter'
         NextBoundary = $nextBoundary
         AllocationContext = 'limit=0;ptr=0;valid=0'

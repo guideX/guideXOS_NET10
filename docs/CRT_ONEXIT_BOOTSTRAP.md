@@ -58,4 +58,4 @@ The host negative tests cover null arguments, empty initialization, repeated ini
 
 ## What was not implemented
 
-No `_register_onexit_function`, `_execute_onexit_table`, `_crt_atexit`, `atexit`, `_cexit`, or `_c_exit` behavior was added. No callback was registered or executed, no dynamic table growth was attempted, no heap allocation occurred, and no GC initialization occurred. The next authentic dependency is `KERNEL32.dll!InitializeSListHead`; the pass stops there for the next census.
+No `_register_onexit_function`, `_execute_onexit_table`, `_crt_atexit`, `atexit`, `_cexit`, or `_c_exit` behavior was added. No callback was registered or executed, no dynamic table growth was attempted, no heap allocation occurred, and no GC initialization occurred. The downstream SLIST initialization boundary is now separately closed for one aligned empty x64 header; no SLIST companion operation is implied. The next authentic dependency after that bounded transition is `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`.
