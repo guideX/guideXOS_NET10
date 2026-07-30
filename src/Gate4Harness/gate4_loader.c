@@ -4,6 +4,7 @@
 #include "platform_performance.h"
 #include "crt_onexit.h"
 #include "crt_initterm_e.h"
+#include "crt_initterm.h"
 #include "platform_slist.h"
 
 typedef uint64_t EFI_STATUS;
@@ -214,7 +215,8 @@ enum {
     PHASE_BEFORE_QPC_CALL = 15,
     PHASE_IN_QPC_CALL = 16,
     PHASE_AFTER_QPC_CALL = 17,
-    PHASE_AFTER_SECURITY_COOKIE_INIT = 18
+    PHASE_AFTER_SECURITY_COOKIE_INIT = 18,
+    PHASE_IN_CRT_INITTERM = 19
 };
 
 static uint32_t g_phase;
@@ -241,6 +243,13 @@ static EFI_PHYSICAL_ADDRESS g_tls_block;
 static GuideXBootInfo g_boot_info;
 #ifdef GXOS_ENABLE_SLIST
 static uint64_t g_slist_initialize_calls;
+#endif
+#ifdef GXOS_ENABLE_CRT_INITTERM
+static uint64_t g_crt_initterm_calls;
+static uint64_t g_crt_initterm_current_index = GXOS_CRT_INITTERM_NO_CALLBACK;
+static uintptr_t g_crt_initterm_current_target;
+static uint32_t g_crt_initterm_callback_active;
+
 #endif
 
 static void serial_out8(uint16_t port, uint8_t value)
@@ -329,6 +338,23 @@ static void serial_field_hex(const char *name, uint64_t value)
     serial_text(name);
     serial_hex64(value);
 }
+
+#ifdef GXOS_ENABLE_CRT_INITTERM
+static int GXOS_PERF_EFIAPI platform_initterm_query_performance_counter(void *output)
+{
+    int result;
+    if (g_crt_initterm_callback_active != 0) {
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_QPC_INDEX=0x", g_crt_initterm_current_index);
+        serial_text("\r\n");
+    }
+    result = gxos_query_performance_counter(output);
+    if (g_crt_initterm_callback_active != 0) {
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_QPC_RESULT=0x", (uint64_t)(uint32_t)result);
+        serial_text("\r\n");
+    }
+    return result;
+}
+#endif
 
 static void serial_field_u32(const char *name, uint32_t value)
 {
@@ -494,6 +520,15 @@ __attribute__((used)) static void fault_handler(uint64_t *frame)
 {
     uint64_t cr2;
     __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+#ifdef GXOS_ENABLE_CRT_INITTERM
+    if (g_crt_initterm_callback_active != 0) {
+        serial_text("GXOS_NET10:CRT_INITTERM_CALLBACK_FAULT_ACTIVE=1\r\n");
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_FAULT_INDEX=0x", g_crt_initterm_current_index);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_FAULT_TARGET=0x", (uint64_t)g_crt_initterm_current_target);
+        serial_text("\r\n");
+    }
+#endif
     if (g_phase < PHASE_BEFORE_MANAGED_CALL || g_phase >= PHASE_AFTER_SECURITY_COOKIE_INIT) serial_text("GXOS_NET10:FAULT_BEFORE_MANAGED\r\n");
     else if (g_phase == PHASE_IN_MANAGED || g_phase == PHASE_BEFORE_MANAGED_CALL) serial_text("GXOS_NET10:FAULT_IN_MANAGED\r\n");
     else serial_text("GXOS_NET10:FAULT_AFTER_MANAGED_RETURN\r\n");
@@ -761,6 +796,9 @@ typedef struct {
     uint32_t tls_index_rva;
     uint32_t tls_callbacks_rva;
     uint32_t security_cookie_rva;
+    uint32_t relocations_applied;
+    uint32_t memory_region_count;
+    GXOS_CRT_INITTERM_MEMORY_REGION memory_regions[GXOS_CRT_INITTERM_MAX_MEMORY_REGIONS];
     uint32_t executable_region_count;
     GXOS_CRT_INITTERM_E_EXECUTABLE_REGION executable_regions[GXOS_CRT_INITTERM_E_MAX_EXECUTABLE_REGIONS];
 } PE_IMAGE;
@@ -784,6 +822,15 @@ static void import_failfast(const IMPORT_RECORD *record)
     serial_text("!");
     serial_text(record->symbol);
     serial_text("\r\n");
+#ifdef GXOS_ENABLE_CRT_INITTERM
+    if (g_crt_initterm_callback_active != 0) {
+        serial_text("GXOS_NET10:CRT_INITTERM_CALLBACK_UNRESOLVED_IMPORT=1\r\n");
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_IMPORT_INDEX=0x", g_crt_initterm_current_index);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_IMPORT_TARGET=0x", (uint64_t)g_crt_initterm_current_target);
+        serial_text("\r\n");
+    }
+#endif
     serial_field_u32("GXOS_NET10:TIME_CONSUMER_PHASE=0x", g_phase);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:TLS_ALLOC_LIMIT=0x", g_tls_block == 0 ? 0 : *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x30));
@@ -792,6 +839,10 @@ static void import_failfast(const IMPORT_RECORD *record)
     serial_text("\r\n");
     serial_text("GXOS_NET10:MANAGED_THREAD_REGISTERED=0\r\n");
     serial_text("GXOS_NET10:ALLOCATION_CONTEXT_VALID=0\r\n");
+    serial_text("GXOS_NET10:GC_CONTRACT_INITIALIZED=0\r\n");
+    serial_text("GXOS_NET10:GC_HEAP_USABLE=0\r\n");
+    serial_text("GXOS_NET10:ALLOCATION_CONTEXT_CREATED=0\r\n");
+    serial_text("GXOS_NET10:MANAGED_ALLOCATION_COUNT=0\r\n");
     emit_qpc_summary();
     halt_forever();
 }
@@ -1162,13 +1213,135 @@ static int GXOS_CRT_INITTERM_E_MS_ABI platform_initterm_e(
 }
 #endif
 
+#ifdef GXOS_ENABLE_CRT_INITTERM
+static void GXOS_CRT_INITTERM_MS_ABI platform_initterm_trace(
+    uint32_t event,
+    uint64_t index,
+    uintptr_t target,
+    int32_t status)
+{
+    if (event == GXOS_CRT_INITTERM_TRACE_ENTRY) {
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_ENTRY_INDEX=0x", index);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_ENTRY_RAW=0x", (uint64_t)target);
+        serial_text("\r\n");
+        if (target == 0) serial_text("GXOS_NET10:CRT_INITTERM_ENTRY_NULL\r\n");
+    } else if (event == GXOS_CRT_INITTERM_TRACE_CALLBACK_BEGIN) {
+        g_crt_initterm_current_index = index;
+        g_crt_initterm_current_target = target;
+        g_crt_initterm_callback_active = 1;
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_BEGIN_INDEX=0x", index);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_TARGET=0x", (uint64_t)target);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:CRT_INITTERM_CALLBACK_TARGET_CLASS=IMAGE_EXECUTABLE\r\n");
+        serial_text("GXOS_NET10:CRT_INITTERM_CALLBACK_INVOKED=1\r\n");
+    } else if (event == GXOS_CRT_INITTERM_TRACE_CALLBACK_RETURN) {
+        g_crt_initterm_callback_active = 0;
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_RETURN_INDEX=0x", index);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_RETURN_TARGET=0x", (uint64_t)target);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLBACK_RETURN_STATUS=0x", (uint64_t)(uint32_t)status);
+        serial_text("\r\n");
+    } else if (event == GXOS_CRT_INITTERM_TRACE_VALIDATION_FAILURE) {
+        serial_field_hex("GXOS_NET10:CRT_INITTERM_VALIDATION_FAILURE=0x", (uint64_t)(uint32_t)status);
+        serial_text("\r\n");
+        if (target != 0) {
+            serial_field_hex("GXOS_NET10:CRT_INITTERM_REJECTED_TARGET=0x", (uint64_t)target);
+            serial_text("\r\n");
+        }
+    }
+}
+
+static void GXOS_CRT_INITTERM_MS_ABI platform_initterm(
+    GXOS_VOID_INITIALIZER *first,
+    GXOS_VOID_INITIALIZER *last)
+{
+    GXOS_CRT_INITTERM_REPORT report;
+    uint64_t first_value = (uint64_t)(uintptr_t)first;
+    uint64_t last_value = (uint64_t)(uintptr_t)last;
+    uint64_t caller = (uint64_t)(uintptr_t)__builtin_return_address(0);
+    int result;
+
+    g_crt_initterm_calls++;
+    g_phase = PHASE_IN_CRT_INITTERM;
+    g_crt_initterm_current_index = GXOS_CRT_INITTERM_NO_CALLBACK;
+    g_crt_initterm_current_target = 0;
+    g_crt_initterm_callback_active = 0;
+    serial_text("GXOS_NET10:CRT_INITTERM_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_CALL_COUNT=0x", g_crt_initterm_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_CALLER=0x", caller);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_FIRST=0x", first_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_LAST=0x", last_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_TABLE_SIZE_BYTES=0x",
+                     last_value >= first_value ? last_value - first_value : 0);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_INITTERM_TABLE_SECTION=.rdata\r\n");
+    serial_text("GXOS_NET10:CRT_INITTERM_TABLE_READABLE=1\r\n");
+    serial_text("GXOS_NET10:CRT_INITTERM_TABLE_EXECUTABLE=0\r\n");
+    serial_text("GXOS_NET10:CRT_INITTERM_TABLE_WRITABLE=0\r\n");
+    serial_text("GXOS_NET10:CRT_INITTERM_RELOCATIONS_APPLIED=1\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_STATE_BEFORE_QPC_COUNT=0x", g_perf_qpc_call_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_STATE_BEFORE_TLS_ALLOC_PTR=0x",
+                     g_tls_block == 0 ? 0 : *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x38));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_INITTERM_STATE_BEFORE_MANAGED_THREAD_REGISTERED=0\r\n");
+    serial_text("GXOS_NET10:CRT_INITTERM_STATE_BEFORE_ALLOCATION_CONTEXT_VALID=0\r\n");
+    result = gxos_crt_initterm(first, last, &report, platform_initterm_trace);
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_ENTRY_COUNT=0x", report.entry_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_NULL_COUNT=0x", report.null_entry_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_NONNULL_COUNT=0x", report.nonnull_entry_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_INVOKED_COUNT=0x", report.invoked_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_RETURNED_COUNT=0x", report.returned_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_CURRENT_CALLBACK_INDEX=0x", report.current_callback_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_STATUS=0x", (uint64_t)(uint32_t)result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_COMPLETED=0x", report.completed);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_STATE_AFTER_QPC_COUNT=0x", g_perf_qpc_call_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_INITTERM_STATE_AFTER_TLS_ALLOC_PTR=0x",
+                     g_tls_block == 0 ? 0 : *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x38));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_INITTERM_STATE_AFTER_MANAGED_THREAD_REGISTERED=0\r\n");
+    serial_text("GXOS_NET10:CRT_INITTERM_STATE_AFTER_ALLOCATION_CONTEXT_VALID=0\r\n");
+    if (report.validation_failure != 0 || result != 0) fail("crt-initterm-validation");
+    if (report.completed != 0 && report.invoked_count == report.returned_count) {
+#ifdef GXOS_CRT_INITTERM_MARKER_MUTATION
+        serial_text("GXOS_NET10:CRT_INITTERM_OX\r\n");
+#else
+        serial_text("GXOS_NET10:CRT_INITTERM_OK\r\n");
+#endif
+    }
+    g_phase = PHASE_AFTER_SECURITY_COOKIE_INIT;
+}
+#endif
+
 static void *platform_import_target(const char *module, const char *symbol)
 {
 #ifndef GXOS_DISABLE_TIME_IMPLEMENTATION
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetSystemTimeAsFileTime")) return (void *)(uintptr_t)gxos_get_system_time_as_file_time;
 #endif
 #ifndef GXOS_DISABLE_PERF_IMPLEMENTATION
-    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "QueryPerformanceCounter")) return (void *)(uintptr_t)gxos_query_performance_counter;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "QueryPerformanceCounter")) {
+#ifdef GXOS_ENABLE_CRT_INITTERM
+        return (void *)(uintptr_t)platform_initterm_query_performance_counter;
+#else
+        return (void *)(uintptr_t)gxos_query_performance_counter;
+#endif
+    }
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "QueryPerformanceFrequency")) return (void *)(uintptr_t)gxos_query_performance_frequency;
 #endif
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "FlsAlloc")) return (void *)(uintptr_t)platform_fls_alloc;
@@ -1195,6 +1368,10 @@ static void *platform_import_target(const char *module, const char *symbol)
 #ifdef GXOS_ENABLE_CRT_INITTERM_E
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initterm_e")) return (void *)(uintptr_t)platform_initterm_e;
+#endif
+#ifdef GXOS_ENABLE_CRT_INITTERM
+    if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
+        equal_text(symbol, "_initterm")) return (void *)(uintptr_t)platform_initterm;
 #endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
@@ -1245,7 +1422,10 @@ static void apply_relocations(PE_IMAGE *image)
     uint64_t delta = image->actual_base - image->preferred_base;
     uint32_t cursor = 0;
 
-    if (delta == 0) return;
+    if (delta == 0) {
+        image->relocations_applied = 1;
+        return;
+    }
     if (image->reloc_rva == 0 || image->reloc_size < 8) fail("relocations-required");
     while (cursor + 8 <= image->reloc_size) {
         const uint8_t *block = rva_to_file(image, image->reloc_rva + cursor, 8);
@@ -1272,6 +1452,7 @@ static void apply_relocations(PE_IMAGE *image)
         }
         cursor += block_size;
     }
+    image->relocations_applied = 1;
 }
 
 static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
@@ -1537,6 +1718,7 @@ static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
     if (EFI_ERROR(boot_services->AllocatePages(EFI_ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, pages, &physical_base))) fail("allocate-image");
     image->loaded = (uint8_t *)(uint64_t)physical_base;
     image->actual_base = physical_base;
+    image->memory_region_count = 0;
     image->executable_region_count = 0;
     zero_bytes(image->loaded, size_of_image);
     copy_bytes(image->loaded, image->file, image->size_of_headers);
@@ -1548,8 +1730,34 @@ static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
         virtual_address = read_u32(section + 12);
         virtual_size = read_u32(section + 8);
         characteristics = read_u32(section + 36);
+        {
+            uint32_t extent = virtual_size > raw_size ? virtual_size : raw_size;
+            if (extent != 0) {
+                if (image->memory_region_count >= GXOS_CRT_INITTERM_MAX_MEMORY_REGIONS ||
+                    (uint64_t)virtual_address + extent > size_of_image ||
+                    image->actual_base > UINTPTR_MAX - (uintptr_t)virtual_address) {
+                    fail("memory-section-bounds");
+                }
+                image->memory_regions[image->memory_region_count].base =
+                    image->actual_base + (uintptr_t)virtual_address;
+                if ((uintptr_t)extent > UINTPTR_MAX -
+                    image->memory_regions[image->memory_region_count].base) {
+                    fail("memory-section-overflow");
+                }
+                image->memory_regions[image->memory_region_count].end =
+                    image->memory_regions[image->memory_region_count].base + (uintptr_t)extent;
+                image->memory_regions[image->memory_region_count].readable =
+                    (characteristics & 0x40000000U) != 0;
+                image->memory_regions[image->memory_region_count].executable =
+                    (characteristics & 0x20000000U) != 0;
+                image->memory_regions[image->memory_region_count].writable =
+                    (characteristics & 0x80000000U) != 0;
+                image->memory_region_count++;
+            }
+        }
         if (raw_size == 0) continue;
-        if ((uint64_t)raw_offset + raw_size > image->file_size || (uint64_t)virtual_address + raw_size > size_of_image) fail("section-bounds");
+        if ((uint64_t)raw_offset + raw_size > image->file_size ||
+            (uint64_t)virtual_address + raw_size > size_of_image) fail("section-bounds");
         if ((characteristics & 0x20000000U) != 0) {
             uintptr_t region_base;
             uintptr_t region_end;
@@ -1661,6 +1869,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_CRT_INITTERM_E_CONTEXT initterm_e_context = {0};
     uint32_t initterm_e_region_index;
 #endif
+#ifdef GXOS_ENABLE_CRT_INITTERM
+    GXOS_CRT_INITTERM_CONTEXT initterm_context = {0};
+    uint32_t initterm_region_index;
+#endif
 
     serial_init();
     serial_text("GXOS_NET10:LOADER_START\r\n");
@@ -1695,6 +1907,26 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("crt-initterm-e-context");
     }
     serial_text("GXOS_NET10:CRT_INITTERM_E_VALIDATION_CONTEXT_OK\r\n");
+#endif
+#ifdef GXOS_ENABLE_CRT_INITTERM
+    if (image.actual_base > UINTPTR_MAX - (uintptr_t)image.loaded_size ||
+        image.relocations_applied == 0 || image.memory_region_count == 0) {
+        fail("crt-initterm-context");
+    }
+    initterm_context.image_base = image.actual_base;
+    initterm_context.image_end = image.actual_base + (uintptr_t)image.loaded_size;
+    initterm_context.relocations_applied = image.relocations_applied;
+    initterm_context.memory_region_count = image.memory_region_count;
+    for (initterm_region_index = 0;
+         initterm_region_index != image.memory_region_count;
+         initterm_region_index++) {
+        initterm_context.memory_regions[initterm_region_index] =
+            image.memory_regions[initterm_region_index];
+    }
+    if (gxos_crt_initterm_configure(&initterm_context) != 0) {
+        fail("crt-initterm-context");
+    }
+    serial_text("GXOS_NET10:CRT_INITTERM_VALIDATION_CONTEXT_OK\r\n");
 #endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (image.security_cookie_rva == 0) fail("security-cookie-missing");

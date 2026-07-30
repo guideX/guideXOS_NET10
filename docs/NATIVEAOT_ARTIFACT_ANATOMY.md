@@ -50,14 +50,14 @@ The loader creates a zeroed TLS vector and copies the PE TLS template. `_tls_ind
 
 ## Imports and thunks
 
-The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The positive loader serializes:
+The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The current `_initterm` positive loader serializes 25 functional and 99 fail-fast imports:
 
 ```text
 PE_IMPORT_DESCRIPTORS=10
 PE_IMPORT_SYMBOLS=124
 PE_IMPORT_RESOLVED=124
-PE_IMPORT_FUNCTIONAL=23
-PE_IMPORT_FAILFAST=101
+PE_IMPORT_FUNCTIONAL=25
+PE_IMPORT_FAILFAST=99
 UNRESOLVED_REQUIRED_IMPORTS=0
 ```
 
@@ -104,6 +104,8 @@ The exact current path is:
 GetSystemTimeAsFileTime -> QPC -> _initialize_onexit_table (twice)
   -> KERNEL32.dll!InitializeSListHead
   -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e
+  -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm
+  -> api-ms-win-crt-string-l1-1-0.dll!strcmp
 ```
 
 The three selected fresh positive logs are under `artifacts\qpc-final-20260729-allocation\time-contract-runs-*`; each has source `ACPI_PM_TIMER`, frequency `0x369E99`, two source/normalized observations, one QPC call, zero regressions, and zero TLS allocation context. The first allocation remains unproven.
@@ -112,7 +114,7 @@ The three selected fresh positive logs are under `artifacts\qpc-final-20260729-a
 
 The artifact anatomy and call-site conclusion are unchanged: the attach/bootstrap helper initializes one aligned writable static header and then reaches `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`. The final immutable artifact set `artifacts\slist-final-validation-20260729-corrected3` produced three complete fresh QEMU traces in `evidence\generated\slist-final-20260730-immutable`; all three contain the exact header marker and terminal summary under identical loader/payload/runtime/firmware/QEMU/runner/validator hashes. The narrow SLIST initialization milestone is therefore closed.
 
-The three traces retain zero allocation context, no GC-advanced marker, no managed-thread registration, no first allocation, and no general SLIST operation. The loader's `GC_STARTUP_BEGIN` line is only the existing trace boundary; it is not evidence of a functional GC heap or initialization. The `_initterm_e` follow-on is recorded below; SLIST mutations remain out of scope.
+The three traces retain zero allocation context, no GC-advanced marker, no managed-thread registration, no first allocation, and no general SLIST operation. The loader's `GC_STARTUP_BEGIN` line is only the existing trace boundary; it is not evidence of a functional GC heap or initialization. The `_initterm_e` and `_initterm` follow-ons are recorded below; SLIST mutations remain out of scope.
 
 ## Error-returning CRT initializer table
 
@@ -120,4 +122,12 @@ The allocation/startup artifact imports `_initterm_e` from `api-ms-win-crt-runti
 
 The concrete range is preferred `0x18007e4d0` to `0x18007e4d8`, relocated to `0x00000000054F74D0` to `0x00000000054F74D8`. It occupies one eight-byte slot in `.rdata` (`RVA 0x7e4d0`), with one stored null pointer and no relocation entry. There is no non-null initializer to classify or invoke in this artifact; the bounded iterator validates the range, skips the null, returns zero, and emits its success marker. This is the NativeAOT artifact's actual table census, not a claim that every NativeAOT image has an empty table.
 
-The loader records executable PE regions and configures a narrow iterator context after relocation. Before a non-null callback would be invoked, the wrapper checks canonical x64 form, image membership, executable-section membership, and the configured relocated state. The context is bounded to 4,096 entries and uses overflow-safe integer indexing. No heap or managed allocation is performed by the iterator. The host vectors cover non-null callback ABI/order/failure behavior and malformed ranges; QEMU proves the concrete one-null table. The three-run immutable evidence is `evidence\generated\crt-initterm-e-final-20260730-immutable-v4`, whose next authentic boundary is `_initterm`.
+The loader records executable PE regions and configures a narrow iterator context after relocation. Before a non-null callback would be invoked, the wrapper checks canonical x64 form, image membership, executable-section membership, and the configured relocated state. The context is bounded to 4,096 entries and uses overflow-safe integer indexing. No heap or managed allocation is performed by the iterator. The host vectors cover non-null callback ABI/order/failure behavior and malformed ranges; QEMU proves the concrete one-null table. The three-run immutable evidence is `evidence\generated\crt-initterm-e-final-20260730-immutable-v4`, whose next authentic boundary was `_initterm`; that boundary is now closed by the evidence below.
+
+## Void-returning CRT initializer table
+
+The allocation-enabled artifact imports `_initterm` from `api-ms-win-crt-runtime-l1-1-0.dll` at IAT RVA `0x7e390`. The exact preferred call is `0x1800775db` in the attach/bootstrap helper beginning at `0x180077550`; the relocated wrapper observed return address `0x00000000054F05E0`. RCX carries first and RDX carries the exclusive end pointer.
+
+The actual range is `0x00000000054F7468` through `0x00000000054F74B0`, `0x48` bytes in `.rdata`, for nine pointer entries. Index zero is null; indexes one through eight are relocated direct `.text` targets at `0x00000000054AAD50`, `0x00000000054AADA0`, `0x00000000054AAD90`, `0x00000000054AADC0`, `0x00000000054AADB0`, `0x00000000054AADD0`, `0x00000000054AADE0`, and `0x00000000054AADF0`. All eight callbacks entered and returned in order. They performed internal static-state writes and caused no direct imported API call; the next dependency after completion was `api-ms-win-crt-string-l1-1-0.dll!strcmp`.
+
+The narrow iterator validates canonical x64 targets, loaded-image membership, readable/aligned table storage, executable target regions, relocated state, range ordering, and overflow-safe bounded pointer arithmetic. It skips null entries, invokes each non-null entry exactly once per occurrence, emits a post-call marker only after return, performs no allocation, and does not interpret a callback return register. This proves the actual artifact's void-initializer range only; it does not prove general `.CRT` or C++ initialization.

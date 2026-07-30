@@ -181,7 +181,8 @@ The deepest supported startup path is now:
 PE loader -> relocations -> TLS / GS / TEB / FLS -> NativeAOT entry
   -> FILETIME -> QPC / QPF -> two CRT on-exit tables
   -> InitializeSListHead -> _initterm_e: validated one-null range, result 0
-  -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm: next boundary
+  -> _initterm: validated nine-entry range, eight callbacks returned
+  -> api-ms-win-crt-string-l1-1-0.dll!strcmp: next boundary
 ```
 
-The next milestone should investigate `_initterm` as a separate void-initializer contract only if the user explicitly scopes it. Do not infer C++ initializer support, process teardown, GC startup, managed-thread registration, or managed allocation from this result.
+The `_initterm` boundary described above was subsequently closed as a separate void-initializer contract. The new deepest boundary is `api-ms-win-crt-string-l1-1-0.dll!strcmp`. Any follow-on milestone should preserve the separation between `_initterm_e` and `_initterm`, and should not treat either result as general C++ initialization or evidence of GC or allocation readiness.

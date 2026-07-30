@@ -15,7 +15,7 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
-The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, the exact UEFI-backed FILETIME, monotonic performance, CRT on-exit initialization, and x64 SLIST-head initialization contracts advance authentic startup. The current deepest boundary is `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`; no allocation, GC startup, managed-thread registration, or general SLIST operation is claimed. The first allocation remains unproven.
+The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, and the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, and narrow `_initterm` contracts advance authentic startup. The current deepest boundary is `api-ms-win-crt-string-l1-1-0.dll!strcmp`; no allocation, GC startup, managed-thread registration, general SLIST operation, or general CRT/C++ initialization is claimed. The first allocation remains unproven.
 
 ## Provisional first-image path
 
@@ -44,6 +44,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [NativeAOT platform performance counter](docs/PLATFORM_PERFORMANCE_COUNTER.md)
 - [Windows x64 SLIST initialization contract](docs/PLATFORM_SLIST_CONTRACT.md)
 - [Windows x64 `_initterm_e` bootstrap contract](docs/CRT_INITTERM_E_BOOTSTRAP.md)
+- [Windows x64 `_initterm` bootstrap contract](docs/CRT_INITTERM_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 
@@ -68,10 +69,14 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 
 The narrow Windows x64 `InitializeSListHead` implementation and host contract suite are complete: one writable 16-byte, 16-byte-aligned NativeAOT-owned header is reset to two zero 64-bit words, with no allocation, GC initialization, managed-thread registration, or general SLIST mutation support. The final immutable artifact set is under `artifacts\slist-final-validation-20260729-corrected3`; its loader hash is `2EEBCD284F6D2E5AD1526EB15FA4AF6483E7B1FE9D17A448720A289FF64B0362` and its NativeAOT payload hash is `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`.
 
-The required three-run QEMU gate is closed by `evidence\generated\slist-final-20260730-immutable`: fresh PIDs `17256`, `660`, and `15344` used identical artifact hashes, emitted the complete marker sequence and final summaries, and advanced to `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`. The prior apparent stalls were guest triple faults caused by the bounded loader's un-packed IDTR and 32-entry replacement IDT; the harness now preserves the packed firmware IDTR and all IRQ vectors. The next milestone remains the `_initterm_e` CRT startup contract.
+The required three-run QEMU gate is closed by `evidence\generated\slist-final-20260730-immutable`: fresh PIDs `17256`, `660`, and `15344` used identical artifact hashes, emitted the complete marker sequence and final summaries, and advanced to `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`. The prior apparent stalls were guest triple faults caused by the bounded loader's un-packed IDTR and 32-entry replacement IDT; the harness now preserves the packed firmware IDTR and all IRQ vectors. The subsequent `_initterm_e` and `_initterm` closures are documented separately.
 
 ## `_initterm_e` bootstrap evidence status (2026-07-30)
 
 The narrow Microsoft x64 `_initterm_e` contract is implemented and host-tested. The actual NativeAOT call passes the relocated `.rdata` range `0x00000000054F74D0` to `0x00000000054F74D8`, an exclusive eight-byte range containing one null entry. The iterator validates the range and executable callback targets, skips nulls, invokes non-null entries in forward order, and returns the first nonzero callback result without allocation. Because this artifact's table is empty, the three real QEMU runs invoke zero callbacks and correctly return zero; callback ABI, ordering, failure, bounds, and target-validation behavior are proven by the focused host vectors.
 
-The immutable evidence is under `evidence\generated\crt-initterm-e-final-20260730-immutable-v4`. Three fresh QEMU processes complete the iterator and advance to the next authentic boundary, `api-ms-win-crt-runtime-l1-1-0.dll!_initterm`. `_initterm`, general CRT startup, GC initialization, managed-thread registration, allocation, and SLIST mutation remain outside this milestone.
+The immutable evidence is under `evidence\generated\crt-initterm-e-final-20260730-immutable-v4`. Three fresh QEMU processes complete the iterator and advance to the next authentic boundary, `_initterm`; this historical result is preserved unchanged.
+
+## `_initterm` bootstrap evidence status (2026-07-30)
+
+The narrow Microsoft x64 `_initterm` contract is implemented, host-tested, and routed only for the exact `api-ms-win-crt-runtime-l1-1-0.dll!_initterm` import. The actual NativeAOT call passes relocated `.rdata` bounds `0x00000000054F7468` to `0x00000000054F74B0`: nine entries, one null, and eight relocated direct `.text` callbacks. All eight valid callbacks entered and returned in forward order. Three immutable fresh QEMU runs are recorded under `evidence\generated\crt-initterm-final-20260730-immutable-v2` and stop at `api-ms-win-crt-string-l1-1-0.dll!strcmp`. GC heap usability, allocation context, managed-thread registration, managed allocation, broad CRT startup, and general C++ initialization remain unproven.
