@@ -62,3 +62,9 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 ## Working rules
 
 `D:\dev\guideXOS_NET10` is the only writable repository for this effort. Legacy, UEFI, and Server are read-only code vaults. Audit documents distinguish confirmed observations from recommendations; a recommendation is not evidence that a later runtime feature already works.
+
+## SLIST initialization evidence status (2026-07-29)
+
+The narrow Windows x64 `InitializeSListHead` implementation and host contract suite are complete: one writable 16-byte, 16-byte-aligned NativeAOT-owned header is reset to two zero 64-bit words, with no allocation, GC initialization, managed-thread registration, or general SLIST mutation support. The fresh final artifact set is under `artifacts\slist-final-validation-20260729-195900`; its loader hash is `333F110626390045D8E9DB5081A99D198BB84720F5519CDCB4FE3B74B3C2CE9C` and its NativeAOT payload hash is `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`.
+
+The required immutable three-run QEMU gate is not closed. Runs `slist-initialize-final-20260729-195900-run1`, `run2`, and `run3` used the same hashes but were rejected as incomplete: they stopped at varying pre-summary markers, with run 3 reaching `_initterm_e` but losing the final QPC summary. A separate fresh probe completed the exact SLIST contract and reached `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`; it is retained as `evidence\generated\slist-final-single-probe-20260729-200400`, not counted as three-run closure. File-backed lifecycle and QEMU-monitor diagnostics classify the failures as guest/firmware shutdowns (`paused (shutdown)`, `HLT=0`, reset-vector RIP), not terminal rendering loss. The next milestone remains the `_initterm_e` CRT startup contract.

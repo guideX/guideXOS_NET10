@@ -110,3 +110,9 @@ PE load -> relocation -> TLS/GS/TEB/FLS -> NativeAOT entry
 ```
 
 The next milestone is the `_initterm_e` CRT startup contract. It must not be conflated with SLIST companions, GC startup, managed-thread registration, or first allocation.
+
+## 2026-07-29 evidence-closure pass
+
+Implementation, host vectors, and the disabled functional-routing control are complete; the final-hash three-run criterion is not. The immutable positive sequence `slist-initialize-final-20260729-195900-run1`/`run2`/`run3` used loader `333F110626390045D8E9DB5081A99D198BB84720F5519CDCB4FE3B74B3C2CE9C` and payload `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`, but all three were rejected before complete summaries. Run 3 reached `_initterm_e` without the trailing QPC summary. A separate fresh final-artifact probe completed the exact marker sequence and summary; it is evidence of correctness, not a substitute for the three-run gate.
+
+The harness now retains raw serial, stdout, stderr, lifecycle, PID, timestamps, timeout/kill reasons, file lengths, and artifact hashes. QEMU monitor diagnostics showed `VM status: paused (shutdown)`, `HLT=0`, and a reset-vector RIP while monitor queries continued, classifying the apparent stalls as guest/firmware shutdowns rather than PowerShell truncation or competing serial readers. The six truncated/missing-summary/stale/hash-mismatch/duplicate/marker-mutation controls all rejected their mutated evidence. The retained complete disabled control stops at `KERNEL32.dll!InitializeSListHead` with no SLIST success marker. No allocation, GC initialization, managed-thread registration, or general SLIST mutation is claimed.

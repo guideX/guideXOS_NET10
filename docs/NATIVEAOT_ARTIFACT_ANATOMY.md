@@ -107,3 +107,9 @@ GetSystemTimeAsFileTime -> QPC -> _initialize_onexit_table (twice)
 ```
 
 The three selected fresh positive logs are under `artifacts\qpc-final-20260729-allocation\time-contract-runs-*`; each has source `ACPI_PM_TIMER`, frequency `0x369E99`, two source/normalized observations, one QPC call, zero regressions, and zero TLS allocation context. The first allocation remains unproven.
+
+## SLIST evidence-closure result (2026-07-29)
+
+The artifact anatomy and call-site conclusion are unchanged: the attach/bootstrap helper initializes one aligned writable static header and then reaches `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`. The final immutable artifact set produced one complete fresh positive probe with the exact header marker and terminal summary, but its required three-run sequence was not complete: the three fresh processes stopped at different points, and the validator rejected them. This leaves implementation and host-test completion distinct from final-hash three-run closure.
+
+The complete probe retained zero allocation context, no GC initialization marker, no managed-thread registration, no first allocation, and no general SLIST operation. The next-stage blocker is `_initterm_e`; do not advance to initializer execution or implement SLIST mutations in this milestone.

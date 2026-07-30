@@ -24,3 +24,7 @@ Other deferred areas are CRT startup/termination, process time/environment, COM,
 ## Recommended next milestone
 
 Create a one-variable-at-a-time NativeAOT CRT startup reproducer for `_initterm_e` and the first allocation/GC boundary. Capture imports, undefined symbols, TLS, module initializer behavior, and transition-helper changes before writing any additional UEFI platform code.
+
+## SLIST evidence-closure qualification (2026-07-29)
+
+The narrow `InitializeSListHead` implementation is complete and host-tested, but the requested three consecutive complete final-hash QEMU runs remain open. One fresh final-artifact run reaches `_initterm_e` with the exact 16-byte empty-header proof, while the three-run attempt was rejected because QEMU/firmware shutdowns stopped all three logs before complete terminal summaries. No allocation, GC initialization, managed-thread registration, or general SLIST mutation support is implied. The next milestone is still a bounded `_initterm_e` CRT-startup investigation.

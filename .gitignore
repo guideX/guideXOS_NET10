@@ -3,6 +3,7 @@
 **/obj/
 artifacts/
 evidence/generated/
+evidence/generated/slist-initialize-*
 
 # Local tool caches and emulator state
 .dotnet/

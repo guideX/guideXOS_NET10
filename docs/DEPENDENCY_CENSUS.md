@@ -118,3 +118,9 @@ The separate pre-startup allocation run reaches the generated `RhpNewFast` path 
 `link.rsp` retains `dllmain.obj`, `bootstrapperdll.obj`, `Runtime.WorkstationGC.lib`, `aotminipal.lib`, disabled EventPipe/standalone-GC components, compression/native support, and Windows import libraries. The map contains `ModuleInitializerList`, `RuntimeConfigurationBlob`, TLS, GC statics, exception metadata, and thread-static metadata. The current proof provides only the minimum one-thread transition state; it does not provide a GC heap, virtual-memory allocator, process/threading system, COM, CRT, exceptions, or unwinding.
 
 The prior static-link attempt remains evidence that removing the import directory by linking the standard static runtime is not a clean solution: it produced 158 unresolved externals spanning memory, threads/FLS, COM, unwind/context, TLS, CRT, stack probing, and allocation operators.
+
+## SLIST evidence-closure qualification (2026-07-29)
+
+The current census remains 23 functional / 101 fail-fast imports with `UNRESOLVED_REQUIRED_IMPORTS=0`. The final positive artifact set was frozen at loader `333F110626390045D8E9DB5081A99D198BB84720F5519CDCB4FE3B74B3C2CE9C` and payload `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`. One fresh run proved the functional `InitializeSListHead` call and advanced to `_initterm_e`; the required three consecutive complete final-hash runs were not proven because all three final-sequence logs were incomplete.
+
+This qualification does not change the dependency census or add `_initterm_e`, allocation, GC, thread registration, or SLIST companion support. The next dependency remains `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`.
