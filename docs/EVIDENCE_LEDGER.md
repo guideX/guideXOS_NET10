@@ -216,3 +216,33 @@ The required sequence used fresh QEMU PIDs `17692`, `9524`, and `16252`. Run 1 e
 A separate fresh probe `slist-final-single-probe-20260729-200400-run1`, PID `8408`, completed with the exact sequence, `PE_IMPORT_FUNCTIONAL=23`, `PE_IMPORT_FAILFAST=101`, `UNRESOLVED_REQUIRED_IMPORTS=0`, `QPC_REGRESSIONS=0`, zero allocation-context pointer/limit, and the `_initterm_e` boundary. The six evidence-pipeline controls all rejected their intentionally incomplete or mutated inputs. The retained complete disabled control is `artifacts\slist-final-20260729-100119-060\disabled\time-contract-runs-20260729-101316-870\time-contract-20260729-101317-171-run1.serial.log`; it reports 22/102 imports, stops at `KERNEL32.dll!InitializeSListHead`, has no SLIST success marker, and reports zero QPC regressions and zero allocation context. Fresh disabled retries were incomplete due the same QEMU/guest shutdown condition and are not substituted for the retained control.
 
 The harness diagnosis is supported by file-backed events and QEMU monitor captures: stdout/stderr remained empty, serial files stopped growing, QEMU CPU time stopped, and monitor queries still succeeded; QEMU reported `VM status: paused (shutdown)` with `HLT=0` and reset-vector RIP. The collection harness therefore preserved and rejected incomplete evidence rather than losing a complete summary to terminal truncation. No allocation, GC initialization, managed-thread registration, or general SLIST mutation is claimed. The next milestone remains `_initterm_e`.
+
+## Final SLIST evidence closure (2026-07-29)
+
+This pass began on branch `main`, HEAD `c7eac442d580c178e59480a05f8dd573c5611c6e`, upstream `origin/main`, with a clean worktree. The initial execution artifact set was the retained `slist-initialize-final-20260729-195900` manifest: loader `333F110626390045D8E9DB5081A99D198BB84720F5519CDCB4FE3B74B3C2CE9C`, NativeAOT payload/source `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`, runtime archive `DBA78CC0C6747E2E0CF51894F1492A70ECD08513151D9473C04048CD7B9D9311`, OVMF code `33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`, OVMF vars `5D2AC383371B408398ACCEE7EC27C8C09EA5B74A0DE0CEEA6513388B15BE5D1E`, startup script `36735816647B797ACC483C75D12D7768215A9379B3428D4901B2B03C5ED36786`, QEMU `A930E028F93D0FA47E4D58BDAD2432F7466DC2B6AF0AE376F77EF7A298FFDD02`, runner `949FDA8FBD32B1E1EDD5046F01FCDA7BACC3ABF35A43EEB37935028A073A0BF7`, and validator `7050B57B1E792D28B6750FEE8A8DE0A7AC007CDE16C7999D875F540A84E70999`.
+
+The prior apparent TCG stall was guest-side: QEMU monitor evidence showed `paused (shutdown)`, stopped CPU time, `HLT=0`, and a reset/triple-fault state. QEMU debug logs recorded hardware IRQ `0x20` entering the loader's 32-entry replacement IDT, followed by `#GP`/`#DF`; a second probe exposed the un-packed `IDTR` ABI as the reason the replacement table itself was loaded at a corrupt base. This was not PowerShell display truncation, stale-log reuse, competing readers, a short timeout, or lost pipe output. The minimal correction preserved the full firmware 256-vector IDT, overrode only exception vectors `0..31`, and declared `IDTR` packed. The SLIST implementation was not changed.
+
+The final immutable artifact set is `artifacts\slist-final-validation-20260729-corrected3` and the three-run evidence is `evidence\generated\slist-final-20260730-immutable`. Its execution hashes are:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| EFI loader | `2EEBCD284F6D2E5AD1526EB15FA4AF6483E7B1FE9D17A448720A289FF64B0362` |
+| NativeAOT payload and source | `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379` |
+| Runtime archive | `DBA78CC0C6747E2E0CF51894F1492A70ECD08513151D9473C04048CD7B9D9311` |
+| OVMF code / vars template | `33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A` / `5D2AC383371B408398ACCEE7EC27C8C09EA5B74A0DE0CEEA6513388B15BE5D1E` |
+| ESP startup script | `36735816647B797ACC483C75D12D7768215A9379B3428D4901B2B03C5ED36786` |
+| QEMU executable | `A930E028F93D0FA47E4D58BDAD2432F7466DC2B6AF0AE376F77EF7A298FFDD02` |
+| Validation runner / evidence validator | `949FDA8FBD32B1E1EDD5046F01FCDA7BACC3ABF35A43EEB37935028A073A0BF7` / `2B40930C75A70712F1882A199EF733773E5D516648AA6711E3C2BEEDB4A910FD` |
+
+All three QEMU processes were fresh and used identical hashes. Run IDs and complete terminal data are:
+
+| Run | PID | Exit | Serial bytes | Boundary | QPC summary |
+| --- | ---: | ---: | ---: | --- | --- |
+| `slist-final-20260730-immutable-run1` | `17256` | `0` | `3419` | `_initterm_e` | count `1`, first=last `0x23060`, regressions `0` |
+| `slist-final-20260730-immutable-run2` | `660` | `0` | `3419` | `_initterm_e` | count `1`, first=last `0x1D51B`, regressions `0` |
+| `slist-final-20260730-immutable-run3` | `15344` | `0` | `3419` | `_initterm_e` | count `1`, first=last `0x1E6EE`, regressions `0` |
+
+Each marker sequence is `NATIVEAOT_STARTUP_OK -> FILETIME_CONVERSION_OK -> QPC_OK -> CRT_ONEXIT_INITIALIZED_OK -> CRT_ONEXIT_INITIALIZED_OK -> SLIST_HEAD_INITIALIZED_OK -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`, with `PE_IMPORT_FUNCTIONAL=23`, `PE_IMPORT_FAILFAST=101`, `UNRESOLVED_REQUIRED_IMPORTS=0`, `TIME_CONSUMER_PHASE=0x18`, zero TLS allocation limit/pointer, `MANAGED_THREAD_REGISTERED=0`, `ALLOCATION_CONTEXT_VALID=0`, and the final QPC summary. The disabled implementation control `slist-disabled-final-20260730-run1` (PID `18868`) passed the disabled validator, stopped at `KERNEL32.dll!InitializeSListHead`, emitted no SLIST success marker, and retained the same zero-allocation/QPC summary shape.
+
+The evidence-pipeline controls all passed: truncated log, missing final summary, stale run ID, hash mismatch, duplicate process evidence, and mutated `GXOS_NET10:SLIST_HEAD_INITIALIZED_OX` were rejected for their intended reasons. Host vectors and the intentionally wrong-layout compile control also passed. The SLIST initialization milestone is fully closed; the next boundary remains `_initterm_e`. No commit or push was performed.

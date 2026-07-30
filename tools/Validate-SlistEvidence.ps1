@@ -54,6 +54,22 @@ if ($failures.Count -eq 0) {
             if (-not (Test-Path -LiteralPath $path)) { Add-Failure "missing $property for $($run.RunId)" }
         }
         if (-not $run.CleanupComplete) { Add-Failure "QEMU cleanup incomplete: $($run.RunId)" }
+        if ($null -eq $run.ArtifactSetAfterRun) {
+            Add-Failure "per-run artifact snapshot is missing: $($run.RunId)"
+        } else {
+            foreach ($entry in $manifest.Artifacts) {
+                $after = @($run.ArtifactSetAfterRun | Where-Object { $_.Kind -eq $entry.Kind } | Select-Object -First 1)
+                if ($after.Count -ne 1) {
+                    Add-Failure "per-run artifact snapshot is missing $($entry.Kind): $($run.RunId)"
+                    continue
+                }
+                if ($after[0].Sha256 -ne $entry.Sha256 -or
+                    [int64]$after[0].Length -ne [int64]$entry.Length -or
+                    $after[0].LastWriteTimeUtc -ne $entry.LastWriteTimeUtc) {
+                    Add-Failure "per-run artifact snapshot mismatch for $($entry.Kind): $($run.RunId)"
+                }
+            }
+        }
         $serialPath = Join-Path $evidence ([string]$run.SerialLog)
         if (-not (Test-Path -LiteralPath $serialPath)) { continue }
         $text = Get-Content -LiteralPath $serialPath -Raw

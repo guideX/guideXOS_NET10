@@ -38,7 +38,7 @@ function Refresh-Length([string]$dir) {
 function Expect-Rejection([string]$name, [string]$dir, [int]$count = 1) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $validator -EvidenceRoot $dir -ExpectedRunCount $count 1> (Join-Path $dir 'validator.stdout.log') 2> (Join-Path $dir 'validator.stderr.log')
     $exit = $LASTEXITCODE
-    [PSCustomObject]@{ Control = $name; Rejected = ($exit -ne 0); ExitCode = $exit; Summary = (Join-Path $dir 'validation-summary.json') }
+    [PSCustomObject]@{ Control = $name; ExpectedOutcome = 'rejected'; Passed = ($exit -ne 0); ExitCode = $exit; Summary = (Join-Path $dir 'validation-summary.json') }
 }
 
 $results = New-Object System.Collections.Generic.List[object]
@@ -77,7 +77,7 @@ $results.Add((Expect-Rejection 'hash-mismatch' $control))
 $control = Copy-Control 'duplicate-process-evidence'
 New-Item -ItemType Directory -Force -Path (Join-Path $control 'runs\run-2') | Out-Null
 Copy-Item -Path (Join-Path $control 'runs\run-1\*') -Destination (Join-Path $control 'runs\run-2') -Recurse -Force
-$results.Add((Expect-Rejection 'duplicate-process-evidence' $control 1))
+$results.Add((Expect-Rejection 'duplicate-process-evidence' $control 2))
 
 $control = Copy-Control 'marker-mutation'
 $run = Read-Run $control
@@ -92,10 +92,10 @@ if (-not [string]::IsNullOrWhiteSpace($DisabledEvidenceRoot)) {
     $disabled = [IO.Path]::GetFullPath($DisabledEvidenceRoot)
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $validator -EvidenceRoot $disabled -ExpectedRunCount 1 1> (Join-Path $output 'disabled-validator.stdout.log') 2> (Join-Path $output 'disabled-validator.stderr.log')
     $disabledExit = $LASTEXITCODE
-    $results.Add([PSCustomObject]@{ Control = 'disabled-implementation'; Rejected = ($disabledExit -ne 0); ExitCode = $disabledExit; Summary = (Join-Path $disabled 'validation-summary.json') })
+    $results.Add([PSCustomObject]@{ Control = 'disabled-implementation'; ExpectedOutcome = 'accepted-disabled-boundary'; Passed = ($disabledExit -eq 0); ExitCode = $disabledExit; Summary = (Join-Path $disabled 'validation-summary.json') })
 }
 
 $results | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $output 'negative-control-summary.json') -Encoding utf8
 $results | ConvertTo-Json -Depth 8 -Compress
-if (@($results | Where-Object { -not $_.Rejected }).Count -ne 0) { exit 2 }
+if (@($results | Where-Object { -not $_.Passed }).Count -ne 0) { exit 2 }
 Write-Output 'SLIST_NEGATIVE_CONTROLS=PASSED'

@@ -591,7 +591,7 @@ GX_FAULT_NO_ERROR(29)
 GX_FAULT_NO_ERROR(30)
 GX_FAULT_NO_ERROR(31)
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint16_t limit;
     uint64_t base;
 } IDTR;
@@ -607,7 +607,7 @@ typedef struct {
 } IDT_GATE;
 
 static IDTR g_saved_idtr;
-static IDT_GATE g_gate4_idt[32] __attribute__((aligned(16)));
+static IDT_GATE g_gate4_idt[256] __attribute__((aligned(16)));
 
 static void read_idtr(IDTR *idtr)
 {
@@ -641,7 +641,21 @@ static void set_idt_gate(IDT_GATE *gate, void (*handler)(void))
 static void install_fault_handlers(void)
 {
     uint32_t i;
+    uint32_t copy_count;
+    uint8_t *source;
+    uint8_t *destination;
+
+    /*
+     * This bounded loader owns exception diagnostics only.  Preserve the
+     * firmware's full IDT so its timer and other IRQ vectors remain valid;
+     * installing a 32-entry replacement IDT would triple-fault on IRQ 0x20.
+     */
     read_idtr(&g_saved_idtr);
+    source = (uint8_t *)(uintptr_t)g_saved_idtr.base;
+    destination = (uint8_t *)g_gate4_idt;
+    copy_count = (uint32_t)g_saved_idtr.limit + 1U;
+    if (copy_count > (uint32_t)sizeof(g_gate4_idt)) copy_count = (uint32_t)sizeof(g_gate4_idt);
+    for (i = 0; i != copy_count; i++) destination[i] = source[i];
     for (i = 0; i != 32; i++) set_idt_gate(&g_gate4_idt[i], fault_no_error_0);
     set_idt_gate(&g_gate4_idt[0], fault_no_error_0);
     set_idt_gate(&g_gate4_idt[1], fault_no_error_1);

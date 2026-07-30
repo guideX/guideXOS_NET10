@@ -119,8 +119,8 @@ The separate pre-startup allocation run reaches the generated `RhpNewFast` path 
 
 The prior static-link attempt remains evidence that removing the import directory by linking the standard static runtime is not a clean solution: it produced 158 unresolved externals spanning memory, threads/FLS, COM, unwind/context, TLS, CRT, stack probing, and allocation operators.
 
-## SLIST evidence-closure qualification (2026-07-29)
+## SLIST evidence-closure result (2026-07-29)
 
-The current census remains 23 functional / 101 fail-fast imports with `UNRESOLVED_REQUIRED_IMPORTS=0`. The final positive artifact set was frozen at loader `333F110626390045D8E9DB5081A99D198BB84720F5519CDCB4FE3B74B3C2CE9C` and payload `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`. One fresh run proved the functional `InitializeSListHead` call and advanced to `_initterm_e`; the required three consecutive complete final-hash runs were not proven because all three final-sequence logs were incomplete.
+The current census remains 23 functional / 101 fail-fast imports with `UNRESOLVED_REQUIRED_IMPORTS=0`. The final immutable positive artifact set is `artifacts\slist-final-validation-20260729-corrected3`, with loader `2EEBCD284F6D2E5AD1526EB15FA4AF6483E7B1FE9D17A448720A289FF64B0362` and payload `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`. Three consecutive fresh QEMU runs completed under `evidence\generated\slist-final-20260730-immutable`; each executed the functional `InitializeSListHead` contract and advanced to `_initterm_e` with complete summaries.
 
-This qualification does not change the dependency census or add `_initterm_e`, allocation, GC, thread registration, or SLIST companion support. The next dependency remains `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`.
+This result does not add `_initterm_e`, allocation, GC, thread registration, or SLIST companion support. The next dependency remains `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`.
