@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -58,6 +58,7 @@ $gccArguments = @(
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
     '-o', $efi, $source, $timeSource, $performanceSource,
     (Join-Path $root 'src\Gate4Harness\crt_onexit.c'),
+    (Join-Path $root 'src\Gate4Harness\crt_initterm_e.c'),
     (Join-Path $root 'src\Gate4Harness\platform_slist.c')
 )
 switch ($Scenario) {
@@ -91,6 +92,21 @@ switch ($Scenario) {
         $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
         $gccArguments += '-DGXOS_ENABLE_SLIST'
         $gccArguments += '-DGXOS_SLIST_MARKER_MUTATION'
+    }
+    'CrtInittermE' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+    }
+    'CrtInittermEDisabled' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+    }
+    'CrtInittermEMarkerMutation' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_CRT_INITTERM_E_MARKER_MUTATION'
     }
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }

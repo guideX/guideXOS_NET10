@@ -109,7 +109,7 @@ PE load -> relocation -> TLS/GS/TEB/FLS -> NativeAOT entry
   -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e: next blocker
 ```
 
-The next milestone is the `_initterm_e` CRT startup contract. It must not be conflated with SLIST companions, GC startup, managed-thread registration, or first allocation.
+The next milestone after this SLIST closure was the `_initterm_e` CRT startup contract. That narrow contract is now separately closed for the actual one-null NativeAOT table; the current deepest boundary is `_initterm`. This historical SLIST document must not be read as claiming SLIST companions, GC startup, managed-thread registration, or first allocation.
 
 ## 2026-07-29 evidence-closure pass
 
