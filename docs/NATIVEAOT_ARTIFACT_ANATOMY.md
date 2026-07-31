@@ -50,18 +50,18 @@ The loader creates a zeroed TLS vector and copies the PE TLS template. `_tls_ind
 
 ## Imports and thunks
 
-The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The current `strcmp` positive loader serializes 26 functional and 98 fail-fast imports:
+The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The current `strlen` positive loader serializes 27 functional and 97 fail-fast imports:
 
 ```text
 PE_IMPORT_DESCRIPTORS=10
 PE_IMPORT_SYMBOLS=124
 PE_IMPORT_RESOLVED=124
-PE_IMPORT_FUNCTIONAL=26
-PE_IMPORT_FAILFAST=98
+PE_IMPORT_FUNCTIONAL=27
+PE_IMPORT_FAILFAST=97
 UNRESOLVED_REQUIRED_IMPORTS=0
 ```
 
-Each of the 98 currently unreachable symbols is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The current allocation-startup build adds `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency`, for 21 functional / 103 fail-fast. The CRT opt-in adds `_initialize_onexit_table`, for 22 / 102, the SLIST opt-in adds `InitializeSListHead`, for 23 / 101, `_initterm_e` adds one for 24 / 100, `_initterm` adds one for 25 / 99, and the exact `strcmp` route adds one for 26 / 98. The historical 18/106, 19/105, and 21/103 counts remain audit evidence.
+Each of the 97 currently unreachable symbols is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The current allocation-startup build adds `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency`, for 21 functional / 103 fail-fast. The CRT opt-in adds `_initialize_onexit_table`, for 22 / 102, the SLIST opt-in adds `InitializeSListHead`, for 23 / 101, `_initterm_e` adds one for 24 / 100, `_initterm` adds one for 25 / 99, `strcmp` adds one for 26 / 98, and `strlen` adds one for 27 / 97. The historical 18/106, 19/105, 21/103, and 26/98 counts remain audit evidence.
 
 ## TLS, unwind, and initialization answers
 
@@ -106,6 +106,8 @@ GetSystemTimeAsFileTime -> QPC -> _initialize_onexit_table (twice)
   -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e
   -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm
   -> api-ms-win-crt-string-l1-1-0.dll!strcmp
+  -> api-ms-win-crt-string-l1-1-0.dll!strlen
+  -> KERNEL32.dll!GetEnvironmentVariableW
 ```
 
 The three selected fresh positive logs are under `artifacts\qpc-final-20260729-allocation\time-contract-runs-*`; each has source `ACPI_PM_TIMER`, frequency `0x369E99`, two source/normalized observations, one QPC call, zero regressions, and zero TLS allocation context. The first allocation remains unproven.
@@ -131,3 +133,9 @@ The allocation-enabled artifact imports `_initterm` from `api-ms-win-crt-runtime
 The actual range is `0x00000000054F7468` through `0x00000000054F74B0`, `0x48` bytes in `.rdata`, for nine pointer entries. Index zero is null; indexes one through eight are relocated direct `.text` targets at `0x00000000054AAD50`, `0x00000000054AADA0`, `0x00000000054AAD90`, `0x00000000054AADC0`, `0x00000000054AADB0`, `0x00000000054AADD0`, `0x00000000054AADE0`, and `0x00000000054AADF0`. All eight callbacks entered and returned in order. They performed internal static-state writes and caused no direct imported API call; the next dependency after completion was `api-ms-win-crt-string-l1-1-0.dll!strcmp`.
 
 The narrow iterator validates canonical x64 targets, loaded-image membership, readable/aligned table storage, executable target regions, relocated state, range ordering, and overflow-safe bounded pointer arithmetic. It skips null entries, invokes each non-null entry exactly once per occurrence, emits a post-call marker only after return, performs no allocation, and does not interpret a callback return register. This proves the actual artifact's void-initializer range only; it does not prove general `.CRT` or C++ initialization.
+
+## `strlen` evidence-closure result (2026-07-31)
+
+The current payload import table contains `strlen` at IAT RVA `0x7d3e8`, with preferred IAT address `0x18007d3e8` and the normal import thunk at preferred `0x18007737f`. The exact static call is preferred `0x18003dba0`, returning at `0x18003dba5`; in the relocated QEMU image (`IMAGE_BASE=0x000000000547B000`) the wrapper observed return address `0x00000000054B8BA5`. The call is made after `NATIVEAOT_STARTUP_OK` and `BEFORE_MANAGED_CALL`, and its return value is consumed by the next NativeAOT startup helper before the next import boundary.
+
+The first argument is relocated `.rdata` address `0x0000000005513498`, the read-only `.rdata` mapping is `0x00000000054F8000..0x0000000005524E00`, and the bounded byte preview is `gcServer` followed by the terminator. The checked wrapper returns `8` and reports terminator address `0x00000000055134A0`; it performs no allocation, external call, write, SIMD read, or speculative access beyond the validated image-region context. The import treatment is 27 functional / 97 fail-fast / 0 unresolved, and three immutable fresh QEMU runs reach `KERNEL32.dll!GetEnvironmentVariableW`. The disabled profile preserves the prior `strlen` fail-fast boundary.

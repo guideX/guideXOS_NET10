@@ -1,13 +1,13 @@
 # Next-stage blockers
 
-Gate 4 still proves the first no-allocation managed handoff. The allocation follow-on now builds and traces the generated allocation helper, and the verified FILETIME, monotonic performance, minimal CRT on-exit initialization, x64 SLIST-head initialization, error-returning initializer-table contract, void initializer-table contract, and narrow `strcmp` contract advance authentic NativeAOT startup beyond QPC. The next boundary is `api-ms-win-crt-string-l1-1-0.dll!strlen`; the loader's 26 functional imports remain bounded platform contracts rather than broad implementation of the following runtime services.
+Gate 4 still proves the first no-allocation managed handoff. The allocation follow-on now builds and traces the generated allocation helper, and the verified FILETIME, monotonic performance, minimal CRT on-exit initialization, x64 SLIST-head initialization, error-returning initializer-table contract, void initializer-table contract, narrow `strcmp` contract, and narrow `strlen` contract advance authentic NativeAOT startup beyond QPC. The next boundary is `KERNEL32.dll!GetEnvironmentVariableW`; the loader's 27 functional imports remain bounded platform contracts rather than broad implementation of the following runtime services.
 
 | Feature | Gate 4 boundary | Next blocker / smallest next experiment |
 | --- | --- | --- |
 | First managed allocation | The allocation PE contains `ManagedMain -> AllocateOne -> RhpNewFast`, but the clean pre-startup run sees zero TLS allocation-context slots and returns `-10`; no first-allocation marker is emitted. | Close the standard NativeAOT startup/PAL contract, then run one fixed allocation with explicit heap ownership and object-header/EEType evidence. |
 | Repeated allocation | Gate G is correctly gated because Gate F did not pass. | Stress a bounded allocation loop only after first allocation, roots, write barriers, and collection behavior are proven. |
 | Virtual memory | `VirtualQuery` is functional only for the active loader stack; no GC segment reservation/commit/release contract is implemented. | Define page ownership, protection, reservation/commit, and release semantics for a real UEFI substrate. |
-| GC initialization | `Runtime.WorkstationGC.lib` and its `RhpNewFast` path are physically linked, but the `strcmp`-enabled startup now stops at `api-ms-win-crt-string-l1-1-0.dll!strlen`; no heap/segments/allocation context are initialized. | Census only the next authentic `strlen` dependency; do not add dummy success shims or infer GC readiness from CRT progress. |
+| GC initialization | `Runtime.WorkstationGC.lib` and its `RhpNewFast` path are physically linked, but the `strlen`-enabled startup now stops at `KERNEL32.dll!GetEnvironmentVariableW`; no heap/segments/allocation context are initialized. | Census only the next authentic environment-variable dependency; do not add dummy success shims or infer GC readiness from CRT progress. |
 | Process-time startup | `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency` are functional. The CRT opt-in initializes both empty on-exit tables, and the SLIST opt-in initializes one x64 header. | No longer a blocker for this pass. Preserve the exact time, CRT, and initialization-only SLIST contracts; keep registration/execution and SLIST companions separate. |
 | CRT on-exit lifecycle | `_initialize_onexit_table` is proven for two empty tables; registration, execution, shutdown, and callback ownership were not reached. | Do not implement registration or shutdown until a fresh trace reaches them; treat `_register_onexit_function` and `_execute_onexit_table` as separate contracts. |
 | Error-returning CRT initializers | The actual range is one null `.rdata` entry; `_initterm_e` validates, skips it, returns zero, and reaches the now-closed `_initterm` range. No actual NativeAOT callback was present in this family. | Keep other `.CRT` families separate. Do not generalize these table results into C++ processing or implement initializer entries not present in a traced artifact. |
@@ -24,11 +24,11 @@ Other deferred areas are CRT startup/termination, process time/environment, COM,
 
 ## `strcmp` evidence-closure result (2026-07-30)
 
-The narrow Microsoft x64 `strcmp` contract is closed by [CRT_STRCMP_BOOTSTRAP.md](CRT_STRCMP_BOOTSTRAP.md). Three immutable fresh QEMU runs compare `gcServer` with `gcConservative`, return `+1`, preserve zero TLS allocation context/managed-thread/GC state, and reach `api-ms-win-crt-string-l1-1-0.dll!strlen`. `strlen` remains intentionally unimplemented.
+The narrow Microsoft x64 `strcmp` contract is closed by [CRT_STRCMP_BOOTSTRAP.md](CRT_STRCMP_BOOTSTRAP.md). Three immutable fresh QEMU runs compare `gcServer` with `gcConservative`, return `+1`, preserve zero TLS allocation context/managed-thread/GC state, and reach `strlen`. The subsequent narrow `strlen` contract is closed by [CRT_STRLEN_BOOTSTRAP.md](CRT_STRLEN_BOOTSTRAP.md); the next boundary is `KERNEL32.dll!GetEnvironmentVariableW`.
 
 ## Recommended next milestone
 
-Investigate the exact `api-ms-win-crt-string-l1-1-0.dll!strlen` dependency reached after the proven `strcmp` call, then reassess the first allocation/GC boundary. Capture imports, undefined symbols, TLS, module initializer behavior, and transition-helper changes before writing any additional UEFI platform code.
+Investigate the exact `KERNEL32.dll!GetEnvironmentVariableW` dependency reached after the proven `strlen` call, then reassess the first allocation/GC boundary. Capture imports, undefined symbols, TLS, module initializer behavior, and transition-helper changes before writing any additional UEFI platform code.
 
 ## SLIST evidence-closure result (2026-07-29)
 
@@ -37,3 +37,7 @@ The narrow `InitializeSListHead` implementation is complete and host-tested, and
 ## `_initterm_e` evidence-closure result (2026-07-30)
 
 The one-entry error-returning initializer range is now closed for the actual artifact. Three fresh immutable-hash QEMU runs validated the exclusive bounds, skipped the sole null entry, returned zero, and reached the now-closed `_initterm` range. The host suite proves the non-empty callback cases, exact first-error propagation, exclusive-end behavior, and malformed-range/target rejection. No callback ran in QEMU because no non-null initializer exists in the traced table. The next milestone is the separately scoped `strcmp` dependency, not GC, allocation, managed-thread registration, or general CRT startup.
+
+## `strlen` evidence-closure result (2026-07-31)
+
+The bounded Microsoft x64 `strlen` contract is closed for the actual NativeAOT call. Host vectors cover empty, ordinary, embedded-null, high-bit, long, maximum-scan, null, noncanonical, out-of-image, unreadable, gap, unterminated, overflow, guard, unchanged-input, approved-region, and mutation-control cases. Three immutable QEMU runs report one successful `strlen("gcServer")` call with result `8`, preserve zero allocation context/managed-thread/GC state, and advance to `KERNEL32.dll!GetEnvironmentVariableW`. The disabled profile preserves the original `strlen` boundary, and the evidence pipeline rejects marker, truncation, stale-run, duplicate-process, and artifact-hash mutations.

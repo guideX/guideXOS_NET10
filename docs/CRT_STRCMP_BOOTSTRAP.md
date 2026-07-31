@@ -1,8 +1,8 @@
 # Microsoft x64 `strcmp` bootstrap contract
 
-Status: CLOSED for the one exact `api-ms-win-crt-string-l1-1-0.dll!strcmp` call reached by the current NativeAOT startup artifact. This milestone does not implement or claim `strncmp`, `_stricmp`, `wcscmp`, `memcmp`, `strcmpi`, `strlen`, locale processing, Unicode conversion, UTF processing, security variants, vectorization, SIMD, allocation, GC, managed-thread registration, or general string support.
+Status: CLOSED for the one exact `api-ms-win-crt-string-l1-1-0.dll!strcmp` call reached by the current NativeAOT startup artifact. This historical milestone does not implement or claim `strncmp`, `_stricmp`, `wcscmp`, `memcmp`, `strcmpi`, locale processing, Unicode conversion, UTF processing, security variants, vectorization, SIMD, allocation, GC, managed-thread registration, or general string support. The separately scoped `strlen` follow-on is now closed in [CRT_STRLEN_BOOTSTRAP.md](CRT_STRLEN_BOOTSTRAP.md).
 
-The required milestone was to implement only Microsoft x64 `strcmp`, prove the actual caller and arguments, run the host vectors, route only the exact import, and stop at the next authentic dependency. The next dependency is `api-ms-win-crt-string-l1-1-0.dll!strlen`; it remains fail-fast and intentionally unimplemented.
+The required milestone was to implement only Microsoft x64 `strcmp`, prove the actual caller and arguments, run the host vectors, route only the exact import, and stop at the next authentic dependency. At this milestone's close, the next dependency was `api-ms-win-crt-string-l1-1-0.dll!strlen`; the subsequent closure advanced the path to `KERNEL32.dll!GetEnvironmentVariableW`.
 
 ## Baseline and repository state
 
@@ -125,7 +125,7 @@ The import census transition is:
 | Proven `_initterm` baseline | 25 | 99 | 0 |
 | `strcmp` enabled | 26 | 98 | 0 |
 
-The disabled-routing control remained at 25/99 and stopped at `strcmp`, with no `CRT_STRCMP_*` markers. No `strlen` or other string API was routed.
+The disabled-routing control remained at 25/99 and stopped at `strcmp`, with no `CRT_STRCMP_*` markers. No `strlen` or other string API was routed in this `strcmp` profile.
 
 ## Gate G: three immutable QEMU runs
 
@@ -137,7 +137,7 @@ The final frozen artifact manifest is `evidence\generated\crt-strcmp-final-20260
 | `crt-strcmp-final-20260730-immutable-run2` | 2376 | 12137 | `gcServer` / `gcConservative` / `+1` | 26 / 98 / unresolved 0 | count 2, first `0x1F417`, last `0x3C8F3`, min/max delta `0x1D4DC` / `0x1D4DC`, regressions 0 | `strlen` |
 | `crt-strcmp-final-20260730-immutable-run3` | 21892 | 12137 | `gcServer` / `gcConservative` / `+1` | 26 / 98 / unresolved 0 | count 2, first `0x1D07B`, last `0x39A24`, min/max delta `0x1C9A9` / `0x1C9A9`, regressions 0 | `strlen` |
 
-Every enabled run also recorded `NATIVEAOT_STARTUP_RETURN=1`, TLS allocation limit/pointer `0/0`, `MANAGED_THREAD_REGISTERED=0`, `ALLOCATION_CONTEXT_VALID=0`, `GC_CONTRACT_INITIALIZED=0`, `GC_HEAP_USABLE=0`, `ALLOCATION_CONTEXT_CREATED=0`, and `MANAGED_ALLOCATION_COUNT=0`. The final boundary was deliberately left fail-fast; `strlen` was not implemented.
+Every enabled run also recorded `NATIVEAOT_STARTUP_RETURN=1`, TLS allocation limit/pointer `0/0`, `MANAGED_THREAD_REGISTERED=0`, `ALLOCATION_CONTEXT_VALID=0`, `GC_CONTRACT_INITIALIZED=0`, `GC_HEAP_USABLE=0`, `ALLOCATION_CONTEXT_CREATED=0`, and `MANAGED_ALLOCATION_COUNT=0`. The final boundary of this historical `strcmp` artifact was deliberately left fail-fast at `strlen`; the later `strlen` artifact is documented separately.
 
 The disabled control is `evidence\generated\crt-strcmp-disabled-20260730`, PID `19500`, exit `0`, 11482 serial bytes, 25/99 imports, and the original `api-ms-win-crt-string-l1-1-0.dll!strcmp` boundary. Its validator passed and it emitted no `CRT_STRCMP_CALL_COUNT` marker.
 
@@ -155,7 +155,8 @@ PE loader
   -> _initterm_e
   -> _initterm
   -> strcmp("gcServer", "gcConservative") = +1
-  -> api-ms-win-crt-string-l1-1-0.dll!strlen
+  -> api-ms-win-crt-string-l1-1-0.dll!strlen = 8
+  -> KERNEL32.dll!GetEnvironmentVariableW
 ```
 
-This closes exactly one new CRT dependency and advances startup to exactly one new authentic dependency. `strlen` is the next milestone and is intentionally outside this task.
+This historical milestone closed exactly one new CRT dependency. The subsequent `strlen` closure advanced startup to exactly one new authentic dependency, `KERNEL32.dll!GetEnvironmentVariableW`.

@@ -282,3 +282,19 @@ The final enabled profile is 26 functional / 98 fail-fast / 0 unresolved imports
 | `crt-strcmp-final-20260730-immutable-run3` | 21892 | 0 | 12137 | `gcServer` / `gcConservative` / `+1` | 26 / 98 / 0 | count 2, regressions 0 | TLS 0/0; managed 0; allocation context 0; GC heap 0 | `strlen` |
 
 The disabled control `evidence\generated\crt-strcmp-disabled-20260730` used PID `19500`, exit `0`, 11482 bytes, 25 / 99 / 0 imports, and stopped at the original `strcmp` boundary with no implementation marker. The new deepest boundary is `api-ms-win-crt-string-l1-1-0.dll!strlen`. No commit or push occurred.
+
+## Final `strlen` evidence closure (2026-07-31)
+
+This pass began on branch `main`, HEAD `eaddb75a920dfa3abbcba512cfabcf854cc822fd`, upstream `origin/main`, with a clean worktree. A fresh disposable baseline run was captured under `evidence\generated\crt-strlen-baseline-fresh-20260731`; it retained the prior `strcmp` result and stopped at `api-ms-win-crt-string-l1-1-0.dll!strlen` with 26 functional / 98 fail-fast imports and zero unresolved required imports. No commit or push occurred during this pass.
+
+The checked core contract is in `src/Gate4Harness/crt_strlen.c` / `crt_strlen.h`. The immutable positive artifact set is `evidence\generated\crt-strlen-final-20260731-immutable-v3`, built under `artifacts\crt-strlen-build-20260731`. Its execution-relevant hashes are: loader `B0FA9D7587D73154DF52F769205B6F4B632698ECF90CDFC246BBA4257023B191`, NativeAOT payload `2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837`, runtime archive `DBA78CC0C6747E2E0CF51894F1492A70ECD08513151D9473C04048CD7B9D9311`, OVMF code `33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`, OVMF vars template `5D2AC383371B408398ACCEE7EC27C8C09EA5B74A0DE0CEEA6513388B15BE5D1E`, QEMU `A930E028F93D0FA47E4D58BDAD2432F7466DC2B6AF0AE376F77EF7A298FFDD02`, runner `8429EAC7EB62CE8BDE5E98A674B7843FA9B778C6F4C6EB20287360CB963FC489`, and validator `FF44995656AAD1CD52D68E1FEEF376EED73AEB06C59BF1747AA7E7368D3361A0`.
+
+The enabled profile is 27 functional / 97 fail-fast / 0 unresolved. The exact IAT slot is `0x7d3e8`; the static call is preferred `0x18003dba0`, and the runtime return site is `0x00000000054B8BA5`. The input is the relocated read-only `.rdata` string `gcServer` at `0x0000000005513498`; the wrapper validated the mapped region `0x00000000054F8000..0x0000000005524E00`, returned length `8`, and identified the terminator at `0x00000000055134A0`. The next boundary is `KERNEL32.dll!GetEnvironmentVariableW`.
+
+| Run | PID | Exit | Bytes | `strlen` result | Imports | QPC | State | Boundary |
+| --- | ---: | ---: | ---: | --- | --- | --- | --- | --- |
+| `crt-strlen-final-20260731-immutable-v3-run1` | 26236 | 0 | 13704 | `gcServer` / `8` | 27 / 97 / 0 | count 2, first `0x1D37F`, last `0x39F0A`, delta `0x1CB8B`, regressions 0 | TLS 0/0; managed 0; allocation context 0; GC heap 0 | `GetEnvironmentVariableW` |
+| `crt-strlen-final-20260731-immutable-v3-run2` | 20464 | 0 | 13704 | `gcServer` / `8` | 27 / 97 / 0 | count 2, first `0x1D412`, last `0x38C70`, delta `0x1B85E`, regressions 0 | TLS 0/0; managed 0; allocation context 0; GC heap 0 | `GetEnvironmentVariableW` |
+| `crt-strlen-final-20260731-immutable-v3-run3` | 23172 | 0 | 13704 | `gcServer` / `8` | 27 / 97 / 0 | count 2, first `0x1E0F9`, last `0x39D33`, delta `0x1BC3A`, regressions 0 | TLS 0/0; managed 0; allocation context 0; GC heap 0 | `GetEnvironmentVariableW` |
+
+The disabled control is `evidence\generated\crt-strlen-disabled-20260731-immutable`; its three fresh runs passed with 26 / 98 imports, no `CRT_STRLEN_*` implementation marker, and the original `api-ms-win-crt-string-l1-1-0.dll!strlen` boundary. The host suite, prior `strcmp`/`_initterm`/`_initterm_e`/SLIST regression suites, and the negative evidence pipeline all passed. The first allocation, GC initialization, managed-thread registration, and broad CRT/string support remain unproven.
