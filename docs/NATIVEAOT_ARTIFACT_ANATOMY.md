@@ -50,18 +50,18 @@ The loader creates a zeroed TLS vector and copies the PE TLS template. `_tls_ind
 
 ## Imports and thunks
 
-The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The current `strlen` positive loader serializes 27 functional and 97 fail-fast imports:
+The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The current `GetEnvironmentVariableW` positive loader serializes 28 functional and 96 fail-fast imports:
 
 ```text
 PE_IMPORT_DESCRIPTORS=10
 PE_IMPORT_SYMBOLS=124
 PE_IMPORT_RESOLVED=124
-PE_IMPORT_FUNCTIONAL=27
-PE_IMPORT_FAILFAST=97
+PE_IMPORT_FUNCTIONAL=28
+PE_IMPORT_FAILFAST=96
 UNRESOLVED_REQUIRED_IMPORTS=0
 ```
 
-Each of the 97 currently unreachable symbols is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The current allocation-startup build adds `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency`, for 21 functional / 103 fail-fast. The CRT opt-in adds `_initialize_onexit_table`, for 22 / 102, the SLIST opt-in adds `InitializeSListHead`, for 23 / 101, `_initterm_e` adds one for 24 / 100, `_initterm` adds one for 25 / 99, `strcmp` adds one for 26 / 98, and `strlen` adds one for 27 / 97. The historical 18/106, 19/105, 21/103, and 26/98 counts remain audit evidence.
+Each of the 96 currently unreachable symbols is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The current allocation-startup build adds `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency`, for 21 functional / 103 fail-fast. The CRT opt-in adds `_initialize_onexit_table`, for 22 / 102, the SLIST opt-in adds `InitializeSListHead`, for 23 / 101, `_initterm_e` adds one for 24 / 100, `_initterm` adds one for 25 / 99, `strcmp` adds one for 26 / 98, `strlen` adds one for 27 / 97, and `GetEnvironmentVariableW` adds one for 28 / 96. The historical 18/106, 19/105, 21/103, and 26/98 counts remain audit evidence.
 
 ## TLS, unwind, and initialization answers
 
@@ -107,7 +107,8 @@ GetSystemTimeAsFileTime -> QPC -> _initialize_onexit_table (twice)
   -> api-ms-win-crt-runtime-l1-1-0.dll!_initterm
   -> api-ms-win-crt-string-l1-1-0.dll!strcmp
   -> api-ms-win-crt-string-l1-1-0.dll!strlen
-  -> KERNEL32.dll!GetEnvironmentVariableW
+  -> KERNEL32.dll!GetEnvironmentVariableW("DOTNET_gcServer") = missing
+  -> api-ms-win-crt-string-l1-1-0.dll!_stricmp
 ```
 
 The three selected fresh positive logs are under `artifacts\qpc-final-20260729-allocation\time-contract-runs-*`; each has source `ACPI_PM_TIMER`, frequency `0x369E99`, two source/normalized observations, one QPC call, zero regressions, and zero TLS allocation context. The first allocation remains unproven.
@@ -139,3 +140,11 @@ The narrow iterator validates canonical x64 targets, loaded-image membership, re
 The current payload import table contains `strlen` at IAT RVA `0x7d3e8`, with preferred IAT address `0x18007d3e8` and the normal import thunk at preferred `0x18007737f`. The exact static call is preferred `0x18003dba0`, returning at `0x18003dba5`; in the relocated QEMU image (`IMAGE_BASE=0x000000000547B000`) the wrapper observed return address `0x00000000054B8BA5`. The call is made after `NATIVEAOT_STARTUP_OK` and `BEFORE_MANAGED_CALL`, and its return value is consumed by the next NativeAOT startup helper before the next import boundary.
 
 The first argument is relocated `.rdata` address `0x0000000005513498`, the read-only `.rdata` mapping is `0x00000000054F8000..0x0000000005524E00`, and the bounded byte preview is `gcServer` followed by the terminator. The checked wrapper returns `8` and reports terminator address `0x00000000055134A0`; it performs no allocation, external call, write, SIMD read, or speculative access beyond the validated image-region context. The import treatment is 27 functional / 97 fail-fast / 0 unresolved, and three immutable fresh QEMU runs reach `KERNEL32.dll!GetEnvironmentVariableW`. The disabled profile preserves the prior `strlen` fail-fast boundary.
+
+## `GetEnvironmentVariableW` evidence-closure result (2026-07-31)
+
+The current allocation-enabled image imports `KERNEL32.dll!GetEnvironmentVariableW` at IAT RVA `0x7d088`, preferred IAT address `0x18007d088`, and normal thunk `0x1800772ef`. The live NativeAOT call is in the GC-configuration helper at preferred `0x18003e150`; its direct call is `0x18003e196`, with return at `0x18003e19b`. In the relocated QEMU image (`IMAGE_BASE=0x000000000547B000`), the call and return are `0x00000000054B9196` and `0x00000000054B919B`.
+
+The Microsoft x64 arguments observed in all three immutable runs were `RCX=lpName=0x0000000007E64B40`, `RDX=lpBuffer=0x0000000007E64B10`, and `R8D=nSize=0x11`. The name is the terminated UTF-16 string `DOTNET_gcServer` (15 code units). The buffer is non-null, the size is nonzero, and this is not a size probe. The function returns `0`, changes last error from `0` to `203` (`ERROR_ENVVAR_NOT_FOUND`), writes no value, and the caller immediately takes its absent/fallback path. Each process makes exactly one call; no second variable query or value parse is reached.
+
+The enabled treatment is 28 functional / 96 fail-fast / 0 unresolved. The three immutable runs under `evidence\generated\getenv-final-20260731-immutable` all have exit `0`, unique PIDs, complete serial output, QPC count `2`, zero QPC regressions, and zero TLS allocation context, managed-thread registration, and GC heap usability. The disabled control preserves the original GetEnvironmentVariableW boundary. The next authentic import is `_stricmp`, and this document does not claim a complete environment subsystem or GC initialization.

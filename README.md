@@ -15,7 +15,7 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
-The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, and the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, `_initterm`, `strcmp`, and `strlen` contracts advance authentic startup. The current deepest boundary is `KERNEL32.dll!GetEnvironmentVariableW`; no allocation, GC startup, managed-thread registration, general SLIST operation, or general CRT/C++ initialization is claimed. The first allocation remains unproven. See [the `strlen` bootstrap contract](docs/CRT_STRLEN_BOOTSTRAP.md) for the closed milestone.
+The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, and the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, `_initterm`, `strcmp`, `strlen`, and `GetEnvironmentVariableW` contracts advance authentic startup. The current deepest boundary is `api-ms-win-crt-string-l1-1-0.dll!_stricmp`; no allocation, GC startup, managed-thread registration, general SLIST operation, or general CRT/C++ initialization is claimed. The first allocation remains unproven. See [the `GetEnvironmentVariableW` bootstrap contract](docs/KERNEL32_GETENVIRONMENTVARIABLEW_BOOTSTRAP.md) for the closed milestone.
 
 ## Provisional first-image path
 
@@ -36,6 +36,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Build and toolchain record](docs/BUILD_TOOLCHAIN_RECORD.md)
 - [NativeAOT artifact anatomy](docs/NATIVEAOT_ARTIFACT_ANATOMY.md)
 - [Dependency census](docs/DEPENDENCY_CENSUS.md)
+- [`GetEnvironmentVariableW` bootstrap contract](docs/KERNEL32_GETENVIRONMENTVARIABLEW_BOOTSTRAP.md)
 - [Image-format decision](docs/IMAGE_FORMAT_DECISION.md)
 - [Boot ABI](docs/BOOT_ABI.md)
 - [Managed-entry proof procedure](docs/MANAGED_ENTRY_PROOF.md)
@@ -90,3 +91,7 @@ The narrow Microsoft x64 `strcmp` implementation is complete, host-tested, and r
 ## `strlen` bootstrap evidence status (2026-07-31)
 
 The narrow Microsoft x64 `strlen` implementation is complete, host-tested, and routed only for the exact `api-ms-win-crt-string-l1-1-0.dll!strlen` import. The actual NativeAOT call scans the read-only `.rdata` string `gcServer`, returns length `8`, and advances to `KERNEL32.dll!GetEnvironmentVariableW`. Three immutable fresh QEMU runs are recorded under `evidence\generated\crt-strlen-final-20260731-immutable-v3`; the disabled control retains the original `strlen` boundary. The enabled profile is 27 functional / 97 fail-fast / 0 unresolved imports, with zero allocation-context, managed-thread, and GC-heap evidence.
+
+## `GetEnvironmentVariableW` bootstrap evidence status (2026-07-31)
+
+The narrow Microsoft x64 `GetEnvironmentVariableW` implementation is complete, host-tested, and routed only for the exact `KERNEL32.dll!GetEnvironmentVariableW` import. The live NativeAOT path queries `DOTNET_gcServer` once with a non-null 17-character buffer, receives missing-variable result `0`, and observes `ERROR_ENVVAR_NOT_FOUND` (`203`). The value is not parsed; the caller takes its fallback path. Three immutable fresh QEMU runs are recorded under `evidence\generated\getenv-final-20260731-immutable`; the enabled profile is 28 functional / 96 fail-fast / 0 unresolved imports and advances to `api-ms-win-crt-string-l1-1-0.dll!_stricmp`. The disabled control retains the original GetEnvironmentVariableW boundary. This is a narrow lookup contract, not a complete Windows environment subsystem or GC initialization.

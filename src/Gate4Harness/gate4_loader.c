@@ -7,6 +7,7 @@
 #include "crt_initterm.h"
 #include "crt_strcmp.h"
 #include "crt_strlen.h"
+#include "platform_environment.h"
 #include "platform_slist.h"
 
 typedef uint64_t EFI_STATUS;
@@ -253,6 +254,15 @@ static uintptr_t g_crt_initterm_current_target;
 static uint32_t g_crt_initterm_callback_active;
 
 #endif
+#ifdef GXOS_ENABLE_GETENV
+static uint64_t g_getenv_calls;
+static uint64_t g_getenv_successes;
+static uint64_t g_getenv_missing;
+static uint64_t g_getenv_last_return;
+static uint64_t g_getenv_last_error_before;
+static uint64_t g_getenv_last_error_after;
+static uint64_t g_getenv_last_caller;
+#endif
 
 static void serial_out8(uint16_t port, uint8_t value)
 {
@@ -410,6 +420,79 @@ static int GXOS_CRT_STRCMP_MS_ABI platform_strcmp(const char *lhs, const char *r
     serial_field_hex("GXOS_NET10:CRT_STRCMP_RESULT=0x", (uint64_t)(uint32_t)result);
     serial_text("\r\n");
     return result;
+}
+#endif
+
+#ifdef GXOS_ENABLE_GETENV
+static uint32_t platform_getenv_bounded_name_length(const GXOS_ENVIRONMENT_WCHAR *name)
+{
+    uint32_t length = 0;
+    while (length != 256 && name != 0 && name[length] != 0) length++;
+    return length;
+}
+
+static void platform_getenv_emit_hex16(const char *prefix,
+                                       const GXOS_ENVIRONMENT_WCHAR *value,
+                                       uint32_t length)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint32_t index;
+    uint32_t preview = length > 128 ? 128 : length;
+
+    serial_text(prefix);
+    for (index = 0; index != preview; index++) {
+        uint16_t word = value[index];
+        serial_char((uint8_t)digits[(word >> 12) & 0xF]);
+        serial_char((uint8_t)digits[(word >> 8) & 0xF]);
+        serial_char((uint8_t)digits[(word >> 4) & 0xF]);
+        serial_char((uint8_t)digits[word & 0xF]);
+    }
+    if (preview != length) serial_text("...");
+    serial_text("\r\n");
+}
+
+static void platform_getenv_emit_text(const char *prefix,
+                                      const GXOS_ENVIRONMENT_WCHAR *value,
+                                      uint32_t length)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint32_t index;
+    uint32_t preview = length > 128 ? 128 : length;
+
+    serial_text(prefix);
+    serial_char('"');
+    for (index = 0; index != preview; index++) {
+        uint16_t word = value[index];
+        if (word >= 0x20 && word <= 0x7E && word != '\\' && word != '"') {
+            serial_char((uint8_t)word);
+        } else {
+            serial_text("\\u");
+            serial_char((uint8_t)digits[(word >> 12) & 0xF]);
+            serial_char((uint8_t)digits[(word >> 8) & 0xF]);
+            serial_char((uint8_t)digits[(word >> 4) & 0xF]);
+            serial_char((uint8_t)digits[word & 0xF]);
+        }
+    }
+    if (preview != length) serial_text("...");
+    serial_text("\"\r\n");
+}
+
+static void emit_getenv_summary(void)
+{
+    serial_field_hex("GXOS_NET10:GETENV_CALL_COUNT=0x", g_getenv_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_SUCCESS_COUNT=0x", g_getenv_successes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_MISSING_COUNT=0x", g_getenv_missing);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_LAST_RETURN=0x", g_getenv_last_return);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_LAST_ERROR_BEFORE=0x", g_getenv_last_error_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_LAST_ERROR_AFTER=0x", g_getenv_last_error_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_LAST_CALLER=0x", g_getenv_last_caller);
+    serial_text("\r\n");
 }
 #endif
 
@@ -1068,6 +1151,9 @@ static void import_failfast(const IMPORT_RECORD *record)
 #ifdef GXOS_ENABLE_CRT_STRLEN
     emit_crt_strlen_summary();
 #endif
+#ifdef GXOS_ENABLE_GETENV
+    emit_getenv_summary();
+#endif
     emit_qpc_summary();
     halt_forever();
 }
@@ -1139,6 +1225,79 @@ static int EFIAPI platform_fls_free(uint32_t index)
 }
 
 static uint32_t g_platform_last_error;
+
+#ifdef GXOS_ENABLE_GETENV
+static uint32_t EFIAPI platform_get_environment_variable_w(
+    const GXOS_ENVIRONMENT_WCHAR *name,
+    GXOS_ENVIRONMENT_WCHAR *buffer,
+    GXOS_ENVIRONMENT_DWORD buffer_size)
+{
+    GXOS_ENVIRONMENT_DWORD previous_error = g_platform_last_error;
+    GXOS_ENVIRONMENT_DWORD last_error = previous_error;
+    GXOS_ENVIRONMENT_DWORD result;
+    uint32_t name_length = platform_getenv_bounded_name_length(name);
+    uint64_t caller = (uint64_t)(uintptr_t)__builtin_return_address(0);
+
+    result = gxos_get_environment_variable_w_not_found(name, buffer, buffer_size,
+                                                        &last_error);
+    g_platform_last_error = last_error;
+    g_getenv_calls++;
+    g_getenv_missing++;
+    g_getenv_last_return = result;
+    g_getenv_last_error_before = previous_error;
+    g_getenv_last_error_after = last_error;
+    g_getenv_last_caller = caller;
+
+    serial_text("GXOS_NET10:GETENV_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_CALL_INDEX=0x", g_getenv_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_CALLER=0x", caller);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_RETURN_ADDRESS=0x", caller);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_LP_NAME=0x", (uint64_t)(uintptr_t)name);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_LP_BUFFER=0x", (uint64_t)(uintptr_t)buffer);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_N_SIZE=0x", buffer_size);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETENV_LP_NAME_NULL=");
+    serial_text(name == 0 ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETENV_LP_BUFFER_NULL=");
+    serial_text(buffer == 0 ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETENV_N_SIZE_ZERO=");
+    serial_text(buffer_size == 0 ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETENV_SIZE_PROBE=");
+    serial_text(buffer == 0 || buffer_size == 0 ? "1\r\n" : "0\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_NAME_LENGTH=0x", name_length);
+    serial_text("\r\n");
+    if (name != 0) {
+        platform_getenv_emit_hex16("GXOS_NET10:GETENV_NAME_UTF16=", name, name_length);
+        platform_getenv_emit_text("GXOS_NET10:GETENV_NAME_TEXT=", name, name_length);
+    } else {
+        serial_text("GXOS_NET10:GETENV_NAME_UTF16=\r\n");
+        serial_text("GXOS_NET10:GETENV_NAME_TEXT=\"\"\r\n");
+    }
+    serial_field_hex("GXOS_NET10:GETENV_RETURN_VALUE=0x", result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_LAST_ERROR_BEFORE=0x", previous_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETENV_LAST_ERROR_AFTER=0x", last_error);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETENV_LAST_ERROR_CHANGED=");
+    serial_text(previous_error == last_error ? "0\r\n" : "1\r\n");
+    serial_text("GXOS_NET10:GETENV_RETURN_EXPECTED_BY_CALLER=0x0000000000000000\r\n");
+    serial_text("GXOS_NET10:GETENV_IMMEDIATE_USE=unsigned_return_minus_one_and_16_char_bound\r\n");
+    serial_text("GXOS_NET10:GETENV_OUTPUT_WRITTEN=0\r\n");
+#ifdef GXOS_GETENV_MARKER_MUTATION
+    serial_text("GXOS_NET10:GETENV_OX\r\n");
+#else
+    serial_text("GXOS_NET10:GETENV_RETURNED\r\n");
+    serial_text("GXOS_NET10:GETENV_OK\r\n");
+#endif
+    return result;
+}
+#endif
 
 static uint32_t EFIAPI platform_get_current_thread_id(void)
 {
@@ -1605,6 +1764,12 @@ static void *platform_import_target(const char *module, const char *symbol)
 #ifdef GXOS_ENABLE_CRT_STRLEN
     if (equal_text(module, "api-ms-win-crt-string-l1-1-0.dll") &&
         equal_text(symbol, "strlen")) return (void *)(uintptr_t)platform_strlen;
+#endif
+#ifdef GXOS_ENABLE_GETENV
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetEnvironmentVariableW")) {
+        return (void *)(uintptr_t)platform_get_environment_variable_w;
+    }
 #endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
@@ -2240,6 +2405,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         serial_text("\r\n");
 #ifdef GXOS_ENABLE_CRT_STRLEN
         emit_crt_strlen_summary();
+#endif
+#ifdef GXOS_ENABLE_GETENV
+        emit_getenv_summary();
 #endif
         if (nativeaot_result == 0) fail("nativeaot-startup-failed");
     }
