@@ -15,7 +15,7 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
-The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, and the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, and narrow `_initterm` contracts advance authentic startup. The current deepest boundary is `api-ms-win-crt-string-l1-1-0.dll!strcmp`; no allocation, GC startup, managed-thread registration, general SLIST operation, or general CRT/C++ initialization is claimed. The first allocation remains unproven.
+The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, and the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, `_initterm`, and `strcmp` contracts advance authentic startup. The current deepest boundary is `api-ms-win-crt-string-l1-1-0.dll!strlen`; no allocation, GC startup, managed-thread registration, general SLIST operation, or general CRT/C++ initialization is claimed. The first allocation remains unproven.
 
 ## Provisional first-image path
 
@@ -45,6 +45,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Windows x64 SLIST initialization contract](docs/PLATFORM_SLIST_CONTRACT.md)
 - [Windows x64 `_initterm_e` bootstrap contract](docs/CRT_INITTERM_E_BOOTSTRAP.md)
 - [Windows x64 `_initterm` bootstrap contract](docs/CRT_INITTERM_BOOTSTRAP.md)
+- [Windows x64 `strcmp` bootstrap contract](docs/CRT_STRCMP_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 
@@ -80,3 +81,7 @@ The immutable evidence is under `evidence\generated\crt-initterm-e-final-2026073
 ## `_initterm` bootstrap evidence status (2026-07-30)
 
 The narrow Microsoft x64 `_initterm` contract is implemented, host-tested, and routed only for the exact `api-ms-win-crt-runtime-l1-1-0.dll!_initterm` import. The actual NativeAOT call passes relocated `.rdata` bounds `0x00000000054F7468` to `0x00000000054F74B0`: nine entries, one null, and eight relocated direct `.text` callbacks. All eight valid callbacks entered and returned in forward order. Three immutable fresh QEMU runs are recorded under `evidence\generated\crt-initterm-final-20260730-immutable-v2` and stop at `api-ms-win-crt-string-l1-1-0.dll!strcmp`. GC heap usability, allocation context, managed-thread registration, managed allocation, broad CRT startup, and general C++ initialization remain unproven.
+
+## `strcmp` bootstrap evidence status (2026-07-30)
+
+The narrow Microsoft x64 `strcmp` implementation is complete, host-tested, and routed only for the exact `api-ms-win-crt-string-l1-1-0.dll!strcmp` import. The actual NativeAOT call compares `gcServer` with `gcConservative`, returns `+1`, and advances to `api-ms-win-crt-string-l1-1-0.dll!strlen`. Three immutable fresh QEMU runs are recorded under `evidence\generated\crt-strcmp-final-20260730-immutable`; the disabled control remains at the original `strcmp` boundary. GC heap usability, allocation context, managed-thread registration, managed allocation, `strlen`, and broad CRT/string support remain unproven.

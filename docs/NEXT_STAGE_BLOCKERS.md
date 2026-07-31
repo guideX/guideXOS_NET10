@@ -1,13 +1,13 @@
 # Next-stage blockers
 
-Gate 4 still proves the first no-allocation managed handoff. The allocation follow-on now builds and traces the generated allocation helper, and the verified FILETIME, monotonic performance, minimal CRT on-exit initialization, x64 SLIST-head initialization, error-returning initializer-table contract, and void initializer-table contract advance authentic NativeAOT startup beyond QPC. The next boundary is `api-ms-win-crt-string-l1-1-0.dll!strcmp`; the loader's 25 functional imports in the `_initterm` opt-in profile remain bounded platform contracts rather than broad implementation of the following runtime services.
+Gate 4 still proves the first no-allocation managed handoff. The allocation follow-on now builds and traces the generated allocation helper, and the verified FILETIME, monotonic performance, minimal CRT on-exit initialization, x64 SLIST-head initialization, error-returning initializer-table contract, void initializer-table contract, and narrow `strcmp` contract advance authentic NativeAOT startup beyond QPC. The next boundary is `api-ms-win-crt-string-l1-1-0.dll!strlen`; the loader's 26 functional imports remain bounded platform contracts rather than broad implementation of the following runtime services.
 
 | Feature | Gate 4 boundary | Next blocker / smallest next experiment |
 | --- | --- | --- |
 | First managed allocation | The allocation PE contains `ManagedMain -> AllocateOne -> RhpNewFast`, but the clean pre-startup run sees zero TLS allocation-context slots and returns `-10`; no first-allocation marker is emitted. | Close the standard NativeAOT startup/PAL contract, then run one fixed allocation with explicit heap ownership and object-header/EEType evidence. |
 | Repeated allocation | Gate G is correctly gated because Gate F did not pass. | Stress a bounded allocation loop only after first allocation, roots, write barriers, and collection behavior are proven. |
 | Virtual memory | `VirtualQuery` is functional only for the active loader stack; no GC segment reservation/commit/release contract is implemented. | Define page ownership, protection, reservation/commit, and release semantics for a real UEFI substrate. |
-| GC initialization | `Runtime.WorkstationGC.lib` and its `RhpNewFast` path are physically linked, but the `_initterm`-enabled startup now stops at `api-ms-win-crt-string-l1-1-0.dll!strcmp`; no heap/segments/allocation context are initialized. | Census only the next authentic `strcmp` dependency; do not add dummy success shims or infer GC readiness from CRT progress. |
+| GC initialization | `Runtime.WorkstationGC.lib` and its `RhpNewFast` path are physically linked, but the `strcmp`-enabled startup now stops at `api-ms-win-crt-string-l1-1-0.dll!strlen`; no heap/segments/allocation context are initialized. | Census only the next authentic `strlen` dependency; do not add dummy success shims or infer GC readiness from CRT progress. |
 | Process-time startup | `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency` are functional. The CRT opt-in initializes both empty on-exit tables, and the SLIST opt-in initializes one x64 header. | No longer a blocker for this pass. Preserve the exact time, CRT, and initialization-only SLIST contracts; keep registration/execution and SLIST companions separate. |
 | CRT on-exit lifecycle | `_initialize_onexit_table` is proven for two empty tables; registration, execution, shutdown, and callback ownership were not reached. | Do not implement registration or shutdown until a fresh trace reaches them; treat `_register_onexit_function` and `_execute_onexit_table` as separate contracts. |
 | Error-returning CRT initializers | The actual range is one null `.rdata` entry; `_initterm_e` validates, skips it, returns zero, and reaches the now-closed `_initterm` range. No actual NativeAOT callback was present in this family. | Keep other `.CRT` families separate. Do not generalize these table results into C++ processing or implement initializer entries not present in a traced artifact. |
@@ -22,9 +22,13 @@ Gate 4 still proves the first no-allocation managed handoff. The allocation foll
 
 Other deferred areas are CRT startup/termination, process time/environment, COM, diagnostics, networking, filesystem, globalization, and broad Windows compatibility. The current 103 fail-fast imports make accidental entry into those areas visible. Do not port them as no-op shims.
 
+## `strcmp` evidence-closure result (2026-07-30)
+
+The narrow Microsoft x64 `strcmp` contract is closed by [CRT_STRCMP_BOOTSTRAP.md](CRT_STRCMP_BOOTSTRAP.md). Three immutable fresh QEMU runs compare `gcServer` with `gcConservative`, return `+1`, preserve zero TLS allocation context/managed-thread/GC state, and reach `api-ms-win-crt-string-l1-1-0.dll!strlen`. `strlen` remains intentionally unimplemented.
+
 ## Recommended next milestone
 
-Investigate the exact `api-ms-win-crt-string-l1-1-0.dll!strcmp` dependency reached after the proven `_initterm` callbacks, then reassess the first allocation/GC boundary. Capture imports, undefined symbols, TLS, module initializer behavior, and transition-helper changes before writing any additional UEFI platform code.
+Investigate the exact `api-ms-win-crt-string-l1-1-0.dll!strlen` dependency reached after the proven `strcmp` call, then reassess the first allocation/GC boundary. Capture imports, undefined symbols, TLS, module initializer behavior, and transition-helper changes before writing any additional UEFI platform code.
 
 ## SLIST evidence-closure result (2026-07-29)
 

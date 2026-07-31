@@ -5,6 +5,7 @@
 #include "crt_onexit.h"
 #include "crt_initterm_e.h"
 #include "crt_initterm.h"
+#include "crt_strcmp.h"
 #include "platform_slist.h"
 
 typedef uint64_t EFI_STATUS;
@@ -338,6 +339,78 @@ static void serial_field_hex(const char *name, uint64_t value)
     serial_text(name);
     serial_hex64(value);
 }
+
+#ifdef GXOS_ENABLE_CRT_STRCMP
+static uint64_t g_crt_strcmp_calls;
+
+static uint32_t platform_strcmp_bounded_length(const char *value)
+{
+    uint32_t length = 0;
+    while (length != 64 && value[length] != 0) length++;
+    return length;
+}
+
+static void platform_strcmp_emit_bytes(const char *name,
+                                       const char *value,
+                                       uint32_t length)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint32_t index;
+    serial_text(name);
+    for (index = 0; index != length; index++) {
+        uint8_t byte = (uint8_t)value[index];
+        serial_char((uint8_t)digits[byte >> 4]);
+        serial_char((uint8_t)digits[byte & 0x0F]);
+    }
+    serial_text("\r\n");
+}
+
+static void platform_strcmp_emit_text(const char *name,
+                                      const char *value,
+                                      uint32_t length)
+{
+    uint32_t index;
+    serial_text(name);
+    for (index = 0; index != length; index++) {
+        uint8_t byte = (uint8_t)value[index];
+        serial_char(byte >= 0x20 && byte <= 0x7E ? byte : (uint8_t)'.');
+    }
+    serial_text("\r\n");
+}
+
+static int GXOS_CRT_STRCMP_MS_ABI platform_strcmp(const char *lhs, const char *rhs)
+{
+    uint32_t lhs_length = platform_strcmp_bounded_length(lhs);
+    uint32_t rhs_length = platform_strcmp_bounded_length(rhs);
+    int result = gxos_crt_strcmp(lhs, rhs);
+
+    g_crt_strcmp_calls++;
+    serial_field_hex("GXOS_NET10:CRT_STRCMP_CALL_COUNT=0x", g_crt_strcmp_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRCMP_CALLER=0x",
+                     (uint64_t)(uintptr_t)__builtin_return_address(0));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRCMP_LHS_POINTER=0x", (uint64_t)(uintptr_t)lhs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRCMP_RHS_POINTER=0x", (uint64_t)(uintptr_t)rhs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRCMP_LHS_LENGTH=0x", lhs_length);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRCMP_RHS_LENGTH=0x", rhs_length);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_STRCMP_LHS_NULL_TERMINATED=");
+    serial_text(lhs_length == 64 ? "0\r\n" : "1\r\n");
+    serial_text("GXOS_NET10:CRT_STRCMP_RHS_NULL_TERMINATED=");
+    serial_text(rhs_length == 64 ? "0\r\n" : "1\r\n");
+    platform_strcmp_emit_bytes("GXOS_NET10:CRT_STRCMP_LHS_BYTES=", lhs, lhs_length);
+    platform_strcmp_emit_bytes("GXOS_NET10:CRT_STRCMP_RHS_BYTES=", rhs, rhs_length);
+    platform_strcmp_emit_text("GXOS_NET10:CRT_STRCMP_LHS_TEXT=", lhs, lhs_length);
+    platform_strcmp_emit_text("GXOS_NET10:CRT_STRCMP_RHS_TEXT=", rhs, rhs_length);
+    serial_field_hex("GXOS_NET10:CRT_STRCMP_RESULT=0x", (uint64_t)(uint32_t)result);
+    serial_text("\r\n");
+    return result;
+}
+#endif
 
 #ifdef GXOS_ENABLE_CRT_INITTERM
 static int GXOS_PERF_EFIAPI platform_initterm_query_performance_counter(void *output)
@@ -1372,6 +1445,10 @@ static void *platform_import_target(const char *module, const char *symbol)
 #ifdef GXOS_ENABLE_CRT_INITTERM
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initterm")) return (void *)(uintptr_t)platform_initterm;
+#endif
+#ifdef GXOS_ENABLE_CRT_STRCMP
+    if (equal_text(module, "api-ms-win-crt-string-l1-1-0.dll") &&
+        equal_text(symbol, "strcmp")) return (void *)(uintptr_t)platform_strcmp;
 #endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&

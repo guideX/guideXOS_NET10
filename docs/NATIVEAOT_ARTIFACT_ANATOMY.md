@@ -50,18 +50,18 @@ The loader creates a zeroed TLS vector and copies the PE TLS template. `_tls_ind
 
 ## Imports and thunks
 
-The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The current `_initterm` positive loader serializes 25 functional and 99 fail-fast imports:
+The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The current `strcmp` positive loader serializes 26 functional and 98 fail-fast imports:
 
 ```text
 PE_IMPORT_DESCRIPTORS=10
 PE_IMPORT_SYMBOLS=124
 PE_IMPORT_RESOLVED=124
-PE_IMPORT_FUNCTIONAL=25
-PE_IMPORT_FAILFAST=99
+PE_IMPORT_FUNCTIONAL=26
+PE_IMPORT_FAILFAST=98
 UNRESOLVED_REQUIRED_IMPORTS=0
 ```
 
-Each of the 103 currently unreachable symbols is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The current allocation-startup build adds `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency`, for 21 functional / 103 fail-fast. The CRT opt-in adds `_initialize_onexit_table`, for 22 / 102, and the current SLIST opt-in adds `InitializeSListHead`, for 23 / 101. The historical 18/106, 19/105, and 21/103 counts remain audit evidence.
+Each of the 98 currently unreachable symbols is patched to a guideXOS-owned stub that emits `GXOS_NET10:UNEXPECTED_IMPORT_CALL:<module>!<symbol>` and halts. This is deterministic failure, not a broad Windows compatibility layer. The historical 18 functional targets are the narrowly demonstrated FLS, current identity, pseudo-handle, bounded stack query, and one-thread critical-section operations required by the observed transition path. The current allocation-startup build adds `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency`, for 21 functional / 103 fail-fast. The CRT opt-in adds `_initialize_onexit_table`, for 22 / 102, the SLIST opt-in adds `InitializeSListHead`, for 23 / 101, `_initterm_e` adds one for 24 / 100, `_initterm` adds one for 25 / 99, and the exact `strcmp` route adds one for 26 / 98. The historical 18/106, 19/105, and 21/103 counts remain audit evidence.
 
 ## TLS, unwind, and initialization answers
 
