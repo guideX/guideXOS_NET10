@@ -15,7 +15,7 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
-The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, and the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, `_initterm`, `strcmp`, `strlen`, and `GetEnvironmentVariableW` contracts advance authentic startup. The current deepest boundary is `api-ms-win-crt-string-l1-1-0.dll!_stricmp`; no allocation, GC startup, managed-thread registration, general SLIST operation, or general CRT/C++ initialization is claimed. The first allocation remains unproven. See [the `GetEnvironmentVariableW` bootstrap contract](docs/KERNEL32_GETENVIRONMENTVARIABLEW_BOOTSTRAP.md) for the closed milestone.
+The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, and the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, `_initterm`, `strcmp`, `strlen`, `GetEnvironmentVariableW`, and Microsoft x64 `_stricmp` contracts advance authentic startup. Three fresh positive QEMU runs now stop at the next authentic `KERNEL32.dll!GetSystemInfo` import after 885 checked `_stricmp` calls. No allocation, GC startup, managed-thread registration, general SLIST operation, or general CRT/C++ initialization is claimed. The first allocation remains unproven. See [the `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md) and [the preceding `GetEnvironmentVariableW` bootstrap contract](docs/KERNEL32_GETENVIRONMENTVARIABLEW_BOOTSTRAP.md).
 
 ## Provisional first-image path
 
@@ -48,6 +48,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Windows x64 `_initterm` bootstrap contract](docs/CRT_INITTERM_BOOTSTRAP.md)
 - [Windows x64 `strcmp` bootstrap contract](docs/CRT_STRCMP_BOOTSTRAP.md)
 - [Windows x64 `strlen` bootstrap contract](docs/CRT_STRLEN_BOOTSTRAP.md)
+- [Windows x64 `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 
@@ -95,3 +96,7 @@ The narrow Microsoft x64 `strlen` implementation is complete, host-tested, and r
 ## `GetEnvironmentVariableW` bootstrap evidence status (2026-07-31)
 
 The narrow Microsoft x64 `GetEnvironmentVariableW` implementation is complete, host-tested, and routed only for the exact `KERNEL32.dll!GetEnvironmentVariableW` import. The live NativeAOT path queries `DOTNET_gcServer` once with a non-null 17-character buffer, receives missing-variable result `0`, and observes `ERROR_ENVVAR_NOT_FOUND` (`203`). The value is not parsed; the caller takes its fallback path. Three immutable fresh QEMU runs are recorded under `evidence\generated\getenv-final-20260731-immutable`; the enabled profile is 28 functional / 96 fail-fast / 0 unresolved imports and advances to `api-ms-win-crt-string-l1-1-0.dll!_stricmp`. The disabled control retains the original GetEnvironmentVariableW boundary. This is a narrow lookup contract, not a complete Windows environment subsystem or GC initialization.
+
+## `_stricmp` bootstrap evidence status (2026-07-31)
+
+The narrow Microsoft x64 `_stricmp` implementation is complete, host-tested, and routed only for the exact `api-ms-win-crt-string-l1-1-0.dll!_stricmp` import. The checked route validates image-backed readable operands, bounded null termination, canonical pointers, overflow, and default-C-locale ASCII folding. Three fresh positive QEMU runs complete 885 calls and stop at the next authentic `KERNEL32.dll!GetSystemInfo` import; the disabled route stops at `_stricmp`. No later API is routed.

@@ -314,3 +314,24 @@ The live caller was the NativeAOT GC-configuration helper: preferred direct call
 | `getenv-final-20260731-immutable-run3` | 7100 | 0 | 15500 | `DOTNET_gcServer`, `nSize=17`, non-null buffer | `0` / `203` | 28 / 96 / 0 | count 2, regressions 0 | TLS 0/0; managed 0; allocation context 0; GC heap 0 | `_stricmp` |
 
 The disabled three-run control is `evidence\generated\getenv-disabled-20260731`; it retained 27 / 97 / 0 imports, emitted no GetEnv implementation marker, and stopped at the original GetEnvironmentVariableW boundary. The negative-control bundle `evidence\generated\getenv-negative-controls-20260731-final` passed disabled routing, missing-variable, existing-variable, empty-variable, NULL size-probe, insufficient-buffer, stale-evidence, marker-mutation, duplicate-PID, and artifact-hash-mismatch checks. Host regressions for `strlen`, `strcmp`, `_initterm`, and `_initterm_e` passed. No commit or push occurred.
+
+## Final `_stricmp` evidence closure (2026-07-31)
+
+This pass began with a fresh disposable pre-change QEMU reproduction under `evidence\generated\stricmp-baseline-20260731-v2`. It stopped at the exact `api-ms-win-crt-string-l1-1-0.dll!_stricmp` import with the preceding `GetEnvironmentVariableW("DOTNET_gcServer")` lookup still missing. The baseline was preserved and no reference repository was changed.
+
+The final positive artifact set is `evidence\generated\crt-stricmp-final-20260731-immutable-v4`; the disabled control is `evidence\generated\crt-stricmp-disabled-20260731-v3`. The three positive runs all validate the same immutable source/loader/payload/runtime/OVMF/QEMU/runner/validator snapshot, use unique fresh QEMU PIDs, complete cleanup, and stop at `KERNEL32.dll!GetSystemInfo` immediately after the `_stricmp` summary. Each run records:
+
+| Field | Result |
+| --- | --- |
+| import census | `29` functional / `95` fail-fast / `0` unresolved |
+| `_stricmp` calls | `885` successful / `0` failures |
+| result categories | `2` equal / `566` less / `317` greater |
+| total compared bytes | `0x362A` |
+| longest compared prefix | `0x15` |
+| QPC | count `2`, regressions `0` |
+| runtime state | TLS allocation `0/0`, managed thread `0`, allocation context `0`, GC heap `0`, managed allocations `0` |
+| next boundary | `KERNEL32.dll!GetSystemInfo` |
+
+The host suite and evidence pipeline passed the focused contract vectors, no-external-reference check, disabled-route control, marker mutation, stale evidence ID, duplicate PID, and artifact-hash mutation. No later API was implemented, and no allocation or GC readiness is inferred.
+
+The positive run records are PIDs `25028`, `24284`, and `26960`, each with `2,113,224` serial bytes and exit `0`. The disabled control records PIDs `13764`, `25892`, and `27332`, each with `15,500` serial bytes and exit `0`. Positive execution hashes are: loader `64E46560A00EA3C04F59E1BBC239991262D02AB6F2E486992ADBC1CD3B470DBC`, payload `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`, runtime archive `DBA78CC0C6747E2E0CF51894F1492A70ECD08513151D9473C04048CD7B9D9311`, OVMF code `33090CC07675BA519D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`, QEMU `A930E028F93D0FA47E4D58BDAD2432F7466DC2B6AF0AE376F77EF7A298FFDD02`, runner `03BCDA7D2D835C3CA2F7C724D6D5E206BFA6B6DA10EF6971F0D1DBBF8C70A6D1`, and validator `9F481DEEFFEC827BF7238534F96F5E7CEA68B4D7957FF57836491BAB3E7F84C2`.

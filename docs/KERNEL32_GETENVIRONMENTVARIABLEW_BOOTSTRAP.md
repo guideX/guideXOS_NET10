@@ -113,7 +113,7 @@ The checked core is `src/Gate4Harness/platform_environment.c` with its declarati
 
 The runtime import route is narrower than the host core. `GXOS_ENABLE_GETENV` routes only `KERNEL32.dll!GetEnvironmentVariableW` to a table-free missing-variable function. For the actual NativeAOT call it returns zero, changes last error to 203, does not write the caller's buffer, and emits bounded diagnostics. No process-wide table is installed.
 
-The route does not implement `SetEnvironmentVariable`, `ExpandEnvironmentStrings`, process management, inheritance, registry lookup, user/system environments, PATH handling, allocation, GC, thread registration, scheduler behavior, or any other import. The next `_stricmp` boundary remains fail-fast and was not implemented.
+The route does not implement `SetEnvironmentVariable`, `ExpandEnvironmentStrings`, process management, inheritance, registry lookup, user/system environments, PATH handling, allocation, GC, thread registration, scheduler behavior, or any other import. The subsequent `_stricmp` route is a separate milestone documented in [CRT_STRICMP_BOOTSTRAP.md](CRT_STRICMP_BOOTSTRAP.md); this document does not absorb that contract into the environment API.
 
 ## Gate E: host tests and regressions
 
@@ -215,7 +215,7 @@ PE loader
   -> api-ms-win-crt-string-l1-1-0.dll!_stricmp
 ```
 
-The new deepest startup boundary is `api-ms-win-crt-string-l1-1-0.dll!_stricmp`. It is the next authentic dependency and remains intentionally unimplemented. No later phase is inferred.
+At the close of this environment milestone, the next authentic startup boundary was `api-ms-win-crt-string-l1-1-0.dll!_stricmp`. That separate contract is now closed; its three-run evidence advances to `KERNEL32.dll!GetSystemInfo`. No environment subsystem or later phase is inferred here.
 
 ## Files changed for this milestone
 
@@ -239,3 +239,7 @@ docs/KERNEL32_GETENVIRONMENTVARIABLEW_BOOTSTRAP.md
 ```
 
 No commit or push occurred. This closure makes no claim of a complete Windows environment subsystem or GC initialization.
+
+## Follow-on `_stricmp` boundary (2026-07-31)
+
+The missing-variable result documented here is the first input to the separately scoped `_stricmp` startup milestone. The follow-on observed 73 bounded missing environment queries while comparing static image-backed configuration/name strings; none of the `_stricmp` operands came from an environment value. The environment implementation remained unchanged and no process environment table was introduced. See [CRT_STRICMP_BOOTSTRAP.md](CRT_STRICMP_BOOTSTRAP.md) for the exact route, call-site census, and next `GetSystemInfo` boundary.

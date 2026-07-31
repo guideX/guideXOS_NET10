@@ -7,6 +7,7 @@
 #include "crt_initterm.h"
 #include "crt_strcmp.h"
 #include "crt_strlen.h"
+#include "crt_stricmp.h"
 #include "platform_environment.h"
 #include "platform_slist.h"
 
@@ -263,6 +264,14 @@ static uint64_t g_getenv_last_error_before;
 static uint64_t g_getenv_last_error_after;
 static uint64_t g_getenv_last_caller;
 #endif
+#ifdef GXOS_ENABLE_CRT_STRICMP
+static GXOS_READABLE_IMAGE g_crt_stricmp_image;
+static uint64_t g_crt_stricmp_calls;
+static uint64_t g_crt_stricmp_successes;
+static uint64_t g_crt_stricmp_failures;
+static uint64_t g_crt_stricmp_total_bytes;
+static uint64_t g_crt_stricmp_longest_prefix;
+#endif
 
 static void serial_out8(uint16_t port, uint8_t value)
 {
@@ -493,6 +502,243 @@ static void emit_getenv_summary(void)
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GETENV_LAST_CALLER=0x", g_getenv_last_caller);
     serial_text("\r\n");
+}
+#endif
+
+#ifdef GXOS_ENABLE_CRT_STRICMP
+static int platform_stricmp_is_canonical(uintptr_t address)
+{
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    uint64_t high = (uint64_t)address >> 47;
+    return high == 0 || high == 0x1FFFFU;
+#else
+    (void)address;
+    return 1;
+#endif
+}
+
+static const GXOS_CRT_INITTERM_MEMORY_REGION *platform_stricmp_region(const char *value)
+{
+    uintptr_t address = (uintptr_t)value;
+    uint32_t index;
+
+    for (index = 0; index != g_crt_stricmp_image.memory_region_count; index++) {
+        const GXOS_CRT_INITTERM_MEMORY_REGION *region =
+            &g_crt_stricmp_image.memory_regions[index];
+        if (address >= region->base && address < region->end) return region;
+    }
+    return 0;
+}
+
+static size_t platform_stricmp_bounded_length(const char *value,
+                                              uintptr_t *terminator,
+                                              uint32_t *terminated)
+{
+    uintptr_t base = (uintptr_t)value;
+    size_t length;
+
+    *terminator = 0;
+    *terminated = 0;
+    if (value == 0) return 0;
+    for (length = 0; length != GXOS_CRT_STRICMP_DEFAULT_MAX_SCAN; length++) {
+        uintptr_t current;
+        const GXOS_CRT_INITTERM_MEMORY_REGION *region;
+        if ((uintptr_t)length > UINTPTR_MAX - base) return length;
+        current = base + (uintptr_t)length;
+        if (!platform_stricmp_is_canonical(current)) return length;
+        region = platform_stricmp_region((const char *)(uintptr_t)current);
+        if (region == 0 || region->readable == 0) return length;
+        if (*(const unsigned char *)(uintptr_t)current == 0) {
+            *terminator = current;
+            *terminated = 1;
+            return length;
+        }
+    }
+    return GXOS_CRT_STRICMP_DEFAULT_MAX_SCAN;
+}
+
+static void platform_stricmp_emit_bytes(const char *prefix,
+                                        const char *value,
+                                        size_t length)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    size_t index;
+    size_t preview = length > 64 ? 64 : length;
+
+    serial_text(prefix);
+    for (index = 0; index != preview; index++) {
+        uint8_t byte = (uint8_t)value[index];
+        serial_char((uint8_t)digits[byte >> 4]);
+        serial_char((uint8_t)digits[byte & 0x0F]);
+    }
+    if (preview != length) serial_text("...");
+    serial_text("\r\n");
+}
+
+static void platform_stricmp_emit_text(const char *prefix,
+                                       const char *value,
+                                       size_t length)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    size_t index;
+    size_t preview = length > 64 ? 64 : length;
+
+    serial_text(prefix);
+    serial_char('"');
+    for (index = 0; index != preview; index++) {
+        uint8_t byte = (uint8_t)value[index];
+        if (byte >= 0x20 && byte <= 0x7E && byte != '\\' && byte != '"') {
+            serial_char(byte);
+        } else {
+            serial_text("\\x");
+            serial_char((uint8_t)digits[byte >> 4]);
+            serial_char((uint8_t)digits[byte & 0x0F]);
+        }
+    }
+    if (preview != length) serial_text("...");
+    serial_text("\"\r\n");
+}
+
+static void emit_crt_stricmp_summary(void)
+{
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_CALL_COUNT=0x", g_crt_stricmp_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_SUCCESS_COUNT=0x", g_crt_stricmp_successes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_FAILURE_COUNT=0x", g_crt_stricmp_failures);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_TOTAL_BYTES=0x", g_crt_stricmp_total_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_LONGEST_PREFIX=0x", g_crt_stricmp_longest_prefix);
+    serial_text("\r\n");
+}
+
+static int GXOS_CRT_STRICMP_MS_ABI platform_stricmp(const char *string1,
+                                                    const char *string2)
+{
+    const GXOS_CRT_INITTERM_MEMORY_REGION *region1 = platform_stricmp_region(string1);
+    const GXOS_CRT_INITTERM_MEMORY_REGION *region2 = platform_stricmp_region(string2);
+    GXOS_CRT_STRICMP_REPORT report;
+    GXOS_CRT_STRICMP_STATUS status;
+    uintptr_t terminator1;
+    uintptr_t terminator2;
+    uint32_t terminated1;
+    uint32_t terminated2;
+    size_t length1;
+    size_t length2;
+    uint64_t caller = (uint64_t)(uintptr_t)__builtin_return_address(0);
+    int result = 0;
+    uint64_t call_index = g_crt_stricmp_calls++;
+
+    serial_text("GXOS_NET10:CRT_STRICMP_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_CALL_INDEX=0x", call_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_CALLER=0x", caller);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_RETURN_ADDRESS=0x", caller);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING1_POINTER=0x", (uint64_t)(uintptr_t)string1);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING2_POINTER=0x", (uint64_t)(uintptr_t)string2);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_MAX_SCAN=0x", GXOS_CRT_STRICMP_DEFAULT_MAX_SCAN);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_STRICMP_LOCALE=C_DEFAULT_NO_LOCALE_CHANGE\r\n");
+    serial_text("GXOS_NET10:CRT_STRICMP_STRING1_REGION_IMAGE_BACKED=");
+    serial_text(region1 != 0 && (uintptr_t)string1 >= g_crt_stricmp_image.image_base &&
+                (uintptr_t)string1 < g_crt_stricmp_image.image_end ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:CRT_STRICMP_STRING2_REGION_IMAGE_BACKED=");
+    serial_text(region2 != 0 && (uintptr_t)string2 >= g_crt_stricmp_image.image_base &&
+                (uintptr_t)string2 < g_crt_stricmp_image.image_end ? "1\r\n" : "0\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING1_REGION_BEGIN=0x",
+                     region1 == 0 ? 0 : (uint64_t)region1->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING1_REGION_END=0x",
+                     region1 == 0 ? 0 : (uint64_t)region1->end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING1_REGION_READABLE=0x",
+                     region1 == 0 ? 0 : region1->readable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING1_REGION_EXECUTABLE=0x",
+                     region1 == 0 ? 0 : region1->executable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING1_REGION_WRITABLE=0x",
+                     region1 == 0 ? 0 : region1->writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING2_REGION_BEGIN=0x",
+                     region2 == 0 ? 0 : (uint64_t)region2->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING2_REGION_END=0x",
+                     region2 == 0 ? 0 : (uint64_t)region2->end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING2_REGION_READABLE=0x",
+                     region2 == 0 ? 0 : region2->readable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING2_REGION_EXECUTABLE=0x",
+                     region2 == 0 ? 0 : region2->executable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING2_REGION_WRITABLE=0x",
+                     region2 == 0 ? 0 : region2->writable);
+    serial_text("\r\n");
+
+    status = gxos_crt_stricmp_checked_report(
+        string1, string2, &g_crt_stricmp_image,
+        GXOS_CRT_STRICMP_DEFAULT_MAX_SCAN, &result, &report);
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STATUS=0x", (uint64_t)(uint32_t)status);
+    serial_text("\r\n");
+    if (status != GXOS_CRT_STRICMP_STATUS_OK) {
+        g_crt_stricmp_failures++;
+        serial_text("GXOS_NET10:CRT_STRICMP_INVALID_INPUT\r\n");
+        emit_crt_stricmp_summary();
+        fail("crt-stricmp-invalid");
+    }
+
+    length1 = platform_stricmp_bounded_length(string1, &terminator1, &terminated1);
+    length2 = platform_stricmp_bounded_length(string2, &terminator2, &terminated2);
+    if (terminated1 == 0 || terminated2 == 0) {
+        g_crt_stricmp_failures++;
+        serial_text("GXOS_NET10:CRT_STRICMP_INVALID_INPUT\r\n");
+        emit_crt_stricmp_summary();
+        fail("crt-stricmp-census");
+    }
+    g_crt_stricmp_successes++;
+    if (report.bytes_examined != 0 &&
+        g_crt_stricmp_total_bytes <= UINT64_MAX - (uint64_t)report.bytes_examined) {
+        g_crt_stricmp_total_bytes += (uint64_t)report.bytes_examined;
+    } else if (report.bytes_examined != 0) {
+        g_crt_stricmp_total_bytes = UINT64_MAX;
+    }
+    if ((uint64_t)report.compared_prefix > g_crt_stricmp_longest_prefix) {
+        g_crt_stricmp_longest_prefix = (uint64_t)report.compared_prefix;
+    }
+    platform_stricmp_emit_bytes("GXOS_NET10:CRT_STRICMP_STRING1_BYTES=", string1, length1);
+    platform_stricmp_emit_bytes("GXOS_NET10:CRT_STRICMP_STRING2_BYTES=", string2, length2);
+    platform_stricmp_emit_text("GXOS_NET10:CRT_STRICMP_STRING1_PREVIEW=", string1, length1);
+    platform_stricmp_emit_text("GXOS_NET10:CRT_STRICMP_STRING2_PREVIEW=", string2, length2);
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING1_LENGTH=0x", (uint64_t)length1);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING2_LENGTH=0x", (uint64_t)length2);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING1_TERMINATOR=0x", (uint64_t)terminator1);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING2_TERMINATOR=0x", (uint64_t)terminator2);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_BYTES_EXAMINED=0x", (uint64_t)report.bytes_examined);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_COMPARED_PREFIX=0x", (uint64_t)report.compared_prefix);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_STRICMP_RESULT=0x", (uint64_t)(uint32_t)result);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_STRICMP_RESULT_CATEGORY=");
+    serial_text(result < 0 ? "LESS\r\n" : result > 0 ? "GREATER\r\n" : "EQUAL\r\n");
+    serial_text("GXOS_NET10:CRT_STRICMP_CALLER_CONSUMES_SIGN_OR_ZERO=1\r\n");
+    serial_text("GXOS_NET10:CRT_STRICMP_RETURNED\r\n");
+#ifdef GXOS_CRT_STRICMP_MARKER_MUTATION
+    serial_text("GXOS_NET10:CRT_STRICMP_OX\r\n");
+#else
+    serial_text("GXOS_NET10:CRT_STRICMP_OK\r\n");
+#endif
+    return result;
 }
 #endif
 
@@ -1154,6 +1400,9 @@ static void import_failfast(const IMPORT_RECORD *record)
 #ifdef GXOS_ENABLE_GETENV
     emit_getenv_summary();
 #endif
+#ifdef GXOS_ENABLE_CRT_STRICMP
+    emit_crt_stricmp_summary();
+#endif
     emit_qpc_summary();
     halt_forever();
 }
@@ -1771,6 +2020,10 @@ static void *platform_import_target(const char *module, const char *symbol)
         return (void *)(uintptr_t)platform_get_environment_variable_w;
     }
 #endif
+#ifdef GXOS_ENABLE_CRT_STRICMP
+    if (equal_text(module, "api-ms-win-crt-string-l1-1-0.dll") &&
+        equal_text(symbol, "_stricmp")) return (void *)(uintptr_t)platform_stricmp;
+#endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initialize_onexit_table")) return (void *)(uintptr_t)platform_initialize_onexit_table;
@@ -2296,6 +2549,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     g_crt_strlen_image.memory_regions = image.memory_regions;
     serial_text("GXOS_NET10:CRT_STRLEN_VALIDATION_CONTEXT_OK\r\n");
 #endif
+#ifdef GXOS_ENABLE_CRT_STRICMP
+    if (image.actual_base == 0 || image.actual_base > UINTPTR_MAX - (uintptr_t)image.loaded_size ||
+        image.memory_region_count == 0 || image.relocations_applied == 0) {
+        fail("crt-stricmp-context");
+    }
+    g_crt_stricmp_image.image_base = image.actual_base;
+    g_crt_stricmp_image.image_end = image.actual_base + (uintptr_t)image.loaded_size;
+    g_crt_stricmp_image.relocations_applied = image.relocations_applied;
+    g_crt_stricmp_image.memory_region_count = image.memory_region_count;
+    g_crt_stricmp_image.memory_regions = image.memory_regions;
+    serial_text("GXOS_NET10:CRT_STRICMP_VALIDATION_CONTEXT_OK\r\n");
+#endif
 #ifdef GXOS_ENABLE_CRT_INITTERM_E
     if (image.actual_base > UINTPTR_MAX - (uintptr_t)image.loaded_size ||
         image.executable_region_count == 0) {
@@ -2408,6 +2673,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
 #ifdef GXOS_ENABLE_GETENV
         emit_getenv_summary();
+#endif
+#ifdef GXOS_ENABLE_CRT_STRICMP
+        emit_crt_stricmp_summary();
 #endif
         if (nativeaot_result == 0) fail("nativeaot-startup-failed");
     }

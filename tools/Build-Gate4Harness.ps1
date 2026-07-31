@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -62,6 +62,7 @@ $gccArguments = @(
     (Join-Path $root 'src\Gate4Harness\crt_initterm.c'),
     (Join-Path $root 'src\Gate4Harness\crt_strcmp.c'),
     (Join-Path $root 'src\Gate4Harness\crt_strlen.c'),
+    (Join-Path $root 'src\Gate4Harness\crt_stricmp.c'),
     (Join-Path $root 'src\Gate4Harness\platform_environment.c'),
     (Join-Path $root 'src\Gate4Harness\platform_slist.c')
 )
@@ -184,6 +185,36 @@ switch ($Scenario) {
         $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
         $gccArguments += '-DGXOS_ENABLE_GETENV'
         $gccArguments += '-DGXOS_GETENV_MARKER_MUTATION'
+    }
+    'CrtStricmp' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+    }
+    'CrtStricmpDisabled' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+    }
+    'CrtStricmpMarkerMutation' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_CRT_STRICMP_MARKER_MUTATION'
     }
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
