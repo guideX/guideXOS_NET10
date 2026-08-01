@@ -69,3 +69,7 @@ The next authentic dependency is `GetProcessGroupAffinity`. The first-allocation
 ## `GetProcessGroupAffinity` evidence-closure result (2026-08-01)
 
 The exact current-path contract is closed under [KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md](KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md). The caller makes one `GroupCount=0`/`GroupArray=NULL` capacity probe, receives required count `1` with `ERROR_INSUFFICIENT_BUFFER`, consumes the count, and does not retry. The next authentic dependency is `KERNEL32.dll!GetProcessAffinityMask`; it is intentionally not implemented here. Do not infer process-affinity, processor-group topology, NUMA allocation, thread scheduling, heap initialization, or GC readiness from this probe.
+
+## `GetProcessAffinityMask` evidence-closure result (2026-08-01)
+
+The exact Microsoft x64 process-affinity contract is closed under [KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md](KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md). The current-process pseudo-handle returns the one initialized bootstrap processor as both process and system mask `0x1`. The two callers consume only the process mask: one updates a bitmap, and one performs a manual population count before `QueryInformationJobObject`. The final QEMU evidence preserves zero GC/allocation state. The next authentic dependency is `KERNEL32.dll!QueryInformationJobObject`; no other affinity or topology API was implemented.

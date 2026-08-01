@@ -106,3 +106,7 @@ The next authentic dependency is `KERNEL32.dll!GetProcessGroupAffinity`, not ano
 ## Follow-on `GetProcessGroupAffinity` (2026-08-01)
 
 The one-domain successful zero result reaches the exact process-group capacity probe documented in [KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md](KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md). That follow-on returns required count `1` for zero capacity and the caller takes its required-count branch without retry or group-array consumption. This NUMA closure remains unchanged; `GetProcessAffinityMask` is the next boundary after the process-group contract.
+
+## Follow-on process affinity (2026-08-01)
+
+The process-group closure is followed by the separately scoped [`GetProcessAffinityMask`](KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md) contract. It reuses the same one-processor facts and returns process/system masks `0x1`/`0x1`; this does not change the NUMA result, add topology discovery, or establish allocation/GC readiness. The next boundary after the two affinity callers is `KERNEL32.dll!QueryInformationJobObject`.

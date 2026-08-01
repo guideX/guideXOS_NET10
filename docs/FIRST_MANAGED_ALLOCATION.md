@@ -29,3 +29,7 @@ The current allocation blocker remains heap ownership and initialization of a re
 ## Process-group capacity probe (2026-08-01)
 
 The exact `KERNEL32.dll!GetProcessGroupAffinity` call is now closed for the current startup path. It is a one-call capacity probe after the one-domain NUMA fallback: current-process pseudo-handle, zero `USHORT` capacity, and null group array. The checked result publishes required count `1` and returns `ERROR_INSUFFICIENT_BUFFER`; the caller reads that count, performs no retry, and does not read group storage. This proves no allocation or GC transition. The next authentic dependency is `KERNEL32.dll!GetProcessAffinityMask`, which remains outside this milestone. See [KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md](KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md).
+
+## `GetProcessAffinityMask` evidence-closure result (2026-08-01)
+
+The exact `GetProcessAffinityMask` contract now completes the next NativeAOT startup dependency, but it does not advance first allocation. Both live calls return process/system masks `0x1`/`0x1`; the bitmap caller updates a processor bitmap, and the processor-count caller derives a one-bit population count before reaching `QueryInformationJobObject`. Final summaries still report zero allocation context, zero managed-thread registration, zero GC heap usability, and zero managed allocations.

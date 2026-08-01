@@ -13,6 +13,7 @@
 #include "platform_system_info.h"
 #include "platform_numa.h"
 #include "platform_process_group_affinity.h"
+#include "platform_process_affinity.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -334,6 +335,28 @@ static GXOS_PROCESS_GROUP_AFFINITY_BOOL EFIAPI
 platform_get_process_group_affinity(void *process_handle,
                                     GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_count,
                                     GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_array);
+#endif
+#ifdef GXOS_ENABLE_PROCESS_AFFINITY
+static GXOS_PROCESS_AFFINITY_FACTS g_process_affinity_facts;
+static uint64_t g_process_affinity_calls;
+static uint64_t g_process_affinity_successes;
+static uint64_t g_process_affinity_failures;
+static uint64_t g_process_affinity_last_handle;
+static uint64_t g_process_affinity_last_process_pointer;
+static uint64_t g_process_affinity_last_system_pointer;
+static uint64_t g_process_affinity_last_process_before;
+static uint64_t g_process_affinity_last_system_before;
+static uint64_t g_process_affinity_last_process_after;
+static uint64_t g_process_affinity_last_system_after;
+static uint64_t g_process_affinity_last_error_before;
+static uint64_t g_process_affinity_last_error_after;
+static GXOS_PROCESS_AFFINITY_BOOL g_process_affinity_last_boolean;
+static GXOS_PROCESS_AFFINITY_STATUS g_process_affinity_last_status;
+static GXOS_PROCESS_AFFINITY_REPORT g_process_affinity_last_report;
+static GXOS_PROCESS_AFFINITY_BOOL EFIAPI platform_get_process_affinity_mask(
+    void *process_handle,
+    GXOS_PROCESS_AFFINITY_DWORD_PTR *process_affinity_mask,
+    GXOS_PROCESS_AFFINITY_DWORD_PTR *system_affinity_mask);
 #endif
 
 static void serial_out8(uint16_t port, uint8_t value)
@@ -1571,6 +1594,16 @@ static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t origin
         serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_NEXT_BOUNDARY=KERNEL32.dll!GetProcessAffinityMask\r\n");
     }
 #endif
+#ifdef GXOS_ENABLE_PROCESS_AFFINITY
+    if (g_process_affinity_calls != 0) {
+        serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_CONSUMPTION_COMPLETE\r\n");
+        serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_NEXT_BOUNDARY=");
+        serial_text(record->module);
+        serial_text("!");
+        serial_text(record->symbol);
+        serial_text("\r\n");
+    }
+#endif
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
@@ -2246,6 +2279,12 @@ static void *platform_import_target(const char *module, const char *symbol)
         return (void *)(uintptr_t)platform_get_process_group_affinity;
     }
 #endif
+#ifdef GXOS_ENABLE_PROCESS_AFFINITY
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetProcessAffinityMask")) {
+        return (void *)(uintptr_t)platform_get_process_affinity_mask;
+    }
+#endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initialize_onexit_table")) return (void *)(uintptr_t)platform_initialize_onexit_table;
@@ -2581,6 +2620,29 @@ static void configure_platform_system_info(const PE_IMAGE *image)
         GXOS_PROCESS_GROUP_AFFINITY_FACT_SNAPSHOT;
     serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_FACTS_SOURCE=GETSYSTEMINFO_SNAPSHOT\r\n");
     serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_FACTS_POLICY=SINGLE_GROUP_ZERO\r\n");
+#endif
+#ifdef GXOS_ENABLE_PROCESS_AFFINITY
+    /* Affinity reuses the same immutable one-processor and one-group snapshot. */
+    g_process_affinity_facts.supported_process_handle =
+        GXOS_PROCESS_AFFINITY_CURRENT_PROCESS;
+    g_process_affinity_facts.process_affinity_mask =
+        g_system_info_facts.active_processor_mask;
+    g_process_affinity_facts.system_affinity_mask =
+        g_system_info_facts.active_processor_mask;
+    g_process_affinity_facts.usable_processor_mask =
+        g_system_info_facts.active_processor_mask;
+    g_process_affinity_facts.usable_processor_count =
+        g_system_info_facts.number_of_processors;
+    g_process_affinity_facts.system_info_processor_count =
+        g_system_info_facts.number_of_processors;
+    g_process_affinity_facts.system_info_active_processor_mask =
+        g_system_info_facts.active_processor_mask;
+    g_process_affinity_facts.processor_group_count = 1;
+    g_process_affinity_facts.current_group_number = 0;
+    g_process_affinity_facts.topology_policy =
+        GXOS_PROCESS_AFFINITY_TOPOLOGY_FACT_SNAPSHOT;
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_FACTS_SOURCE=GETSYSTEMINFO_AND_PROCESSGROUP_SNAPSHOT\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_FACTS_POLICY=SINGLE_GROUP_ZERO_BOOTSTRAP_PROCESSOR\r\n");
 #endif
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_SOURCE=UEFI_PAGE_AND_LOADED_IMAGE\r\n");
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_POLICY=IMAGE_BACKED_RANGE_SINGLE_BOOTSTRAP_PROCESSOR\r\n");
@@ -3067,6 +3129,350 @@ platform_get_process_group_affinity(
     }
 #endif
     return g_process_group_last_boolean;
+}
+#endif
+
+#ifdef GXOS_ENABLE_PROCESS_AFFINITY
+static const char *process_affinity_status_name(
+    GXOS_PROCESS_AFFINITY_STATUS status)
+{
+    switch (status) {
+    case GXOS_PROCESS_AFFINITY_STATUS_OK: return "OK";
+    case GXOS_PROCESS_AFFINITY_STATUS_INVALID_PROCESS_HANDLE: return "INVALID_PROCESS_HANDLE";
+    case GXOS_PROCESS_AFFINITY_STATUS_NULL_PROCESS_MASK: return "NULL_PROCESS_MASK";
+    case GXOS_PROCESS_AFFINITY_STATUS_NULL_SYSTEM_MASK: return "NULL_SYSTEM_MASK";
+    case GXOS_PROCESS_AFFINITY_STATUS_NONCANONICAL_PROCESS_MASK: return "NONCANONICAL_PROCESS_MASK";
+    case GXOS_PROCESS_AFFINITY_STATUS_NONCANONICAL_SYSTEM_MASK: return "NONCANONICAL_SYSTEM_MASK";
+    case GXOS_PROCESS_AFFINITY_STATUS_UNWRITABLE_PROCESS_MASK: return "UNWRITABLE_PROCESS_MASK";
+    case GXOS_PROCESS_AFFINITY_STATUS_UNWRITABLE_SYSTEM_MASK: return "UNWRITABLE_SYSTEM_MASK";
+    case GXOS_PROCESS_AFFINITY_STATUS_RANGE_OVERFLOW: return "RANGE_OVERFLOW";
+    case GXOS_PROCESS_AFFINITY_STATUS_ZERO_PROCESS_MASK: return "ZERO_PROCESS_MASK";
+    case GXOS_PROCESS_AFFINITY_STATUS_ZERO_SYSTEM_MASK: return "ZERO_SYSTEM_MASK";
+    case GXOS_PROCESS_AFFINITY_STATUS_PROCESS_NOT_SUBSET: return "PROCESS_NOT_SUBSET";
+    case GXOS_PROCESS_AFFINITY_STATUS_PROCESSOR_COUNT_MISMATCH: return "PROCESSOR_COUNT_MISMATCH";
+    case GXOS_PROCESS_AFFINITY_STATUS_GROUP_POLICY_MISMATCH: return "GROUP_POLICY_MISMATCH";
+    case GXOS_PROCESS_AFFINITY_STATUS_SYSTEM_SNAPSHOT_MISMATCH: return "SYSTEM_SNAPSHOT_MISMATCH";
+    case GXOS_PROCESS_AFFINITY_STATUS_UNSUPPORTED_TOPOLOGY: return "UNSUPPORTED_TOPOLOGY";
+    case GXOS_PROCESS_AFFINITY_STATUS_ALIASED_OUTPUTS: return "ALIASED_OUTPUTS";
+    case GXOS_PROCESS_AFFINITY_STATUS_INVALID_MEMORY_CONTEXT: return "INVALID_MEMORY_CONTEXT";
+    default: return "UNKNOWN";
+    }
+}
+
+static uint32_t process_affinity_status_last_error(
+    GXOS_PROCESS_AFFINITY_STATUS status)
+{
+    if (status == GXOS_PROCESS_AFFINITY_STATUS_INVALID_PROCESS_HANDLE) {
+        return GXOS_PROCESS_AFFINITY_ERROR_INVALID_HANDLE;
+    }
+    if (status == GXOS_PROCESS_AFFINITY_STATUS_UNSUPPORTED_TOPOLOGY) {
+        return GXOS_PROCESS_AFFINITY_ERROR_NOT_SUPPORTED;
+    }
+    return GXOS_PROCESS_AFFINITY_ERROR_INVALID_PARAMETER;
+}
+
+static uint32_t process_affinity_population(uint64_t value)
+{
+    uint32_t count = 0;
+    while (value != 0) {
+        value &= value - 1U;
+        count++;
+    }
+    return count;
+}
+
+static const GXOS_SYSTEM_INFO_MEMORY_REGION *process_affinity_region(
+    uintptr_t address, uint64_t *writable_range, uint32_t *range_valid)
+{
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *region =
+        platform_system_info_region(address);
+    *writable_range = 0;
+    *range_valid = 0;
+    if (region != 0 && region->writable != 0 &&
+        address <= UINTPTR_MAX - sizeof(uint64_t) &&
+        address + sizeof(uint64_t) <= region->end) {
+        *writable_range = (uint64_t)(region->end - address);
+        *range_valid = 1;
+    }
+    return region;
+}
+
+static uint32_t process_affinity_safe_read(
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *region, uintptr_t address,
+    uint64_t *value)
+{
+    if (region == 0 || region->readable == 0 || value == 0 ||
+        address > UINTPTR_MAX - sizeof(uint64_t) ||
+        address + sizeof(uint64_t) > region->end) return 0;
+    *value = *(const uint64_t *)(uintptr_t)address;
+    return 1;
+}
+
+static GXOS_PROCESS_AFFINITY_BOOL EFIAPI platform_get_process_affinity_mask(
+    void *process_handle,
+    GXOS_PROCESS_AFFINITY_DWORD_PTR *process_affinity_mask,
+    GXOS_PROCESS_AFFINITY_DWORD_PTR *system_affinity_mask)
+{
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = return_address >= 6 ? return_address - 6 : 0;
+    uint64_t static_call_site = call_site >= (uintptr_t)g_managed_image_base
+                                    ? 0x180000000ULL +
+                                          (uint64_t)(call_site - (uintptr_t)g_managed_image_base)
+                                    : 0;
+    uint32_t bitmap_caller = static_call_site == 0x180043793ULL;
+    uint32_t processor_count_caller = static_call_site == 0x18003CC55ULL;
+    uintptr_t process_address = (uintptr_t)process_affinity_mask;
+    uintptr_t system_address = (uintptr_t)system_affinity_mask;
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *process_region;
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *system_region;
+    uint64_t process_range;
+    uint64_t system_range;
+    uint32_t process_range_valid;
+    uint32_t system_range_valid;
+    uint32_t process_before_valid;
+    uint32_t system_before_valid;
+    uint32_t process_after_valid;
+    uint32_t system_after_valid;
+    uint64_t process_before = 0;
+    uint64_t system_before = 0;
+    uint64_t process_after = 0;
+    uint64_t system_after = 0;
+    GXOS_PROCESS_AFFINITY_REPORT report;
+    GXOS_PROCESS_AFFINITY_STATUS status;
+    GXOS_PROCESS_AFFINITY_BOOL result;
+    uint64_t last_error_before = g_platform_last_error;
+
+    g_process_affinity_calls++;
+    process_region = process_affinity_region(process_address, &process_range,
+                                             &process_range_valid);
+    system_region = process_affinity_region(system_address, &system_range,
+                                            &system_range_valid);
+    process_before_valid = process_affinity_safe_read(
+        process_region, process_address, &process_before);
+    system_before_valid = process_affinity_safe_read(
+        system_region, system_address, &system_before);
+#ifdef GXOS_PROCESS_AFFINITY_FORCE_FAILURE
+    status = GXOS_PROCESS_AFFINITY_STATUS_INVALID_PROCESS_HANDLE;
+    gxos_get_process_affinity_mask_checked(
+        (GXOS_PROCESS_AFFINITY_HANDLE)0, 0, 0, 0, 0, &report);
+#else
+    status = gxos_get_process_affinity_mask_checked(
+        (GXOS_PROCESS_AFFINITY_HANDLE)(uintptr_t)process_handle,
+        process_affinity_mask, system_affinity_mask,
+        &g_process_affinity_facts, &g_system_info_memory, &report);
+#endif
+    if (status == GXOS_PROCESS_AFFINITY_STATUS_OK) {
+        result = GXOS_PROCESS_AFFINITY_TRUE;
+        g_process_affinity_successes++;
+    } else {
+        result = GXOS_PROCESS_AFFINITY_FALSE;
+        g_platform_last_error = process_affinity_status_last_error(status);
+        g_process_affinity_failures++;
+    }
+    process_after_valid = process_affinity_safe_read(
+        process_region, process_address, &process_after);
+    system_after_valid = process_affinity_safe_read(
+        system_region, system_address, &system_after);
+    g_process_affinity_last_handle = (uint64_t)(uintptr_t)process_handle;
+    g_process_affinity_last_process_pointer = process_address;
+    g_process_affinity_last_system_pointer = system_address;
+    g_process_affinity_last_process_before = process_before;
+    g_process_affinity_last_system_before = system_before;
+    g_process_affinity_last_process_after = process_after;
+    g_process_affinity_last_system_after = system_after;
+    g_process_affinity_last_error_before = last_error_before;
+    g_process_affinity_last_error_after = g_platform_last_error;
+    g_process_affinity_last_boolean = result;
+    g_process_affinity_last_status = status;
+    g_process_affinity_last_report = report;
+
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_CALL_INDEX=0x",
+                     g_process_affinity_calls - 1U);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_IMPORT_MODULE=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_IMPORT_SYMBOL=GetProcessAffinityMask\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_IMPORT_DESCRIPTOR_INDEX=0x2\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_IAT_RVA=0x7d208\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_PREFERRED_IAT=0x000000018007d208\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_RUNTIME_IAT=0x",
+                     g_managed_image_base + 0x7d208U);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_STATIC_CALL_SITE=0x",
+                     static_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_RETURN_ADDRESS=0x", return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_START=0x",
+                     bitmap_caller ? g_managed_image_base + 0x43650U :
+                         processor_count_caller ? g_managed_image_base + 0x3CBE0U : 0);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER=");
+    serial_text(bitmap_caller ? "NativeAOT_processor_bitmap_setup\r\n" :
+                    processor_count_caller ? "NativeAOT_processor_count_setup\r\n" :
+                        "NativeAOT_unclassified_affinity_call\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_RCX_HANDLE=0x",
+                     (uint64_t)(uintptr_t)process_handle);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_HANDLE_CLASS=");
+    serial_text((uintptr_t)process_handle == GXOS_PROCESS_AFFINITY_CURRENT_PROCESS
+                    ? "CURRENT_PROCESS_PSEUDO\r\n" : "OTHER\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_HANDLE_ORIGIN=GetCurrentProcess\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_RDX_PROCESS_OUTPUT=0x",
+                     process_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_R8_SYSTEM_OUTPUT=0x",
+                     system_address);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_POINTER_NULL=");
+    serial_text(process_affinity_mask == 0 ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_POINTER_NULL=");
+    serial_text(system_affinity_mask == 0 ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_OUTPUTS_ALIAS=");
+    serial_text(process_affinity_mask != 0 && process_affinity_mask == system_affinity_mask
+                    ? "1\r\n" : "0\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_POINTER_ALIGNMENT=0x",
+                     process_address & 7U);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_POINTER_ALIGNMENT=0x",
+                     system_address & 7U);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_REGION_BASE=0x",
+                     process_region == 0 ? 0 : process_region->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_REGION_END=0x",
+                     process_region == 0 ? 0 : process_region->end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_WRITABLE_RANGE=0x",
+                     process_range);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_REGION_BASE=0x",
+                     system_region == 0 ? 0 : system_region->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_REGION_END=0x",
+                     system_region == 0 ? 0 : system_region->end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_WRITABLE_RANGE=0x",
+                     system_range);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_OUTPUT_WIDTH=0x8\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_BEFORE=0x", process_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_BEFORE=0x", system_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_AFTER=0x", process_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_AFTER=0x", system_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_MASK=0x",
+                     g_process_affinity_facts.process_affinity_mask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_MASK=0x",
+                     g_process_affinity_facts.system_affinity_mask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_USABLE_MASK=0x",
+                     g_process_affinity_facts.usable_processor_mask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_USABLE_PROCESSOR_COUNT=0x",
+                     g_process_affinity_facts.usable_processor_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_POPCOUNT=0x",
+                     process_affinity_population(g_process_affinity_facts.process_affinity_mask));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_POPCOUNT=0x",
+                     process_affinity_population(g_process_affinity_facts.system_affinity_mask));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_STATUS=0x", (uint32_t)status);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_STATUS_NAME=");
+    serial_text(process_affinity_status_name(status));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_BOOLEAN_RESULT=0x", (uint32_t)result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_LAST_ERROR_BEFORE=0x",
+                     last_error_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_LAST_ERROR_AFTER=0x",
+                     g_platform_last_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_POINTER_CANONICAL=0x",
+                     report.process_pointer_canonical);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_POINTER_WRITABLE=0x",
+                     report.process_pointer_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_RANGE_VALID=0x",
+                     report.process_range_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_POINTER_CANONICAL=0x",
+                     report.system_pointer_canonical);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_POINTER_WRITABLE=0x",
+                     report.system_pointer_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_RANGE_VALID=0x",
+                     report.system_range_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_WRITTEN=0x",
+                     report.process_written);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_WRITTEN=0x",
+                     report.system_written);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_BRANCH=");
+    serial_text(result == GXOS_PROCESS_AFFINITY_TRUE
+                    ? "SUCCESS_PROCESS_MASK_READ_SYSTEM_MASK_NOT_READ\r\n"
+                    : "FAILURE_AFFINITY_FALLBACK\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_PROCESS_MASK_READ=0x",
+                     result == GXOS_PROCESS_AFFINITY_TRUE ? 1 : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_SYSTEM_MASK_READ=0x", 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_PROCESS_READ_WIDTH=0x",
+                     result == GXOS_PROCESS_AFFINITY_TRUE ? 8 : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_SYSTEM_READ_WIDTH=0x", 0);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_MASKS_INTERSECTED=0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_PROCESS_AND_SYSTEM=0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_BITS_COUNTED=");
+    serial_text(result == GXOS_PROCESS_AFFINITY_TRUE && processor_count_caller
+                    ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_POPCOUNT_PERFORMED=");
+    serial_text(result == GXOS_PROCESS_AFFINITY_TRUE && processor_count_caller
+                    ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_PROCESSOR_BITMAP_UPDATE=");
+    serial_text(result == GXOS_PROCESS_AFFINITY_TRUE && bitmap_caller ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_SUBSEQUENT_API=");
+    serial_text(processor_count_caller ? "KERNEL32.dll!QueryInformationJobObject\r\n" :
+                    "NONE_BEFORE_RETURN\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_DERIVED_PROCESSOR_COUNT=");
+    if (result != GXOS_PROCESS_AFFINITY_TRUE) {
+        serial_text(processor_count_caller ? "1\r\n" : "NOT_DERIVED\r\n");
+    } else if (processor_count_caller) {
+        serial_field_hex("0x", process_affinity_population(process_after));
+        serial_text("\r\n");
+    } else {
+        serial_text("NOT_DERIVED\r\n");
+    }
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_CALLER_GETLASTERROR=0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_PROCESS_AFTER_READ_VALID=");
+    serial_text(process_after_valid != 0 && process_before_valid != 0 ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_SYSTEM_AFTER_READ_VALID=");
+    serial_text(system_after_valid != 0 && system_before_valid != 0 ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_RETURNED\r\n");
+#ifdef GXOS_PROCESS_AFFINITY_MARKER_MUTATION
+    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_OX\r\n");
+#else
+    if (status == GXOS_PROCESS_AFFINITY_STATUS_OK) {
+        serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_OK\r\n");
+    } else {
+        serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_FAILED\r\n");
+    }
+#endif
+    return result;
 }
 #endif
 

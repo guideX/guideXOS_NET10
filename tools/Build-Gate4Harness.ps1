@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -67,7 +67,8 @@ $gccArguments = @(
     (Join-Path $root 'src\Gate4Harness\platform_slist.c'),
     (Join-Path $root 'src\Gate4Harness\platform_system_info.c'),
     (Join-Path $root 'src\Gate4Harness\platform_numa.c'),
-    (Join-Path $root 'src\Gate4Harness\platform_process_group_affinity.c')
+    (Join-Path $root 'src\Gate4Harness\platform_process_group_affinity.c'),
+    (Join-Path $root 'src\Gate4Harness\platform_process_affinity.c')
 )
 switch ($Scenario) {
     'InvalidBootInfo' { $gccArguments += '-DGXOS_NEGATIVE_INVALID_BOOT_INFO' }
@@ -338,6 +339,63 @@ switch ($Scenario) {
         $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
         $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
         $gccArguments += '-DGXOS_PROCESS_GROUP_AFFINITY_MARKER_MUTATION'
+    }
+    'GetProcessAffinityMask' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+    }
+    'GetProcessAffinityMaskDisabled' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+    }
+    'GetProcessAffinityMaskMarkerMutation' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+        $gccArguments += '-DGXOS_PROCESS_AFFINITY_MARKER_MUTATION'
+    }
+    'GetProcessAffinityMaskFailureExperiment' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+        $gccArguments += '-DGXOS_PROCESS_AFFINITY_FORCE_FAILURE'
     }
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }

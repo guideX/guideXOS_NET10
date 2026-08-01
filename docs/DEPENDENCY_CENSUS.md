@@ -45,6 +45,12 @@ The exact process-group import at IAT RVA `0x7d2a0` changes from fail-fast to on
 
 The final enabled evidence is `evidence\generated\getprocessgroup-final3-20260801-immutable-v4`; all three runs reach `KERNEL32.dll!GetProcessAffinityMask`. See [KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md](KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md).
 
+## `GetProcessAffinityMask` closure (2026-08-01)
+
+The exact `KERNEL32.dll!GetProcessAffinityMask` import is IAT RVA `0x7d208`, preferred IAT `0x18007d208`, and descriptor index `2`. Enabling the narrow route changes the observed census from `32 / 92 / 0` to `33 / 91 / 0` functional/fail-fast/unresolved imports. The route reuses the one-processor `GetSystemInfo` facts and one-group Group-0 facts, returning process/system masks `0x1`/`0x1` only for the current-process pseudo-handle.
+
+Two live calls are proven: preferred `0x180043793` reads only the process mask to update a processor bitmap, and preferred `0x18003cc55` reads only the process mask, manually counts its bits, and then calls `QueryInformationJobObject`. The system-mask output is written and validated but is not read by either caller. The next authentic dependency is `KERNEL32.dll!QueryInformationJobObject`; no other affinity API was aliased.
+
 ## CRT on-exit bootstrap census
 
 The current NativeAOT attach helper at preferred address `0x180077c70` calls `_initialize_onexit_table` twice, with table addresses `0x1800b5e98` and `0x1800b5eb0`. Both calls returned zero in the complete CRT-enabled traces, and both tables ended with equal `first`, `last`, and `end` fields. The next observed import was `KERNEL32.dll!InitializeSListHead`.

@@ -106,3 +106,7 @@ The disabled routing control is `evidence\generated\getprocessgroup-disabled-fin
 ## Boundary and conclusion
 
 This closure stops at `KERNEL32.dll!GetProcessAffinityMask`. No process-affinity mask API, processor-group companion API, NUMA API, allocation, GC heap, thread registration, or general topology support is added or inferred. No commit or push was performed.
+
+## Follow-on `GetProcessAffinityMask` (2026-08-01)
+
+The process-group capacity probe is now followed by the separately scoped [GetProcessAffinityMask bootstrap contract](KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md). That contract reuses this document's one-group/Group-0 snapshot and advances the enabled census to `33 / 91 / 0`. It returns process/system masks `0x1`/`0x1` only for the current-process pseudo-handle; it does not broaden this process-group contract into scheduler topology, affinity mutation, or multi-group support.
