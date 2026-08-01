@@ -51,6 +51,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Windows x64 `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md)
 - [`GetSystemInfo` bootstrap contract](docs/KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md)
 - [`GetNumaHighestNodeNumber` bootstrap contract](docs/KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md)
+- [`GetProcessGroupAffinity` bootstrap contract](docs/KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 
@@ -110,3 +111,9 @@ The narrow Microsoft x64 `KERNEL32.dll!GetSystemInfo` contract is complete, host
 ## `GetNumaHighestNodeNumber` evidence status (2026-08-01)
 
 The narrow Microsoft x64 `KERNEL32.dll!GetNumaHighestNodeNumber` contract is complete and routed only for that exact import pair. The checked four-byte `ULONG` output contract publishes highest node `0` from the explicit one-processor/one-locality-domain `GetSystemInfo` snapshot, preserves the output on rejected inputs, and does not claim general NUMA, SMP, node-targeted allocation, scheduler locality, or GC support. Three immutable positive QEMU runs are recorded under `evidence\generated\getnumahighest-final-20260801-immutable-v2`; each reaches the next authentic `KERNEL32.dll!GetProcessGroupAffinity` boundary. See [KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md](docs/KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md).
+
+## `GetProcessGroupAffinity` evidence status (2026-08-01)
+
+The narrow Microsoft x64 `KERNEL32.dll!GetProcessGroupAffinity` contract is complete and routed only for that exact import pair. The observed caller performs one capacity probe with the current-process pseudo-handle, `GroupCount=0`, and `GroupArray=NULL`; the checked route returns `FALSE`, publishes required count `1`, sets `ERROR_INSUFFICIENT_BUFFER` (`122`), and the caller consumes the count without retrying or reading a group array. Three fresh immutable QEMU runs are recorded under `evidence\generated\getprocessgroup-final3-20260801-immutable-v4` and advance to the next authentic `KERNEL32.dll!GetProcessAffinityMask` boundary. The disabled control retains the original process-group boundary. See [KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md](docs/KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md).
+
+This pass does not implement `GetProcessAffinityMask`, other processor-group APIs, NUMA/topology discovery, allocation, or GC behavior. The first-allocation blocker is unchanged.

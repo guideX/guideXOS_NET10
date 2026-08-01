@@ -71,3 +71,7 @@ The `GetSystemInfo` consumer census is now followed by the separate exact [`GetN
 The current `GetSystemInfo` snapshot is intentionally sufficient only for a one-domain policy: processor count `1`, active mask `1`, domain count `1`, highest node `0`, and no node-targeted allocation support. A successful zero output therefore selects the caller's non-NUMA fallback. A nonzero output would be converted by the caller to `highest + 1` for its node-table setup; this is not a claim about general Windows node contiguity.
 
 The new wrapper records the exact output range and last-error behavior while preserving the `GetSystemInfo` field-consumption marker. Positive QEMU runs advance to `KERNEL32.dll!GetProcessGroupAffinity`; the disabled route retains the original NUMA fail-fast boundary. This follow-on does not broaden the `GetSystemInfo` contract into processor-topology discovery, NUMA allocation, SMP support, or GC readiness.
+
+## Follow-on process-group consumer (2026-08-01)
+
+The same one-processor snapshot is reused by the separately scoped [`GetProcessGroupAffinity`](KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md) contract. The process-group caller passes a zero-capacity `USHORT` and null array, so the snapshot's one group produces `ERROR_INSUFFICIENT_BUFFER` and required count `1`. No additional `SYSTEM_INFO` fields, processor-topology APIs, or allocation state are inferred from that reuse.

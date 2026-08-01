@@ -12,6 +12,7 @@
 #include "platform_slist.h"
 #include "platform_system_info.h"
 #include "platform_numa.h"
+#include "platform_process_group_affinity.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -273,6 +274,15 @@ static uint64_t g_crt_stricmp_successes;
 static uint64_t g_crt_stricmp_failures;
 static uint64_t g_crt_stricmp_total_bytes;
 static uint64_t g_crt_stricmp_longest_prefix;
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+#define GXOS_CRT_STRICMP_MAX_CENSUS_PAIRS 1024U
+static uint64_t g_crt_stricmp_census_hash = 0xCBF29CE484222325ULL;
+static uint64_t g_crt_stricmp_unique_operand_pairs;
+static uint64_t g_crt_stricmp_verbose_records_suppressed;
+static uintptr_t g_crt_stricmp_pair_lhs[GXOS_CRT_STRICMP_MAX_CENSUS_PAIRS];
+static uintptr_t g_crt_stricmp_pair_rhs[GXOS_CRT_STRICMP_MAX_CENSUS_PAIRS];
+static uint32_t g_crt_stricmp_pair_table_overflow;
+#endif
 #endif
 #ifdef GXOS_ENABLE_SYSTEM_INFO
 static GXOS_SYSTEM_FACTS g_system_info_facts;
@@ -298,6 +308,32 @@ static GXOS_NUMA_BOOL g_numa_last_boolean;
 static uint32_t g_numa_last_output_read;
 static GXOS_NUMA_BOOL EFIAPI platform_get_numa_highest_node_number(
     GXOS_NUMA_ULONG *highest_node_number);
+#endif
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+static GXOS_PROCESS_GROUP_AFFINITY_FACTS g_process_group_facts;
+static uint64_t g_process_group_calls;
+static uint64_t g_process_group_successes;
+static uint64_t g_process_group_insufficient_buffer_calls;
+static uint64_t g_process_group_failures;
+static uint64_t g_process_group_retry_count;
+static uint64_t g_process_group_last_handle;
+static uint64_t g_process_group_last_count_pointer;
+static uint64_t g_process_group_last_array_pointer;
+static uint16_t g_process_group_last_input_capacity;
+static uint16_t g_process_group_last_output_count;
+static uint16_t g_process_group_last_required_count;
+static uint32_t g_process_group_last_groups_written;
+static GXOS_PROCESS_GROUP_AFFINITY_BOOL g_process_group_last_boolean;
+static GXOS_PROCESS_GROUP_AFFINITY_STATUS g_process_group_last_status;
+static uint32_t g_process_group_last_error_before;
+static uint32_t g_process_group_last_error_after;
+static uint32_t g_process_group_last_array_null;
+static uint32_t g_process_group_last_count_read;
+static uint32_t g_process_group_last_count_written;
+static GXOS_PROCESS_GROUP_AFFINITY_BOOL EFIAPI
+platform_get_process_group_affinity(void *process_handle,
+                                    GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_count,
+                                    GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_array);
 #endif
 
 static void serial_out8(uint16_t port, uint8_t value)
@@ -584,6 +620,7 @@ static size_t platform_stricmp_bounded_length(const char *value,
     return GXOS_CRT_STRICMP_DEFAULT_MAX_SCAN;
 }
 
+#ifndef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
 static void platform_stricmp_emit_bytes(const char *prefix,
                                         const char *value,
                                         size_t length)
@@ -625,6 +662,7 @@ static void platform_stricmp_emit_text(const char *prefix,
     if (preview != length) serial_text("...");
     serial_text("\"\r\n");
 }
+#endif
 
 static void emit_crt_stricmp_summary(void)
 {
@@ -638,7 +676,55 @@ static void emit_crt_stricmp_summary(void)
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:CRT_STRICMP_LONGEST_PREFIX=0x", g_crt_stricmp_longest_prefix);
     serial_text("\r\n");
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+    serial_field_hex("GXOS_NET10:PRIOR_STRICMP_CALL_COUNT=0x", g_crt_stricmp_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PRIOR_STRICMP_SUCCESS_COUNT=0x", g_crt_stricmp_successes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PRIOR_STRICMP_FAILURE_COUNT=0x", g_crt_stricmp_failures);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PRIOR_STRICMP_UNIQUE_OPERAND_PAIR_COUNT=0x",
+                     g_crt_stricmp_unique_operand_pairs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PRIOR_STRICMP_CENSUS_HASH=0x",
+                     g_crt_stricmp_census_hash);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PRIOR_VERBOSE_RECORDS_SUPPRESSED=0x",
+                     g_crt_stricmp_verbose_records_suppressed);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PRIOR_STRICMP_PAIR_TABLE_OVERFLOW=0x",
+                     g_crt_stricmp_pair_table_overflow);
+    serial_text("\r\n");
+#endif
 }
+
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+static uint64_t process_group_hash_u64(uint64_t hash, uint64_t value)
+{
+    uint32_t index;
+    for (index = 0; index != 8; index++) {
+        hash ^= (value >> (index * 8U)) & 0xFFU;
+        hash *= 0x100000001B3ULL;
+    }
+    return hash;
+}
+
+static void process_group_track_stricmp_pair(uintptr_t lhs, uintptr_t rhs)
+{
+    uint32_t index;
+    for (index = 0; index != g_crt_stricmp_unique_operand_pairs; index++) {
+        if (g_crt_stricmp_pair_lhs[index] == lhs &&
+            g_crt_stricmp_pair_rhs[index] == rhs) return;
+    }
+    if (g_crt_stricmp_unique_operand_pairs >= GXOS_CRT_STRICMP_MAX_CENSUS_PAIRS) {
+        g_crt_stricmp_pair_table_overflow = 1;
+        return;
+    }
+    g_crt_stricmp_pair_lhs[g_crt_stricmp_unique_operand_pairs] = lhs;
+    g_crt_stricmp_pair_rhs[g_crt_stricmp_unique_operand_pairs] = rhs;
+    g_crt_stricmp_unique_operand_pairs++;
+}
+#endif
 
 static int GXOS_CRT_STRICMP_MS_ABI platform_stricmp(const char *string1,
                                                     const char *string2)
@@ -657,6 +743,12 @@ static int GXOS_CRT_STRICMP_MS_ABI platform_stricmp(const char *string1,
     int result = 0;
     uint64_t call_index = g_crt_stricmp_calls++;
 
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+    (void)region1;
+    (void)region2;
+    (void)caller;
+    g_crt_stricmp_verbose_records_suppressed++;
+#else
     serial_text("GXOS_NET10:CRT_STRICMP_BEGIN\r\n");
     serial_field_hex("GXOS_NET10:CRT_STRICMP_CALL_INDEX=0x", call_index);
     serial_text("\r\n");
@@ -707,6 +799,7 @@ static int GXOS_CRT_STRICMP_MS_ABI platform_stricmp(const char *string1,
     serial_field_hex("GXOS_NET10:CRT_STRICMP_STRING2_REGION_WRITABLE=0x",
                      region2 == 0 ? 0 : region2->writable);
     serial_text("\r\n");
+#endif
 
     status = gxos_crt_stricmp_checked_report(
         string1, string2, &g_crt_stricmp_image,
@@ -738,6 +831,21 @@ static int GXOS_CRT_STRICMP_MS_ABI platform_stricmp(const char *string1,
     if ((uint64_t)report.compared_prefix > g_crt_stricmp_longest_prefix) {
         g_crt_stricmp_longest_prefix = (uint64_t)report.compared_prefix;
     }
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+    process_group_track_stricmp_pair((uintptr_t)string1, (uintptr_t)string2);
+    g_crt_stricmp_census_hash = process_group_hash_u64(
+        g_crt_stricmp_census_hash, call_index);
+    g_crt_stricmp_census_hash = process_group_hash_u64(
+        g_crt_stricmp_census_hash, report.bytes_examined);
+    g_crt_stricmp_census_hash = process_group_hash_u64(
+        g_crt_stricmp_census_hash, report.compared_prefix);
+    g_crt_stricmp_census_hash = process_group_hash_u64(
+        g_crt_stricmp_census_hash, (uint64_t)length1);
+    g_crt_stricmp_census_hash = process_group_hash_u64(
+        g_crt_stricmp_census_hash, (uint64_t)length2);
+    g_crt_stricmp_census_hash = process_group_hash_u64(
+        g_crt_stricmp_census_hash, (uint32_t)result);
+#else
     platform_stricmp_emit_bytes("GXOS_NET10:CRT_STRICMP_STRING1_BYTES=", string1, length1);
     platform_stricmp_emit_bytes("GXOS_NET10:CRT_STRICMP_STRING2_BYTES=", string2, length2);
     platform_stricmp_emit_text("GXOS_NET10:CRT_STRICMP_STRING1_PREVIEW=", string1, length1);
@@ -763,7 +871,8 @@ static int GXOS_CRT_STRICMP_MS_ABI platform_stricmp(const char *string1,
 #ifdef GXOS_CRT_STRICMP_MARKER_MUTATION
     serial_text("GXOS_NET10:CRT_STRICMP_OX\r\n");
 #else
-    serial_text("GXOS_NET10:CRT_STRICMP_OK\r\n");
+        serial_text("GXOS_NET10:CRT_STRICMP_OK\r\n");
+#endif
 #endif
     return result;
 }
@@ -1446,6 +1555,22 @@ static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t origin
         serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_SUBSEQUENT_NUMA_CALL_COUNT=0x0000000000000000\r\n");
     }
 #endif
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+    if (equal_text(record->module, "KERNEL32.dll") &&
+        equal_text(record->symbol, "GetProcessAffinityMask") &&
+        g_process_group_calls != 0) {
+        serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_CALLER_BRANCH=FAILURE_INSUFFICIENT_BUFFER_REQUIRED_COUNT_READ\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_OUTPUT_COUNT_CONSUMED=0x",
+                         g_process_group_last_output_count);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_GROUP_ARRAY_CONSUMED=0\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_RETRY_COUNT=0x",
+                         g_process_group_retry_count);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_SUBSEQUENT_GROUP_API_COUNT=0\r\n");
+        serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_NEXT_BOUNDARY=KERNEL32.dll!GetProcessAffinityMask\r\n");
+    }
+#endif
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
@@ -2115,6 +2240,12 @@ static void *platform_import_target(const char *module, const char *symbol)
         return (void *)(uintptr_t)platform_get_numa_highest_node_number;
     }
 #endif
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetProcessGroupAffinity")) {
+        return (void *)(uintptr_t)platform_get_process_group_affinity;
+    }
+#endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initialize_onexit_table")) return (void *)(uintptr_t)platform_initialize_onexit_table;
@@ -2434,6 +2565,23 @@ static void configure_platform_system_info(const PE_IMAGE *image)
     serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_FACTS_SOURCE=GETSYSTEMINFO_SNAPSHOT\r\n");
     serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_FACTS_POLICY=SINGLE_LOCALITY_DOMAIN\r\n");
 #endif
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+    /* Processor groups reuse the already-published one-bootstrap-processor snapshot. */
+    g_process_group_facts.group_count = 1;
+    g_process_group_facts.group_numbers[0] = 0;
+    g_process_group_facts.usable_processor_count =
+        g_system_info_facts.number_of_processors;
+    g_process_group_facts.active_processor_mask =
+        g_system_info_facts.active_processor_mask;
+    g_process_group_facts.system_info_processor_count =
+        g_system_info_facts.number_of_processors;
+    g_process_group_facts.system_info_active_processor_mask =
+        g_system_info_facts.active_processor_mask;
+    g_process_group_facts.topology_policy =
+        GXOS_PROCESS_GROUP_AFFINITY_FACT_SNAPSHOT;
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_FACTS_SOURCE=GETSYSTEMINFO_SNAPSHOT\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_FACTS_POLICY=SINGLE_GROUP_ZERO\r\n");
+#endif
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_SOURCE=UEFI_PAGE_AND_LOADED_IMAGE\r\n");
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_POLICY=IMAGE_BACKED_RANGE_SINGLE_BOOTSTRAP_PROCESSOR\r\n");
 }
@@ -2671,6 +2819,254 @@ static GXOS_NUMA_BOOL EFIAPI platform_get_numa_highest_node_number(
         serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_FAILED\r\n");
     }
     return g_numa_last_boolean;
+}
+#endif
+
+#ifdef GXOS_ENABLE_PROCESS_GROUP_AFFINITY
+static const char *process_group_status_name(
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS status)
+{
+    switch (status) {
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_OK: return "OK";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_INSUFFICIENT_BUFFER: return "INSUFFICIENT_BUFFER";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_NULL_GROUP_COUNT: return "NULL_GROUP_COUNT";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_NONCANONICAL_GROUP_COUNT: return "NONCANONICAL_GROUP_COUNT";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_UNREADABLE_GROUP_COUNT: return "UNREADABLE_GROUP_COUNT";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_UNWRITABLE_GROUP_COUNT: return "UNWRITABLE_GROUP_COUNT";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_NULL_GROUP_ARRAY: return "NULL_GROUP_ARRAY";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_NONCANONICAL_GROUP_ARRAY: return "NONCANONICAL_GROUP_ARRAY";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_UNWRITABLE_GROUP_ARRAY: return "UNWRITABLE_GROUP_ARRAY";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_INVALID_PROCESS_HANDLE: return "INVALID_PROCESS_HANDLE";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_INVALID_TOPOLOGY: return "INVALID_TOPOLOGY";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_COUNT_OVERFLOW: return "COUNT_OVERFLOW";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_RANGE_OVERFLOW: return "RANGE_OVERFLOW";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_UNSUPPORTED_TOPOLOGY: return "UNSUPPORTED_TOPOLOGY";
+    case GXOS_PROCESS_GROUP_AFFINITY_STATUS_INVALID_MEMORY_CONTEXT: return "INVALID_MEMORY_CONTEXT";
+    default: return "UNKNOWN";
+    }
+}
+
+static uint32_t process_group_status_last_error(
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS status)
+{
+    if (status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_INSUFFICIENT_BUFFER) {
+        return GXOS_PROCESS_GROUP_AFFINITY_ERROR_INSUFFICIENT_BUFFER;
+    }
+    if (status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_INVALID_PROCESS_HANDLE) {
+        return GXOS_PROCESS_GROUP_AFFINITY_ERROR_INVALID_HANDLE;
+    }
+    if (status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_UNSUPPORTED_TOPOLOGY) {
+        return GXOS_PROCESS_GROUP_AFFINITY_ERROR_NOT_SUPPORTED;
+    }
+    return GXOS_PROCESS_GROUP_AFFINITY_ERROR_INVALID_PARAMETER;
+}
+
+static GXOS_PROCESS_GROUP_AFFINITY_BOOL EFIAPI
+platform_get_process_group_affinity(
+    void *process_handle,
+    GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_count,
+    GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_array)
+{
+    GXOS_PROCESS_GROUP_AFFINITY_REPORT report;
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS status;
+    uintptr_t count_address = (uintptr_t)group_count;
+    uintptr_t array_address = (uintptr_t)group_array;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = return_address >= 6 ? return_address - 6 : 0;
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *count_region =
+        platform_system_info_region(count_address);
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *array_region =
+        platform_system_info_region(array_address);
+    uintptr_t count_range = count_region != 0 && count_address >= count_region->base
+                                ? count_region->end - count_address
+                                : 0;
+    uint32_t last_error_before = g_platform_last_error;
+    uint32_t last_error_after;
+    uint64_t call_index = g_process_group_calls++;
+    uint16_t input_capacity = 0;
+    uint16_t output_count = 0;
+    uint32_t count_before_read = 0;
+
+    if (count_address != 0 && count_region != 0 && count_range >= sizeof(*group_count) &&
+        count_region->readable != 0 && count_region->writable != 0) {
+        input_capacity = *group_count;
+        count_before_read = 1;
+    }
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_CALL_INDEX=0x", call_index);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_IMPORT_MODULE=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_IMPORT_SYMBOL=GetProcessGroupAffinity\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_IMPORT_DESCRIPTOR_INDEX=0x", 2);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_IAT_RVA=0x", 0x7D2A0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_IAT_PREFERRED_ADDRESS=0x", 0x18007D2A0ULL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_IAT_RUNTIME_ADDRESS=0x",
+                     g_managed_image_base + 0x7D2A0ULL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_STATIC_CALL_SITE=0x", 0x1800436DAULL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_RETURN_ADDRESS=0x", return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_CALLER_FUNCTION_START=0x",
+                     g_managed_image_base + 0x43650ULL);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_CALLER=NativeAOT_PROCESSOR_GROUP_DISCOVERY\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_PROCESS_HANDLE=0x",
+                     (uintptr_t)process_handle);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_HANDLE_CLASS=");
+    serial_text((uintptr_t)process_handle == GXOS_PROCESS_GROUP_AFFINITY_CURRENT_PROCESS
+                    ? "CURRENT_PROCESS_PSEUDO_HANDLE\r\n"
+                    : "UNSUPPORTED_HANDLE\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_HANDLE_ORIGIN=KERNEL32.dll!GetCurrentProcess\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_COUNT_POINTER=0x", count_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_ARRAY_POINTER=0x", array_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_COUNT_ALIGNMENT=0x",
+                     count_address & (sizeof(*group_count) - 1U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_ARRAY_ALIGNMENT=0x",
+                     array_address & (sizeof(*group_array) - 1U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_COUNT_REGION_BASE=0x",
+                     count_region == 0 ? 0 : count_region->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_COUNT_REGION_END=0x",
+                     count_region == 0 ? 0 : count_region->end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_COUNT_WRITABLE_RANGE=0x", count_range);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_ARRAY_REGION_BASE=0x",
+                     array_region == 0 ? 0 : array_region->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_ARRAY_REGION_END=0x",
+                     array_region == 0 ? 0 : array_region->end);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_ARRAY_NULL=");
+    serial_text(group_array == 0 ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_COUNT_NULL=");
+    serial_text(group_count == 0 ? "1\r\n" : "0\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_INPUT_CAPACITY=0x", input_capacity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_COUNT_BEFORE=0x",
+                     count_before_read != 0 ? input_capacity : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_REQUIRED_COUNT=0x",
+                     g_process_group_facts.group_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_PROCESSOR_COUNT=0x",
+                     g_process_group_facts.usable_processor_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_ACTIVE_PROCESSOR_MASK=0x",
+                     g_process_group_facts.active_processor_mask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_LAST_ERROR_BEFORE=0x",
+                     last_error_before);
+    serial_text("\r\n");
+    status = gxos_get_process_group_affinity_checked(
+        (uintptr_t)process_handle, group_count, group_array, &g_process_group_facts,
+        &g_system_info_memory, &report);
+    if (status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_INSUFFICIENT_BUFFER) {
+        g_platform_last_error = GXOS_PROCESS_GROUP_AFFINITY_ERROR_INSUFFICIENT_BUFFER;
+        g_process_group_insufficient_buffer_calls++;
+    } else if (status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_OK) {
+        g_process_group_successes++;
+    } else {
+        g_platform_last_error = process_group_status_last_error(status);
+        g_process_group_failures++;
+    }
+    if (report.input_capacity_valid != 0) {
+        output_count = *group_count;
+    }
+    last_error_after = g_platform_last_error;
+    g_process_group_last_handle = (uint64_t)(uintptr_t)process_handle;
+    g_process_group_last_count_pointer = count_address;
+    g_process_group_last_array_pointer = array_address;
+    g_process_group_last_input_capacity = report.input_capacity;
+    g_process_group_last_output_count = output_count;
+    g_process_group_last_required_count = report.required_count;
+    g_process_group_last_groups_written = report.groups_written;
+    g_process_group_last_boolean = status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_OK
+                                       ? GXOS_PROCESS_GROUP_AFFINITY_TRUE
+                                       : GXOS_PROCESS_GROUP_AFFINITY_FALSE;
+    g_process_group_last_status = status;
+    g_process_group_last_error_before = last_error_before;
+    g_process_group_last_error_after = last_error_after;
+    g_process_group_last_array_null = group_array == 0;
+    g_process_group_last_count_read = report.input_capacity_valid;
+    g_process_group_last_count_written =
+        status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_OK ||
+                status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_INSUFFICIENT_BUFFER;
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_COUNT_READABLE=0x",
+                     report.count_pointer_readable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_COUNT_WRITABLE=0x",
+                     report.count_pointer_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_ARRAY_CANONICAL=0x",
+                     report.array_pointer_canonical);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_ARRAY_WRITABLE=0x",
+                     report.array_pointer_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_OUTPUT_COUNT=0x", output_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_GROUPS_WRITTEN=0x",
+                     report.groups_written);
+    serial_text("\r\n");
+    if (g_process_group_facts.group_count != 0) {
+        serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_GROUP_0_POLICY=0x",
+                         g_process_group_facts.group_numbers[0]);
+        serial_text("\r\n");
+    }
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_GROUP_0_WRITTEN=0x",
+                     report.groups_written != 0 ? report.group_numbers[0] : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_GROUP_ARRAY_OUTPUT_VALID=0x",
+                     report.groups_written != 0 ? 1 : 0);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_STATUS_NAME=");
+    serial_text(process_group_status_name(status));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_BOOLEAN_RESULT=0x",
+                     (uint32_t)g_process_group_last_boolean);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_LAST_ERROR_AFTER=0x",
+                     last_error_after);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_CALLER_BRANCH=");
+    serial_text(status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_INSUFFICIENT_BUFFER
+                    ? "FAILURE_INSUFFICIENT_BUFFER_REQUIRED_COUNT_READ\r\n"
+                    : status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_OK
+                          ? "SUCCESS_GROUP_ARRAY_PUBLISHED\r\n"
+                          : "FAILURE_OTHER\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_RETRY=0x",
+                     g_process_group_retry_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_OUTPUT_COUNT_READ_BY_CALLER=0x",
+                     status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_INSUFFICIENT_BUFFER ? 1 :
+                         status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_OK ? 1 : 0);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_GROUP_ARRAY_READ_BY_CALLER=0\r\n");
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_RETURNED\r\n");
+#ifdef GXOS_PROCESS_GROUP_AFFINITY_MARKER_MUTATION
+    serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_OX\r\n");
+#else
+    if (status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_OK) {
+        serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_OK\r\n");
+    } else if (status == GXOS_PROCESS_GROUP_AFFINITY_STATUS_INSUFFICIENT_BUFFER) {
+        serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_INSUFFICIENT_BUFFER_OK\r\n");
+    } else {
+        serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_FAILED\r\n");
+    }
+#endif
+    return g_process_group_last_boolean;
 }
 #endif
 

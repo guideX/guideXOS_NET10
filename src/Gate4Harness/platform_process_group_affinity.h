@@ -1,0 +1,99 @@
+#ifndef GXOS_PLATFORM_PROCESS_GROUP_AFFINITY_H
+#define GXOS_PLATFORM_PROCESS_GROUP_AFFINITY_H
+
+#include <stdint.h>
+
+#include "platform_system_info.h"
+
+#if defined(__x86_64__)
+#define GXOS_PROCESS_GROUP_AFFINITY_MS_ABI __attribute__((ms_abi))
+#else
+#define GXOS_PROCESS_GROUP_AFFINITY_MS_ABI
+#endif
+
+/* Microsoft Win32 widths used by GetProcessGroupAffinity. */
+typedef int32_t GXOS_PROCESS_GROUP_AFFINITY_BOOL;
+typedef uintptr_t GXOS_PROCESS_GROUP_AFFINITY_HANDLE;
+typedef uint16_t GXOS_PROCESS_GROUP_AFFINITY_USHORT;
+
+#define GXOS_PROCESS_GROUP_AFFINITY_TRUE ((GXOS_PROCESS_GROUP_AFFINITY_BOOL)1)
+#define GXOS_PROCESS_GROUP_AFFINITY_FALSE ((GXOS_PROCESS_GROUP_AFFINITY_BOOL)0)
+#define GXOS_PROCESS_GROUP_AFFINITY_CURRENT_PROCESS ((uintptr_t)(intptr_t)-1)
+#define GXOS_PROCESS_GROUP_AFFINITY_MAX_GROUPS 64U
+#define GXOS_PROCESS_GROUP_AFFINITY_FACT_SNAPSHOT ((uint32_t)1U)
+#define GXOS_PROCESS_GROUP_AFFINITY_ERROR_INVALID_HANDLE ((uint32_t)6U)
+#define GXOS_PROCESS_GROUP_AFFINITY_ERROR_INVALID_PARAMETER ((uint32_t)87U)
+#define GXOS_PROCESS_GROUP_AFFINITY_ERROR_INSUFFICIENT_BUFFER ((uint32_t)122U)
+#define GXOS_PROCESS_GROUP_AFFINITY_ERROR_NOT_SUPPORTED ((uint32_t)50U)
+
+typedef struct GXOS_PROCESS_GROUP_AFFINITY_FACTS {
+    uint16_t group_count;
+    uint16_t group_numbers[GXOS_PROCESS_GROUP_AFFINITY_MAX_GROUPS];
+    uint32_t usable_processor_count;
+    uintptr_t active_processor_mask;
+    uint32_t system_info_processor_count;
+    uintptr_t system_info_active_processor_mask;
+    uint32_t topology_policy;
+} GXOS_PROCESS_GROUP_AFFINITY_FACTS;
+
+typedef enum GXOS_PROCESS_GROUP_AFFINITY_STATUS {
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_OK = 0,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_INSUFFICIENT_BUFFER,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_NULL_GROUP_COUNT,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_NONCANONICAL_GROUP_COUNT,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_UNREADABLE_GROUP_COUNT,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_UNWRITABLE_GROUP_COUNT,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_NULL_GROUP_ARRAY,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_NONCANONICAL_GROUP_ARRAY,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_UNWRITABLE_GROUP_ARRAY,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_INVALID_PROCESS_HANDLE,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_INVALID_TOPOLOGY,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_COUNT_OVERFLOW,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_RANGE_OVERFLOW,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_UNSUPPORTED_TOPOLOGY,
+    GXOS_PROCESS_GROUP_AFFINITY_STATUS_INVALID_MEMORY_CONTEXT
+} GXOS_PROCESS_GROUP_AFFINITY_STATUS;
+
+typedef struct GXOS_PROCESS_GROUP_AFFINITY_REPORT {
+    uint32_t count_pointer_canonical;
+    uint32_t count_pointer_readable;
+    uint32_t count_pointer_writable;
+    uint32_t array_pointer_canonical;
+    uint32_t array_pointer_writable;
+    uint32_t input_capacity_valid;
+    uint32_t array_range_valid;
+    uint32_t groups_written;
+    uint16_t input_capacity;
+    uint16_t required_count;
+    uint16_t output_count;
+    uint16_t group_numbers[GXOS_PROCESS_GROUP_AFFINITY_MAX_GROUPS];
+} GXOS_PROCESS_GROUP_AFFINITY_REPORT;
+
+_Static_assert(sizeof(GXOS_PROCESS_GROUP_AFFINITY_BOOL) == 4,
+               "GetProcessGroupAffinity BOOL must remain 32 bits");
+_Static_assert(sizeof(GXOS_PROCESS_GROUP_AFFINITY_HANDLE) == 8,
+               "GetProcessGroupAffinity HANDLE must remain 64 bits on x64");
+_Static_assert(sizeof(GXOS_PROCESS_GROUP_AFFINITY_USHORT) == 2,
+               "GetProcessGroupAffinity USHORT must remain 16 bits");
+_Static_assert(sizeof(uintptr_t) == 8,
+               "GetProcessGroupAffinity requires x64 pointers");
+
+GXOS_PROCESS_GROUP_AFFINITY_STATUS GXOS_PROCESS_GROUP_AFFINITY_MS_ABI
+gxos_get_process_group_affinity_checked(
+    GXOS_PROCESS_GROUP_AFFINITY_HANDLE process_handle,
+    GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_count,
+    GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_array,
+    const GXOS_PROCESS_GROUP_AFFINITY_FACTS *facts,
+    const GXOS_SYSTEM_INFO_MEMORY_CONTEXT *memory,
+    GXOS_PROCESS_GROUP_AFFINITY_REPORT *report);
+
+GXOS_PROCESS_GROUP_AFFINITY_BOOL GXOS_PROCESS_GROUP_AFFINITY_MS_ABI
+gxos_get_process_group_affinity_abi_probe(
+    GXOS_PROCESS_GROUP_AFFINITY_HANDLE process_handle,
+    GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_count,
+    GXOS_PROCESS_GROUP_AFFINITY_USHORT *group_array,
+    const GXOS_PROCESS_GROUP_AFFINITY_FACTS *facts,
+    const GXOS_SYSTEM_INFO_MEMORY_CONTEXT *memory,
+    GXOS_PROCESS_GROUP_AFFINITY_REPORT *report);
+
+#endif

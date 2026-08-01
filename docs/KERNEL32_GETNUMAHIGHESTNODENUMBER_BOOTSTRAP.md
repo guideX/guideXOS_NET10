@@ -102,3 +102,7 @@ The disabled final control is `evidence\generated\getnumahighest-disabled-final-
 The evidence-pipeline suite passed eleven negative controls: marker mutation, truncation, stale run identity, duplicate PID, artifact-hash mismatch, highest-node/count confusion, zero-node confusion, success without an output write, failure with a claimed output write, wrong output width, and unexpected last error. All prior focused host suites and the existing `GetSystemInfo`, `_stricmp`, environment, `strlen`, `strcmp`, `_initterm`, and `_initterm_e` regression suites passed, including no-external-reference checks where provided.
 
 The next authentic dependency is `KERNEL32.dll!GetProcessGroupAffinity`, not another NUMA API. No first allocation, GC heap, managed-thread registration, node-targeted allocation, or general processor-topology support was added or inferred. No commit or push was performed.
+
+## Follow-on `GetProcessGroupAffinity` (2026-08-01)
+
+The one-domain successful zero result reaches the exact process-group capacity probe documented in [KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md](KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md). That follow-on returns required count `1` for zero capacity and the caller takes its required-count branch without retry or group-array consumption. This NUMA closure remains unchanged; `GetProcessAffinityMask` is the next boundary after the process-group contract.

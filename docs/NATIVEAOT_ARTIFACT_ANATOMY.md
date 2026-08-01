@@ -168,3 +168,9 @@ The final opt-in artifact keeps the NativeAOT payload unchanged and adds one exa
 The final relocated wrapper trace is call site `0x54bc7dd`, return `0x54bc7e3`, output `0x7e64c80`, and approved writable region `0x7e64000..0x7f64000`. This is a caller-owned output slot inside the bounded loader memory model. It is not a new PE section, a NativeAOT heap, a Windows process address-space description, or a NUMA node table.
 
 The final import treatment is `31` functional / `93` fail-fast / `0` unresolved. The imported topology companions (`GetLogicalProcessorInformation`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`) remain fail-fast. The artifact therefore records an exact next dependency without changing the broader NativeAOT artifact conclusion: the runtime archive still contains GC, PAL, threading, diagnostics, and topology code whose general contracts are not implemented here.
+
+## `GetProcessGroupAffinity` import anatomy (2026-08-01)
+
+The enabled process-group image changes only `KERNEL32.dll!GetProcessGroupAffinity` from fail-fast to functional. In the unchanged NativeAOT payload its IAT slot is RVA `0x7d2a0` (`0x18007d2a0` preferred); the direct call is `0x1800436da` in the helper beginning at `0x180043650`. The Microsoft x64 argument registers are `RCX=hProcess`, `RDX=GroupCount`, and `R8=GroupArray`; the live return is a 32-bit BOOL in `EAX`. The caller passes `GetCurrentProcess()`'s pseudo-handle, a stack `USHORT` at `rsp+0x60`, and `R8=0`.
+
+The wrapper's relocated final profile is image base `0x547b000`, IAT `0x54f82a0`, call `0x54be6da`, caller start `0x54be650`, and count pointer `0x7e64c80`. It returns the required count for the zero-capacity probe and advances to `GetProcessAffinityMask`; no processor-group companion, process-affinity, NUMA, virtual-memory, allocation, or GC import is made functional by this closure.

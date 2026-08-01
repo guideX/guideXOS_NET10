@@ -39,6 +39,12 @@ For the current time-enabled census, the single exception to that historical gro
 
 The resulting current allocation-startup treatment is 21 functional / 103 fail-fast before the CRT opt-in. The CRT-enabled treatment is 22 functional / 102 fail-fast, the SLIST-enabled treatment is 23 functional / 101 fail-fast, `_initterm_e` is 24 / 100, `_initterm` is 25 / 99, `strcmp` is 26 / 98, and `strlen` is 27 / 97. The historical 18/106 and 19/105 tables remain in earlier evidence to preserve the prior Gate 4 sequence.
 
+## `GetProcessGroupAffinity` closure (2026-08-01)
+
+The exact process-group import at IAT RVA `0x7d2a0` changes from fail-fast to one narrow functional route in the enabled image: `32` functional / `92` fail-fast / `0` unresolved. The disabled control remains `31` / `93` / `0` and stops at the original import. The exact checked route is limited to the current-process pseudo-handle, the one-processor `FACT_SNAPSHOT`/`SINGLE_GROUP_ZERO` facts, and the observed capacity probe. `GetProcessAffinityMask`, `GetLogicalProcessorInformation`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`, and all other processor-group/affinity companions remain fail-fast.
+
+The final enabled evidence is `evidence\generated\getprocessgroup-final3-20260801-immutable-v4`; all three runs reach `KERNEL32.dll!GetProcessAffinityMask`. See [KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md](KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md).
+
 ## CRT on-exit bootstrap census
 
 The current NativeAOT attach helper at preferred address `0x180077c70` calls `_initialize_onexit_table` twice, with table addresses `0x1800b5e98` and `0x1800b5eb0`. Both calls returned zero in the complete CRT-enabled traces, and both tables ended with equal `first`, `last`, and `end` fields. The next observed import was `KERNEL32.dll!InitializeSListHead`.
