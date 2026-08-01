@@ -1,13 +1,13 @@
 # Next-stage blockers
 
-Gate 4 still proves the first no-allocation managed handoff. The allocation follow-on now builds and traces the generated allocation helper, and the verified FILETIME, monotonic performance, minimal CRT on-exit initialization, x64 SLIST-head initialization, error-returning initializer-table contract, void initializer-table contract, narrow `strcmp`, `strlen`, `GetEnvironmentVariableW`, and `_stricmp` contracts advance authentic NativeAOT startup beyond QPC. The next boundary is `KERNEL32.dll!GetSystemInfo`; the loader's 29 functional imports remain bounded platform contracts rather than broad implementation of the following runtime services.
+Gate 4 still proves the first no-allocation managed handoff. The allocation follow-on now builds and traces the generated allocation helper, and the verified FILETIME, monotonic performance, minimal CRT on-exit initialization, x64 SLIST-head initialization, error-returning initializer-table contract, void initializer-table contract, narrow `strcmp`, `strlen`, `GetEnvironmentVariableW`, `_stricmp`, and `GetSystemInfo` contracts advance authentic NativeAOT startup beyond QPC. The next boundary is `KERNEL32.dll!GetNumaHighestNodeNumber`; the loader's 30 functional imports remain bounded platform contracts rather than broad implementation of the following runtime services.
 
 | Feature | Gate 4 boundary | Next blocker / smallest next experiment |
 | --- | --- | --- |
 | First managed allocation | The allocation PE contains `ManagedMain -> AllocateOne -> RhpNewFast`, but the clean pre-startup run sees zero TLS allocation-context slots and returns `-10`; no first-allocation marker is emitted. | Close the standard NativeAOT startup/PAL contract, then run one fixed allocation with explicit heap ownership and object-header/EEType evidence. |
 | Repeated allocation | Gate G is correctly gated because Gate F did not pass. | Stress a bounded allocation loop only after first allocation, roots, write barriers, and collection behavior are proven. |
 | Virtual memory | `VirtualQuery` is functional only for the active loader stack; no GC segment reservation/commit/release contract is implemented. | Define page ownership, protection, reservation/commit, and release semantics for a real UEFI substrate. |
-| GC initialization | `Runtime.WorkstationGC.lib` and its `RhpNewFast` path are physically linked, but the startup now stops at `KERNEL32.dll!GetSystemInfo` after 885 checked `_stricmp` calls; no heap/segments/allocation context are initialized. The observed `DOTNET_gcServer` lookup was absent and was not parsed. | Census only the next authentic `GetSystemInfo` dependency; do not add dummy success shims or infer GC readiness from CRT progress. |
+| GC initialization | `Runtime.WorkstationGC.lib` and its `RhpNewFast` path are physically linked, but the startup now stops at `KERNEL32.dll!GetNumaHighestNodeNumber` after the bounded `GetSystemInfo` route; no heap/segments/allocation context are initialized. The observed `DOTNET_gcServer` lookup was absent and was not parsed. | Census only the next authentic NUMA dependency; do not add dummy success shims or infer GC readiness from the `SYSTEM_INFO` result. |
 | Process-time startup | `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, and `QueryPerformanceFrequency` are functional. The CRT opt-in initializes both empty on-exit tables, and the SLIST opt-in initializes one x64 header. | No longer a blocker for this pass. Preserve the exact time, CRT, and initialization-only SLIST contracts; keep registration/execution and SLIST companions separate. |
 | CRT on-exit lifecycle | `_initialize_onexit_table` is proven for two empty tables; registration, execution, shutdown, and callback ownership were not reached. | Do not implement registration or shutdown until a fresh trace reaches them; treat `_register_onexit_function` and `_execute_onexit_table` as separate contracts. |
 | Error-returning CRT initializers | The actual range is one null `.rdata` entry; `_initterm_e` validates, skips it, returns zero, and reaches the now-closed `_initterm` range. No actual NativeAOT callback was present in this family. | Keep other `.CRT` families separate. Do not generalize these table results into C++ processing or implement initializer entries not present in a traced artifact. |
@@ -28,7 +28,7 @@ The narrow Microsoft x64 `strcmp` contract is closed by [CRT_STRCMP_BOOTSTRAP.md
 
 ## Recommended next milestone
 
-Investigate the exact `KERNEL32.dll!GetSystemInfo` dependency reached after the closed `_stricmp` route, then reassess the first allocation/GC boundary. Capture imports, undefined symbols, TLS, module initializer behavior, and transition-helper changes before writing any additional UEFI platform code.
+Investigate the exact `KERNEL32.dll!GetNumaHighestNodeNumber` dependency reached after the bounded `GetSystemInfo` route, then reassess the first allocation/GC boundary. Capture imports, undefined symbols, TLS, module initializer behavior, and transition-helper changes before writing any additional UEFI platform code.
 
 ## SLIST evidence-closure result (2026-07-29)
 
@@ -51,3 +51,9 @@ The next milestone is the exact `_stricmp` call reached after the absent GC-conf
 ## `_stricmp` evidence-closure result (2026-07-31)
 
 The narrow Microsoft x64 `_stricmp` contract is closed by [CRT_STRICMP_BOOTSTRAP.md](CRT_STRICMP_BOOTSTRAP.md). Three fresh positive QEMU runs completed 885 checked calls with zero failures, preserved zero allocation/GC state, and advanced to `KERNEL32.dll!GetSystemInfo`. The disabled control retained the exact `_stricmp` fail-fast boundary. The next experiment is `GetSystemInfo`; do not infer GC readiness or implement broader PAL services from this CRT closure.
+
+## `GetSystemInfo` evidence-closure result (2026-07-31)
+
+The next experiment is complete. Three immutable positive QEMU runs under `evidence/generated/getsysteminfo-final-20260731-immutable-v3` fill and return the exact x64 `SYSTEM_INFO` structure, prove the observed `0xA2` consumer mask, preserve zero allocation/GC state, and advance to `KERNEL32.dll!GetNumaHighestNodeNumber`. The disabled control preserves the original GetSystemInfo boundary, and the marker-mutation control proves that `GETSYSTEMINFO_OX` is not accepted as positive success.
+
+The smallest next dependency is the exact `GetNumaHighestNodeNumber` contract. Keep the image-backed address-range and one-bootstrap-processor policies explicit; do not broaden this result into a general NUMA, processor-topology, virtual-memory, or GC implementation. First allocation remains blocked until heap ownership, segment reservation, allocation context, thread registration, and object/EEType evidence are separately proven.

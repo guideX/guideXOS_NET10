@@ -143,6 +143,10 @@ PE loader
 
 No allocation, GC startup, managed-thread registration, general SLIST operation, locale subsystem, environment table, or later API support follows from this closure.
 
+## Continuation: `GetSystemInfo` (2026-07-31)
+
+The next exact dependency was subsequently closed in [KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md](KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md). Three positive runs complete the observed `SYSTEM_INFO` consumer and advance to `KERNEL32.dll!GetNumaHighestNodeNumber`; the disabled control retains the `_stricmp` boundary before any GetSystemInfo implementation runs. This continuation does not change the `_stricmp` contract or imply allocation/GC readiness.
+
 ## Sources
 
 - Microsoft, [`_stricmp` reference](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/stricmp-wcsicmp-mbsicmp-stricmp-l-wcsicmp-l-mbsicmp-l?view=msvc-170)

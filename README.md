@@ -49,6 +49,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Windows x64 `strcmp` bootstrap contract](docs/CRT_STRCMP_BOOTSTRAP.md)
 - [Windows x64 `strlen` bootstrap contract](docs/CRT_STRLEN_BOOTSTRAP.md)
 - [Windows x64 `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md)
+- [`GetSystemInfo` bootstrap contract](docs/KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 
@@ -100,3 +101,7 @@ The narrow Microsoft x64 `GetEnvironmentVariableW` implementation is complete, h
 ## `_stricmp` bootstrap evidence status (2026-07-31)
 
 The narrow Microsoft x64 `_stricmp` implementation is complete, host-tested, and routed only for the exact `api-ms-win-crt-string-l1-1-0.dll!_stricmp` import. The checked route validates image-backed readable operands, bounded null termination, canonical pointers, overflow, and default-C-locale ASCII folding. Three fresh positive QEMU runs complete 885 calls and stop at the next authentic `KERNEL32.dll!GetSystemInfo` import; the disabled route stops at `_stricmp`. No later API is routed.
+
+## `GetSystemInfo` bootstrap evidence status (2026-07-31)
+
+The narrow Microsoft x64 `KERNEL32.dll!GetSystemInfo` contract is complete, host-tested, and routed only for that exact import. The checked route validates the x64 `SYSTEM_INFO` destination and approved writable range, initializes the complete `0x30`-byte structure, and publishes the current image-backed/page-backed bootstrap facts. Three immutable positive QEMU runs complete the observed consumer's `0xA2` field-read mask and advance to `KERNEL32.dll!GetNumaHighestNodeNumber`; the disabled three-run control retains the original GetSystemInfo boundary. See [KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md](docs/KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md). This does not claim GC initialization, a general virtual-memory allocator, or processor discovery beyond the one bootstrap processor.

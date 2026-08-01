@@ -10,6 +10,7 @@
 #include "crt_stricmp.h"
 #include "platform_environment.h"
 #include "platform_slist.h"
+#include "platform_system_info.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -271,6 +272,16 @@ static uint64_t g_crt_stricmp_successes;
 static uint64_t g_crt_stricmp_failures;
 static uint64_t g_crt_stricmp_total_bytes;
 static uint64_t g_crt_stricmp_longest_prefix;
+#endif
+#ifdef GXOS_ENABLE_SYSTEM_INFO
+static GXOS_SYSTEM_FACTS g_system_info_facts;
+static GXOS_SYSTEM_INFO_MEMORY_REGION g_system_info_regions[GXOS_SYSTEM_INFO_MAX_MEMORY_REGIONS];
+static GXOS_SYSTEM_INFO_MEMORY_CONTEXT g_system_info_memory;
+static uint64_t g_system_info_calls;
+static uint64_t g_system_info_successes;
+static uint64_t g_system_info_failures;
+static uint32_t g_system_info_field_consumption_emitted;
+static void EFIAPI platform_get_system_info(GXOS_SYSTEM_INFO *destination);
 #endif
 
 static void serial_out8(uint16_t port, uint8_t value)
@@ -1364,10 +1375,28 @@ static IMPORT_RECORD g_import_records[MAX_IMPORT_SYMBOLS];
 static EFI_PHYSICAL_ADDRESS g_import_stub_pages;
 static uint32_t g_import_symbol_count;
 
-static void import_failfast(const IMPORT_RECORD *record)
+static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t original_rcx)
 {
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
     if (g_phase == PHASE_AFTER_TIME_CALL) g_phase = PHASE_IN_TIME_CONSUMER;
     if (g_phase == PHASE_AFTER_QPC_CALL) g_phase = PHASE_AFTER_SECURITY_COOKIE_INIT;
+    if (equal_text(record->module, "KERNEL32.dll") && equal_text(record->symbol, "GetSystemInfo")) {
+        serial_field_hex("GXOS_NET10:GETSYSTEMINFO_FAILFAST_RETURN_ADDRESS=0x", return_address);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETSYSTEMINFO_FAILFAST_CALL_SITE=0x",
+                         return_address >= 6 ? return_address - 6 : 0);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETSYSTEMINFO_FAILFAST_RCX=0x", original_rcx);
+        serial_text("\r\n");
+    }
+#ifdef GXOS_ENABLE_SYSTEM_INFO
+    if (g_system_info_successes != 0 && g_system_info_field_consumption_emitted == 0) {
+        serial_text("GXOS_NET10:GETSYSTEMINFO_FIELD_READ_MASK=0x00000000000000A2\r\n");
+        serial_text("GXOS_NET10:GETSYSTEMINFO_FIELD_READ_SOURCE=STATIC_CALLSITE_CENSUS\r\n");
+        serial_text("GXOS_NET10:GETSYSTEMINFO_FIELD_CONSUMPTION_COMPLETE\r\n");
+        g_system_info_field_consumption_emitted = 1;
+    }
+#endif
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
@@ -1413,7 +1442,10 @@ static void emit_import_failfast_stub(uint8_t *stub, const IMPORT_RECORD *record
     uint64_t handler_address = (uint64_t)(uintptr_t)import_failfast;
     uint32_t cursor = 0;
 
-    /* mov rcx, record; mov rax, import_failfast; jmp rax */
+    /* mov rdx, rcx; mov rcx, record; mov rax, import_failfast; jmp rax */
+    stub[cursor++] = 0x48;
+    stub[cursor++] = 0x89;
+    stub[cursor++] = 0xCA;
     stub[cursor++] = 0x48;
     stub[cursor++] = 0xB9;
     *(uint64_t *)(stub + cursor) = record_address;
@@ -2024,6 +2056,10 @@ static void *platform_import_target(const char *module, const char *symbol)
     if (equal_text(module, "api-ms-win-crt-string-l1-1-0.dll") &&
         equal_text(symbol, "_stricmp")) return (void *)(uintptr_t)platform_stricmp;
 #endif
+#ifdef GXOS_ENABLE_SYSTEM_INFO
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetSystemInfo")) return (void *)(uintptr_t)platform_get_system_info;
+#endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initialize_onexit_table")) return (void *)(uintptr_t)platform_initialize_onexit_table;
@@ -2276,6 +2312,152 @@ static void restore_nativeaot_tls(void)
     write_msr(0xC0000101, g_saved_gs_base);
     if ((g_saved_flags & 0x200) != 0) __asm__ volatile ("sti");
 }
+
+#ifdef GXOS_ENABLE_SYSTEM_INFO
+static const GXOS_SYSTEM_INFO_MEMORY_REGION *platform_system_info_region(
+    uintptr_t address)
+{
+    uint32_t index;
+    for (index = 0; index != g_system_info_memory.region_count; index++) {
+        const GXOS_SYSTEM_INFO_MEMORY_REGION *region = &g_system_info_memory.regions[index];
+        if (address >= region->base && address < region->end) return region;
+    }
+    return 0;
+}
+
+static void configure_platform_system_info(const PE_IMAGE *image)
+{
+    uint32_t index;
+    GXOS_SYSTEM_INFO_STATUS status;
+
+    if (image == 0 || image->actual_base == 0 || image->loaded_size == 0 ||
+        image->actual_base > UINTPTR_MAX - (uintptr_t)image->loaded_size ||
+        image->memory_region_count == 0 ||
+        image->memory_region_count + 1U > GXOS_SYSTEM_INFO_MAX_MEMORY_REGIONS ||
+        g_stack_lower >= g_stack_upper) {
+        fail("getsysteminfo-facts");
+    }
+    for (index = 0; index != image->memory_region_count; index++) {
+        g_system_info_regions[index].base = image->memory_regions[index].base;
+        g_system_info_regions[index].end = image->memory_regions[index].end;
+        g_system_info_regions[index].readable = image->memory_regions[index].readable;
+        g_system_info_regions[index].writable = image->memory_regions[index].writable;
+    }
+    g_system_info_regions[image->memory_region_count].base = (uintptr_t)g_stack_lower;
+    g_system_info_regions[image->memory_region_count].end = (uintptr_t)g_stack_upper;
+    g_system_info_regions[image->memory_region_count].readable = 1;
+    g_system_info_regions[image->memory_region_count].writable = 1;
+    g_system_info_memory.region_count = image->memory_region_count + 1U;
+    g_system_info_memory.regions = g_system_info_regions;
+
+    g_system_info_facts.processor_architecture =
+        GXOS_SYSTEM_INFO_PROCESSOR_ARCHITECTURE_AMD64;
+    g_system_info_facts.page_size = (uint32_t)EFI_PAGE_SIZE;
+    g_system_info_facts.minimum_application_address = image->actual_base;
+    g_system_info_facts.maximum_application_address =
+        image->actual_base + (uintptr_t)image->loaded_size - (uintptr_t)1U;
+    g_system_info_facts.active_processor_mask = (uintptr_t)1U;
+    g_system_info_facts.number_of_processors = 1;
+    g_system_info_facts.processor_type = GXOS_SYSTEM_INFO_PROCESSOR_TYPE_AMD_X8664;
+    g_system_info_facts.allocation_granularity = (uint32_t)EFI_PAGE_SIZE;
+    g_system_info_facts.processor_level = 0;
+    g_system_info_facts.processor_revision = 0;
+    g_system_info_facts.address_range_policy =
+        GXOS_SYSTEM_INFO_ADDRESS_RANGE_IMAGE_BACKED;
+    status = gxos_system_info_configure(&g_system_info_facts, &g_system_info_memory);
+    if (status != GXOS_SYSTEM_INFO_STATUS_OK) fail("getsysteminfo-facts");
+    serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_SOURCE=UEFI_PAGE_AND_LOADED_IMAGE\r\n");
+    serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_POLICY=IMAGE_BACKED_RANGE_SINGLE_BOOTSTRAP_PROCESSOR\r\n");
+}
+
+static void serial_system_info_status(GXOS_SYSTEM_INFO_STATUS status)
+{
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_STATUS=0x", (uint64_t)(uint32_t)status);
+    serial_text("\r\n");
+}
+
+static void EFIAPI platform_get_system_info(GXOS_SYSTEM_INFO *destination)
+{
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *region;
+    GXOS_SYSTEM_INFO_STATUS status;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = return_address >= 6 ? return_address - 6 : 0;
+    uint64_t call_index = g_system_info_calls++;
+
+    serial_text("GXOS_NET10:GETSYSTEMINFO_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_CALL_INDEX=0x", call_index);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETSYSTEMINFO_STATIC_CALL_SITE=0x000000018004379F\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_RETURN_ADDRESS=0x", return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_DESTINATION=0x", (uintptr_t)destination);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_STRUCTURE_SIZE=0x", sizeof(GXOS_SYSTEM_INFO));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_DESTINATION_ALIGNMENT=0x",
+                     ((uintptr_t)destination) & (_Alignof(GXOS_SYSTEM_INFO) - 1U));
+    serial_text("\r\n");
+    region = platform_system_info_region((uintptr_t)destination);
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_DESTINATION_REGION_BASE=0x",
+                     region == 0 ? 0 : region->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_DESTINATION_REGION_END=0x",
+                     region == 0 ? 0 : region->end);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETSYSTEMINFO_DESTINATION_WRITABLE=");
+    serial_text(region != 0 && region->writable != 0 ? "1\r\n" : "0\r\n");
+    status = gxos_get_system_info_checked(destination, &g_system_info_facts,
+                                          &g_system_info_memory);
+    serial_system_info_status(status);
+    if (status != GXOS_SYSTEM_INFO_STATUS_OK) {
+        g_system_info_failures++;
+        fail("getsysteminfo-invalid");
+    }
+    g_system_info_successes++;
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_ARCHITECTURE=0x",
+                     destination->architecture_union.architecture.wProcessorArchitecture);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_RESERVED_ARCHITECTURE=0x",
+                     destination->architecture_union.architecture.wReserved);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_PAGE_SIZE=0x", destination->dwPageSize);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_MIN_ADDRESS=0x",
+                     (uintptr_t)destination->lpMinimumApplicationAddress);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_MAX_ADDRESS=0x",
+                     (uintptr_t)destination->lpMaximumApplicationAddress);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_ACTIVE_MASK=0x",
+                     destination->dwActiveProcessorMask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_PROCESSOR_COUNT=0x",
+                     destination->dwNumberOfProcessors);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_PROCESSOR_TYPE=0x",
+                     destination->dwProcessorType);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_ALLOCATION_GRANULARITY=0x",
+                     destination->dwAllocationGranularity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_PROCESSOR_LEVEL=0x",
+                     destination->wProcessorLevel);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSYSTEMINFO_PROCESSOR_REVISION=0x",
+                     destination->wProcessorRevision);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETSYSTEMINFO_FIELD_READ_MASK=0x00000000000000A2\r\n");
+    serial_text("GXOS_NET10:GETSYSTEMINFO_FIELD_READ_SOURCE=STATIC_CALLSITE_CENSUS\r\n");
+    serial_text("GXOS_NET10:GETSYSTEMINFO_RETURNED\r\n");
+#ifdef GXOS_SYSTEM_INFO_MARKER_MUTATION
+    serial_text("GXOS_NET10:GETSYSTEMINFO_OX\r\n");
+#else
+    serial_text("GXOS_NET10:GETSYSTEMINFO_OK\r\n");
+#endif
+}
+#endif
 
 static void find_managed_main(PE_IMAGE *image)
 {
@@ -2647,6 +2829,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
     install_fault_handlers();
     initialize_nativeaot_tls(&image, boot_services);
+#ifdef GXOS_ENABLE_SYSTEM_INFO
+    configure_platform_system_info(&image);
+#endif
 #ifdef GXOS_ENABLE_NATIVEAOT_STARTUP
     if (image.entry_rva == 0 || image.entry_rva >= image.loaded_size) fail("nativeaot-entrypoint-missing");
     g_phase = PHASE_BEFORE_TIME_CALL;

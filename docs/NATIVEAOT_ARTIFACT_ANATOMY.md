@@ -50,7 +50,7 @@ The loader creates a zeroed TLS vector and copies the PE TLS template. `_tls_ind
 
 ## Imports and thunks
 
-The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The current `_stricmp` positive loader serializes 29 functional and 95 fail-fast imports:
+The exact ten descriptors and 124 symbols, with IAT RVAs and per-symbol treatment, are in [DEPENDENCY_CENSUS.md](DEPENDENCY_CENSUS.md). The current `_stricmp` positive loader serializes 29 functional and 95 fail-fast imports; the separate `GetSystemInfo` opt-in serializes 30 functional and 94 fail-fast imports:
 
 ```text
 PE_IMPORT_DESCRIPTORS=10
@@ -109,7 +109,8 @@ GetSystemTimeAsFileTime -> QPC -> _initialize_onexit_table (twice)
   -> api-ms-win-crt-string-l1-1-0.dll!strlen
   -> KERNEL32.dll!GetEnvironmentVariableW("DOTNET_gcServer") = missing
   -> api-ms-win-crt-string-l1-1-0.dll!_stricmp (885 checked calls)
-  -> KERNEL32.dll!GetSystemInfo (next authentic boundary; fail-fast)
+  -> KERNEL32.dll!GetSystemInfo (bounded SYSTEM_INFO contract)
+  -> KERNEL32.dll!GetNumaHighestNodeNumber (next authentic boundary; fail-fast)
 ```
 
 The three selected fresh positive logs are under `artifacts\qpc-final-20260729-allocation\time-contract-runs-*`; each has source `ACPI_PM_TIMER`, frequency `0x369E99`, two source/normalized observations, one QPC call, zero regressions, and zero TLS allocation context. The first allocation remains unproven.
@@ -153,3 +154,9 @@ The enabled treatment is 28 functional / 96 fail-fast / 0 unresolved. The three 
 ## `_stricmp` evidence-closure result (2026-07-31)
 
 The exact imported `_stricmp` slot is RVA `0x7e3e0`, with preferred thunk `0x1800774cb`. The two executed direct call sites are preferred `0x18003df6b` and `0x18003e0ab`; each tests EAX for zero/sign after return. The checked Microsoft x64 route validates both relocated `.rdata` operands, completes 885 calls, and advances to `KERNEL32.dll!GetSystemInfo`. See [CRT_STRICMP_BOOTSTRAP.md](CRT_STRICMP_BOOTSTRAP.md) for the contract and immutable evidence paths.
+
+## `GetSystemInfo` consumer census (2026-07-31)
+
+The committed `_stricmp` payload imports `KERNEL32.dll!GetSystemInfo` at IAT RVA `0x7e260` (preferred IAT address `0x18007e260`) and the direct preferred call at `0x18004379f`. The call destination is the writable stack buffer at `rsp+0x20`; the live relocated return site is `0x00000000054BC7A5`. Static post-call reads consume only `SYSTEM_INFO` offsets `0x04`, `0x20`, and `0x28`, giving field-read mask `0xA2` under the contract document's bit mapping.
+
+The implementation publishes the relocated loaded-image allocation as the application range and uses the existing loader page size (`4096`) as both page size and allocation granularity. This is a bounded substrate fact, not an inferred Windows address-space or VM reservation model. The positive route reaches `KERNEL32.dll!GetNumaHighestNodeNumber`; the disabled route retains the GetSystemInfo fail-fast call with original RCX recorded. See [KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md](KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md) for the exact ABI, layout, checks, and evidence paths.
