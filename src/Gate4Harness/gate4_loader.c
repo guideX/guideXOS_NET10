@@ -11,6 +11,7 @@
 #include "platform_environment.h"
 #include "platform_slist.h"
 #include "platform_system_info.h"
+#include "platform_numa.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -282,6 +283,21 @@ static uint64_t g_system_info_successes;
 static uint64_t g_system_info_failures;
 static uint32_t g_system_info_field_consumption_emitted;
 static void EFIAPI platform_get_system_info(GXOS_SYSTEM_INFO *destination);
+#endif
+#ifdef GXOS_ENABLE_NUMA_HIGHEST_NODE
+static GXOS_NUMA_FACTS g_numa_facts;
+static uint64_t g_numa_calls;
+static uint64_t g_numa_successes;
+static uint64_t g_numa_failures;
+static uint64_t g_numa_last_error_before;
+static uint64_t g_numa_last_error_after;
+static uint64_t g_numa_last_output_before;
+static uint64_t g_numa_last_output_after;
+static uint64_t g_numa_last_status;
+static GXOS_NUMA_BOOL g_numa_last_boolean;
+static uint32_t g_numa_last_output_read;
+static GXOS_NUMA_BOOL EFIAPI platform_get_numa_highest_node_number(
+    GXOS_NUMA_ULONG *highest_node_number);
 #endif
 
 static void serial_out8(uint16_t port, uint8_t value)
@@ -1397,6 +1413,39 @@ static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t origin
         g_system_info_field_consumption_emitted = 1;
     }
 #endif
+#ifdef GXOS_ENABLE_NUMA_HIGHEST_NODE
+    if (equal_text(record->module, "KERNEL32.dll") &&
+        equal_text(record->symbol, "GetProcessGroupAffinity") &&
+        g_numa_calls != 0) {
+        serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_CALLER_BRANCH_CALL_INDEX=0x",
+                         g_numa_calls - 1U);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_CALLER_BRANCH=");
+        if (g_numa_last_boolean == GXOS_NUMA_TRUE) {
+            if (g_numa_last_output_after == 0) {
+                serial_text("SUCCESS_BOOLEAN_OUTPUT_ZERO_NON_NUMA_FALLBACK\r\n");
+            } else {
+                serial_text("SUCCESS_BOOLEAN_OUTPUT_NONZERO_NODE_TABLE_SETUP\r\n");
+            }
+        } else {
+            serial_text("FAILURE_NON_NUMA_FALLBACK\r\n");
+        }
+        serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_OUTPUT_READ=");
+        serial_text(g_numa_last_boolean == GXOS_NUMA_TRUE ? "1\r\n" : "0\r\n");
+        serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_DERIVED_DOMAIN_COUNT=0x",
+                         g_numa_last_boolean != GXOS_NUMA_TRUE ||
+                                 g_numa_last_output_after == 0
+                             ? 0
+                             : g_numa_last_output_after + 1U);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_OUTPUT_TRANSFORM=");
+        serial_text(g_numa_last_boolean == GXOS_NUMA_TRUE &&
+                            g_numa_last_output_after != 0
+                        ? "highest_plus_one\r\n"
+                        : "none\r\n");
+        serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_SUBSEQUENT_NUMA_CALL_COUNT=0x0000000000000000\r\n");
+    }
+#endif
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
@@ -2060,6 +2109,12 @@ static void *platform_import_target(const char *module, const char *symbol)
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "GetSystemInfo")) return (void *)(uintptr_t)platform_get_system_info;
 #endif
+#ifdef GXOS_ENABLE_NUMA_HIGHEST_NODE
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetNumaHighestNodeNumber")) {
+        return (void *)(uintptr_t)platform_get_numa_highest_node_number;
+    }
+#endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initialize_onexit_table")) return (void *)(uintptr_t)platform_initialize_onexit_table;
@@ -2366,6 +2421,19 @@ static void configure_platform_system_info(const PE_IMAGE *image)
         GXOS_SYSTEM_INFO_ADDRESS_RANGE_IMAGE_BACKED;
     status = gxos_system_info_configure(&g_system_info_facts, &g_system_info_memory);
     if (status != GXOS_SYSTEM_INFO_STATUS_OK) fail("getsysteminfo-facts");
+#ifdef GXOS_ENABLE_NUMA_HIGHEST_NODE
+    /* NUMA uses the already-published GetSystemInfo processor snapshot. */
+    g_numa_facts.usable_processor_count = g_system_info_facts.number_of_processors;
+    g_numa_facts.locality_domain_count = 1;
+    g_numa_facts.highest_node_number = 0;
+    g_numa_facts.node_targeted_allocation_supported = false;
+    g_numa_facts.system_info_processor_count = g_system_info_facts.number_of_processors;
+    g_numa_facts.system_info_active_processor_mask =
+        g_system_info_facts.active_processor_mask;
+    g_numa_facts.topology_policy = GXOS_NUMA_TOPOLOGY_POLICY_FACT_SNAPSHOT;
+    serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_FACTS_SOURCE=GETSYSTEMINFO_SNAPSHOT\r\n");
+    serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_FACTS_POLICY=SINGLE_LOCALITY_DOMAIN\r\n");
+#endif
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_SOURCE=UEFI_PAGE_AND_LOADED_IMAGE\r\n");
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_POLICY=IMAGE_BACKED_RANGE_SINGLE_BOOTSTRAP_PROCESSOR\r\n");
 }
@@ -2456,6 +2524,153 @@ static void EFIAPI platform_get_system_info(GXOS_SYSTEM_INFO *destination)
 #else
     serial_text("GXOS_NET10:GETSYSTEMINFO_OK\r\n");
 #endif
+}
+#endif
+
+#ifdef GXOS_ENABLE_NUMA_HIGHEST_NODE
+static const char *numa_status_name(GXOS_NUMA_HIGHEST_NODE_STATUS status)
+{
+    switch (status) {
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_OK: return "OK";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_NULL_POINTER: return "NULL_POINTER";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_NONCANONICAL_POINTER: return "NONCANONICAL_POINTER";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_UNWRITABLE_POINTER: return "UNWRITABLE_POINTER";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_INSUFFICIENT_WRITABLE_RANGE: return "INSUFFICIENT_WRITABLE_RANGE";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_INVALID_MEMORY_CONTEXT: return "INVALID_MEMORY_CONTEXT";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_INVALID_PROCESSOR_COUNT: return "INVALID_PROCESSOR_COUNT";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_INVALID_PROCESSOR_MASK: return "INVALID_PROCESSOR_MASK";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_INVALID_DOMAIN_COUNT: return "INVALID_DOMAIN_COUNT";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_INVALID_HIGHEST_NODE: return "INVALID_HIGHEST_NODE";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_INCONSISTENT_DOMAIN_MODEL: return "INCONSISTENT_DOMAIN_MODEL";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_INVALID_SYSTEM_SNAPSHOT: return "INVALID_SYSTEM_SNAPSHOT";
+    case GXOS_NUMA_HIGHEST_NODE_STATUS_UNSUPPORTED_TOPOLOGY: return "UNSUPPORTED_TOPOLOGY";
+    default: return "UNKNOWN";
+    }
+}
+
+static uint32_t numa_status_last_error(GXOS_NUMA_HIGHEST_NODE_STATUS status)
+{
+    return status == GXOS_NUMA_HIGHEST_NODE_STATUS_UNSUPPORTED_TOPOLOGY
+               ? GXOS_NUMA_ERROR_NOT_SUPPORTED
+               : GXOS_NUMA_ERROR_INVALID_PARAMETER;
+}
+
+static GXOS_NUMA_BOOL EFIAPI platform_get_numa_highest_node_number(
+    GXOS_NUMA_ULONG *highest_node_number)
+{
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *region;
+    GXOS_NUMA_HIGHEST_NODE_STATUS status;
+    uintptr_t destination = (uintptr_t)highest_node_number;
+    uintptr_t writable_range = 0;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = return_address >= 6 ? return_address - 6 : 0;
+    uint64_t call_index = g_numa_calls++;
+    uint32_t output_before = 0;
+    uint32_t output_after = 0;
+    uint64_t last_error_before = g_platform_last_error;
+
+    serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_CALL_INDEX=0x", call_index);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_STATIC_CALL_SITE=0x00000001800437DD\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_RETURN_ADDRESS=0x", return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_OUTPUT_POINTER=0x", destination);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_OUTPUT_WIDTH=0x", sizeof(GXOS_NUMA_ULONG));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_OUTPUT_ALIGNMENT=0x",
+                     destination & (sizeof(GXOS_NUMA_ULONG) - 1U));
+    serial_text("\r\n");
+    region = platform_system_info_region(destination);
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_DESTINATION_REGION_BASE=0x",
+                     region == 0 ? 0 : region->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_DESTINATION_REGION_END=0x",
+                     region == 0 ? 0 : region->end);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_DESTINATION_WRITABLE=");
+    serial_text(region != 0 && region->writable != 0 ? "1\r\n" : "0\r\n");
+    if (region != 0 && destination >= region->base && destination < region->end) {
+        writable_range = region->end - destination;
+        if (writable_range >= sizeof(GXOS_NUMA_ULONG) && region->writable != 0) {
+            output_before = *highest_node_number;
+        }
+    }
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_WRITABLE_RANGE_SIZE=0x", writable_range);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_OUTPUT_BEFORE=0x", output_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_USABLE_PROCESSORS=0x",
+                     g_numa_facts.usable_processor_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_DOMAIN_COUNT=0x",
+                     g_numa_facts.locality_domain_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_HIGHEST_NODE=0x",
+                     g_numa_facts.highest_node_number);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_SYSTEM_INFO_PROCESSOR_COUNT=0x",
+                     g_numa_facts.system_info_processor_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_SYSTEM_INFO_ACTIVE_MASK=0x",
+                     g_numa_facts.system_info_active_processor_mask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_LAST_ERROR_BEFORE=0x",
+                     last_error_before);
+    serial_text("\r\n");
+
+#ifdef GXOS_NUMA_FORCE_FAILURE
+    status = GXOS_NUMA_HIGHEST_NODE_STATUS_UNSUPPORTED_TOPOLOGY;
+#else
+    status = gxos_get_numa_highest_node_checked(highest_node_number, &g_numa_facts,
+                                                &g_system_info_memory);
+#endif
+    g_numa_last_status = status;
+    g_numa_last_error_before = last_error_before;
+    g_numa_last_output_before = output_before;
+    if (status != GXOS_NUMA_HIGHEST_NODE_STATUS_OK) {
+        g_numa_failures++;
+        g_platform_last_error = numa_status_last_error(status);
+        g_numa_last_boolean = GXOS_NUMA_FALSE;
+        g_numa_last_output_after = output_before;
+        g_numa_last_output_read = 0;
+    } else {
+        g_numa_successes++;
+        g_numa_last_boolean = GXOS_NUMA_TRUE;
+        output_after = *highest_node_number;
+        g_numa_last_output_after = output_after;
+        g_numa_last_output_read = 1;
+    }
+    g_numa_last_error_after = g_platform_last_error;
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_STATUS=0x", (uint64_t)(uint32_t)status);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_STATUS_NAME=");
+    serial_text(numa_status_name(status));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_BOOLEAN_RESULT=0x",
+                     (uint64_t)(uint32_t)g_numa_last_boolean);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_OUTPUT_AFTER=0x", g_numa_last_output_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_LAST_ERROR_BEFORE=0x",
+                     g_numa_last_error_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_LAST_ERROR_AFTER=0x",
+                     g_numa_last_error_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETNUMAHIGHESTNODE_OUTPUT_READ_BY_WRAPPER=0x",
+                     g_numa_last_output_read);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_RETURNED\r\n");
+    if (status == GXOS_NUMA_HIGHEST_NODE_STATUS_OK) {
+        serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_OK\r\n");
+    } else {
+        serial_text("GXOS_NET10:GETNUMAHIGHESTNODE_FAILED\r\n");
+    }
+    return g_numa_last_boolean;
 }
 #endif
 

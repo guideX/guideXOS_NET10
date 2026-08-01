@@ -19,3 +19,9 @@ The 2026-07-30 `_initterm_e`, `_initterm`, and `strcmp` passes, followed by the 
 The startup path now passes the exact `KERNEL32.dll!GetSystemInfo` call required before the current allocation probe. The implementation is intentionally limited to the current one-CPU, image-backed, 4 KiB loader facts and complete x64 `SYSTEM_INFO` initialization; it does not initialize a GC heap or allocation context. Three immutable positive QEMU runs are recorded under `evidence/generated/getsysteminfo-final-20260731-immutable-v3` and advance to `KERNEL32.dll!GetNumaHighestNodeNumber`. The final serial summaries still report `ALLOCATION_CONTEXT_VALID=0`, `MANAGED_THREAD_REGISTERED=0`, `GC_HEAP_USABLE=0`, and `MANAGED_ALLOCATION_COUNT=0`.
 
 The first managed allocation remains unproven. The next experiment must census the new authentic NUMA dependency and preserve the allocation gate's explicit heap/segment/EEType/object-header evidence requirements; `GetSystemInfo` success is not evidence of GC readiness.
+
+## `GetNumaHighestNodeNumber` does not advance allocation
+
+The bounded `KERNEL32.dll!GetNumaHighestNodeNumber` contract now completes the next NativeAOT startup dependency after `GetSystemInfo`, but it does not change the first-allocation conclusion. The live route publishes highest node `0` from the one-processor/one-locality-domain fact snapshot, and the caller takes its non-NUMA fallback. The positive runs still record zero TLS allocation context, zero managed-thread registration, zero GC heap usability, and zero managed allocations.
+
+The current allocation blocker remains heap ownership and initialization of a real NativeAOT allocation context, including segment reservation/commit, object/EEType publication, roots, write barriers, and lifecycle/GC policy. No NUMA allocator, node-targeted allocation, SMP scheduler, or general topology service was added as part of this contract.

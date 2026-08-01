@@ -50,6 +50,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Windows x64 `strlen` bootstrap contract](docs/CRT_STRLEN_BOOTSTRAP.md)
 - [Windows x64 `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md)
 - [`GetSystemInfo` bootstrap contract](docs/KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md)
+- [`GetNumaHighestNodeNumber` bootstrap contract](docs/KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 
@@ -105,3 +106,7 @@ The narrow Microsoft x64 `_stricmp` implementation is complete, host-tested, and
 ## `GetSystemInfo` bootstrap evidence status (2026-07-31)
 
 The narrow Microsoft x64 `KERNEL32.dll!GetSystemInfo` contract is complete, host-tested, and routed only for that exact import. The checked route validates the x64 `SYSTEM_INFO` destination and approved writable range, initializes the complete `0x30`-byte structure, and publishes the current image-backed/page-backed bootstrap facts. Three immutable positive QEMU runs complete the observed consumer's `0xA2` field-read mask and advance to `KERNEL32.dll!GetNumaHighestNodeNumber`; the disabled three-run control retains the original GetSystemInfo boundary. See [KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md](docs/KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md). This does not claim GC initialization, a general virtual-memory allocator, or processor discovery beyond the one bootstrap processor.
+
+## `GetNumaHighestNodeNumber` evidence status (2026-08-01)
+
+The narrow Microsoft x64 `KERNEL32.dll!GetNumaHighestNodeNumber` contract is complete and routed only for that exact import pair. The checked four-byte `ULONG` output contract publishes highest node `0` from the explicit one-processor/one-locality-domain `GetSystemInfo` snapshot, preserves the output on rejected inputs, and does not claim general NUMA, SMP, node-targeted allocation, scheduler locality, or GC support. Three immutable positive QEMU runs are recorded under `evidence\generated\getnumahighest-final-20260801-immutable-v2`; each reaches the next authentic `KERNEL32.dll!GetProcessGroupAffinity` boundary. See [KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md](docs/KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md).

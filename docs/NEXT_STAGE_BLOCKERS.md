@@ -57,3 +57,11 @@ The narrow Microsoft x64 `_stricmp` contract is closed by [CRT_STRICMP_BOOTSTRAP
 The next experiment is complete. Three immutable positive QEMU runs under `evidence/generated/getsysteminfo-final-20260731-immutable-v3` fill and return the exact x64 `SYSTEM_INFO` structure, prove the observed `0xA2` consumer mask, preserve zero allocation/GC state, and advance to `KERNEL32.dll!GetNumaHighestNodeNumber`. The disabled control preserves the original GetSystemInfo boundary, and the marker-mutation control proves that `GETSYSTEMINFO_OX` is not accepted as positive success.
 
 The smallest next dependency is the exact `GetNumaHighestNodeNumber` contract. Keep the image-backed address-range and one-bootstrap-processor policies explicit; do not broaden this result into a general NUMA, processor-topology, virtual-memory, or GC implementation. First allocation remains blocked until heap ownership, segment reservation, allocation context, thread registration, and object/EEType evidence are separately proven.
+
+## `GetNumaHighestNodeNumber` evidence-closure result (2026-08-01)
+
+The exact Microsoft x64 `KERNEL32.dll!GetNumaHighestNodeNumber` contract is now closed for the current startup path. The checked output is a four-byte `ULONG`; the final one-domain policy publishes highest node `0`, and the caller selects its non-NUMA fallback. Three immutable positive runs under `evidence\generated\getnumahighest-final-20260801-immutable-v2` reach the next authentic `KERNEL32.dll!GetProcessGroupAffinity` boundary. The enabled census is `31 / 93 / 0`; the disabled control remains `30 / 94 / 0` at the original NUMA boundary.
+
+This closure does not implement or infer `GetLogicalProcessorInformation`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`, node-targeted allocation, SMP scheduling, ACPI NUMA discovery, or GC initialization. The controlled failure branch proves that a failed BOOL leaves the output unread and takes the caller's failure fallback; its forced `0x32` last-error value is test policy, not a universal Windows error claim.
+
+The next authentic dependency is `GetProcessGroupAffinity`. The first-allocation blocker is unchanged: no heap segments, allocation context, managed-thread registration, object/EEType publication, write barriers, or GC lifecycle have been proven.

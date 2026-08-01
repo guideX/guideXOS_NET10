@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -65,7 +65,8 @@ $gccArguments = @(
     (Join-Path $root 'src\Gate4Harness\crt_stricmp.c'),
     (Join-Path $root 'src\Gate4Harness\platform_environment.c'),
     (Join-Path $root 'src\Gate4Harness\platform_slist.c'),
-    (Join-Path $root 'src\Gate4Harness\platform_system_info.c')
+    (Join-Path $root 'src\Gate4Harness\platform_system_info.c'),
+    (Join-Path $root 'src\Gate4Harness\platform_numa.c')
 )
 switch ($Scenario) {
     'InvalidBootInfo' { $gccArguments += '-DGXOS_NEGATIVE_INVALID_BOOT_INFO' }
@@ -249,6 +250,54 @@ switch ($Scenario) {
         $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
         $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
         $gccArguments += '-DGXOS_SYSTEM_INFO_MARKER_MUTATION'
+    }
+    'GetNumaHighestNodeNumber' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+    }
+    'GetNumaHighestNodeNumberDisabled' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+    }
+    'GetNumaHighestNodeNumberSuccessExperiment' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+    }
+    'GetNumaHighestNodeNumberFailureExperiment' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_NUMA_FORCE_FAILURE'
     }
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }

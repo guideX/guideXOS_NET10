@@ -347,3 +347,32 @@ The immutable positive gate is `artifacts/getsysteminfo-final-20260731`; evidenc
 The disabled three-run control is `evidence/generated/getsysteminfo-disabled-20260731-immutable-v2`, with PIDs `25452`, `17108`, and `26976`, loader hash `174E4FC67CD788B46574016CCB17DC3CC76043CAC632E5B1B6927858757B2275`, `29 / 95 / 0` imports, and the exact GetSystemInfo fail-fast boundary. The marker-mutation negative control is `evidence/generated/getsysteminfo-marker-mutation-20260731`; it emitted `GETSYSTEMINFO_OX`, never `GETSYSTEMINFO_OK`, and still reached the authentic next boundary. No commit or push occurred.
 
 The runner-frozen positive evidence superseding the earlier v2 attempt is `evidence/generated/getsysteminfo-final-20260731-immutable-v3`, with PIDs `3164`, `26008`, and `26176`, serial length `2115119` per run, loader `0CFFF09C12BC567615540CDB2CDE01A8327342E3E316FED2957D3F7F78FAF931`, runner `ACC92AD93262D714450F14C3A666B94B1224EC63C59C839E6A71695B6A5B5BD6`, and validator `0CE9E28EBBAFA7039A6570D7E2268729134155E1538A70BD914D50E929350EB4`. All three validate successfully against the final runner revision.
+
+## Final `GetNumaHighestNodeNumber` evidence closure (2026-08-01)
+
+This pass began from the committed `GetSystemInfo` milestone at `14d865eeb19e97a627824671104cf377cdda5bb9`, with branch `main`, upstream `origin/main`, and a clean initial worktree. A fresh baseline under `evidence\generated\getnumahighest-baseline-20260801` reproduced the exact `KERNEL32.dll!GetNumaHighestNodeNumber` dependency. The baseline used QEMU PID `23940`, produced `2,115,119` serial bytes, and was preserved.
+
+The final immutable positive artifact is `artifacts\getnumahighest-final-v2-20260801`; the evidence root is `evidence\generated\getnumahighest-final-20260801-immutable-v2`. The execution-relevant hashes are:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| EFI loader | `8A83363EAA6CB4167E2BF7898310C229BD48FFF9E5E6CAA6F6C2753B3BFBF230` |
+| NativeAOT payload | `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379` |
+| runtime archive | `DBA78CC0C6747E2E0CF51894F1492A70ECD08513151D9473C04048CD7B9D9311` |
+| OVMF code | `33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A` |
+| QEMU | `A930E028F93D0FA47E4D58BDAD2432F7466DC2B6AF0AE376F77EF7A298FFDD02` |
+| runner / validator | `786E2B86ECA7E070E08B7903080AE26C9C2F97D278E0822DE88A5C28F370A149` / `7197D27CCF6D2BB8518B14C301C564C97A19759219B8EF5FEF72B02356BAC191` |
+
+The three fresh positive runs passed the immutable validator and reached `KERNEL32.dll!GetProcessGroupAffinity`:
+
+| Run | PID | Serial bytes | Exit | Cleanup |
+| --- | ---: | ---: | ---: | --- |
+| run1 | `22788` | `2,117,419` | `0` | complete |
+| run2 | `13324` | `2,117,419` | `0` | complete |
+| run3 | `20836` | `2,117,419` | `0` | complete |
+
+Each run proved `31 / 93 / 0` functional/fail-fast/unresolved imports, `_stricmp=0x375`, QPC count `2`, zero QPC regressions, and zero allocation-context, managed-thread, managed-allocation, or GC-heap state. The wrapper observed the exact four-byte output at runtime pointer `0x7e64c80` in approved writable memory, with output before/after `0`, facts `1` processor / `1` domain / highest `0`, `BOOL=1`, status `OK`, and last error preserved `0xcb -> 0xcb`. The caller read the output, selected `SUCCESS_BOOLEAN_OUTPUT_ZERO_NON_NUMA_FALLBACK`, derived domain count `0`, and made no subsequent NUMA call.
+
+The one-run success experiment (`evidence\generated\getnumahighest-success-final-20260801`, PID `18304`) reproduced the same success branch. The one-run forced failure experiment (`evidence\generated\getnumahighest-failure-final-20260801`, PID `16884`) returned `BOOL=0`, status `UNSUPPORTED_TOPOLOGY`, preserved output `0`, changed last error `0xcb -> 0x32`, did not read the output, and selected `FAILURE_NON_NUMA_FALLBACK`. The one-run disabled control (`evidence\generated\getnumahighest-disabled-final-20260801`, PID `23912`) retained the original NUMA fail-fast boundary and emitted no wrapper marker.
+
+The negative-control pipeline passed marker mutation, truncated evidence, stale run identity, duplicate PID, artifact-hash mismatch, highest-node/count confusion, zero-node confusion, success without output write, failure with claimed output, wrong output width, and unexpected last error. This is a bounded platform closure only; the next authentic dependency is `GetProcessGroupAffinity`, and first allocation/GC remains unproven. No commit or push occurred.

@@ -63,3 +63,11 @@ The positive run records `30 / 94 / 0` functional/fail-fast/unresolved imports, 
 The disabled immutable control is `evidence/generated/getsysteminfo-disabled-20260731-immutable-v2`. Its three runs retain `29 / 95 / 0`, preserve the `_stricmp` count and startup summaries, prove the original RCX destination in `GETSYSTEMINFO_FAILFAST_RCX`, and stop at `KERNEL32.dll!GetSystemInfo` without any checked implementation marker. The marker-mutation control is `evidence/generated/getsysteminfo-marker-mutation-20260731`; it reaches the same authentic next boundary while emitting `GETSYSTEMINFO_OX` and no positive `GETSYSTEMINFO_OK`, so the evidence validator rejects marker substitution rather than treating it as success.
 
 No commit or push was performed for this pass.
+
+## Follow-on `GetNumaHighestNodeNumber` consumer (2026-08-01)
+
+The `GetSystemInfo` consumer census is now followed by the separate exact [`GetNumaHighestNodeNumber`](KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md) contract. The payload imports that symbol at IAT RVA `0x7e298` and calls it at preferred `0x1800437dd`; the caller passes `rsp+0x60` as a four-byte `ULONG` output pointer, tests the returned `BOOL`, and reads the output only after success.
+
+The current `GetSystemInfo` snapshot is intentionally sufficient only for a one-domain policy: processor count `1`, active mask `1`, domain count `1`, highest node `0`, and no node-targeted allocation support. A successful zero output therefore selects the caller's non-NUMA fallback. A nonzero output would be converted by the caller to `highest + 1` for its node-table setup; this is not a claim about general Windows node contiguity.
+
+The new wrapper records the exact output range and last-error behavior while preserving the `GetSystemInfo` field-consumption marker. Positive QEMU runs advance to `KERNEL32.dll!GetProcessGroupAffinity`; the disabled route retains the original NUMA fail-fast boundary. This follow-on does not broaden the `GetSystemInfo` contract into processor-topology discovery, NUMA allocation, SMP support, or GC readiness.
