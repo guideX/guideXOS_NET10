@@ -10,6 +10,10 @@ The SLIST scope is deliberately initialization-only. The current payload imports
 
 The no-allocation control remains independently positive across three fresh QEMU runs. See [MANAGED_ENTRY_PROOF.md](MANAGED_ENTRY_PROOF.md), [PLATFORM_PERFORMANCE_COUNTER.md](PLATFORM_PERFORMANCE_COUNTER.md), and [NEXT_STAGE_BLOCKERS.md](NEXT_STAGE_BLOCKERS.md) for the evidence and blocker separation.
 
+## Query-information follow-on (2026-08-01)
+
+The current startup trace now closes the exact `QueryInformationJobObject` call after process-affinity setup. It returns the no-associated-job failure for `hJob=NULL`, publishes no job structure, and leaves the first-allocation state unchanged. Three fresh immutable runs reach `KERNEL32.dll!GetModuleHandleW`; all preserve zero allocation context, zero managed-thread registration, zero GC-heap usability, and zero managed allocations. A job-information success route is not evidence of a heap or allocator, and the synthetic success experiments are retained only as caller-branch reachability tests.
+
 The 2026-07-29 SLIST evidence-closure pass does not change this allocation status. The SLIST implementation is allocation-free, and all three complete final-hash traces report zero allocation-context pointer/limit, `ALLOCATION_CONTEXT_VALID=0`, no GC-advanced marker, and no managed-thread registration. The SLIST milestone is closed only for initialization.
 
 The 2026-07-30 `_initterm_e`, `_initterm`, and `strcmp` passes, followed by the 2026-07-31 `strlen`, `GetEnvironmentVariableW`, and `_stricmp` passes, leave allocation unproven. `_initterm_e` skipped its one null entry; `_initterm` invoked and returned from all eight actual non-null callbacks; `strcmp` returned `+1`; `strlen` returned `8`; the environment query returned missing-variable status `0` with last error `203`; and `_stricmp` completed 885 checked calls before `GetSystemInfo`. All three final QEMU summaries still report allocation-context pointer/limit `0/0`, `ALLOCATION_CONTEXT_VALID=0`, `MANAGED_THREAD_REGISTERED=0`, and no observable GC advancement. The new deepest boundary is `KERNEL32.dll!GetSystemInfo`.

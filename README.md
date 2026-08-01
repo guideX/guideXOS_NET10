@@ -118,6 +118,12 @@ The narrow Microsoft x64 `KERNEL32.dll!GetProcessGroupAffinity` contract is comp
 
 This pass does not implement `GetProcessAffinityMask`, other processor-group APIs, NUMA/topology discovery, allocation, or GC behavior. The first-allocation blocker is unchanged.
 
+## `QueryInformationJobObject` evidence status (2026-08-01)
+
+The narrow Microsoft x64 `KERNEL32.dll!QueryInformationJobObject` contract is complete and routed only for the exact import pair. The live NativeAOT call uses `hJob=NULL`, class `JobObjectCpuRateControlInformation` (`15`), an eight-byte `JOBOBJECT_CPU_RATE_CONTROL_INFORMATION` destination, `cb=8`, and `lpReturnLength=NULL`. The checked route returns the no-associated-job failure with `ERROR_ACCESS_DENIED` (`5`), preserves the sentinel output, and the caller takes `FAILURE_NO_ASSOCIATED_JOB_FALLBACK`. A second static class-9 reference exists in the payload but is dormant; each bounded positive run proves one live call.
+
+Three immutable QEMU runs are recorded under `evidence\generated\queryjobobject-final-20260801`; the enabled census is `34 / 90 / 0` and the next authentic boundary is `KERNEL32.dll!GetModuleHandleW`. Host reference, focused host vectors, success/active-limit fact experiments, disabled routing, negative evidence controls, and prior regressions pass. See [KERNEL32_QUERYINFORMATIONJOBOBJECT_BOOTSTRAP.md](docs/KERNEL32_QUERYINFORMATIONJOBOBJECT_BOOTSTRAP.md). This does not claim a general job-object subsystem, CPU-rate enforcement, allocation, GC readiness, or managed-thread registration.
+
 ## `GetProcessAffinityMask` evidence status (2026-08-01)
 
 The narrow Microsoft x64 `KERNEL32.dll!GetProcessAffinityMask` contract is now routed only for the exact import pair. The artifact makes two live calls: bitmap setup reads the eight-byte process mask and updates a processor bitmap; processor-count setup reads the process mask, counts its bits, and then reaches `KERNEL32.dll!QueryInformationJobObject`. Neither caller reads the system mask or calls `GetLastError`. The checked route publishes process/system masks `0x1`/`0x1` from the existing one-bootstrap-processor snapshot and supports only the current-process pseudo-handle.

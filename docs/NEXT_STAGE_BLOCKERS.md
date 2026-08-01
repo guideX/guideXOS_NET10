@@ -73,3 +73,7 @@ The exact current-path contract is closed under [KERNEL32_GETPROCESSGROUPAFFINIT
 ## `GetProcessAffinityMask` evidence-closure result (2026-08-01)
 
 The exact Microsoft x64 process-affinity contract is closed under [KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md](KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md). The current-process pseudo-handle returns the one initialized bootstrap processor as both process and system mask `0x1`. The two callers consume only the process mask: one updates a bitmap, and one performs a manual population count before `QueryInformationJobObject`. The final QEMU evidence preserves zero GC/allocation state. The next authentic dependency is `KERNEL32.dll!QueryInformationJobObject`; no other affinity or topology API was implemented.
+
+## Query-information closure (2026-08-01)
+
+`QueryInformationJobObject` is now closed only for the live `hJob=NULL` / class-15 / eight-byte CPU-rate query. The guideXOS snapshot has no associated job, so the caller's no-job fallback is proven and the next authentic dependency is `KERNEL32.dll!GetModuleHandleW`. The dormant class-9 static reference remains a future census item, not a live startup blocker. This closure does not change the first-allocation blocker: the allocation context, GC heap, managed-thread registration, object publication, write barriers, and collection lifecycle remain unproven.

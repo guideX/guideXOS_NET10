@@ -120,3 +120,7 @@ The negative-control pipeline is [`Test-GetProcessAffinityMaskEvidencePipeline.p
 ## Result and stopping point
 
 The only newly routed import is `KERNEL32.dll!GetProcessAffinityMask`. Prior time, performance, CRT, environment, `GetSystemInfo`, NUMA, and process-group contracts remain intact. No other affinity or topology API was aliased. The next milestone is `KERNEL32.dll!QueryInformationJobObject`; work stops here because it is outside this task's requested scope.
+
+## Follow-on `QueryInformationJobObject` (2026-08-01)
+
+The next exact contract is now documented in [KERNEL32_QUERYINFORMATIONJOBOBJECT_BOOTSTRAP.md](KERNEL32_QUERYINFORMATIONJOBOBJECT_BOOTSTRAP.md). The processor-count caller passes `hJob=NULL`, class `15`, an eight-byte destination, `cb=8`, and `lpReturnLength=NULL`. The checked route returns the no-associated-job failure, so the caller keeps its one-processor fallback and advances to `KERNEL32.dll!GetModuleHandleW`. This does not broaden process affinity into job management, CPU-rate enforcement, allocation, or GC readiness.

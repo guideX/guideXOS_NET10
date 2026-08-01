@@ -14,6 +14,7 @@
 #include "platform_numa.h"
 #include "platform_process_group_affinity.h"
 #include "platform_process_affinity.h"
+#include "platform_query_information_job_object.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -357,6 +358,32 @@ static GXOS_PROCESS_AFFINITY_BOOL EFIAPI platform_get_process_affinity_mask(
     void *process_handle,
     GXOS_PROCESS_AFFINITY_DWORD_PTR *process_affinity_mask,
     GXOS_PROCESS_AFFINITY_DWORD_PTR *system_affinity_mask);
+#endif
+#ifdef GXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT
+static GXOS_QUERY_JOB_FACTS g_query_job_facts;
+static uint64_t g_query_job_calls;
+static uint64_t g_query_job_successes;
+static uint64_t g_query_job_expected_no_job_failures;
+static uint64_t g_query_job_other_failures;
+static GXOS_QUERY_JOB_STATUS g_query_job_last_status;
+static uint32_t g_query_job_last_error_before;
+static uint32_t g_query_job_last_error_after;
+static GXOS_QUERY_JOB_BOOL g_query_job_last_boolean;
+/* These four symbols are intentionally visible to the naked ABI shim only. */
+uint64_t g_query_job_entry_rsp;
+uint64_t g_query_job_return_address;
+uint64_t g_query_job_fifth_stack_address;
+uint64_t g_query_job_fifth_stack_value;
+static GXOS_QUERY_JOB_REPORT g_query_job_last_report;
+static GXOS_QUERY_JOB_BOOL EFIAPI platform_query_information_job_object_body(
+    void *job_handle,
+    GXOS_QUERY_JOB_INFO_CLASS information_class,
+    GXOS_QUERY_JOB_OUTPUT output,
+    GXOS_QUERY_JOB_DWORD output_length,
+    GXOS_QUERY_JOB_RETURN_LENGTH return_length) __attribute__((used));
+static GXOS_QUERY_JOB_BOOL EFIAPI platform_query_information_job_object(
+    void *, GXOS_QUERY_JOB_INFO_CLASS, GXOS_QUERY_JOB_OUTPUT,
+    GXOS_QUERY_JOB_DWORD, GXOS_QUERY_JOB_RETURN_LENGTH) __attribute__((naked));
 #endif
 
 static void serial_out8(uint16_t port, uint8_t value)
@@ -1604,6 +1631,26 @@ static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t origin
         serial_text("\r\n");
     }
 #endif
+#ifdef GXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT
+    if (g_query_job_calls != 0) {
+        serial_text("GXOS_NET10:QUERYJOBOBJECT_CALLER_CONSUMPTION_COMPLETE\r\n");
+        serial_text("GXOS_NET10:QUERYJOBOBJECT_NEXT_BOUNDARY=");
+        serial_text(record->module);
+        serial_text("!");
+        serial_text(record->symbol);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_CALL_COUNT=0x", g_query_job_calls);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_SUCCESS_COUNT=0x", g_query_job_successes);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_EXPECTED_NO_JOB_FAILURE_COUNT=0x",
+                         g_query_job_expected_no_job_failures);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OTHER_FAILURE_COUNT=0x",
+                         g_query_job_other_failures);
+        serial_text("\r\n");
+    }
+#endif
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
@@ -2285,6 +2332,12 @@ static void *platform_import_target(const char *module, const char *symbol)
         return (void *)(uintptr_t)platform_get_process_affinity_mask;
     }
 #endif
+#ifdef GXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "QueryInformationJobObject")) {
+        return (void *)(uintptr_t)platform_query_information_job_object;
+    }
+#endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initialize_onexit_table")) return (void *)(uintptr_t)platform_initialize_onexit_table;
@@ -2643,6 +2696,36 @@ static void configure_platform_system_info(const PE_IMAGE *image)
         GXOS_PROCESS_AFFINITY_TOPOLOGY_FACT_SNAPSHOT;
     serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_FACTS_SOURCE=GETSYSTEMINFO_AND_PROCESSGROUP_SNAPSHOT\r\n");
     serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_FACTS_POLICY=SINGLE_GROUP_ZERO_BOOTSTRAP_PROCESSOR\r\n");
+#endif
+#ifdef GXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT
+    /* guideXOS has no job-object manager or current-process job association. */
+    g_query_job_facts.supported_job_handle = GXOS_QUERY_JOB_CURRENT_HANDLE;
+    g_query_job_facts.associated_job = 0;
+    g_query_job_facts.control_flags = 0;
+    g_query_job_facts.cpu_rate = 0;
+    g_query_job_facts.weight = 0;
+    g_query_job_facts.min_rate = 0;
+    g_query_job_facts.max_rate = 0;
+#ifdef GXOS_QUERY_JOB_SUCCESS_NO_LIMIT_EXPERIMENT
+    g_query_job_facts.associated_job = 1;
+#endif
+#ifdef GXOS_QUERY_JOB_ACTIVE_LIMIT_EXPERIMENT
+    g_query_job_facts.associated_job = 1;
+    g_query_job_facts.control_flags = GXOS_QUERY_JOB_CPU_RATE_ENABLE |
+                                      GXOS_QUERY_JOB_CPU_RATE_HARD_CAP;
+    g_query_job_facts.cpu_rate = 5000;
+#endif
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_FACTS_SOURCE=GUIDEXOS_BOOTSTRAP_SNAPSHOT\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_FACTS_POLICY=");
+#if defined(GXOS_QUERY_JOB_SUCCESS_NO_LIMIT_EXPERIMENT)
+    serial_text("INVESTIGATION_SYNTHETIC_ASSOCIATED_JOB_NO_ACTIVE_LIMIT\r\n");
+#elif defined(GXOS_QUERY_JOB_ACTIVE_LIMIT_EXPERIMENT)
+    serial_text("INVESTIGATION_SYNTHETIC_ASSOCIATED_JOB_ACTIVE_HARD_CAP\r\n");
+#else
+    serial_text("NO_JOB_SUBSYSTEM_NO_ASSOCIATED_JOB\r\n");
+#endif
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_NESTED_JOBS_SUPPORTED=0\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_CPU_RATE_CONTROL_ENFORCED=0\r\n");
 #endif
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_SOURCE=UEFI_PAGE_AND_LOADED_IMAGE\r\n");
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_POLICY=IMAGE_BACKED_RANGE_SINGLE_BOOTSTRAP_PROCESSOR\r\n");
@@ -3129,6 +3212,329 @@ platform_get_process_group_affinity(
     }
 #endif
     return g_process_group_last_boolean;
+}
+#endif
+
+#ifdef GXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT
+static const char *query_job_status_name(GXOS_QUERY_JOB_STATUS status)
+{
+    switch (status) {
+    case GXOS_QUERY_JOB_STATUS_OK: return "OK";
+    case GXOS_QUERY_JOB_STATUS_NO_ASSOCIATED_JOB: return "NO_ASSOCIATED_JOB";
+    case GXOS_QUERY_JOB_STATUS_INVALID_HANDLE: return "INVALID_HANDLE";
+    case GXOS_QUERY_JOB_STATUS_UNSUPPORTED_INFORMATION_CLASS: return "UNSUPPORTED_INFORMATION_CLASS";
+    case GXOS_QUERY_JOB_STATUS_NULL_OUTPUT: return "NULL_OUTPUT";
+    case GXOS_QUERY_JOB_STATUS_NONCANONICAL_OUTPUT: return "NONCANONICAL_OUTPUT";
+    case GXOS_QUERY_JOB_STATUS_UNWRITABLE_OUTPUT: return "UNWRITABLE_OUTPUT";
+    case GXOS_QUERY_JOB_STATUS_INSUFFICIENT_OUTPUT: return "INSUFFICIENT_OUTPUT";
+    case GXOS_QUERY_JOB_STATUS_NONCANONICAL_RETURN_LENGTH: return "NONCANONICAL_RETURN_LENGTH";
+    case GXOS_QUERY_JOB_STATUS_UNWRITABLE_RETURN_LENGTH: return "UNWRITABLE_RETURN_LENGTH";
+    case GXOS_QUERY_JOB_STATUS_LAYOUT_MISMATCH: return "LAYOUT_MISMATCH";
+    case GXOS_QUERY_JOB_STATUS_INVALID_JOB_FACTS: return "INVALID_JOB_FACTS";
+    case GXOS_QUERY_JOB_STATUS_RANGE_OVERFLOW: return "RANGE_OVERFLOW";
+    case GXOS_QUERY_JOB_STATUS_ALIASED_OUTPUTS: return "ALIASED_OUTPUTS";
+    case GXOS_QUERY_JOB_STATUS_INVALID_FLAGS: return "INVALID_FLAGS";
+    case GXOS_QUERY_JOB_STATUS_INVALID_RATE: return "INVALID_RATE";
+    default: return "UNKNOWN";
+    }
+}
+
+static uint32_t query_job_status_last_error(GXOS_QUERY_JOB_STATUS status)
+{
+    if (status == GXOS_QUERY_JOB_STATUS_NO_ASSOCIATED_JOB) {
+        return GXOS_QUERY_JOB_ERROR_ACCESS_DENIED;
+    }
+    if (status == GXOS_QUERY_JOB_STATUS_INVALID_HANDLE) {
+        return GXOS_QUERY_JOB_ERROR_INVALID_HANDLE;
+    }
+    if (status == GXOS_QUERY_JOB_STATUS_INSUFFICIENT_OUTPUT) {
+        return GXOS_QUERY_JOB_ERROR_INSUFFICIENT_BUFFER;
+    }
+    if (status == GXOS_QUERY_JOB_STATUS_NONCANONICAL_OUTPUT ||
+        status == GXOS_QUERY_JOB_STATUS_UNWRITABLE_OUTPUT ||
+        status == GXOS_QUERY_JOB_STATUS_NONCANONICAL_RETURN_LENGTH ||
+        status == GXOS_QUERY_JOB_STATUS_UNWRITABLE_RETURN_LENGTH ||
+        status == GXOS_QUERY_JOB_STATUS_RANGE_OVERFLOW) {
+        return GXOS_QUERY_JOB_ERROR_NOACCESS;
+    }
+    return GXOS_QUERY_JOB_ERROR_INVALID_PARAMETER;
+}
+
+static uint32_t query_job_field_read_mask(uint32_t control_flags,
+                                          GXOS_QUERY_JOB_STATUS status)
+{
+    if (status != GXOS_QUERY_JOB_STATUS_OK) return 0;
+    if ((control_flags & (GXOS_QUERY_JOB_CPU_RATE_ENABLE |
+                          GXOS_QUERY_JOB_CPU_RATE_HARD_CAP)) ==
+        (GXOS_QUERY_JOB_CPU_RATE_ENABLE | GXOS_QUERY_JOB_CPU_RATE_HARD_CAP)) {
+        return 0x3;
+    }
+    if ((control_flags & (GXOS_QUERY_JOB_CPU_RATE_ENABLE |
+                          GXOS_QUERY_JOB_CPU_RATE_MIN_MAX)) ==
+        (GXOS_QUERY_JOB_CPU_RATE_ENABLE | GXOS_QUERY_JOB_CPU_RATE_MIN_MAX)) {
+        return 0x5;
+    }
+    return 0x1;
+}
+
+static uint32_t query_job_population(uint64_t value)
+{
+    uint32_t count = 0;
+    while (value != 0) {
+        value &= value - 1U;
+        ++count;
+    }
+    return count;
+}
+
+static void query_job_emit_report(
+    void *job_handle,
+    GXOS_QUERY_JOB_INFO_CLASS information_class,
+    GXOS_QUERY_JOB_OUTPUT output,
+    GXOS_QUERY_JOB_DWORD output_length,
+    GXOS_QUERY_JOB_RETURN_LENGTH return_length,
+    GXOS_QUERY_JOB_STATUS status,
+    GXOS_QUERY_JOB_REPORT *report)
+{
+    uintptr_t return_address = (uintptr_t)g_query_job_return_address;
+    uintptr_t call_site = return_address >= 6 ? return_address - 6U : 0;
+    uint64_t static_call_site = call_site >= (uintptr_t)g_managed_image_base
+                                    ? 0x180000000ULL +
+                                          (uint64_t)(call_site -
+                                                     (uintptr_t)g_managed_image_base)
+                                    : 0;
+    uint32_t control_flags = status == GXOS_QUERY_JOB_STATUS_OK && report != 0
+                                 ? report->output_after_low
+                                 : 0;
+    uint32_t field_read_mask = query_job_field_read_mask(control_flags, status);
+    uint32_t processor_count_before = query_job_population(
+        g_process_affinity_facts.process_affinity_mask);
+    uint32_t processor_count_after = processor_count_before;
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *output_region =
+        platform_system_info_region((uintptr_t)output);
+    const GXOS_SYSTEM_INFO_MEMORY_REGION *return_region =
+        platform_system_info_region((uintptr_t)return_length);
+
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_CALL_INDEX=0x",
+                     g_query_job_calls - 1U);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_IMPORT_MODULE=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_IMPORT_SYMBOL=QueryInformationJobObject\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_IMPORT_DESCRIPTOR_INDEX=0x", 2);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_IAT_RVA=0x", 0x7D1F0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_PREFERRED_IAT=0x", 0x18007D1F0ULL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_RUNTIME_IAT=0x",
+                     g_managed_image_base + 0x7D1F0ULL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_STATIC_CALL_SITE=0x", static_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_RETURN_ADDRESS=0x", return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_CALLER_START=0x",
+                     g_managed_image_base + 0x3CBE0ULL);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_CALLER=NativeAOT_processor_count_setup\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_RCX_HJOB=0x", (uintptr_t)job_handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_EDX_INFO_CLASS=0x", information_class);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_R8_OUTPUT_POINTER=0x", (uintptr_t)output);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_R9D_OUTPUT_LENGTH=0x", output_length);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_ENTRY_RSP=0x", g_query_job_entry_rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_FIFTH_ARGUMENT_STACK_ADDRESS=0x",
+                     g_query_job_fifth_stack_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_FIFTH_ARGUMENT_STACK_VALUE=0x",
+                     g_query_job_fifth_stack_value);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_FIFTH_ARGUMENT_RELATION=ENTRY_RSP_PLUS_0x28\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_LP_RETURN_LENGTH=0x",
+                     (uintptr_t)return_length);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_LP_RETURN_LENGTH_NULL=");
+    serial_text(return_length == 0 ? "1\r\n" : "0\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_REGION_BASE=0x",
+                     output_region == 0 ? 0 : output_region->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_REGION_END=0x",
+                     output_region == 0 ? 0 : output_region->end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_REGION_WRITABLE=0x",
+                     output_region == 0 ? 0 : output_region->writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_ALIGNMENT=0x",
+                     report == 0 ? 0 : report->output_alignment);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_LENGTH=0x", output_length);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_STRUCTURE_SIZE=0x",
+                     GXOS_QUERY_JOB_CPU_RATE_STRUCTURE_SIZE);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_INFO_CLASS_NAME=JobObjectCpuRateControlInformation\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_INFO_CLASS_VALUE=0x", information_class);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_POINTER_CANONICAL=0x",
+                     report == 0 ? 0 : report->output_pointer_canonical);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_POINTER_WRITABLE=0x",
+                     report == 0 ? 0 : report->output_pointer_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_RANGE_VALID=0x",
+                     report == 0 ? 0 : report->output_range_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_BEFORE_LOW=0x",
+                     report == 0 ? 0 : report->output_before_low);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_BEFORE_HIGH=0x",
+                     report == 0 ? 0 : report->output_before_high);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_AFTER_LOW=0x",
+                     report == 0 ? 0 : report->output_after_low);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_AFTER_HIGH=0x",
+                     report == 0 ? 0 : report->output_after_high);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_RETURN_LENGTH_POINTER_REGION_BASE=0x",
+                     return_region == 0 ? 0 : return_region->base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_RETURN_LENGTH_POINTER_REGION_END=0x",
+                     return_region == 0 ? 0 : return_region->end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_LAST_ERROR_BEFORE=0x",
+                     g_query_job_last_error_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_BOOLEAN_RESULT=0x",
+                     (uint32_t)g_query_job_last_boolean);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_LAST_ERROR_AFTER=0x",
+                     g_query_job_last_error_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_RETURN_LENGTH=0x",
+                     report != 0 && report->return_length_after_valid
+                         ? report->return_length_after
+                         : report != 0 && report->return_length_before_valid
+                               ? report->return_length_before
+                               : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_FIELD_READ_MASK=0x", field_read_mask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_PROCESSOR_COUNT_BEFORE=0x",
+                     processor_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_PROCESSOR_COUNT_AFTER=0x",
+                     processor_count_after);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_JOB_ASSOCIATION=");
+    serial_text(g_query_job_facts.associated_job != 0 ? "ASSOCIATED\r\n" : "NONE\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_ACTIVE_CONTROL_FLAGS=0x",
+                     g_query_job_facts.control_flags);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_CALLER_BRANCH=");
+    if (status == GXOS_QUERY_JOB_STATUS_NO_ASSOCIATED_JOB) {
+        serial_text("FAILURE_NO_ASSOCIATED_JOB_FALLBACK\r\n");
+    } else if (status == GXOS_QUERY_JOB_STATUS_OK && control_flags == 0) {
+        serial_text("SUCCESS_NO_ACTIVE_CPU_RATE_FALLBACK\r\n");
+    } else if (status == GXOS_QUERY_JOB_STATUS_OK) {
+        serial_text("SUCCESS_ACTIVE_CPU_RATE_CAP\r\n");
+    } else {
+        serial_text("FAILURE_OTHER\r\n");
+    }
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_CALLER_GETLASTERROR=0x", 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OUTPUT_WRITTEN=0x",
+                     report == 0 ? 0 : report->output_written);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_RETURN_LENGTH_WRITTEN=0x",
+                     report == 0 ? 0 : report->return_length_written);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_CALL_COUNT=0x", g_query_job_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_SUCCESS_COUNT=0x", g_query_job_successes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_EXPECTED_NO_JOB_FAILURE_COUNT=0x",
+                     g_query_job_expected_no_job_failures);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OTHER_FAILURE_COUNT=0x",
+                     g_query_job_other_failures);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_STATUS=0x", (uint32_t)status);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_STATUS_NAME=");
+    serial_text(query_job_status_name(status));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_RETURNED\r\n");
+#ifdef GXOS_QUERY_JOB_MARKER_MUTATION
+    serial_text("GXOS_NET10:QUERYJOBOBJECT_OX\r\n");
+#else
+    if (status == GXOS_QUERY_JOB_STATUS_NO_ASSOCIATED_JOB) {
+        serial_text("GXOS_NET10:QUERYJOBOBJECT_EXPECTED_NO_ASSOCIATED_JOB_FAILURE\r\n");
+    } else if (status == GXOS_QUERY_JOB_STATUS_OK) {
+        serial_text("GXOS_NET10:QUERYJOBOBJECT_OK\r\n");
+    } else {
+        serial_text("GXOS_NET10:QUERYJOBOBJECT_FAILED\r\n");
+    }
+#endif
+}
+
+static GXOS_QUERY_JOB_BOOL EFIAPI platform_query_information_job_object_body(
+    void *job_handle,
+    GXOS_QUERY_JOB_INFO_CLASS information_class,
+    GXOS_QUERY_JOB_OUTPUT output,
+    GXOS_QUERY_JOB_DWORD output_length,
+    GXOS_QUERY_JOB_RETURN_LENGTH return_length)
+{
+    GXOS_QUERY_JOB_STATUS status;
+    GXOS_QUERY_JOB_BOOL result;
+    uint32_t last_error_before = g_platform_last_error;
+
+    ++g_query_job_calls;
+    status = gxos_query_information_job_object_checked(
+        (GXOS_QUERY_JOB_HANDLE)(uintptr_t)job_handle, information_class,
+        output, output_length, return_length, &g_query_job_facts,
+        &g_system_info_memory, &g_query_job_last_report);
+    if (status == GXOS_QUERY_JOB_STATUS_OK) {
+        result = GXOS_QUERY_JOB_TRUE;
+        ++g_query_job_successes;
+    } else {
+        result = GXOS_QUERY_JOB_FALSE;
+        g_platform_last_error = query_job_status_last_error(status);
+        if (status == GXOS_QUERY_JOB_STATUS_NO_ASSOCIATED_JOB) {
+            ++g_query_job_expected_no_job_failures;
+        } else {
+            ++g_query_job_other_failures;
+        }
+    }
+    g_query_job_last_status = status;
+    g_query_job_last_error_before = last_error_before;
+    g_query_job_last_error_after = g_platform_last_error;
+    g_query_job_last_boolean = result;
+    query_job_emit_report(job_handle, information_class, output, output_length,
+                          return_length, status, &g_query_job_last_report);
+    return result;
+}
+
+static GXOS_QUERY_JOB_BOOL EFIAPI platform_query_information_job_object(
+    void *, GXOS_QUERY_JOB_INFO_CLASS, GXOS_QUERY_JOB_OUTPUT,
+    GXOS_QUERY_JOB_DWORD, GXOS_QUERY_JOB_RETURN_LENGTH)
+{
+    __asm__ volatile(
+        "movq (%rsp), %r11\n\t"
+        "movq %r11, g_query_job_return_address(%rip)\n\t"
+        "movq %rsp, g_query_job_entry_rsp(%rip)\n\t"
+        "leaq 0x28(%rsp), %r11\n\t"
+        "movq %r11, g_query_job_fifth_stack_address(%rip)\n\t"
+        "movq 0x28(%rsp), %r11\n\t"
+        "movq %r11, g_query_job_fifth_stack_value(%rip)\n\t"
+        "jmp platform_query_information_job_object_body\n\t");
 }
 #endif
 

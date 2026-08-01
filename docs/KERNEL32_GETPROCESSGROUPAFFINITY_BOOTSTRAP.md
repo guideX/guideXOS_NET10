@@ -110,3 +110,7 @@ This closure stops at `KERNEL32.dll!GetProcessAffinityMask`. No process-affinity
 ## Follow-on `GetProcessAffinityMask` (2026-08-01)
 
 The process-group capacity probe is now followed by the separately scoped [GetProcessAffinityMask bootstrap contract](KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md). That contract reuses this document's one-group/Group-0 snapshot and advances the enabled census to `33 / 91 / 0`. It returns process/system masks `0x1`/`0x1` only for the current-process pseudo-handle; it does not broaden this process-group contract into scheduler topology, affinity mutation, or multi-group support.
+
+## Follow-on query information (2026-08-01)
+
+The process-affinity follow-on now closes the subsequent class-15 `QueryInformationJobObject` call. Its no-associated-job result advances the bounded startup to `KERNEL32.dll!GetModuleHandleW`; no process-group, job, scheduler, or allocation semantics are inferred from that transition.

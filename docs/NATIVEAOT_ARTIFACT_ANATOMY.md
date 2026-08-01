@@ -178,3 +178,7 @@ The wrapper's relocated final profile is image base `0x547b000`, IAT `0x54f82a0`
 ## `GetProcessAffinityMask` import anatomy (2026-08-01)
 
 The enabled image changes only `KERNEL32.dll!GetProcessAffinityMask` from fail-fast to functional. Its IAT slot is RVA `0x7d208` (`0x18007d208` preferred), with two direct calls at preferred `0x180043793` and `0x18003cc55`. Both pass `GetCurrentProcess()`'s full pseudo-handle in RCX and two distinct eight-byte stack outputs in RDX/R8. The first caller updates a processor bitmap from the process mask; the second manually counts process-mask bits and then calls `QueryInformationJobObject`. Neither caller reads the system mask. The route publishes only `0x1`/`0x1` from the existing `GetSystemInfo` snapshot and stops at `KERNEL32.dll!QueryInformationJobObject`.
+
+## Query-information call graph addendum (2026-08-01)
+
+The query-enabled payload imports `KERNEL32.dll!QueryInformationJobObject` at IAT RVA `0x7d1f0` and relocates that slot without changing the Microsoft x64 call shape. The live direct call is preferred `0x18003cca1`, in the processor-count setup function beginning `0x18003cbe0`; the caller passes class `15`, an eight-byte output, `cb=8`, and a null fifth argument. A second direct reference at preferred `0x1800432bd` passes class `9` and `cb=0x90`, but the current startup never reaches it: the live call's consumer completes and the next fail-fast import is `GetModuleHandleW`. The immutable validator requires one live query call per positive run and rejects a missing or reordered boundary.

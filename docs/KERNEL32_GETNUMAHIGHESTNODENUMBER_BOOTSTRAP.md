@@ -110,3 +110,5 @@ The one-domain successful zero result reaches the exact process-group capacity p
 ## Follow-on process affinity (2026-08-01)
 
 The process-group closure is followed by the separately scoped [`GetProcessAffinityMask`](KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md) contract. It reuses the same one-processor facts and returns process/system masks `0x1`/`0x1`; this does not change the NUMA result, add topology discovery, or establish allocation/GC readiness. The next boundary after the two affinity callers is `KERNEL32.dll!QueryInformationJobObject`.
+
+The query-information follow-on is recorded in [KERNEL32_QUERYINFORMATIONJOBOBJECT_BOOTSTRAP.md](KERNEL32_QUERYINFORMATIONJOBOBJECT_BOOTSTRAP.md). It remains outside NUMA scope and only proves the class-15 no-associated-job fallback before `GetModuleHandleW`.

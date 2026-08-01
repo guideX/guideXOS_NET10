@@ -76,6 +76,8 @@ The new wrapper records the exact output range and last-error behavior while pre
 
 The same one-processor snapshot is reused by the separately scoped [`GetProcessGroupAffinity`](KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md) contract. The process-group caller passes a zero-capacity `USHORT` and null array, so the snapshot's one group produces `ERROR_INSUFFICIENT_BUFFER` and required count `1`. No additional `SYSTEM_INFO` fields, processor-topology APIs, or allocation state are inferred from that reuse.
 
+The later process-affinity and query-information closures reuse the same one-processor snapshot. The query route observes no associated job and does not reinterpret `SYSTEM_INFO` as job state, CPU-rate enforcement, allocation context, or GC readiness.
+
 ## Follow-on process affinity (2026-08-01)
 
 The same `GetSystemInfo` snapshot is now the authoritative source for [`GetProcessAffinityMask`](KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md): one usable processor, active mask `0x1`, one Group-0 policy, and process/system masks `0x1`/`0x1`. The affinity contract validates this snapshot before publishing either eight-byte output. It does not reinterpret `SYSTEM_INFO` as a general processor enumerator or imply GC readiness.
