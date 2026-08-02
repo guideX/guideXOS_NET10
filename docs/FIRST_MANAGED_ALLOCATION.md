@@ -47,3 +47,7 @@ No PE export directory, module registry, DLL loader, heap segment, object/EEType
 ## `GetModuleHandleW` does not advance allocation
 
 The current NativeAOT path reaches one non-null `GetModuleHandleW(&L"ntdll.dll")` call after the no-associated-job fallback. guideXOS has no mapped ntdll image, so the truthful narrow contract returns `NULL` with `ERROR_MOD_NOT_FOUND` and stops at `GetProcAddress`. The positive runs still report zero TLS allocation pointer/limit, zero GC contract initialization, zero usable GC heap, zero allocation context, zero managed-thread registration, and zero managed allocations. A module-handle result—even the actual relocated payload base in the null-name checked policy—would not by itself prove heap or GC readiness. The first-allocation blocker remains unchanged.
+
+## `_register_onexit_function` does not advance allocation (2026-08-02)
+
+The current NativeAOT register call is now reached after the bounded `GetProcAddress` fallback. The table is initialized but empty, so the exact UCRT growth dependency is `_recalloc_crt_t(_PVFV,NULL,0x20)`. The bounded route returns `-1` / `GROWTH_REQUIRED` without attempting allocation, leaves the encoded table unchanged, and executes no callback. Three immutable positive runs retain `GC_CONTRACT_INITIALIZED=0`, `GC_HEAP_USABLE=0`, `ALLOCATION_CONTEXT_VALID=0`, `MANAGED_THREAD_REGISTERED=0`, and `MANAGED_ALLOCATION_COUNT=0`. The first managed allocation remains unproven; no allocator or GC shim belongs in this contract.

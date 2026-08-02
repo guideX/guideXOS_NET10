@@ -2681,18 +2681,66 @@ static void EFIAPI platform_delete_critical_section(PlatformCriticalSection *sec
 
 #ifdef GXOS_ENABLE_CRT_ONEXIT
 static uint64_t g_crt_onexit_initialize_calls;
+static uintptr_t g_crt_onexit_initialized_tables[GXOS_CRT_ONEXIT_MAX_INITIALIZED_TABLES];
+static uint32_t g_crt_onexit_initialized_table_count;
+static GXOS_CRT_ONEXIT_CONTEXT g_crt_onexit_context;
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+static uint32_t g_crt_onexit_register_import_descriptor_index;
+static uint32_t g_crt_onexit_register_importing_iat_rva;
+static uint64_t g_crt_onexit_register_calls;
+static uint64_t g_crt_onexit_register_successes;
+static uint64_t g_crt_onexit_register_failures;
+static uint64_t g_crt_onexit_register_allocation_attempts;
+static uint64_t g_crt_onexit_register_callback_executed;
+static GXOS_CRT_ONEXIT_REPORT g_crt_onexit_register_report;
+static GXOS_CRT_ONEXIT_STATUS g_crt_onexit_register_status;
+#endif
 
 static int GXOS_CRT_EFIAPI platform_initialize_onexit_table(GXOS_CRT_ONEXIT_TABLE *table)
 {
     int result;
+    uintptr_t table_value = (uintptr_t)table;
     g_crt_onexit_initialize_calls++;
     serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_CALL=0x", g_crt_onexit_initialize_calls);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:CRT_ONEXIT_TABLE=0x", (uint64_t)(uintptr_t)table);
     serial_text("\r\n");
+    if (table == 0) {
+        serial_text("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_FIRST_BEFORE=0x0000000000000000\r\n");
+        serial_text("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_LAST_BEFORE=0x0000000000000000\r\n");
+        serial_text("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_END_BEFORE=0x0000000000000000\r\n");
+    } else {
+        serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_FIRST_BEFORE=0x", (uintptr_t)table->first);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_LAST_BEFORE=0x", (uintptr_t)table->last);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_END_BEFORE=0x", (uintptr_t)table->end);
+        serial_text("\r\n");
+    }
     result = gxos_crt_initialize_onexit_table(table);
     serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_RETURN=0x", (uint64_t)(uint32_t)result);
     serial_text("\r\n");
+    if (result == 0 && table != 0 &&
+        g_crt_onexit_initialized_table_count < GXOS_CRT_ONEXIT_MAX_INITIALIZED_TABLES) {
+        g_crt_onexit_initialized_tables[g_crt_onexit_initialized_table_count++] = table_value;
+        if (gxos_crt_onexit_set_initialized_tables(
+                g_crt_onexit_initialized_tables,
+                g_crt_onexit_initialized_table_count) != 0) {
+            fail("crt-onexit-table-list");
+        }
+    }
+    if (table == 0) {
+        serial_text("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_FIRST_AFTER=0x0000000000000000\r\n");
+        serial_text("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_LAST_AFTER=0x0000000000000000\r\n");
+        serial_text("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_END_AFTER=0x0000000000000000\r\n");
+    } else {
+        serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_FIRST_AFTER=0x", (uintptr_t)table->first);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_LAST_AFTER=0x", (uintptr_t)table->last);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CRT_ONEXIT_INIT_TABLE_END_AFTER=0x", (uintptr_t)table->end);
+        serial_text("\r\n");
+    }
     if (result == 0 && table != 0 && table->first == table->last && table->last == table->end) {
 #ifdef GXOS_CRT_ONEXIT_MARKER_MUTATION
         serial_text("GXOS_NET10:CRT_ONEXIT_INITIALIZED_OX\r\n");
@@ -2702,6 +2750,215 @@ static int GXOS_CRT_EFIAPI platform_initialize_onexit_table(GXOS_CRT_ONEXIT_TABL
     }
     return result;
 }
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+static uint64_t platform_crt_onexit_static_call_site(uintptr_t call_site)
+{
+    if (call_site >= (uintptr_t)g_managed_image_base) {
+        return 0x180000000ULL +
+               (uint64_t)(call_site - (uintptr_t)g_managed_image_base);
+    }
+    return 0;
+}
+
+static int GXOS_CRT_EFIAPI platform_register_onexit_function(
+    GXOS_CRT_ONEXIT_TABLE *table,
+    GXOS_CRT_ONEXIT_T function)
+{
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = return_address >= 6U ? return_address - 6U : 0;
+    uint64_t static_call_site = platform_crt_onexit_static_call_site(call_site);
+    GXOS_CRT_ONEXIT_STATUS status;
+
+    ++g_crt_onexit_register_calls;
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CALL_INDEX=0x", g_crt_onexit_register_calls - 1U);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_IMPORT_MODULE=api-ms-win-crt-runtime-l1-1-0.dll\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_IMPORT_SYMBOL=_register_onexit_function\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_crt_onexit_register_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_IAT_RVA=0x",
+                     g_crt_onexit_register_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_PREFERRED_IAT=0x",
+                     0x180000000ULL + g_crt_onexit_register_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_RUNTIME_IAT=0x",
+                     (uint64_t)g_managed_image_base + g_crt_onexit_register_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_STATIC_CALL_SITE=0x", static_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_RETURN_ADDRESS=0x", return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_POINTER=0x", (uintptr_t)table);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CALLBACK_POINTER=0x", (uintptr_t)function);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CALLER_START=0x", 0x180077DF0ULL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CALLER_END=0x", 0x180077E30ULL);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_CALLER=NativeAOT_CRT_atexit_registration_helper\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_RVA=0x",
+                     (uint64_t)((uintptr_t)table - (uintptr_t)g_managed_image_base));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CALLBACK_RVA=0x",
+                     (uint64_t)((uintptr_t)function - (uintptr_t)g_managed_image_base));
+    serial_text("\r\n");
+    status = gxos_crt_onexit_register_checked(table, function,
+                                              &g_crt_onexit_register_report);
+    g_crt_onexit_register_status = status;
+    if (status == GXOS_CRT_ONEXIT_STATUS_OK) {
+        ++g_crt_onexit_register_successes;
+    } else {
+        ++g_crt_onexit_register_failures;
+    }
+    if (g_crt_onexit_register_report.allocation_attempted != 0) {
+        ++g_crt_onexit_register_allocation_attempts;
+    }
+    g_crt_onexit_register_callback_executed +=
+        g_crt_onexit_register_report.callback_executed;
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_FIRST_RAW_BEFORE=0x",
+                     g_crt_onexit_register_report.table_first_raw);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_RAW_BEFORE=0x",
+                     g_crt_onexit_register_report.table_last_raw);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_END_RAW_BEFORE=0x",
+                     g_crt_onexit_register_report.table_end_raw);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_REGION_BASE=0x",
+                     g_crt_onexit_register_report.table_region_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_REGION_END=0x",
+                     g_crt_onexit_register_report.table_region_end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_REGION_READABLE=0x",
+                     g_crt_onexit_register_report.table_region_readable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_REGION_WRITABLE=0x",
+                     g_crt_onexit_register_report.table_region_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_FIRST_BEFORE=0x",
+                     g_crt_onexit_register_report.first);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_BEFORE=0x",
+                     g_crt_onexit_register_report.last);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_END_BEFORE=0x",
+                     g_crt_onexit_register_report.end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_USED_BEFORE=0x",
+                     g_crt_onexit_register_report.used_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CAPACITY_BEFORE=0x",
+                     g_crt_onexit_register_report.capacity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_REMAINING_CAPACITY_BEFORE=0x",
+                     g_crt_onexit_register_report.remaining_capacity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_GROWTH_REQUIRED=0x",
+                     g_crt_onexit_register_report.growth_required);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_ATTEMPTED=0x",
+                     g_crt_onexit_register_report.allocation_attempted);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_POINTER_ENCODED=0x",
+                     g_crt_onexit_register_report.pointer_encoded);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_STORED_VALUE=0x",
+                     g_crt_onexit_register_report.stored_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ENTRY_INDEX=0x",
+                     g_crt_onexit_register_report.entry_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_FIRST_AFTER=0x",
+                     g_crt_onexit_register_report.first);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_AFTER=0x",
+                     g_crt_onexit_register_report.last);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_END_AFTER=0x",
+                     g_crt_onexit_register_report.end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_USED_AFTER=0x",
+                     g_crt_onexit_register_report.status == GXOS_CRT_ONEXIT_STATUS_OK ?
+                         g_crt_onexit_register_report.used_count + 1U :
+                         g_crt_onexit_register_report.used_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CAPACITY_AFTER=0x",
+                     g_crt_onexit_register_report.capacity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_FIRST_RAW_AFTER=0x",
+                     table == 0 ? 0 : (uintptr_t)table->first);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_RAW_AFTER=0x",
+                     table == 0 ? 0 : (uintptr_t)table->last);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_END_RAW_AFTER=0x",
+                     table == 0 ? 0 : (uintptr_t)table->end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_UNCHANGED=0x",
+                     table != 0 &&
+                     (uintptr_t)table->first == g_crt_onexit_register_report.table_first_raw &&
+                     (uintptr_t)table->last == g_crt_onexit_register_report.table_last_raw &&
+                     (uintptr_t)table->end == g_crt_onexit_register_report.table_end_raw);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_BASE=0x");
+    serial_hex64(g_crt_onexit_register_report.storage_region_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_END=0x",
+                     g_crt_onexit_register_report.storage_region_end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_READABLE=0x",
+                     g_crt_onexit_register_report.storage_region_readable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_WRITABLE=0x",
+                     g_crt_onexit_register_report.storage_region_writable);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_CALLBACK_OWNER=");
+    if (g_crt_onexit_register_report.callback_region_executable != 0) {
+        serial_text("MANAGED_IMAGE_TEXT\r\n");
+    } else {
+        serial_text("NONE\r\n");
+    }
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CALLBACK_REGION_BASE=0x",
+                     g_crt_onexit_register_report.callback_region_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CALLBACK_REGION_END=0x",
+                     g_crt_onexit_register_report.callback_region_end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_INITIALIZED_TABLE_MATCH=0x",
+                     g_crt_onexit_register_report.initialized_table_match);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_INITIALIZED_TABLE_INDEX=0x",
+                     g_crt_onexit_register_report.initialized_table_index);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_ENCODING=FAST_SECURITY_COOKIE_ROTATE_X64\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_GROWTH_POLICY=INITIAL_TABLE_COUNT_0x20_MIN_INCREMENT_0x4_MAX_INCREMENT_0x200\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_DEPENDENCY=_recalloc_crt_t(_PVFV,NULL,0x20)\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_IMPLEMENTED=0\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_RESULT=0x",
+                     (uint64_t)(uint32_t)(status == GXOS_CRT_ONEXIT_STATUS_OK ? 0 : -1));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_STATUS=");
+    serial_text(gxos_crt_onexit_status_name(status));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_CALLER_BRANCH=");
+    serial_text(status == GXOS_CRT_ONEXIT_STATUS_OK ?
+                    "RETURN_VALUE_MAPPED_TO_SUCCESS\r\n" :
+                    "RETURN_VALUE_MAPPED_TO_FAILURE\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CALLBACK_EXECUTED=0x",
+                     g_crt_onexit_register_report.callback_executed);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_CALLBACK_EXECUTED_PROVEN=0x0\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_RETURNED\r\n");
+    return status == GXOS_CRT_ONEXIT_STATUS_OK ? 0 : -1;
+}
+#endif
 #endif
 
 #ifdef GXOS_ENABLE_SLIST
@@ -3043,6 +3300,10 @@ static void *platform_import_target(const char *module, const char *symbol)
 #ifdef GXOS_ENABLE_CRT_ONEXIT
     if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
         equal_text(symbol, "_initialize_onexit_table")) return (void *)(uintptr_t)platform_initialize_onexit_table;
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+    if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
+        equal_text(symbol, "_register_onexit_function")) return (void *)(uintptr_t)platform_register_onexit_function;
+#endif
 #endif
     return 0;
 }
@@ -3198,6 +3459,13 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 equal_text(g_import_records[symbols].symbol, "GetProcAddress")) {
                 g_get_proc_address_import_descriptor_index = descriptors - 1U;
                 g_get_proc_address_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+            if (equal_text(module, "api-ms-win-crt-runtime-l1-1-0.dll") &&
+                equal_text(g_import_records[symbols].symbol, "_register_onexit_function")) {
+                g_crt_onexit_register_import_descriptor_index = descriptors - 1U;
+                g_crt_onexit_register_importing_iat_rva = first_thunk_rva + index * 8U;
             }
 #endif
             {
@@ -4845,6 +5113,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_CRT_INITTERM_CONTEXT initterm_context = {0};
     uint32_t initterm_region_index;
 #endif
+#ifdef GXOS_ENABLE_CRT_ONEXIT
+    int onexit_context_result;
+#endif
 
     serial_init();
     serial_text("GXOS_NET10:LOADER_START\r\n");
@@ -4929,6 +5200,40 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     gxos_crt_onexit_set_encoded_null_address(
         (const uintptr_t *)rva_to_loaded(&image, image.security_cookie_rva, sizeof(uintptr_t)));
     if (gxos_crt_onexit_get_encoded_null() == 0) fail("security-cookie-uninitialized");
+    if (image.loaded_size > UINT32_MAX || image.actual_base == 0 ||
+        image.preferred_base == 0 || image.memory_region_count == 0 ||
+        image.relocations_applied == 0 ||
+        image.memory_region_count > GXOS_CRT_ONEXIT_MAX_MEMORY_REGIONS) {
+        fail("crt-onexit-context");
+    }
+    g_crt_onexit_context.image_base = image.actual_base;
+    g_crt_onexit_context.image_end = image.actual_base + (uintptr_t)image.loaded_size;
+    g_crt_onexit_context.encoded_null = gxos_crt_onexit_get_encoded_null();
+    g_crt_onexit_context.relocations_applied = image.relocations_applied;
+    g_crt_onexit_context.region_count = image.memory_region_count;
+    g_crt_onexit_context.initialized_table_count = 0;
+    for (initterm_region_index = 0;
+         initterm_region_index != image.memory_region_count;
+         initterm_region_index++) {
+        g_crt_onexit_context.regions[initterm_region_index].base =
+            image.memory_regions[initterm_region_index].base;
+        g_crt_onexit_context.regions[initterm_region_index].end =
+            image.memory_regions[initterm_region_index].end;
+        g_crt_onexit_context.regions[initterm_region_index].readable =
+            image.memory_regions[initterm_region_index].readable;
+        g_crt_onexit_context.regions[initterm_region_index].executable =
+            image.memory_regions[initterm_region_index].executable;
+        g_crt_onexit_context.regions[initterm_region_index].writable =
+            image.memory_regions[initterm_region_index].writable;
+    }
+    onexit_context_result = gxos_crt_onexit_configure(&g_crt_onexit_context);
+    serial_field_hex("GXOS_NET10:CRT_ONEXIT_CONTEXT_RESULT=0x",
+                     (uint64_t)(uint32_t)onexit_context_result);
+    serial_text("\r\n");
+    if (onexit_context_result != 0) {
+        fail("crt-onexit-context");
+    }
+    serial_text("GXOS_NET10:CRT_ONEXIT_VALIDATION_CONTEXT_OK\r\n");
     serial_text("GXOS_NET10:CRT_ONEXIT_ENCODED_NULL_SOURCE=SECURITY_COOKIE\r\n");
 #endif
     serial_text("GXOS_NET10:MANAGED_EXPORT_RVA=0x");

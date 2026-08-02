@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWPreferredBaseExperiment', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWPreferredBaseExperiment', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -660,6 +660,41 @@ switch ($Scenario) {
         $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
         $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
         $gccArguments += '-DGXOS_GET_PROC_ADDRESS_WRONG_ERROR'
+    }
+    'RegisterOnexit' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
+        $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT_REGISTER'
+    }
+    'RegisterOnexitDisabled' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
+        $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
     }
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }

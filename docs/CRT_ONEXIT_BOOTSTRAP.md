@@ -1,6 +1,6 @@
 # CRT on-exit bootstrap contract
 
-Status: the smallest startup contract for `_initialize_onexit_table` is implemented and verified. The implementation initializes the two empty NativeAOT on-exit tables used by the current attach path. It does not implement callback registration, callback execution, heap growth, shutdown, or process teardown.
+Status: the smallest startup contract for `_initialize_onexit_table` is implemented and verified as a preserved historical milestone. The implementation initializes the two empty NativeAOT on-exit tables used by the current attach path. The later `_register_onexit_function` follow-on is documented separately in [CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md](CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md); it reaches the authentic empty-table growth dependency and remains allocation-free.
 
 ## Baseline and scope
 
@@ -38,7 +38,7 @@ The two calls are visible in the PE disassembly at `0x180077c8d` and `0x180077c9
 | `_cexit` | Execute registered CRT callbacks and terminate CRT cleanup without terminating the process directly. | Imported thunk `0x18007be7d`; no static or dynamic call in the current attach path. | No | Shutdown cleanup may free storage | Shutdown synchronization may occur | No | Yes | Shutdown |
 | `_c_exit` | Perform CRT termination state transition without executing registered callbacks. | Not present in the current import census. | No | No current evidence | No current evidence | No | No | Shutdown-only |
 
-The static helper references around `_crt_atexit` are nearby CRT code, not proof that registration or shutdown is reachable from the current attach path. Dynamic execution stops at `InitializeSListHead` before any of those routines can run. The current positive traces contain two `CRT_ONEXIT_INIT_CALL`, two zero returns, no registration marker, no execution marker, and no allocation context.
+The static helper references around `_crt_atexit` are nearby CRT code, not proof that registration or shutdown is reachable from the init-only attach path. The historical init-only traces contain two `CRT_ONEXIT_INIT_CALL`, two zero returns, no registration marker, no execution marker, and no allocation context. The later register-enabled traces are kept separate and do not alter this initialization contract.
 
 ## Exact `_initialize_onexit_table` contract
 
@@ -56,6 +56,8 @@ The profile implementation in `src\Gate4Harness\crt_onexit.c` is bounded and all
 
 The host negative tests cover null arguments, empty initialization, repeated initialization, marker mutation, opaque non-empty state, and a disabled/zero encoding source. The non-empty-state test is deliberately not reported as a detected corruption: the Windows contract treats `first != end` as already initialized and preserves it.
 
-## What was not implemented
+## What was not implemented in the initialization-only milestone
 
-No `_register_onexit_function`, `_execute_onexit_table`, `_crt_atexit`, `atexit`, `_cexit`, or `_c_exit` behavior was added. No callback was registered or executed, no dynamic table growth was attempted, no heap allocation occurred, and no GC initialization occurred. The downstream SLIST initialization boundary is now separately closed for one aligned empty x64 header; no SLIST companion operation is implied. The next authentic dependency after that bounded transition is `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`.
+The initialization-only milestone added no `_register_onexit_function`, `_execute_onexit_table`, `_crt_atexit`, `atexit`, `_cexit`, or `_c_exit` behavior. Its two-table evidence contains no callback registration or execution, no dynamic table growth, no heap allocation, and no GC initialization. The downstream SLIST initialization boundary is separately closed for one aligned empty x64 header; no SLIST companion operation is implied. The historical next authentic dependency after that bounded transition is `api-ms-win-crt-runtime-l1-1-0.dll!_initterm_e`.
+
+The current register follow-on closes only the separately scoped imported call. Its current empty table requires `_recalloc_crt_t(_PVFV,NULL,0x20)`; that allocator is deliberately not implemented here. No callback was registered or executed, and no shutdown or process-teardown behavior was added. See [CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md](CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md).

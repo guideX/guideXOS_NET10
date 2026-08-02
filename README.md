@@ -49,6 +49,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Windows x64 `strcmp` bootstrap contract](docs/CRT_STRCMP_BOOTSTRAP.md)
 - [Windows x64 `strlen` bootstrap contract](docs/CRT_STRLEN_BOOTSTRAP.md)
 - [Windows x64 `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md)
+- [Microsoft x64 `_register_onexit_function` bootstrap contract](docs/CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md)
 - [`GetSystemInfo` bootstrap contract](docs/KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md)
 - [`GetNumaHighestNodeNumber` bootstrap contract](docs/KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md)
 - [`GetProcessGroupAffinity` bootstrap contract](docs/KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md)
@@ -141,3 +142,7 @@ Three immutable positive QEMU runs are recorded under `evidence\generated\getpro
 The narrow Microsoft x64 `KERNEL32.dll!GetProcAddress` contract is now complete for the one live NativeAOT startup call. The preceding `GetModuleHandleW(&L"ntdll.dll")` result is `NULL`/`ERROR_MOD_NOT_FOUND` (`126`); the observed `GetProcAddress(NULL, "RtlDllShutdownInProgress")` result is `NULL`/`ERROR_PROC_NOT_FOUND` (`127`), and the caller takes its null optional fallback. The positive route changes the census to `36 / 88 / 0` and advances to `api-ms-win-crt-runtime-l1-1-0.dll!_register_onexit_function`; the disabled control retains `35 / 89 / 0` and stops at `KERNEL32.dll!GetProcAddress`.
 
 The final immutable evidence is under `artifacts\getprocaddress-final-v3-20260801-immutable-v2`; the disabled three-run control is under `artifacts\getprocaddress-final-disabled-v7-20260801-immutable-v2`. The focused host suite, Windows reference probe, seven evidence-tamper rejection controls, synthetic-pointer/wrong-error investigation controls, and prior host regression suites pass. See [KERNEL32_GETPROCADDRESS_BOOTSTRAP.md](docs/KERNEL32_GETPROCADDRESS_BOOTSTRAP.md). No export-table resolver, DLL loading, forwarded-export support, general module registry, GC initialization, allocation context, managed-thread registration, or managed allocation is claimed.
+
+## `_register_onexit_function` evidence status (2026-08-02)
+
+This task implements only the Microsoft x64 `_register_onexit_function` contract required by the current NativeAOT startup path. The exact imported call is routed with the Microsoft x64 ABI and verified against the three-field encoded `_onexit_table_t` layout. Three immutable fresh QEMU runs preserve the initialized encoded-null state, prove the writable table and executable callback regions, and stop truthfully at the UCRT growth dependency `_recalloc_crt_t(_PVFV,NULL,0x20)`. The bounded result is `-1` / `GROWTH_REQUIRED`; no allocator, callback, shutdown, GC initialization, or managed allocation is claimed. The enabled census is `37 / 87 / 0`, and the disabled control retains the register fail-fast boundary. See [CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md](docs/CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md).
