@@ -15,6 +15,7 @@
 #include "platform_process_group_affinity.h"
 #include "platform_process_affinity.h"
 #include "platform_query_information_job_object.h"
+#include "platform_get_module_handle.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -231,6 +232,24 @@ enum {
 static uint32_t g_phase;
 static uint64_t g_managed_target;
 static uint64_t g_managed_image_base;
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE
+static GXOS_MAIN_MODULE_FACTS g_main_module_facts;
+static uint32_t g_get_module_handle_import_descriptor_index;
+static uint32_t g_get_module_handle_importing_iat_rva;
+static uint64_t g_get_module_handle_calls;
+static uint64_t g_get_module_handle_successes;
+static uint64_t g_get_module_handle_failures;
+static uint64_t g_get_module_handle_null_calls;
+static uint64_t g_get_module_handle_named_calls;
+static uint32_t g_get_module_handle_last_error_before;
+static uint32_t g_get_module_handle_last_error_after;
+static GXOS_MODULE_HANDLE_REPORT g_get_module_handle_last_report;
+static uintptr_t g_get_module_handle_last_caller;
+static uintptr_t g_get_module_handle_last_call_site;
+static uintptr_t g_get_module_handle_last_handle;
+static GXOS_MODULE_HANDLE_HMODULE EFIAPI platform_get_module_handle_w(
+    GXOS_MODULE_HANDLE_LPCWSTR module_name);
+#endif
 static uint64_t g_boot_info_address;
 static uint64_t g_last_time_caller;
 static uint64_t g_last_time_output;
@@ -1651,6 +1670,32 @@ static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t origin
         serial_text("\r\n");
     }
 #endif
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE
+    if (g_get_module_handle_calls != 0) {
+        serial_text("GXOS_NET10:GETMODULEHANDLEW_CALLER_CONSUMPTION_COMPLETE\r\n");
+        serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_CALL_COUNT=0x",
+                         g_get_module_handle_calls);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_SUCCESS_COUNT=0x",
+                         g_get_module_handle_successes);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_FAILURE_COUNT=0x",
+                         g_get_module_handle_failures);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_NULL_CALL_COUNT=0x",
+                         g_get_module_handle_null_calls);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_NAMED_CALL_COUNT=0x",
+                         g_get_module_handle_named_calls);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:GETMODULEHANDLEW_NEXT_BOUNDARY=");
+        serial_text(record->module);
+        serial_text("!");
+        serial_text(record->symbol);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:GETMODULEHANDLEW_SUBSEQUENT_CALL_COUNT=0x0000000000000000\r\n");
+    }
+#endif
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
@@ -1760,6 +1805,299 @@ static int EFIAPI platform_fls_free(uint32_t index)
 }
 
 static uint32_t g_platform_last_error;
+
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE
+static const char *platform_get_module_handle_status_name(
+    GXOS_MODULE_HANDLE_STATUS status)
+{
+    switch (status) {
+        case GXOS_MODULE_HANDLE_STATUS_OK: return "OK";
+        case GXOS_MODULE_HANDLE_STATUS_UNSUPPORTED_NAME: return "UNSUPPORTED_NAME";
+        case GXOS_MODULE_HANDLE_STATUS_MODULE_NOT_FOUND: return "MODULE_NOT_FOUND";
+        case GXOS_MODULE_HANDLE_STATUS_NONCANONICAL_NAME: return "NONCANONICAL_NAME";
+        case GXOS_MODULE_HANDLE_STATUS_UNREADABLE_NAME: return "UNREADABLE_NAME";
+        case GXOS_MODULE_HANDLE_STATUS_UNTERMINATED_NAME: return "UNTERMINATED_NAME";
+        case GXOS_MODULE_HANDLE_STATUS_NAME_SCAN_LIMIT: return "NAME_SCAN_LIMIT";
+        case GXOS_MODULE_HANDLE_STATUS_POINTER_OVERFLOW: return "POINTER_OVERFLOW";
+        case GXOS_MODULE_HANDLE_STATUS_INVALID_MODULE_FACTS: return "INVALID_MODULE_FACTS";
+        case GXOS_MODULE_HANDLE_STATUS_INVALID_MODULE_BASE: return "INVALID_MODULE_BASE";
+        case GXOS_MODULE_HANDLE_STATUS_UNREADABLE_HEADERS: return "UNREADABLE_HEADERS";
+        case GXOS_MODULE_HANDLE_STATUS_INVALID_DOS_HEADER: return "INVALID_DOS_HEADER";
+        case GXOS_MODULE_HANDLE_STATUS_INVALID_NT_HEADER: return "INVALID_NT_HEADER";
+        case GXOS_MODULE_HANDLE_STATUS_WRONG_MACHINE: return "WRONG_MACHINE";
+        case GXOS_MODULE_HANDLE_STATUS_WRONG_OPTIONAL_HEADER: return "WRONG_OPTIONAL_HEADER";
+        case GXOS_MODULE_HANDLE_STATUS_INVALID_IMAGE_RANGE: return "INVALID_IMAGE_RANGE";
+        case GXOS_MODULE_HANDLE_STATUS_RELOCATION_MISMATCH: return "RELOCATION_MISMATCH";
+        default: return "UNKNOWN";
+    }
+}
+
+static void platform_get_module_handle_emit_name(
+    GXOS_MODULE_HANDLE_LPCWSTR module_name,
+    const GXOS_MODULE_HANDLE_REPORT *report)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint32_t index;
+    uint32_t preview;
+
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_NAME_POINTER=0x",
+                     (uint64_t)(uintptr_t)module_name);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NAME_IS_NULL=");
+    serial_text(module_name == 0 ? "1\r\n" : "0\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_NAME_REGION_BASE=0x",
+                     report->name_region_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_NAME_REGION_END=0x",
+                     report->name_region_end);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NAME_REGION_READABLE=");
+    serial_text(report->name_region_readable ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NAME_REGION_EXECUTABLE=");
+    serial_text(report->name_region_executable ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NAME_REGION_WRITABLE=");
+    serial_text(report->name_region_writable ? "1\r\n" : "0\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_NAME_LENGTH=0x",
+                     report->name_length);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_NAME_TERMINATOR=0x",
+                     report->name_terminator);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NAME_HAS_PATH=");
+    serial_text(report->name_has_path ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NAME_HAS_EXTENSION=");
+    serial_text(report->name_has_extension ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NAME_EXACT_OBSERVED_FORM=");
+    serial_text(report->name_exact_observed_form ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NAME_UTF16=");
+    preview = report->name_length > 128U ? 128U : report->name_length;
+    if (module_name != 0 && report->name_readable != 0) {
+        for (index = 0; index != preview; ++index) {
+            uint16_t word = module_name[index];
+            serial_char((uint8_t)digits[(word >> 12) & 0xFU]);
+            serial_char((uint8_t)digits[(word >> 8) & 0xFU]);
+            serial_char((uint8_t)digits[(word >> 4) & 0xFU]);
+            serial_char((uint8_t)digits[word & 0xFU]);
+        }
+    }
+    if (preview != report->name_length) serial_text("...");
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NAME_PREVIEW=\"");
+    if (module_name != 0 && report->name_readable != 0) {
+        for (index = 0; index != preview; ++index) {
+            uint16_t word = module_name[index];
+            serial_char(word >= 0x20U && word <= 0x7EU ?
+                            (uint8_t)word : (uint8_t)'.');
+        }
+    }
+    if (preview != report->name_length) serial_text("...");
+    serial_text("\"\r\n");
+}
+
+static void platform_get_module_handle_emit_call(
+    GXOS_MODULE_HANDLE_LPCWSTR module_name,
+    GXOS_MODULE_HANDLE_HMODULE result,
+    const GXOS_MODULE_HANDLE_REPORT *report,
+    uint32_t error_before,
+    uint32_t error_after,
+    uintptr_t return_address)
+{
+    uintptr_t call_site = return_address >= 6U ? return_address - 6U : 0;
+    uint64_t static_call_site = 0;
+    uint64_t caller_start = 0;
+
+    if (call_site >= (uintptr_t)g_managed_image_base) {
+        static_call_site = 0x180000000ULL +
+                           (uint64_t)(call_site - (uintptr_t)g_managed_image_base);
+    }
+    if (static_call_site == 0x180037C61ULL) caller_start = 0x180037C40ULL;
+    if (static_call_site == 0x18003C553ULL) caller_start = 0x18003C530ULL;
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_CALL_INDEX=0x",
+                     g_get_module_handle_calls);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_IMPORT_MODULE=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_IMPORT_SYMBOL=GetModuleHandleW\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_get_module_handle_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_IAT_RVA=0x",
+                     g_get_module_handle_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_PREFERRED_IAT=0x",
+                     g_main_module_facts.preferred_image_base +
+                         g_get_module_handle_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_RUNTIME_IAT=0x",
+                     g_main_module_facts.mapped_image_base +
+                         g_get_module_handle_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_STATIC_CALL_SITE=0x",
+                     static_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_RETURN_ADDRESS=0x",
+                     return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_CALLER_START=0x", caller_start);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_CALLER=");
+    if (static_call_site == 0x180037C61ULL) serial_text("NativeAOT_RtlDllShutdownInProgress_probe");
+    else if (static_call_site == 0x18003C553ULL) serial_text("NativeAOT_InitializeContext2_probe");
+    else serial_text("unknown");
+    serial_text("\r\n");
+    platform_get_module_handle_emit_name(module_name, report);
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_PREFERRED_BASE=0x",
+                     g_main_module_facts.preferred_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_MAPPED_BASE=0x",
+                     g_main_module_facts.mapped_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_RELOCATION_DELTA=0x",
+                     g_main_module_facts.relocation_delta);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_SIZE_OF_IMAGE=0x",
+                     g_main_module_facts.size_of_image);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_ENTRY_POINT_RVA=0x",
+                     g_main_module_facts.entry_point_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_ENTRY_POINT=0x",
+                     g_main_module_facts.runtime_entry_point);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_DOS_HEADER_VALID=");
+    serial_text(report->dos_header_valid ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_NT_HEADER_VALID=");
+    serial_text(report->nt_header_valid ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_MACHINE_VALID=");
+    serial_text(report->machine_valid ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_OPTIONAL_HEADER_VALID=");
+    serial_text(report->optional_header_valid ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_SIZE_OF_IMAGE_VALID=");
+    serial_text(report->size_of_image_valid ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_IMAGE_RANGE_VALID=");
+    serial_text(report->image_range_valid ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_ENTRY_POINT_VALID=");
+    serial_text(report->entry_point_valid ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_IMPORT_OWNERSHIP_VALID=");
+    serial_text(report->import_ownership_valid ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_RELOCATION_VALID=");
+    serial_text(report->relocation_valid ? "1\r\n" : "0\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_CALLER_READ_MASK=0x",
+                     report->caller_read_mask);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_SELECTED_MODULE=");
+    serial_text(report->selected_module == GXOS_MODULE_HANDLE_SELECTED_MAIN_NATIVEAOT_PAYLOAD
+                    ? "MAIN_NATIVEAOT_PAYLOAD\r\n"
+                    : "NONE\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_RESULT=0x", result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_LAST_ERROR_BEFORE=0x", error_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_LAST_ERROR_AFTER=0x", error_after);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_HANDLE_STORED=0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_HANDLE_PASSED_TO=KERNEL32.dll!GetProcAddress\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_CALLER_READS_DOS_HEADERS=0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_CALLER_READS_NT_HEADERS=0\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_CALLER_HEADER_FIELDS=NONE\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_CALLER_BRANCH=");
+    serial_text(result == 0 ? "FAILURE_HANDLE_NULL\r\n" : "SUCCESS_HANDLE_NONZERO\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_STATUS=");
+    serial_text(platform_get_module_handle_status_name(report->status));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_RETURNED\r\n");
+    if (result != 0) serial_text("GXOS_NET10:GETMODULEHANDLEW_OK\r\n");
+}
+
+static GXOS_MODULE_HANDLE_HMODULE EFIAPI platform_get_module_handle_w(
+    GXOS_MODULE_HANDLE_LPCWSTR module_name)
+{
+    GXOS_MODULE_HANDLE_HMODULE result = 0;
+    GXOS_MODULE_HANDLE_STATUS status;
+    uint32_t error_before = g_platform_last_error;
+    uint32_t error_after = error_before;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+
+    g_get_module_handle_calls++;
+    if (module_name == 0) g_get_module_handle_null_calls++;
+    else g_get_module_handle_named_calls++;
+    status = gxos_get_module_handle_checked(module_name, &g_main_module_facts,
+                                            &result, &g_get_module_handle_last_report);
+#ifdef GXOS_MODULE_HANDLE_FORCE_FAILURE
+    status = GXOS_MODULE_HANDLE_STATUS_INVALID_MODULE_FACTS;
+    result = 0;
+    g_get_module_handle_last_report.status = status;
+    g_get_module_handle_last_report.output_written = 0;
+    g_get_module_handle_last_report.result = 0;
+#elif defined(GXOS_MODULE_HANDLE_NAMED_MAIN_EXPERIMENT)
+    if (status == GXOS_MODULE_HANDLE_STATUS_MODULE_NOT_FOUND) {
+        result = g_main_module_facts.mapped_image_base;
+        status = GXOS_MODULE_HANDLE_STATUS_OK;
+        g_get_module_handle_last_report.status = status;
+        g_get_module_handle_last_report.selected_module =
+            GXOS_MODULE_HANDLE_SELECTED_MAIN_NATIVEAOT_PAYLOAD;
+        g_get_module_handle_last_report.output_written = 1;
+        g_get_module_handle_last_report.result = result;
+        serial_text("GXOS_NET10:GETMODULEHANDLEW_NAMED_MAIN_EXPERIMENT=1\r\n");
+    }
+#elif defined(GXOS_MODULE_HANDLE_PREFERRED_BASE_EXPERIMENT)
+    if (status == GXOS_MODULE_HANDLE_STATUS_MODULE_NOT_FOUND) {
+        result = g_main_module_facts.preferred_image_base;
+        status = GXOS_MODULE_HANDLE_STATUS_OK;
+        g_get_module_handle_last_report.status = status;
+        g_get_module_handle_last_report.selected_module =
+            GXOS_MODULE_HANDLE_SELECTED_MAIN_NATIVEAOT_PAYLOAD;
+        g_get_module_handle_last_report.output_written = 1;
+        g_get_module_handle_last_report.result = result;
+        serial_text("GXOS_NET10:GETMODULEHANDLEW_PREFERRED_BASE_EXPERIMENT=1\r\n");
+    }
+#elif defined(GXOS_MODULE_HANDLE_RVA_EXPERIMENT)
+    if (status == GXOS_MODULE_HANDLE_STATUS_MODULE_NOT_FOUND) {
+        result = g_main_module_facts.entry_point_rva;
+        status = GXOS_MODULE_HANDLE_STATUS_OK;
+        g_get_module_handle_last_report.status = status;
+        g_get_module_handle_last_report.selected_module =
+            GXOS_MODULE_HANDLE_SELECTED_MAIN_NATIVEAOT_PAYLOAD;
+        g_get_module_handle_last_report.output_written = 1;
+        g_get_module_handle_last_report.result = result;
+        serial_text("GXOS_NET10:GETMODULEHANDLEW_RVA_EXPERIMENT=1\r\n");
+    }
+#elif defined(GXOS_MODULE_HANDLE_WRONG_IMAGE_EXPERIMENT)
+    if (status == GXOS_MODULE_HANDLE_STATUS_MODULE_NOT_FOUND) {
+        result = (GXOS_MODULE_HANDLE_HMODULE)(uintptr_t)&platform_get_module_handle_w;
+        status = GXOS_MODULE_HANDLE_STATUS_OK;
+        g_get_module_handle_last_report.status = status;
+        g_get_module_handle_last_report.selected_module =
+            GXOS_MODULE_HANDLE_SELECTED_NONE;
+        g_get_module_handle_last_report.output_written = 1;
+        g_get_module_handle_last_report.result = result;
+        serial_text("GXOS_NET10:GETMODULEHANDLEW_WRONG_IMAGE_EXPERIMENT=1\r\n");
+    }
+#endif
+    if (status != GXOS_MODULE_HANDLE_STATUS_OK) {
+        g_get_module_handle_failures++;
+        error_after = status == GXOS_MODULE_HANDLE_STATUS_MODULE_NOT_FOUND
+                          ? GXOS_MODULE_HANDLE_ERROR_MOD_NOT_FOUND
+                          : GXOS_MODULE_HANDLE_ERROR_INVALID_PARAMETER;
+        g_platform_last_error = error_after;
+    } else {
+        g_get_module_handle_successes++;
+    }
+    g_get_module_handle_last_error_before = error_before;
+    g_get_module_handle_last_error_after = error_after;
+    g_get_module_handle_last_caller = return_address;
+    g_get_module_handle_last_call_site = return_address >= 6U ? return_address - 6U : 0;
+    g_get_module_handle_last_handle = result;
+    platform_get_module_handle_emit_call(module_name, result,
+                                         &g_get_module_handle_last_report,
+                                         error_before, error_after,
+                                         return_address);
+    return result;
+}
+#endif
 
 #ifdef GXOS_ENABLE_GETENV
 static uint32_t EFIAPI platform_get_environment_variable_w(
@@ -2273,6 +2611,12 @@ static void *platform_import_target(const char *module, const char *symbol)
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetCurrentProcess")) return (void *)(uintptr_t)platform_get_current_process;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetLastError")) return (void *)(uintptr_t)platform_get_last_error;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "SetLastError")) return (void *)(uintptr_t)platform_set_last_error;
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetModuleHandleW")) {
+        return (void *)(uintptr_t)platform_get_module_handle_w;
+    }
+#endif
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "DuplicateHandle")) return (void *)(uintptr_t)platform_duplicate_handle;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "CloseHandle")) return (void *)(uintptr_t)platform_close_handle;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "VirtualQuery")) return (void *)(uintptr_t)platform_virtual_query;
@@ -2484,6 +2828,13 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
             if (symbols >= MAX_IMPORT_SYMBOLS) fail("import-symbol-capacity");
             g_import_records[symbols].module = module;
             g_import_records[symbols].symbol = (const char *)(hint_name + 2);
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "GetModuleHandleW")) {
+                g_get_module_handle_import_descriptor_index = descriptors - 1U;
+                g_get_module_handle_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
             {
                 void *target = platform_import_target(module, g_import_records[symbols].symbol);
 #ifdef GXOS_NEGATIVE_UNRESOLVED_IMPORT
@@ -4226,6 +4577,31 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     resolve_imports(&image, boot_services, &import_descriptors, &import_symbols,
                     &import_functional, &import_failfast, &unresolved_imports);
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE
+    if (image.loaded_size > UINT32_MAX || image.actual_base == 0 ||
+        image.preferred_base == 0 || image.size_of_headers == 0 ||
+        image.memory_region_count == 0 || image.relocations_applied == 0 ||
+        g_get_module_handle_importing_iat_rva == 0) {
+        fail("getmodulehandle-context");
+    }
+    g_main_module_facts.preferred_image_base = (uintptr_t)image.preferred_base;
+    g_main_module_facts.mapped_image_base = (uintptr_t)image.actual_base;
+    g_main_module_facts.runtime_entry_point =
+        (uintptr_t)(image.actual_base + image.entry_rva);
+    g_main_module_facts.relocation_delta = image.actual_base - image.preferred_base;
+    g_main_module_facts.size_of_image = (uint32_t)image.loaded_size;
+    g_main_module_facts.size_of_headers = image.size_of_headers;
+    g_main_module_facts.entry_point_rva = image.entry_rva;
+    g_main_module_facts.import_directory_rva = image.import_rva;
+    g_main_module_facts.import_directory_size = image.import_size;
+    g_main_module_facts.importing_iat_rva = g_get_module_handle_importing_iat_rva;
+    g_main_module_facts.importing_iat_size = 8U;
+    g_main_module_facts.relocations_applied = image.relocations_applied;
+    g_main_module_facts.mapped_regions = image.memory_regions;
+    g_main_module_facts.mapped_region_count = image.memory_region_count;
+    gxos_get_module_handle_configure(&g_main_module_facts);
+    serial_text("GXOS_NET10:GETMODULEHANDLEW_VALIDATION_CONTEXT_OK\r\n");
+#endif
     serial_text("GXOS_NET10:PE_IMPORT_DESCRIPTORS=");
     serial_u32(import_descriptors);
     serial_text("\r\n");

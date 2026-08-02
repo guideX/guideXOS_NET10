@@ -179,3 +179,6 @@ The evidence-pipeline controls are run by `tools\Test-QueryInformationJobObjectE
 
 This closure adds one exact import route and one bounded job-information class. The next authentic dependency is `KERNEL32.dll!GetModuleHandleW`. No job subsystem, process/job handle rights, CPU-rate enforcement, allocator, GC heap, managed-thread registration, or general Windows compatibility is implied. No commit or push was performed.
 
+## Follow-on `GetModuleHandleW` boundary
+
+The subsequent fresh baseline confirms that the query closure's next import is `KERNEL32.dll!GetModuleHandleW` at descriptor `0x2`, IAT RVA `0x7d130`. Its first live caller passes `&L"ntdll.dll"`; because no ntdll PE is mapped, the follow-on contract returns `NULL`/`ERROR_MOD_NOT_FOUND` and advances only to `KERNEL32.dll!GetProcAddress`. The job-object contract remains unchanged and all no-job, output-preservation, processor-count, and zero-allocation invariants are retained. See [KERNEL32_GETMODULEHANDLEW_BOOTSTRAP.md](KERNEL32_GETMODULEHANDLEW_BOOTSTRAP.md).

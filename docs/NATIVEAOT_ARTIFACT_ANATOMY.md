@@ -182,3 +182,9 @@ The enabled image changes only `KERNEL32.dll!GetProcessAffinityMask` from fail-f
 ## Query-information call graph addendum (2026-08-01)
 
 The query-enabled payload imports `KERNEL32.dll!QueryInformationJobObject` at IAT RVA `0x7d1f0` and relocates that slot without changing the Microsoft x64 call shape. The live direct call is preferred `0x18003cca1`, in the processor-count setup function beginning `0x18003cbe0`; the caller passes class `15`, an eight-byte output, `cb=8`, and a null fifth argument. A second direct reference at preferred `0x1800432bd` passes class `9` and `cb=0x90`, but the current startup never reaches it: the live call's consumer completes and the next fail-fast import is `GetModuleHandleW`. The immutable validator requires one live query call per positive run and rejects a missing or reordered boundary.
+
+## `GetModuleHandleW` image ownership (2026-08-01)
+
+The next direct import is `KERNEL32.dll!GetModuleHandleW` at IAT RVA `0x7d130` (preferred slot `0x18007d130`). The live call is preferred `0x180037c61`, in the helper beginning `0x180037c40`, and receives `&L"ntdll.dll"`. The importing IAT and executing NativeAOT caller belong to the manually mapped payload, whose actual base is `0x547b000`, while the preferred base is `0x180000000`; the relocation delta is `0xfffffffe8547b000`. The loader/wrapper image, UEFI firmware, runtime archive, synthetic stubs, stack, and heap remain separate image-like entities.
+
+The current named image set contains no mapped ntdll PE. The contract therefore does not alias the payload to ntdll. It publishes a validated payload base only for the checked null-name current-executable policy, returns `NULL`/`126` for the live named failure, and leaves `GetProcAddress` as the next import boundary.

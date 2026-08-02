@@ -37,3 +37,7 @@ The exact `KERNEL32.dll!GetProcessGroupAffinity` call is now closed for the curr
 ## `GetProcessAffinityMask` evidence-closure result (2026-08-01)
 
 The exact `GetProcessAffinityMask` contract now completes the next NativeAOT startup dependency, but it does not advance first allocation. Both live calls return process/system masks `0x1`/`0x1`; the bitmap caller updates a processor bitmap, and the processor-count caller derives a one-bit population count before reaching `QueryInformationJobObject`. Final summaries still report zero allocation context, zero managed-thread registration, zero GC heap usability, and zero managed allocations.
+
+## `GetModuleHandleW` does not advance allocation
+
+The current NativeAOT path reaches one non-null `GetModuleHandleW(&L"ntdll.dll")` call after the no-associated-job fallback. guideXOS has no mapped ntdll image, so the truthful narrow contract returns `NULL` with `ERROR_MOD_NOT_FOUND` and stops at `GetProcAddress`. The positive runs still report zero TLS allocation pointer/limit, zero GC contract initialization, zero usable GC heap, zero allocation context, zero managed-thread registration, and zero managed allocations. A module-handle result—even the actual relocated payload base in the null-name checked policy—would not by itself prove heap or GC readiness. The first-allocation blocker remains unchanged.

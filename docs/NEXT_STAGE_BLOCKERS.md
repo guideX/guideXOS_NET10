@@ -66,6 +66,12 @@ This closure does not implement or infer `GetLogicalProcessorInformation`, `GetL
 
 The next authentic dependency is `GetProcessGroupAffinity`. The first-allocation blocker is unchanged: no heap segments, allocation context, managed-thread registration, object/EEType publication, write barriers, or GC lifecycle have been proven.
 
+## `GetModuleHandleW` closure (2026-08-01)
+
+The exact live call is `GetModuleHandleW(&L"ntdll.dll")`. The named module is not mapped in the guideXOS process model, so the smallest truthful implementation returns `NULL` with `ERROR_MOD_NOT_FOUND` and leaves `GetProcAddress` as the next authentic dependency. The null-name current-executable query is checked against the actual relocated payload base but is not substituted for the observed named call. No general loader, DLL search, module registry, enumeration, reference counting, unloading, or cross-process handle model was added.
+
+The first-allocation blocker remains unchanged: no GC heap, allocation context, managed-thread registration, object publication, write barriers, or collection lifecycle is proven. The recommended next milestone is the exact `KERNEL32.dll!GetProcAddress` call reached after this bounded module-name failure.
+
 ## `GetProcessGroupAffinity` evidence-closure result (2026-08-01)
 
 The exact current-path contract is closed under [KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md](KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md). The caller makes one `GroupCount=0`/`GroupArray=NULL` capacity probe, receives required count `1` with `ERROR_INSUFFICIENT_BUFFER`, consumes the count, and does not retry. The next authentic dependency is `KERNEL32.dll!GetProcessAffinityMask`; it is intentionally not implemented here. Do not infer process-affinity, processor-group topology, NUMA allocation, thread scheduling, heap initialization, or GC readiness from this probe.

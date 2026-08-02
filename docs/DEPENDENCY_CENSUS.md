@@ -199,4 +199,10 @@ The exact `KERNEL32.dll!GetNumaHighestNodeNumber` import is at IAT RVA `0x7e298`
 
 The checked wrapper is a narrow `BOOL (PULONG)` Microsoft x64 contract. The actual caller passes a writable four-byte stack output at `rsp+0x60`, tests the Boolean return, and reads the output only on the success path. For the current one-domain policy, a successful output of zero selects the caller's non-NUMA fallback; a successful nonzero value would be transformed by the caller into `highest + 1` for its node-table setup. No subsequent NUMA API is reached; both caller branches converge at the next authentic `GetProcessGroupAffinity` fail-fast boundary.
 
+## `GetModuleHandleW` closure (2026-08-01)
+
+The fresh baseline reproduced `KERNEL32.dll!GetModuleHandleW` as the immediate boundary after the exact job-object closure. The positive route changes the census from `34 / 90 / 0` to `35 / 89 / 0`; the disabled control preserves `34 / 90 / 0`. The importing IAT is RVA `0x7d130`, descriptor `0x2`, and the live preferred call is `0x180037c61` in `NativeAOT_RtlDllShutdownInProgress_probe`.
+
+The live call supplies `&L"ntdll.dll"`. The bounded wrapper records the UTF-16 argument, read-only payload `.rdata` ownership, actual relocated image base, preferred base, relocation delta, and `NULL`/`ERROR_MOD_NOT_FOUND`. No ntdll image is mapped, so the payload is not returned under the ntdll name. The next authentic dependency is `KERNEL32.dll!GetProcAddress`; it remains fail-fast. See [KERNEL32_GETMODULEHANDLEW_BOOTSTRAP.md](KERNEL32_GETMODULEHANDLEW_BOOTSTRAP.md).
+
 The complete import and call evidence is retained in `evidence\generated\getnumahighest-final-20260801-immutable-v2`. The contract does not make `GetLogicalProcessorInformation`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`, or any other topology/allocation import functional. They remain deterministic fail-fast dependencies.
