@@ -32,6 +32,15 @@ static int gxos_crt_onexit_range_contains(
            base >= region->base && end >= base && end <= region->end;
 }
 
+static int gxos_crt_onexit_ranges_overlap(
+    uintptr_t base,
+    uintptr_t end,
+    uintptr_t other_base,
+    uintptr_t other_end)
+{
+    return base < other_end && other_base < end;
+}
+
 static const GXOS_CRT_ONEXIT_MEMORY_REGION *gxos_crt_onexit_find_range(
     uintptr_t base,
     uintptr_t end,
@@ -111,6 +120,14 @@ uintptr_t gxos_crt_onexit_decode_pointer(uintptr_t pointer)
     return gxos_crt_onexit_rotate_right(pointer ^ cookie, shift);
 }
 
+static int gxos_crt_onexit_encoded_pointer_matches(
+    uintptr_t encoded,
+    uintptr_t decoded)
+{
+    return encoded != 0 &&
+           gxos_crt_onexit_decode_pointer(encoded) == decoded;
+}
+
 static void gxos_crt_onexit_report_clear(GXOS_CRT_ONEXIT_REPORT *report)
 {
     uint32_t index;
@@ -152,6 +169,23 @@ static void gxos_crt_onexit_report_clear(GXOS_CRT_ONEXIT_REPORT *report)
     for (index = 0; index != GXOS_CRT_ONEXIT_MAX_CENSUS_ENTRIES; ++index) {
         report->census_values[index] = 0;
     }
+    report->table_first_raw_after = 0;
+    report->table_last_raw_after = 0;
+    report->table_end_raw_after = 0;
+    report->first_after = 0;
+    report->last_after = 0;
+    report->end_after = 0;
+    report->used_after = 0;
+    report->capacity_after = 0;
+    report->remaining_after = 0;
+    report->allocation_address = 0;
+    report->allocation_size = 0;
+    report->decoded_slot0 = 0;
+    report->slot_count = 0;
+    report->unused_slots_all_null = 0;
+    report->initial_empty_state = 0;
+    report->allocation_succeeded = 0;
+    report->allocation_disjoint_from_context = 0;
 }
 
 static GXOS_CRT_ONEXIT_STATUS gxos_crt_onexit_fail(
@@ -160,6 +194,34 @@ static GXOS_CRT_ONEXIT_STATUS gxos_crt_onexit_fail(
 {
     if (report != 0) report->status = status;
     return status;
+}
+
+static void gxos_crt_onexit_report_table_after(
+    GXOS_CRT_ONEXIT_REPORT *report,
+    const GXOS_CRT_ONEXIT_TABLE *table)
+{
+    if (report == 0 || table == 0) return;
+    report->table_first_raw_after = (uintptr_t)table->first;
+    report->table_last_raw_after = (uintptr_t)table->last;
+    report->table_end_raw_after = (uintptr_t)table->end;
+    report->first_after = gxos_crt_onexit_decode_pointer(
+        report->table_first_raw_after);
+    report->last_after = gxos_crt_onexit_decode_pointer(
+        report->table_last_raw_after);
+    report->end_after = gxos_crt_onexit_decode_pointer(
+        report->table_end_raw_after);
+}
+
+static GXOS_CRT_ONEXIT_STATUS gxos_crt_onexit_release_allocation(
+    void *allocation,
+    uintptr_t size,
+    GXOS_CRT_ONEXIT_REPORT *report,
+    GXOS_CRT_ONEXIT_STATUS status)
+{
+    if (allocation != 0 && g_context.free != 0) {
+        (void)g_context.free(allocation, size, g_context.allocator_context);
+    }
+    return gxos_crt_onexit_fail(report, status);
 }
 
 const char *gxos_crt_onexit_status_name(GXOS_CRT_ONEXIT_STATUS status)
@@ -216,6 +278,13 @@ int GXOS_CRT_ONEXIT_MS_ABI gxos_crt_onexit_configure(
     g_context.relocations_applied = context->relocations_applied;
     g_context.region_count = context->region_count;
     g_context.initialized_table_count = context->initialized_table_count;
+    if ((context->allocate == 0) != (context->free == 0)) {
+        g_context_valid = 0;
+        return -5;
+    }
+    g_context.allocate = context->allocate;
+    g_context.free = context->free;
+    g_context.allocator_context = context->allocator_context;
     for (index = 0; index != context->initialized_table_count; ++index) {
         if (!gxos_crt_onexit_is_canonical(context->initialized_tables[index])) {
             return -4;
@@ -280,13 +349,20 @@ gxos_crt_onexit_register_checked(
     uintptr_t old_last_raw;
     uintptr_t old_end_raw;
     uintptr_t encoded_callback;
+    uintptr_t encoded_first;
+    uintptr_t encoded_last;
+    uintptr_t encoded_end;
+    uintptr_t allocation_value;
+    uintptr_t allocation_end;
     uintptr_t new_last;
     uintptr_t slot_address;
     uintptr_t old_slot_value;
     uintptr_t offset;
+    uintptr_t *slots;
     uint32_t index;
     uint32_t used;
     uint32_t capacity;
+    uint32_t unused_slots_all_null;
     const GXOS_CRT_ONEXIT_MEMORY_REGION *region;
 
     gxos_crt_onexit_report_clear(report);
@@ -342,8 +418,10 @@ gxos_crt_onexit_register_checked(
         report->first = first;
         report->last = last;
         report->end = end;
+        gxos_crt_onexit_report_table_after(report, table);
     }
-    if (gxos_crt_onexit_get_encoded_null() == 0) {
+    if (!gxos_crt_onexit_encoded_pointer_matches(
+            gxos_crt_onexit_get_encoded_null(), 0)) {
         return gxos_crt_onexit_fail(report, GXOS_CRT_ONEXIT_STATUS_ENCODING_UNAVAILABLE);
     }
     if (callback_value != 0) {
@@ -401,6 +479,129 @@ gxos_crt_onexit_register_checked(
         report->capacity = capacity;
         report->remaining_capacity = capacity - used;
     }
+    if (first == 0) {
+        if (report != 0) {
+            report->initial_empty_state = 1;
+            report->growth_required = 1;
+        }
+        if (g_context.allocate == 0 || g_context.free == 0) {
+            return gxos_crt_onexit_fail(
+                report, GXOS_CRT_ONEXIT_STATUS_ALLOCATION_FAILED);
+        }
+        if (report != 0) report->allocation_attempted = 1;
+        allocation_value = (uintptr_t)g_context.allocate(
+            GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES,
+            g_context.allocator_context);
+        if (report != 0) {
+            report->allocation_address = allocation_value;
+            report->allocation_size = GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES;
+        }
+        if (allocation_value == 0 ||
+            !gxos_crt_onexit_is_canonical(allocation_value) ||
+            (allocation_value & (sizeof(uintptr_t) - 1U)) != 0) {
+            return gxos_crt_onexit_release_allocation(
+                (void *)(uintptr_t)allocation_value,
+                GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES,
+                report,
+                allocation_value == 0
+                    ? GXOS_CRT_ONEXIT_STATUS_ALLOCATION_FAILED
+                    : ((allocation_value & (sizeof(uintptr_t) - 1U)) != 0
+                           ? GXOS_CRT_ONEXIT_STATUS_UNALIGNED_STORAGE
+                           : GXOS_CRT_ONEXIT_STATUS_NONCANONICAL_STORAGE));
+        }
+        if (allocation_value > UINTPTR_MAX -
+                GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES) {
+            return gxos_crt_onexit_release_allocation(
+                (void *)(uintptr_t)allocation_value,
+                GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES,
+                report, GXOS_CRT_ONEXIT_STATUS_POINTER_OVERFLOW);
+        }
+        allocation_end = allocation_value +
+            GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES;
+        if (!gxos_crt_onexit_is_range(allocation_value, allocation_end)) {
+            return gxos_crt_onexit_release_allocation(
+                (void *)(uintptr_t)allocation_value,
+                GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES,
+                report, GXOS_CRT_ONEXIT_STATUS_STORAGE_RANGE_INVALID);
+        }
+        for (index = 0; index != g_context.region_count; ++index) {
+            if (gxos_crt_onexit_ranges_overlap(
+                    allocation_value, allocation_end,
+                    g_context.regions[index].base,
+                    g_context.regions[index].end)) {
+                return gxos_crt_onexit_release_allocation(
+                    (void *)(uintptr_t)allocation_value,
+                    GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES,
+                    report, GXOS_CRT_ONEXIT_STATUS_STORAGE_RANGE_INVALID);
+            }
+        }
+        if (report != 0) {
+            report->storage_region_base = allocation_value;
+            report->storage_region_end = allocation_end;
+            report->storage_region_readable = 1;
+            report->storage_region_writable = 1;
+        }
+        encoded_callback = gxos_crt_onexit_encode_pointer(callback_value);
+        encoded_first = gxos_crt_onexit_encode_pointer(allocation_value);
+        encoded_last = gxos_crt_onexit_encode_pointer(
+            allocation_value + sizeof(uintptr_t));
+        encoded_end = gxos_crt_onexit_encode_pointer(allocation_end);
+        if (!gxos_crt_onexit_encoded_pointer_matches(
+                encoded_callback, callback_value) ||
+            !gxos_crt_onexit_encoded_pointer_matches(
+                encoded_first, allocation_value) ||
+            !gxos_crt_onexit_encoded_pointer_matches(
+                encoded_last, allocation_value + sizeof(uintptr_t)) ||
+            !gxos_crt_onexit_encoded_pointer_matches(encoded_end,
+                                                      allocation_end)) {
+            return gxos_crt_onexit_release_allocation(
+                (void *)(uintptr_t)allocation_value,
+                GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES,
+                report, GXOS_CRT_ONEXIT_STATUS_ENCODING_UNAVAILABLE);
+        }
+        slots = (uintptr_t *)(uintptr_t)allocation_value;
+        for (index = 0; index != GXOS_CRT_ONEXIT_INITIAL_STORAGE_SLOTS;
+             ++index) {
+            slots[index] = gxos_crt_onexit_get_encoded_null();
+        }
+        slots[0] = encoded_callback;
+        unused_slots_all_null = 1;
+        for (index = 1; index != GXOS_CRT_ONEXIT_INITIAL_STORAGE_SLOTS;
+             ++index) {
+            if (!gxos_crt_onexit_encoded_pointer_matches(slots[index], 0)) {
+                unused_slots_all_null = 0;
+                break;
+            }
+        }
+        if (!gxos_crt_onexit_encoded_pointer_matches(slots[0], callback_value) ||
+            unused_slots_all_null == 0) {
+            return gxos_crt_onexit_release_allocation(
+                (void *)(uintptr_t)allocation_value,
+                GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES,
+                report, GXOS_CRT_ONEXIT_STATUS_INVALID_TABLE_STATE);
+        }
+        table->first = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)encoded_first;
+        table->last = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)encoded_last;
+        table->end = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)encoded_end;
+        gxos_crt_onexit_report_table_after(report, table);
+        if (report != 0) {
+            report->used_after = 1;
+            report->capacity_after = GXOS_CRT_ONEXIT_INITIAL_STORAGE_SLOTS;
+            report->remaining_after =
+                GXOS_CRT_ONEXIT_INITIAL_STORAGE_SLOTS - 1U;
+            report->allocation_succeeded = 1;
+            report->slot_count = GXOS_CRT_ONEXIT_INITIAL_STORAGE_SLOTS;
+            report->decoded_slot0 = gxos_crt_onexit_decode_pointer(slots[0]);
+            report->unused_slots_all_null = unused_slots_all_null;
+            report->encoded_callback = encoded_callback;
+            report->stored_value = encoded_callback;
+            report->pointer_encoded = encoded_callback != callback_value;
+            report->entry_index = 0;
+            report->allocation_disjoint_from_context = 1;
+            report->status = GXOS_CRT_ONEXIT_STATUS_OK;
+        }
+        return GXOS_CRT_ONEXIT_STATUS_OK;
+    }
     if (last == end) {
         if (report != 0) report->growth_required = 1;
         return gxos_crt_onexit_fail(report, GXOS_CRT_ONEXIT_STATUS_GROWTH_REQUIRED);
@@ -418,15 +619,22 @@ gxos_crt_onexit_register_checked(
     if (encoded_callback == 0) {
         return gxos_crt_onexit_fail(report, GXOS_CRT_ONEXIT_STATUS_ENCODING_UNAVAILABLE);
     }
+    encoded_first = gxos_crt_onexit_encode_pointer(first);
+    encoded_last = gxos_crt_onexit_encode_pointer(new_last);
+    encoded_end = gxos_crt_onexit_encode_pointer(end);
+    if (!gxos_crt_onexit_encoded_pointer_matches(encoded_callback,
+                                                  callback_value) ||
+        !gxos_crt_onexit_encoded_pointer_matches(encoded_first, first) ||
+        !gxos_crt_onexit_encoded_pointer_matches(encoded_last, new_last) ||
+        !gxos_crt_onexit_encoded_pointer_matches(encoded_end, end)) {
+        return gxos_crt_onexit_fail(report, GXOS_CRT_ONEXIT_STATUS_ENCODING_UNAVAILABLE);
+    }
     old_slot_value = (uintptr_t)*(GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)slot_address;
     *(GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)slot_address =
         (GXOS_CRT_ONEXIT_PVFV)(uintptr_t)encoded_callback;
-    table->first = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)
-        gxos_crt_onexit_encode_pointer(first);
-    table->last = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)
-        gxos_crt_onexit_encode_pointer(new_last);
-    table->end = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)
-        gxos_crt_onexit_encode_pointer(end);
+    table->first = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)encoded_first;
+    table->last = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)encoded_last;
+    table->end = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)encoded_end;
     if (report != 0) {
         report->entry_index = used;
         report->encoded_callback = encoded_callback;
@@ -444,8 +652,15 @@ gxos_crt_onexit_register_checked(
         table->last = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)old_last_raw;
         table->end = (GXOS_CRT_ONEXIT_PVFV *)(uintptr_t)old_end_raw;
         if (report != 0) report->last = last;
+        gxos_crt_onexit_report_table_after(report, table);
         return gxos_crt_onexit_fail(report, GXOS_CRT_ONEXIT_STATUS_INVALID_TABLE_STATE);
     }
-    if (report != 0) report->status = GXOS_CRT_ONEXIT_STATUS_OK;
+    gxos_crt_onexit_report_table_after(report, table);
+    if (report != 0) {
+        report->used_after = used + 1U;
+        report->capacity_after = capacity;
+        report->remaining_after = capacity - used - 1U;
+        report->status = GXOS_CRT_ONEXIT_STATUS_OK;
+    }
     return GXOS_CRT_ONEXIT_STATUS_OK;
 }

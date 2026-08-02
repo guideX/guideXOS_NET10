@@ -61,6 +61,10 @@ if (-not (Test-Path -LiteralPath $manifestPath)) { throw "Artifact manifest miss
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
 Equal $manifest.Mode $Mode 'manifest mode'
 Verify-ArtifactSet $manifest.Artifacts 'manifest'
+$expectedPayloadHash = '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837'
+$payloadArtifact = @($manifest.Artifacts | Where-Object { $_.Kind -eq 'nativeaot_payload' })
+if ($payloadArtifact.Count -ne 1) { Fail 'manifest nativeaot payload artifact count' }
+elseif ([string]$payloadArtifact[0].Sha256 -ne $expectedPayloadHash) { Fail 'manifest payload hash mismatch' }
 $runIds = [System.Collections.Generic.List[string]]::new()
 $pids = [System.Collections.Generic.List[int]]::new()
 $fingerprints = [System.Collections.Generic.List[string]]::new()
@@ -142,30 +146,52 @@ for ($sequence = 1; $sequence -le $ExpectedRunCount; $sequence++) {
     if ($initRaw.Count -ne 2 -or $registerRaw.Count -ne 1 -or $registerAfterRaw.Count -ne 1) {
         continue
     }
-    Equal $registerRaw[0] $initRaw[0] "run $sequence encoded-null preserved"
-    Equal $registerAfterRaw[0] $registerRaw[0] "run $sequence raw first unchanged"
+    Equal $registerRaw[0] $initRaw[0] "run $sequence encoded-null before"
+    if ($registerAfterRaw[0] -eq $registerRaw[0]) { Fail "run $sequence raw first not updated" }
     Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_RAW_BEFORE=0x') $registerRaw[0] "run $sequence raw last before"
     Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_END_RAW_BEFORE=0x') $registerRaw[0] "run $sequence raw end before"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_RAW_AFTER=0x') $registerRaw[0] "run $sequence raw last after"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_END_RAW_AFTER=0x') $registerRaw[0] "run $sequence raw end after"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_UNCHANGED=0x') 1 "run $sequence table unchanged"
+    if ((Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_RAW_AFTER=0x') -eq $registerRaw[0]) { Fail "run $sequence raw last not updated" }
+    if ((Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_END_RAW_AFTER=0x') -eq $registerRaw[0]) { Fail "run $sequence raw end not updated" }
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_UNCHANGED=0x') 0 "run $sequence table changed"
     Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_FIRST_BEFORE=0x') 0 "run $sequence first before"
     Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_BEFORE=0x') 0 "run $sequence last before"
     Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_END_BEFORE=0x') 0 "run $sequence end before"
     Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_GROWTH_REQUIRED=0x') 1 "run $sequence growth required"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_ATTEMPTED=0x') 0 "run $sequence allocation not attempted"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_POINTER_ENCODED=0x') 0 "run $sequence callback not stored"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ENTRY_INDEX=0x') 4294967295 "run $sequence entry index"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_STORED_VALUE=0x') 0 "run $sequence stored callback"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_BASE=0x') 0 "run $sequence storage base"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_END=0x') 0 "run $sequence storage end"
-    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_RESULT=0x') 4294967295 "run $sequence result"
-    Equal (Read-Text $text 'GXOS_NET10:REGISTER_ONEXIT_STATUS=') 'GROWTH_REQUIRED' "run $sequence status"
-    Equal (Read-Text $text 'GXOS_NET10:REGISTER_ONEXIT_CALLER_BRANCH=') 'RETURN_VALUE_MAPPED_TO_FAILURE' "run $sequence caller branch"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_ATTEMPTED=0x') 1 "run $sequence allocation attempted"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_COUNT_BEFORE=0x') 0 "run $sequence allocation count before"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_COUNT_AFTER=0x') 1 "run $sequence allocation count after"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATOR_CALL_COUNT_BEFORE=0x') 0 "run $sequence allocator calls before"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATOR_CALL_COUNT_AFTER=0x') 1 "run $sequence allocator calls after"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATED_BYTES_AFTER=0x') 0x100 "run $sequence allocated bytes"
+    Equal (Read-Text $text 'GXOS_NET10:REGISTER_ONEXIT_INITIAL_TABLE_CLASSIFICATION=') 'DECODED_EMPTY' "run $sequence initial classification"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_SIZE=0x') 0x100 "run $sequence allocation size"
+    $allocation = Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_ADDRESS=0x'
+    if ($null -eq $allocation -or $allocation -eq 0) { Fail "run $sequence allocation address" }
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_BASE=0x') $allocation "run $sequence storage base"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_END=0x') ($allocation + 0x100) "run $sequence storage end"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_READABLE=0x') 1 "run $sequence storage readable"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_WRITABLE=0x') 1 "run $sequence storage writable"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_SLOT_COUNT=0x') 32 "run $sequence slot count"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_SLOT0_DECODED=0x') $callback "run $sequence slot 0 callback"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_SLOT0_CALLBACK_MATCH=0x') 1 "run $sequence slot 0 match"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_UNUSED_SLOTS_ALL_NULL=0x') 1 "run $sequence unused slots"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_STORAGE_DISJOINT_FROM_IMAGE=0x') 1 "run $sequence storage disjointness"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_UNUSED_SLOT_FIRST=0x') 0 "run $sequence unused slot first"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_UNUSED_SLOT_LAST=0x') 0 "run $sequence unused slot last"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_FIRST_AFTER=0x') $allocation "run $sequence decoded beginning"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_AFTER=0x') ($allocation + 8) "run $sequence decoded next"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_TABLE_END_AFTER=0x') ($allocation + 0x100) "run $sequence decoded end"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_USED_AFTER=0x') 1 "run $sequence used after"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_CAPACITY_AFTER=0x') 32 "run $sequence capacity after"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_REMAINING_CAPACITY_AFTER=0x') 31 "run $sequence remaining after"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_RESULT=0x') 0 "run $sequence result"
+    Equal (Read-Text $text 'GXOS_NET10:REGISTER_ONEXIT_STATUS=') 'OK' "run $sequence status"
+    Equal (Read-Text $text 'GXOS_NET10:REGISTER_ONEXIT_CALLER_BRANCH=') 'RETURN_VALUE_MAPPED_TO_SUCCESS' "run $sequence caller branch"
     Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_CALLBACK_EXECUTED=0x') 0 "run $sequence callback execution"
     Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_CALLBACK_EXECUTED_PROVEN=0x') 0 "run $sequence callback execution proof"
-    Equal (Read-Text $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_DEPENDENCY=') '_recalloc_crt_t(_PVFV,NULL,0x20)' "run $sequence allocation dependency"
-    Equal (Read-Text $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_IMPLEMENTED=') '0' "run $sequence allocation implementation"
+    Equal (Read-Text $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_PRIMITIVE=') 'UEFI_BOOT_SERVICES_ALLOCATE_POOL' "run $sequence allocation primitive"
+    Equal (Read-Text $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_DEPENDENCY=') 'AllocatePool(EFI_LOADER_DATA,0x100)' "run $sequence allocation dependency"
+    Equal (Read-Hex $text 'GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_IMPLEMENTED=0x') 1 "run $sequence allocation implementation"
     if ($text.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:api-ms-win-crt-runtime-l1-1-0.dll!_register_onexit_function')) { Fail "run $sequence positive route fail-fast" }
     Ordered $text @(
         'GXOS_NET10:CRT_ONEXIT_INIT_CALL=0x0000000000000001',
@@ -175,7 +201,7 @@ for ($sequence = 1; $sequence -le $ExpectedRunCount; $sequence++) {
         'GXOS_NET10:GETPROCADDRESS_RETURNED',
         'GXOS_NET10:REGISTER_ONEXIT_BEGIN',
         'GXOS_NET10:REGISTER_ONEXIT_RETURNED',
-        'GXOS_NET10:GETPROCADDRESS_CALLER_CONSUMPTION_COMPLETE') "run $sequence contract order"
+        'GXOS_NET10:REGISTER_ONEXIT_CONTINUATION_BEYOND_CALL_SITE=1') "run $sequence contract order"
 }
 
 if (@($runIds | Select-Object -Unique).Count -ne $runIds.Count) { Fail 'duplicate run ID' }

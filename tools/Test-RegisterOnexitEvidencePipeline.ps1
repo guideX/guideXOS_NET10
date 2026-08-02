@@ -45,14 +45,14 @@ Expect-Rejected 'status-mutation' {
     param($case)
     $serialPath = Join-Path $case 'runs\run-1\serial.log'
     $serial = Get-Content -Raw -LiteralPath $serialPath
-    Set-Content -LiteralPath $serialPath -Value ($serial.Replace('REGISTER_ONEXIT_STATUS=GROWTH_REQUIRED', 'REGISTER_ONEXIT_STATUS=OK')) -Encoding utf8 -NoNewline
+    Set-Content -LiteralPath $serialPath -Value ($serial.Replace('REGISTER_ONEXIT_STATUS=OK', 'REGISTER_ONEXIT_STATUS=GROWTH_REQUIRED')) -Encoding utf8 -NoNewline
     Refresh-Run (Join-Path $case 'runs\run-1')
 }
 Expect-Rejected 'raw-field-mutation' {
     param($case)
     $serialPath = Join-Path $case 'runs\run-1\serial.log'
     $serial = Get-Content -Raw -LiteralPath $serialPath
-    Set-Content -LiteralPath $serialPath -Value ($serial.Replace('REGISTER_ONEXIT_TABLE_UNCHANGED=0x0000000000000001', 'REGISTER_ONEXIT_TABLE_UNCHANGED=0x0000000000000000')) -Encoding utf8 -NoNewline
+    Set-Content -LiteralPath $serialPath -Value ($serial.Replace('REGISTER_ONEXIT_TABLE_UNCHANGED=0x0000000000000000', 'REGISTER_ONEXIT_TABLE_UNCHANGED=0x0000000000000001')) -Encoding utf8 -NoNewline
     Refresh-Run (Join-Path $case 'runs\run-1')
 }
 Expect-Rejected 'truncated-evidence' {

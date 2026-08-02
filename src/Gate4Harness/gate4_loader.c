@@ -299,6 +299,9 @@ static uint64_t g_perf_qpc_max_delta;
 static uint64_t g_perf_qpc_regressions;
 static EFI_PHYSICAL_ADDRESS g_tls_block;
 static GuideXBootInfo g_boot_info;
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+static uint64_t g_crt_onexit_register_successes;
+#endif
 #ifdef GXOS_ENABLE_SLIST
 static uint64_t g_slist_initialize_calls;
 #endif
@@ -2050,6 +2053,11 @@ static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t origin
         serial_text("\r\n");
     }
 #endif
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+    if (g_crt_onexit_register_successes != 0) {
+        serial_text("GXOS_NET10:REGISTER_ONEXIT_CONTINUATION_BEYOND_CALL_SITE=1\r\n");
+    }
+#endif
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
@@ -2688,12 +2696,50 @@ static GXOS_CRT_ONEXIT_CONTEXT g_crt_onexit_context;
 static uint32_t g_crt_onexit_register_import_descriptor_index;
 static uint32_t g_crt_onexit_register_importing_iat_rva;
 static uint64_t g_crt_onexit_register_calls;
-static uint64_t g_crt_onexit_register_successes;
 static uint64_t g_crt_onexit_register_failures;
 static uint64_t g_crt_onexit_register_allocation_attempts;
+static uint64_t g_crt_onexit_register_allocator_calls;
+static uint64_t g_crt_onexit_register_allocation_count;
+static uint64_t g_crt_onexit_register_allocated_bytes;
 static uint64_t g_crt_onexit_register_callback_executed;
 static GXOS_CRT_ONEXIT_REPORT g_crt_onexit_register_report;
 static GXOS_CRT_ONEXIT_STATUS g_crt_onexit_register_status;
+#endif
+
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+static void *GXOS_CRT_EFIAPI platform_crt_onexit_allocate(
+    uintptr_t size,
+    void *context)
+{
+    EFI_BOOT_SERVICES *boot_services = (EFI_BOOT_SERVICES *)context;
+    void *allocation = 0;
+
+    ++g_crt_onexit_register_allocator_calls;
+    if (size != GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES ||
+        boot_services == 0 || boot_services->AllocatePool == 0 ||
+        EFI_ERROR(boot_services->AllocatePool(
+            EFI_LOADER_DATA, (EFI_UINTN)size, &allocation)) ||
+        allocation == 0) {
+        return 0;
+    }
+    ++g_crt_onexit_register_allocation_count;
+    g_crt_onexit_register_allocated_bytes += size;
+    return allocation;
+}
+
+static int GXOS_CRT_EFIAPI platform_crt_onexit_free(
+    void *allocation,
+    uintptr_t size,
+    void *context)
+{
+    EFI_BOOT_SERVICES *boot_services = (EFI_BOOT_SERVICES *)context;
+
+    if (allocation == 0 || size != GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES ||
+        boot_services == 0 || boot_services->FreePool == 0) {
+        return -1;
+    }
+    return EFI_ERROR(boot_services->FreePool(allocation)) ? -1 : 0;
+}
 #endif
 
 static int GXOS_CRT_EFIAPI platform_initialize_onexit_table(GXOS_CRT_ONEXIT_TABLE *table)
@@ -2808,6 +2854,14 @@ static int GXOS_CRT_EFIAPI platform_register_onexit_function(
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CALLBACK_RVA=0x",
                      (uint64_t)((uintptr_t)function - (uintptr_t)g_managed_image_base));
     serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_BEFORE_REGISTRATION=1\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_HEAP_MARKER=UEFI_BOOT_SERVICES_ALLOCATE_POOL_EFI_LOADER_DATA\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_COUNT_BEFORE=0x",
+                     g_crt_onexit_register_allocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ALLOCATOR_CALL_COUNT_BEFORE=0x",
+                     g_crt_onexit_register_allocator_calls);
+    serial_text("\r\n");
     status = gxos_crt_onexit_register_checked(table, function,
                                               &g_crt_onexit_register_report);
     g_crt_onexit_register_status = status;
@@ -2876,36 +2930,39 @@ static int GXOS_CRT_EFIAPI platform_register_onexit_function(
                      g_crt_onexit_register_report.entry_index);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_FIRST_AFTER=0x",
-                     g_crt_onexit_register_report.first);
+                     g_crt_onexit_register_report.first_after);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_AFTER=0x",
-                     g_crt_onexit_register_report.last);
+                     g_crt_onexit_register_report.last_after);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_END_AFTER=0x",
-                     g_crt_onexit_register_report.end);
+                     g_crt_onexit_register_report.end_after);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_USED_AFTER=0x",
-                     g_crt_onexit_register_report.status == GXOS_CRT_ONEXIT_STATUS_OK ?
-                         g_crt_onexit_register_report.used_count + 1U :
-                         g_crt_onexit_register_report.used_count);
+                     g_crt_onexit_register_report.used_after);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_CAPACITY_AFTER=0x",
-                     g_crt_onexit_register_report.capacity);
+                     g_crt_onexit_register_report.capacity_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_REMAINING_CAPACITY_AFTER=0x",
+                     g_crt_onexit_register_report.remaining_after);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_FIRST_RAW_AFTER=0x",
-                     table == 0 ? 0 : (uintptr_t)table->first);
+                     g_crt_onexit_register_report.table_first_raw_after);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_LAST_RAW_AFTER=0x",
-                     table == 0 ? 0 : (uintptr_t)table->last);
+                     g_crt_onexit_register_report.table_last_raw_after);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_END_RAW_AFTER=0x",
-                     table == 0 ? 0 : (uintptr_t)table->end);
+                     g_crt_onexit_register_report.table_end_raw_after);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_TABLE_UNCHANGED=0x",
-                     table != 0 &&
-                     (uintptr_t)table->first == g_crt_onexit_register_report.table_first_raw &&
-                     (uintptr_t)table->last == g_crt_onexit_register_report.table_last_raw &&
-                     (uintptr_t)table->end == g_crt_onexit_register_report.table_end_raw);
+                     g_crt_onexit_register_report.table_first_raw_after ==
+                             g_crt_onexit_register_report.table_first_raw &&
+                         g_crt_onexit_register_report.table_last_raw_after ==
+                             g_crt_onexit_register_report.table_last_raw &&
+                         g_crt_onexit_register_report.table_end_raw_after ==
+                             g_crt_onexit_register_report.table_end_raw);
     serial_text("\r\n");
     serial_text("GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_BASE=0x");
     serial_hex64(g_crt_onexit_register_report.storage_region_base);
@@ -2918,6 +2975,57 @@ static int GXOS_CRT_EFIAPI platform_register_onexit_function(
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_STORAGE_REGION_WRITABLE=0x",
                      g_crt_onexit_register_report.storage_region_writable);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_INITIAL_TABLE_CLASSIFICATION=");
+    serial_text(g_crt_onexit_register_report.initial_empty_state != 0
+                    ? "DECODED_EMPTY\r\n"
+                    : "DECODED_NONEMPTY\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_ADDRESS=0x",
+                     g_crt_onexit_register_report.allocation_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_SIZE=0x",
+                     g_crt_onexit_register_report.allocation_size);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_SLOT_COUNT=0x",
+                     g_crt_onexit_register_report.slot_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_SLOT0_DECODED=0x",
+                     g_crt_onexit_register_report.decoded_slot0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_SLOT0_CALLBACK_MATCH=0x",
+                     g_crt_onexit_register_report.decoded_slot0 ==
+                             (uintptr_t)function);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_UNUSED_SLOTS_ALL_NULL=0x",
+                     g_crt_onexit_register_report.unused_slots_all_null);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_STORAGE_DISJOINT_FROM_IMAGE=0x",
+                     g_crt_onexit_register_report.allocation_disjoint_from_context);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_UNUSED_SLOT_FIRST=0x",
+                     g_crt_onexit_register_report.slot_count > 1U
+                         ? gxos_crt_onexit_decode_pointer(
+                               *(uintptr_t *)(g_crt_onexit_register_report.allocation_address +
+                                              sizeof(uintptr_t)))
+                         : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_UNUSED_SLOT_LAST=0x",
+                     g_crt_onexit_register_report.slot_count ==
+                                 GXOS_CRT_ONEXIT_INITIAL_STORAGE_SLOTS
+                         ? gxos_crt_onexit_decode_pointer(
+                               *(uintptr_t *)(g_crt_onexit_register_report.allocation_address +
+                                              (GXOS_CRT_ONEXIT_INITIAL_STORAGE_SLOTS - 1U) *
+                                                  sizeof(uintptr_t)))
+                         : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_COUNT_AFTER=0x",
+                     g_crt_onexit_register_allocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ALLOCATOR_CALL_COUNT_AFTER=0x",
+                     g_crt_onexit_register_allocator_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ALLOCATED_BYTES_AFTER=0x",
+                     g_crt_onexit_register_allocated_bytes);
     serial_text("\r\n");
     serial_text("GXOS_NET10:REGISTER_ONEXIT_CALLBACK_OWNER=");
     if (g_crt_onexit_register_report.callback_region_executable != 0) {
@@ -2939,8 +3047,11 @@ static int GXOS_CRT_EFIAPI platform_register_onexit_function(
     serial_text("\r\n");
     serial_text("GXOS_NET10:REGISTER_ONEXIT_ENCODING=FAST_SECURITY_COOKIE_ROTATE_X64\r\n");
     serial_text("GXOS_NET10:REGISTER_ONEXIT_GROWTH_POLICY=INITIAL_TABLE_COUNT_0x20_MIN_INCREMENT_0x4_MAX_INCREMENT_0x200\r\n");
-    serial_text("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_DEPENDENCY=_recalloc_crt_t(_PVFV,NULL,0x20)\r\n");
-    serial_text("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_IMPLEMENTED=0\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_PRIMITIVE=UEFI_BOOT_SERVICES_ALLOCATE_POOL\r\n");
+    serial_text("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_DEPENDENCY=AllocatePool(EFI_LOADER_DATA,0x100)\r\n");
+    serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_ALLOCATION_IMPLEMENTED=0x",
+                     g_crt_onexit_register_report.allocation_succeeded);
+    serial_text("\r\n");
     serial_field_hex("GXOS_NET10:REGISTER_ONEXIT_RESULT=0x",
                      (uint64_t)(uint32_t)(status == GXOS_CRT_ONEXIT_STATUS_OK ? 0 : -1));
     serial_text("\r\n");
@@ -5212,6 +5323,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     g_crt_onexit_context.relocations_applied = image.relocations_applied;
     g_crt_onexit_context.region_count = image.memory_region_count;
     g_crt_onexit_context.initialized_table_count = 0;
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+    g_crt_onexit_context.allocate = platform_crt_onexit_allocate;
+    g_crt_onexit_context.free = platform_crt_onexit_free;
+    g_crt_onexit_context.allocator_context = boot_services;
+#endif
     for (initterm_region_index = 0;
          initterm_region_index != image.memory_region_count;
          initterm_region_index++) {
@@ -5381,6 +5497,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     g_phase = PHASE_AFTER_MANAGED_RETURN;
     restore_nativeaot_tls();
     restore_fault_handlers();
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+    if (g_crt_onexit_register_successes != 0) {
+        serial_text("GXOS_NET10:REGISTER_ONEXIT_CONTINUATION_BEYOND_CALL_SITE=1\r\n");
+    }
+#endif
     serial_field_hex("GXOS_NET10:STACK_RSP_BEFORE_CALL=0x", rsp_before_call);
     serial_text("\r\n");
     serial_text("GXOS_NET10:STACK_RSP_MOD16=");

@@ -22,6 +22,7 @@ $runtimeArchive = if ([string]::IsNullOrWhiteSpace($RuntimeArchivePath)) {
 } else { [IO.Path]::GetFullPath($RuntimeArchivePath) }
 $validator = Join-Path $root 'tools\Validate-RegisterOnexitEvidence.ps1'
 $runner = [IO.Path]::GetFullPath($PSCommandPath)
+$expectedPayloadHash = '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837'
 $qemuCommand = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue
 $qemu = if ($null -ne $qemuCommand) { [IO.Path]::GetFullPath($qemuCommand.Path) } else { 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
 $qemuShare = Join-Path (Split-Path -Parent $qemu) 'share'
@@ -38,6 +39,9 @@ $sourceFiles = @(
 )
 foreach ($path in @($efi,$payload,$startup,$runtimeArchive,$validator,$runner,$ovmf,$varsTemplate) + $sourceFiles) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Required path missing: $path" }
+}
+if ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -ne $expectedPayloadHash) {
+    throw "NativeAOT payload hash mismatch: $payload"
 }
 if (Test-Path -LiteralPath $evidence) { throw "Evidence directory already exists: $evidence" }
 if ($RunCount -lt 1) { throw 'RunCount must be positive.' }
@@ -90,7 +94,7 @@ $qemuVersion = (& $qemu '--version' 2>$null | Select-Object -First 1).Trim()
 $artifactFingerprint = (($artifacts | ForEach-Object { "$($_.Kind)=$($_.Sha256):$($_.Length)" }) -join '|')
 Write-Json (Join-Path $evidence 'artifact-manifest.json') ([ordered]@{
     EvidenceId=$evidenceId; CreatedUtc=(Get-Date).ToUniversalTime().ToString('o'); RepositoryRoot=$root
-    GateDirectory=$gate; Mode=$Mode; ExpectedBoundary=if ($Mode -eq 'Positive') { 'REGISTER_ONEXIT_STATUS=GROWTH_REQUIRED' } else { 'api-ms-win-crt-runtime-l1-1-0.dll!_register_onexit_function' }
+    GateDirectory=$gate; Mode=$Mode; ExpectedBoundary=if ($Mode -eq 'Positive') { 'REGISTER_ONEXIT_STATUS=OK' } else { 'api-ms-win-crt-runtime-l1-1-0.dll!_register_onexit_function' }
     QemuVersion=$qemuVersion; Artifacts=$artifacts
 })
 Write-Json (Join-Path $evidence 'validation-context.json') ([ordered]@{

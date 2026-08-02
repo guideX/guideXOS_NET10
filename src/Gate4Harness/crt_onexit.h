@@ -14,6 +14,13 @@
 /* Microsoft UCRT declarations from corecrt_startup.h. */
 typedef void (GXOS_CRT_ONEXIT_MS_ABI *GXOS_CRT_ONEXIT_PVFV)(void);
 typedef int (GXOS_CRT_ONEXIT_MS_ABI *GXOS_CRT_ONEXIT_T)(void);
+typedef void *(GXOS_CRT_ONEXIT_MS_ABI *GXOS_CRT_ONEXIT_ALLOCATE)(
+    uintptr_t size,
+    void *context);
+typedef int (GXOS_CRT_ONEXIT_MS_ABI *GXOS_CRT_ONEXIT_FREE)(
+    void *allocation,
+    uintptr_t size,
+    void *context);
 
 typedef struct _onexit_table_t {
     GXOS_CRT_ONEXIT_PVFV *first;
@@ -24,6 +31,8 @@ typedef struct _onexit_table_t {
 #define GXOS_CRT_ONEXIT_MAX_MEMORY_REGIONS 32U
 #define GXOS_CRT_ONEXIT_MAX_INITIALIZED_TABLES 4U
 #define GXOS_CRT_ONEXIT_MAX_CENSUS_ENTRIES 16U
+#define GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES 0x100U
+#define GXOS_CRT_ONEXIT_INITIAL_STORAGE_SLOTS 32U
 #define GXOS_CRT_ONEXIT_FAILURE (-1)
 
 typedef struct {
@@ -43,6 +52,9 @@ typedef struct {
     uint32_t initialized_table_count;
     uintptr_t initialized_tables[GXOS_CRT_ONEXIT_MAX_INITIALIZED_TABLES];
     GXOS_CRT_ONEXIT_MEMORY_REGION regions[GXOS_CRT_ONEXIT_MAX_MEMORY_REGIONS];
+    GXOS_CRT_ONEXIT_ALLOCATE allocate;
+    GXOS_CRT_ONEXIT_FREE free;
+    void *allocator_context;
 } GXOS_CRT_ONEXIT_CONTEXT;
 
 typedef enum GXOS_CRT_ONEXIT_STATUS {
@@ -102,6 +114,23 @@ typedef struct {
     uint32_t callback_executed;
     uint32_t census_count;
     uintptr_t census_values[GXOS_CRT_ONEXIT_MAX_CENSUS_ENTRIES];
+    uintptr_t table_first_raw_after;
+    uintptr_t table_last_raw_after;
+    uintptr_t table_end_raw_after;
+    uintptr_t first_after;
+    uintptr_t last_after;
+    uintptr_t end_after;
+    uint32_t used_after;
+    uint32_t capacity_after;
+    uint32_t remaining_after;
+    uintptr_t allocation_address;
+    uintptr_t allocation_size;
+    uintptr_t decoded_slot0;
+    uint32_t slot_count;
+    uint32_t unused_slots_all_null;
+    uint32_t initial_empty_state;
+    uint32_t allocation_succeeded;
+    uint32_t allocation_disjoint_from_context;
 } GXOS_CRT_ONEXIT_REPORT;
 
 _Static_assert(sizeof(uintptr_t) == 8,
@@ -120,6 +149,9 @@ _Static_assert(_Alignof(GXOS_CRT_ONEXIT_TABLE) == 8,
                "_onexit_table_t alignment changed");
 _Static_assert(sizeof(GXOS_CRT_ONEXIT_TABLE) == 24,
                "_onexit_table_t size changed");
+_Static_assert(GXOS_CRT_ONEXIT_INITIAL_STORAGE_BYTES ==
+                   GXOS_CRT_ONEXIT_INITIAL_STORAGE_SLOTS * sizeof(uintptr_t),
+               "initial on-exit storage size changed");
 
 void gxos_crt_onexit_set_encoded_null(uintptr_t encoded_null);
 void gxos_crt_onexit_set_encoded_null_address(const uintptr_t *encoded_null_address);
