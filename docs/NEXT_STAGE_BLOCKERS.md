@@ -80,6 +80,12 @@ The exact current-path contract is closed under [KERNEL32_GETPROCESSGROUPAFFINIT
 
 The exact Microsoft x64 process-affinity contract is closed under [KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md](KERNEL32_GETPROCESSAFFINITYMASK_BOOTSTRAP.md). The current-process pseudo-handle returns the one initialized bootstrap processor as both process and system mask `0x1`. The two callers consume only the process mask: one updates a bitmap, and one performs a manual population count before `QueryInformationJobObject`. The final QEMU evidence preserves zero GC/allocation state. The next authentic dependency is `KERNEL32.dll!QueryInformationJobObject`; no other affinity or topology API was implemented.
 
+## `GetProcAddress` closure (2026-08-01)
+
+The exact `KERNEL32.dll!GetProcAddress` call is now closed for the current startup path. The previous `GetModuleHandleW(&L"ntdll.dll")` failure supplies `NULL`; the exact name is `RtlDllShutdownInProgress`; and the checked route returns `NULL`/`ERROR_PROC_NOT_FOUND` (`127`) without export parsing. The caller takes its optional fallback and the next authentic dependency is `api-ms-win-crt-runtime-l1-1-0.dll!_register_onexit_function`.
+
+Do not broaden this result into a PE export resolver, forwarded-export resolver, DLL search/load service, module registry, or `ntdll` alias. The first-allocation blocker is unchanged: no GC heap, allocation context, managed-thread registration, object publication, write barriers, or collection lifecycle is proven.
+
 ## Query-information closure (2026-08-01)
 
 `QueryInformationJobObject` is now closed only for the live `hJob=NULL` / class-15 / eight-byte CPU-rate query. The guideXOS snapshot has no associated job, so the caller's no-job fallback is proven and the next authentic dependency is `KERNEL32.dll!GetModuleHandleW`. The dormant class-9 static reference remains a future census item, not a live startup blocker. This closure does not change the first-allocation blocker: the allocation context, GC heap, managed-thread registration, object publication, write barriers, and collection lifecycle remain unproven.

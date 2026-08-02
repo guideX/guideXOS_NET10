@@ -206,3 +206,9 @@ The fresh baseline reproduced `KERNEL32.dll!GetModuleHandleW` as the immediate b
 The live call supplies `&L"ntdll.dll"`. The bounded wrapper records the UTF-16 argument, read-only payload `.rdata` ownership, actual relocated image base, preferred base, relocation delta, and `NULL`/`ERROR_MOD_NOT_FOUND`. No ntdll image is mapped, so the payload is not returned under the ntdll name. The next authentic dependency is `KERNEL32.dll!GetProcAddress`; it remains fail-fast. See [KERNEL32_GETMODULEHANDLEW_BOOTSTRAP.md](KERNEL32_GETMODULEHANDLEW_BOOTSTRAP.md).
 
 The complete import and call evidence is retained in `evidence\generated\getnumahighest-final-20260801-immutable-v2`. The contract does not make `GetLogicalProcessorInformation`, `GetLogicalProcessorInformationEx`, `VirtualAllocExNuma`, or any other topology/allocation import functional. They remain deterministic fail-fast dependencies.
+
+## `GetProcAddress` dependency closure (2026-08-01)
+
+The current NativeAOT startup path imports `KERNEL32.dll!GetProcAddress` at IAT RVA `0x7d138` (`0x18007d138` preferred). The only live call is preferred `0x180037c71` in `NativeAOT_RtlDllShutdownInProgress_probe`, beginning at `0x180037c40`; the caller passes the preceding null `GetModuleHandleW` result and the exact read-only `.rdata` name `RtlDllShutdownInProgress`. The checked route returns `NULL`/`127`, records no export-lookup attempt, and the caller advances to `api-ms-win-crt-runtime-l1-1-0.dll!_register_onexit_function`.
+
+The final positive treatment is `36` functional / `88` fail-fast / `0` unresolved; the disabled GetProcAddress control is `35` / `89` / `0` and stops at the same import as an authentic fail-fast boundary. The route is name-safe and ordinal-aware at the ABI boundary, but it intentionally does not parse PE export directories or load/resolve modules. See [KERNEL32_GETPROCADDRESS_BOOTSTRAP.md](KERNEL32_GETPROCADDRESS_BOOTSTRAP.md).

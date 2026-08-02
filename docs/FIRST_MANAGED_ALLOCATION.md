@@ -38,6 +38,12 @@ The exact `KERNEL32.dll!GetProcessGroupAffinity` call is now closed for the curr
 
 The exact `GetProcessAffinityMask` contract now completes the next NativeAOT startup dependency, but it does not advance first allocation. Both live calls return process/system masks `0x1`/`0x1`; the bitmap caller updates a processor bitmap, and the processor-count caller derives a one-bit population count before reaching `QueryInformationJobObject`. Final summaries still report zero allocation context, zero managed-thread registration, zero GC heap usability, and zero managed allocations.
 
+## `GetProcAddress` does not advance allocation (2026-08-01)
+
+The current `GetProcAddress(NULL, "RtlDllShutdownInProgress")` closure is a module/export lookup boundary only. The truthful result is `NULL`/`127`, the NativeAOT caller takes its optional fallback, and startup advances to `_register_onexit_function`. The three positive traces still report `GC_CONTRACT_INITIALIZED=0`, `GC_HEAP_USABLE=0`, `ALLOCATION_CONTEXT_VALID=0`, `ALLOCATION_CONTEXT_CREATED=0`, `MANAGED_THREAD_REGISTERED=0`, and `MANAGED_ALLOCATION_COUNT=0`.
+
+No PE export directory, module registry, DLL loader, heap segment, object/EEType publication, write barrier, or collection lifecycle was added. A fabricated non-null function pointer was exercised only as a separately marked investigation control and is not evidence of a first allocation or of a valid Windows export resolution.
+
 ## `GetModuleHandleW` does not advance allocation
 
 The current NativeAOT path reaches one non-null `GetModuleHandleW(&L"ntdll.dll")` call after the no-associated-job fallback. guideXOS has no mapped ntdll image, so the truthful narrow contract returns `NULL` with `ERROR_MOD_NOT_FOUND` and stops at `GetProcAddress`. The positive runs still report zero TLS allocation pointer/limit, zero GC contract initialization, zero usable GC heap, zero allocation context, zero managed-thread registration, and zero managed allocations. A module-handle result—even the actual relocated payload base in the null-name checked policy—would not by itself prove heap or GC readiness. The first-allocation blocker remains unchanged.

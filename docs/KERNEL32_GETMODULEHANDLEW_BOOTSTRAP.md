@@ -142,4 +142,4 @@ The next authentic dependency is:
 KERNEL32.dll!GetProcAddress
 ```
 
-That is the next milestone. It is not implemented here.
+That dependency is now closed for its one live startup call. See [KERNEL32_GETPROCADDRESS_BOOTSTRAP.md](KERNEL32_GETPROCADDRESS_BOOTSTRAP.md) for the bounded `GetProcAddress` contract, evidence, and remaining export-resolution boundary.

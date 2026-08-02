@@ -16,6 +16,7 @@
 #include "platform_process_affinity.h"
 #include "platform_query_information_job_object.h"
 #include "platform_get_module_handle.h"
+#include "platform_get_proc_address.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -232,6 +233,8 @@ enum {
 static uint32_t g_phase;
 static uint64_t g_managed_target;
 static uint64_t g_managed_image_base;
+static uint32_t g_platform_last_error;
+static void serial_text(const char *text);
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
 static GXOS_MAIN_MODULE_FACTS g_main_module_facts;
 static uint32_t g_get_module_handle_import_descriptor_index;
@@ -249,6 +252,33 @@ static uintptr_t g_get_module_handle_last_call_site;
 static uintptr_t g_get_module_handle_last_handle;
 static GXOS_MODULE_HANDLE_HMODULE EFIAPI platform_get_module_handle_w(
     GXOS_MODULE_HANDLE_LPCWSTR module_name);
+#endif
+#ifdef GXOS_ENABLE_GET_PROC_ADDRESS
+static uint32_t g_get_proc_address_import_descriptor_index;
+static uint32_t g_get_proc_address_importing_iat_rva;
+static GXOS_GET_PROC_ADDRESS_MEMORY_CONTEXT g_get_proc_address_memory;
+static uint64_t g_get_proc_address_calls;
+static uint64_t g_get_proc_address_successes;
+static uint64_t g_get_proc_address_absent_module_failures;
+static uint64_t g_get_proc_address_missing_export_failures;
+static uint64_t g_get_proc_address_invalid_handle_failures;
+static uint64_t g_get_proc_address_named_calls;
+static uint64_t g_get_proc_address_ordinal_calls;
+static uint64_t g_get_proc_address_export_lookup_attempts;
+static uint64_t g_get_proc_address_pointer_stored;
+static uint64_t g_get_proc_address_pointer_called;
+static GXOS_GET_PROC_ADDRESS_REPORT g_get_proc_address_last_report;
+#ifdef GXOS_GET_PROC_ADDRESS_SYNTHETIC_RESULT
+static int GXOS_GET_PROC_ADDRESS_MS_ABI platform_get_proc_address_synthetic_stub(void)
+{
+    ++g_get_proc_address_pointer_called;
+    serial_text("GXOS_NET10:GETPROCADDRESS_SYNTHETIC_STUB_CALLED=1\r\n");
+    return 0;
+}
+#endif
+static GXOS_GET_PROC_ADDRESS_FARPROC EFIAPI platform_get_proc_address(
+    GXOS_GET_PROC_ADDRESS_HMODULE module_handle,
+    GXOS_GET_PROC_ADDRESS_LPCSTR procedure_identifier);
 #endif
 static uint64_t g_boot_info_address;
 static uint64_t g_last_time_caller;
@@ -560,6 +590,268 @@ static int GXOS_CRT_STRCMP_MS_ABI platform_strcmp(const char *lhs, const char *r
     platform_strcmp_emit_text("GXOS_NET10:CRT_STRCMP_RHS_TEXT=", rhs, rhs_length);
     serial_field_hex("GXOS_NET10:CRT_STRCMP_RESULT=0x", (uint64_t)(uint32_t)result);
     serial_text("\r\n");
+    return result;
+}
+#endif
+
+#ifdef GXOS_ENABLE_GET_PROC_ADDRESS
+static uint64_t platform_get_proc_address_static_call_site(uintptr_t call_site)
+{
+    if (call_site >= (uintptr_t)g_managed_image_base) {
+        return 0x180000000ULL +
+               (uint64_t)(call_site - (uintptr_t)g_managed_image_base);
+    }
+    return 0;
+}
+
+static uintptr_t platform_get_proc_address_caller_start(uint64_t static_call_site)
+{
+    if (static_call_site == 0x180037C71ULL) return 0x180037C40ULL;
+    if (static_call_site == 0x18003C568ULL) return 0x18003C530ULL;
+    if (static_call_site == 0x18003C9B1ULL ||
+        static_call_site == 0x18003CA92ULL ||
+        static_call_site == 0x18003CADAULL) return 0x18003C980ULL;
+    if (static_call_site == 0x18003CE77ULL) return 0x18003CE50ULL;
+    return 0;
+}
+
+static const char *platform_get_proc_address_caller_name(
+    uint64_t static_call_site)
+{
+    if (static_call_site == 0x180037C71ULL) {
+        return "NativeAOT_RtlDllShutdownInProgress_probe";
+    }
+    if (static_call_site == 0x18003C568ULL) {
+        return "NativeAOT_InitializeContext2_probe";
+    }
+    return "nearest-identifiable-NativeAOT-region";
+}
+
+static void platform_get_proc_address_emit_name(
+    const GXOS_GET_PROC_ADDRESS_REPORT *report)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint32_t index;
+
+    if (report->identifier_kind != GXOS_PROC_IDENTIFIER_NAME) return;
+    serial_text("GXOS_NET10:GETPROCADDRESS_NAME_BYTES=");
+    for (index = 0; index != report->name_preview_length; ++index) {
+        uint8_t value = report->name_preview[index];
+        serial_char((uint8_t)digits[(value >> 4) & 0xFU]);
+        serial_char((uint8_t)digits[value & 0xFU]);
+    }
+    if (report->name_preview_truncated) serial_text("...");
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCADDRESS_NAME_PREVIEW=\"");
+    for (index = 0; index != report->name_preview_length; ++index) {
+        uint8_t value = report->name_preview[index];
+        serial_char(value >= 0x20U && value <= 0x7EU ? value : (uint8_t)'.');
+    }
+    if (report->name_preview_truncated) serial_text("...");
+    serial_text("\"\r\n");
+}
+
+static void platform_get_proc_address_emit_call(
+    const GXOS_GET_PROC_ADDRESS_REPORT *report,
+    uintptr_t return_address)
+{
+    uintptr_t call_site = return_address >= 6U ? return_address - 6U : 0;
+    uint64_t static_call_site =
+        platform_get_proc_address_static_call_site(call_site);
+    uintptr_t caller_start =
+        platform_get_proc_address_caller_start(static_call_site);
+
+    serial_text("GXOS_NET10:GETPROCADDRESS_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_CALL_INDEX=0x",
+                     g_get_proc_address_calls - 1U);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCADDRESS_IMPORT_MODULE=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:GETPROCADDRESS_IMPORT_SYMBOL=GetProcAddress\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_get_proc_address_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_IAT_RVA=0x",
+                     g_get_proc_address_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_PREFERRED_IAT=0x",
+                     0x180000000ULL + g_get_proc_address_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_RUNTIME_IAT=0x",
+                     (uint64_t)g_managed_image_base +
+                         g_get_proc_address_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_STATIC_CALL_SITE=0x",
+                     static_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_RETURN_ADDRESS=0x",
+                     return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_CALLER_START=0x",
+                     caller_start);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCADDRESS_CALLER=");
+    serial_text(platform_get_proc_address_caller_name(static_call_site));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_MODULE_HANDLE=0x",
+                     report->module_handle);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCADDRESS_MODULE_CLASS=");
+    serial_text(report->module_is_null ? "ABSENT_NULL\r\n" :
+                (report->module_approved ? "APPROVED_MAPPED\r\n" :
+                 "NONNULL_UNAPPROVED\r\n"));
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_IDENTIFIER_RAW=0x",
+                     report->identifier_raw);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_IDENTIFIER_HIGH_BITS=0x",
+                     report->identifier_high_order_bits);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_IDENTIFIER_LOW_WORD=0x",
+                     report->identifier_low_order_word);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCADDRESS_IDENTIFIER_KIND=");
+    serial_text(gxos_get_proc_address_identifier_kind_name(
+                    report->identifier_kind));
+    serial_text("\r\n");
+    if (report->identifier_kind == GXOS_PROC_IDENTIFIER_ORDINAL) {
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_ORDINAL=0x",
+                         report->ordinal);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:GETPROCADDRESS_MEMORY_READ=0\r\n");
+    } else {
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_POINTER=0x",
+                         report->name_pointer);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_POINTER_CANONICAL=0x",
+                         report->name_pointer_canonical);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_READABLE=0x",
+                         report->name_readable);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_LENGTH=0x",
+                         report->name_length);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_TERMINATOR=0x",
+                         report->name_terminator);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_REGION_BASE=0x",
+                         report->name_region_base);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_REGION_END=0x",
+                         report->name_region_end);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_REGION_READABLE=0x",
+                         report->name_region_readable);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_REGION_EXECUTABLE=0x",
+                         report->name_region_executable);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_REGION_WRITABLE=0x",
+                         report->name_region_writable);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_7BIT_ASCII=0x",
+                         report->name_all_7bit_ascii);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAME_HIGH_BIT_COUNT=0x",
+                         report->name_high_bit_count);
+        serial_text("\r\n");
+        platform_get_proc_address_emit_name(report);
+    }
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_MODULE_VALID=0x",
+                     report->module_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_EXPORT_LOOKUP_ATTEMPTED=0x",
+                     report->export_lookup_attempted);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_RESULT=0x",
+                     (uint64_t)(uintptr_t)report->result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_LAST_ERROR_BEFORE=0x",
+                     report->last_error_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCADDRESS_LAST_ERROR_AFTER=0x",
+                     report->last_error_after);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCADDRESS_STATUS=");
+    serial_text(gxos_get_proc_address_status_name(report->status));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETPROCADDRESS_MODULE_HANDLE_PROVENANCE=");
+    serial_text(report->module_handle == 0
+                    ? "PRECEDING_GETMODULEHANDLEW_NULL_RESULT\r\n"
+                    : "NONNULL_HANDLE_NOT_APPROVED\r\n");
+    if (report->status == GXOS_GET_PROC_ADDRESS_STATUS_INVALID_MODULE_HANDLE &&
+        report->module_handle == 0) {
+        serial_text("GXOS_NET10:GETPROCADDRESS_EXPECTED_ABSENT_MODULE_FAILURE\r\n");
+    }
+    serial_text("GXOS_NET10:GETPROCADDRESS_RETURNED\r\n");
+}
+
+static GXOS_GET_PROC_ADDRESS_FARPROC EFIAPI platform_get_proc_address(
+    GXOS_GET_PROC_ADDRESS_HMODULE module_handle,
+    GXOS_GET_PROC_ADDRESS_LPCSTR procedure_identifier)
+{
+    GXOS_GET_PROC_ADDRESS_FARPROC result =
+        (GXOS_GET_PROC_ADDRESS_FARPROC)0;
+    GXOS_GET_PROC_ADDRESS_DWORD previous_error = g_platform_last_error;
+    GXOS_GET_PROC_ADDRESS_DWORD last_error = previous_error;
+    GXOS_GET_PROC_ADDRESS_STATUS status;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+
+    ++g_get_proc_address_calls;
+    status = gxos_get_proc_address_checked(
+        module_handle, procedure_identifier, &g_get_proc_address_memory,
+        previous_error, &result, &last_error, &g_get_proc_address_last_report);
+#ifdef GXOS_GET_PROC_ADDRESS_SYNTHETIC_RESULT
+    if (module_handle == 0 &&
+        g_get_proc_address_last_report.identifier_kind ==
+            GXOS_PROC_IDENTIFIER_NAME &&
+        status == GXOS_GET_PROC_ADDRESS_STATUS_INVALID_MODULE_HANDLE) {
+        result = (GXOS_GET_PROC_ADDRESS_FARPROC)
+            platform_get_proc_address_synthetic_stub;
+        status = GXOS_GET_PROC_ADDRESS_STATUS_OK;
+        last_error = previous_error;
+        g_get_proc_address_last_report.status = status;
+        g_get_proc_address_last_report.module_approved = 0;
+        g_get_proc_address_last_report.module_valid = 0;
+        g_get_proc_address_last_report.result = result;
+        g_get_proc_address_last_report.last_error_after = last_error;
+        serial_text("GXOS_NET10:GETPROCADDRESS_SYNTHETIC_RESULT=1\r\n");
+    }
+#endif
+#ifdef GXOS_GET_PROC_ADDRESS_WRONG_ERROR
+    if (result == (GXOS_GET_PROC_ADDRESS_FARPROC)0) {
+        last_error = GXOS_GET_PROC_ADDRESS_ERROR_INVALID_HANDLE;
+        serial_text("GXOS_NET10:GETPROCADDRESS_WRONG_ERROR_EXPERIMENT=1\r\n");
+    }
+#endif
+    g_platform_last_error = last_error;
+    g_get_proc_address_last_report.status = status;
+    g_get_proc_address_last_report.result = result;
+    g_get_proc_address_last_report.last_error_before = previous_error;
+    g_get_proc_address_last_report.last_error_after = last_error;
+    if (g_get_proc_address_last_report.identifier_kind ==
+        GXOS_PROC_IDENTIFIER_ORDINAL) {
+        ++g_get_proc_address_ordinal_calls;
+    } else {
+        ++g_get_proc_address_named_calls;
+    }
+    if (g_get_proc_address_last_report.export_lookup_attempted != 0) {
+        ++g_get_proc_address_export_lookup_attempts;
+    }
+    if (result != (GXOS_GET_PROC_ADDRESS_FARPROC)0) {
+        ++g_get_proc_address_successes;
+    } else if (status == GXOS_GET_PROC_ADDRESS_STATUS_INVALID_MODULE_HANDLE &&
+               module_handle == 0) {
+        ++g_get_proc_address_absent_module_failures;
+    } else if (status == GXOS_GET_PROC_ADDRESS_STATUS_EXPORT_NOT_FOUND) {
+        ++g_get_proc_address_missing_export_failures;
+    } else {
+        ++g_get_proc_address_invalid_handle_failures;
+    }
+    platform_get_proc_address_emit_call(&g_get_proc_address_last_report,
+                                        return_address);
     return result;
 }
 #endif
@@ -1696,6 +1988,68 @@ static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t origin
         serial_text("GXOS_NET10:GETMODULEHANDLEW_SUBSEQUENT_CALL_COUNT=0x0000000000000000\r\n");
     }
 #endif
+#ifdef GXOS_ENABLE_GET_PROC_ADDRESS
+    if (g_get_proc_address_calls != 0) {
+        if (g_get_proc_address_last_report.result !=
+            (GXOS_GET_PROC_ADDRESS_FARPROC)0) {
+            ++g_get_proc_address_pointer_stored;
+        }
+        serial_text("GXOS_NET10:GETPROCADDRESS_CALLER_NULL_TEST=1\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_POINTER_STORED=0x",
+                         g_get_proc_address_last_report.result !=
+                                 (GXOS_GET_PROC_ADDRESS_FARPROC)0
+                             ? 1
+                             : 0);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_POINTER_CALLED=0x",
+                         g_get_proc_address_pointer_called != 0 ? 1 : 0);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:GETPROCADDRESS_CALLER_BRANCH=");
+        serial_text(g_get_proc_address_last_report.result !=
+                            (GXOS_GET_PROC_ADDRESS_FARPROC)0
+                        ? "SUCCESS_POINTER_STORED\r\n"
+                        : "FAILURE_NULL_OPTIONAL_FALLBACK\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_SUBSEQUENT_CALL_COUNT=0x",
+                         g_get_proc_address_calls - 1U);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_CALL_COUNT=0x",
+                         g_get_proc_address_calls);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_SUCCESS_COUNT=0x",
+                         g_get_proc_address_successes);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_EXPECTED_ABSENT_MODULE_FAILURE_COUNT=0x",
+                         g_get_proc_address_absent_module_failures);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_MISSING_EXPORT_FAILURE_COUNT=0x",
+                         g_get_proc_address_missing_export_failures);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_INVALID_HANDLE_FAILURE_COUNT=0x",
+                         g_get_proc_address_invalid_handle_failures);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_NAMED_LOOKUP_COUNT=0x",
+                         g_get_proc_address_named_calls);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_ORDINAL_LOOKUP_COUNT=0x",
+                         g_get_proc_address_ordinal_calls);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_EXPORT_LOOKUP_ATTEMPTS=0x",
+                         g_get_proc_address_export_lookup_attempts);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_POINTER_STORED_COUNT=0x",
+                         g_get_proc_address_pointer_stored);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:GETPROCADDRESS_POINTER_CALLED_COUNT=0x",
+                         g_get_proc_address_pointer_called);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:GETPROCADDRESS_CALLER_CONSUMPTION_COMPLETE\r\n");
+        serial_text("GXOS_NET10:GETPROCADDRESS_NEXT_BOUNDARY=");
+        serial_text(record->module);
+        serial_text("!");
+        serial_text(record->symbol);
+        serial_text("\r\n");
+    }
+#endif
     serial_text("GXOS_NET10:UNEXPECTED_IMPORT_CALL:");
     serial_text(record->module);
     serial_text("!");
@@ -1803,8 +2157,6 @@ static int EFIAPI platform_fls_free(uint32_t index)
     g_fls_callbacks[index] = 0;
     return 1;
 }
-
-static uint32_t g_platform_last_error;
 
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
 static const char *platform_get_module_handle_status_name(
@@ -2617,6 +2969,12 @@ static void *platform_import_target(const char *module, const char *symbol)
         return (void *)(uintptr_t)platform_get_module_handle_w;
     }
 #endif
+#ifdef GXOS_ENABLE_GET_PROC_ADDRESS
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetProcAddress")) {
+        return (void *)(uintptr_t)platform_get_proc_address;
+    }
+#endif
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "DuplicateHandle")) return (void *)(uintptr_t)platform_duplicate_handle;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "CloseHandle")) return (void *)(uintptr_t)platform_close_handle;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "VirtualQuery")) return (void *)(uintptr_t)platform_virtual_query;
@@ -2833,6 +3191,13 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 equal_text(g_import_records[symbols].symbol, "GetModuleHandleW")) {
                 g_get_module_handle_import_descriptor_index = descriptors - 1U;
                 g_get_module_handle_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_GET_PROC_ADDRESS
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "GetProcAddress")) {
+                g_get_proc_address_import_descriptor_index = descriptors - 1U;
+                g_get_proc_address_importing_iat_rva = first_thunk_rva + index * 8U;
             }
 #endif
             {
@@ -4601,6 +4966,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     g_main_module_facts.mapped_region_count = image.memory_region_count;
     gxos_get_module_handle_configure(&g_main_module_facts);
     serial_text("GXOS_NET10:GETMODULEHANDLEW_VALIDATION_CONTEXT_OK\r\n");
+#endif
+#ifdef GXOS_ENABLE_GET_PROC_ADDRESS
+    if (image.memory_region_count == 0 || image.memory_region_count > 32U ||
+        image.relocations_applied == 0) {
+        fail("getprocaddress-context");
+    }
+    g_get_proc_address_memory.regions = image.memory_regions;
+    g_get_proc_address_memory.region_count = image.memory_region_count;
+    serial_text("GXOS_NET10:GETPROCADDRESS_VALIDATION_CONTEXT_OK\r\n");
 #endif
     serial_text("GXOS_NET10:PE_IMPORT_DESCRIPTORS=");
     serial_u32(import_descriptors);
