@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWPreferredBaseExperiment', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWPreferredBaseExperiment', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -71,6 +71,7 @@ $gccArguments = @(
     (Join-Path $root 'src\Gate4Harness\platform_process_affinity.c'),
     (Join-Path $root 'src\Gate4Harness\platform_query_information_job_object.c'),
     (Join-Path $root 'src\Gate4Harness\platform_get_module_handle.c'),
+    (Join-Path $root 'src\Gate4Harness\platform_get_module_handle_ex.c'),
     (Join-Path $root 'src\Gate4Harness\platform_get_proc_address.c')
 )
 switch ($Scenario) {
@@ -591,6 +592,43 @@ switch ($Scenario) {
         $gccArguments += '-DGXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT'
         $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
         $gccArguments += '-DGXOS_MODULE_HANDLE_WRONG_IMAGE_EXPERIMENT'
+    }
+    'GetModuleHandleEx' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE_EX'
+        $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT_REGISTER'
+    }
+    'GetModuleHandleExDisabled' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
+        $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT_REGISTER'
     }
     'GetProcAddress' {
         $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'

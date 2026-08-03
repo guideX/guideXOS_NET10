@@ -16,6 +16,7 @@
 #include "platform_process_affinity.h"
 #include "platform_query_information_job_object.h"
 #include "platform_get_module_handle.h"
+#include "platform_get_module_handle_ex.h"
 #include "platform_get_proc_address.h"
 
 typedef uint64_t EFI_STATUS;
@@ -234,6 +235,8 @@ static uint32_t g_phase;
 static uint64_t g_managed_target;
 static uint64_t g_managed_image_base;
 static uint32_t g_platform_last_error;
+static uint64_t g_stack_lower;
+static uint64_t g_stack_upper;
 static void serial_text(const char *text);
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
 static GXOS_MAIN_MODULE_FACTS g_main_module_facts;
@@ -252,6 +255,22 @@ static uintptr_t g_get_module_handle_last_call_site;
 static uintptr_t g_get_module_handle_last_handle;
 static GXOS_MODULE_HANDLE_HMODULE EFIAPI platform_get_module_handle_w(
     GXOS_MODULE_HANDLE_LPCWSTR module_name);
+#endif
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE_EX
+static uint32_t g_get_module_handle_ex_import_descriptor_index;
+static uint32_t g_get_module_handle_ex_importing_iat_rva;
+static uint64_t g_get_module_handle_ex_calls;
+static uint64_t g_get_module_handle_ex_successes;
+static uint64_t g_get_module_handle_ex_failures;
+static uint32_t g_main_module_permanent_residency_proven;
+static GXOS_MODULE_HANDLE_EX_REPORT g_get_module_handle_ex_last_report;
+static int EFIAPI platform_get_module_handle_ex_w(
+    uint32_t flags,
+    uintptr_t address,
+    GXOS_MODULE_HANDLE_HMODULE *module_handle_out);
+#endif
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+static uint64_t g_crt_onexit_register_callback_executed;
 #endif
 #ifdef GXOS_ENABLE_GET_PROC_ADDRESS
 static uint32_t g_get_proc_address_import_descriptor_index;
@@ -855,6 +874,199 @@ static GXOS_GET_PROC_ADDRESS_FARPROC EFIAPI platform_get_proc_address(
     }
     platform_get_proc_address_emit_call(&g_get_proc_address_last_report,
                                         return_address);
+    return result;
+}
+#endif
+
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE_EX
+static const char *platform_get_module_handle_ex_status_name(
+    GXOS_MODULE_HANDLE_EX_STATUS status)
+{
+    switch (status) {
+        case GXOS_MODULE_HANDLE_EX_STATUS_OK: return "OK";
+        case GXOS_MODULE_HANDLE_EX_STATUS_UNSUPPORTED_FLAGS: return "UNSUPPORTED_FLAGS";
+        case GXOS_MODULE_HANDLE_EX_STATUS_NULL_ADDRESS: return "NULL_ADDRESS";
+        case GXOS_MODULE_HANDLE_EX_STATUS_NONCANONICAL_ADDRESS: return "NONCANONICAL_ADDRESS";
+        case GXOS_MODULE_HANDLE_EX_STATUS_ADDRESS_OUTSIDE_IMAGE: return "ADDRESS_OUTSIDE_IMAGE";
+        case GXOS_MODULE_HANDLE_EX_STATUS_AMBIGUOUS_IMAGE: return "AMBIGUOUS_IMAGE";
+        case GXOS_MODULE_HANDLE_EX_STATUS_NULL_OUTPUT: return "NULL_OUTPUT";
+        case GXOS_MODULE_HANDLE_EX_STATUS_OUTPUT_NOT_WRITABLE: return "OUTPUT_NOT_WRITABLE";
+        case GXOS_MODULE_HANDLE_EX_STATUS_INVALID_IMAGE_FACTS: return "INVALID_IMAGE_FACTS";
+        case GXOS_MODULE_HANDLE_EX_STATUS_IMAGE_RANGE_OVERFLOW: return "IMAGE_RANGE_OVERFLOW";
+        case GXOS_MODULE_HANDLE_EX_STATUS_IMAGE_NOT_PERMANENT: return "IMAGE_NOT_PERMANENT";
+        default: return "UNKNOWN";
+    }
+}
+
+static void platform_get_module_handle_ex_emit_call(
+    uint32_t flags,
+    uintptr_t address,
+    GXOS_MODULE_HANDLE_HMODULE *module_handle_out,
+    int result,
+    const GXOS_MODULE_HANDLE_EX_REPORT *report,
+    uintptr_t return_address,
+    uint32_t prior_onexit_callback_executed)
+{
+    uintptr_t call_site = return_address >= 6U ? return_address - 6U : 0;
+    uint64_t static_call_site = 0;
+    uintptr_t output_before = report->output_pointer_proven_writable != 0
+                                   ? report->output_value_before
+                                   : 0;
+    uintptr_t output_after = report->output_pointer_proven_writable != 0
+                                  ? report->output_value_after
+                                  : 0;
+
+    if (call_site >= (uintptr_t)g_managed_image_base) {
+        static_call_site = 0x180000000ULL +
+                           (uint64_t)(call_site -
+                                      (uintptr_t)g_managed_image_base);
+    }
+    serial_text("GXOS_NET10:GETMODULEHANDLEEX_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_INVOCATION_NUMBER=0x",
+                     g_get_module_handle_ex_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RAW_RCX=0x", flags);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RAW_RDX=0x", address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RAW_R8=0x",
+                     (uintptr_t)module_handle_out);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_STATIC_CALL_SITE=0x",
+                     static_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RETURN_ADDRESS=0x",
+                     return_address);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEEX_IMPORT_MODULE=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEEX_IMPORT_SYMBOL=GetModuleHandleExW\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_get_module_handle_ex_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_IAT_RVA=0x",
+                     g_get_module_handle_ex_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_PREFERRED_IAT=0x",
+                     g_main_module_facts.preferred_image_base +
+                         g_get_module_handle_ex_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RUNTIME_IAT=0x",
+                     g_main_module_facts.mapped_image_base +
+                         g_get_module_handle_ex_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_FLAG_PIN=0x",
+                     flags & GXOS_MODULE_HANDLE_EX_FLAG_PIN);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_FLAG_UNCHANGED_REFCOUNT=0x",
+                     flags & 0x2U);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_FLAG_FROM_ADDRESS=0x",
+                     flags & GXOS_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_UNKNOWN_FLAG_BITS=0x",
+                     report->unknown_flag_bits);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEEX_RDX_INTERPRETATION=ADDRESS\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RDX_IN_PAYLOAD=0x",
+                     report->address_in_image);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_OUTPUT_VALUE_BEFORE=0x",
+                     output_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_OUTPUT_VALUE_BEFORE_PROVEN=0x",
+                     report->output_pointer_proven_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_SELECTED_IMAGE_BASE=0x",
+                     report->selected_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_SELECTED_IMAGE_SIZE=0x",
+                     report->selected_image_size);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_ADDRESS_RVA=0x",
+                     report->address_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_LOOKUP_MATCH_COUNT=0x",
+                     report->lookup_match_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_LOOKUP_UNIQUE=0x",
+                     report->lookup_unique);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEEX_IMAGE_ID=");
+    serial_text(report->image_identity ==
+                        GXOS_MODULE_HANDLE_EX_IMAGE_MAIN_NATIVEAOT_PAYLOAD
+                    ? "MAIN_NATIVEAOT_PAYLOAD\r\n"
+                    : "NONE\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RESIDENCY_INVARIANT_PROVEN=0x",
+                     report->residency_invariant_proven);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_PRIOR_PINNED=0x",
+                     report->prior_pinned);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RESULTING_PINNED=0x",
+                     report->resulting_pinned);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_ALLOCATION_OCCURRED=0x",
+                     report->allocation_occurred);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_IMAGE_FREE_OR_UNLOAD_INVOKED=0x",
+                     report->image_free_or_unload_invoked);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_PRIOR_ONEXIT_CALLBACK_EXECUTED=0x",
+                     prior_onexit_callback_executed);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_OUTPUT_VALUE_AFTER=0x",
+                     output_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_OUTPUT_VALUE_AFTER_PROVEN=0x",
+                     report->output_pointer_proven_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_OUTPUT_WRITE_ATTEMPTED=0x",
+                     report->output_written);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RESULT=0x", report->result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETMODULEHANDLEEX_RETURN_VALUE=0x",
+                     (uint32_t)result);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEEX_STATUS=");
+    serial_text(platform_get_module_handle_ex_status_name(report->status));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETMODULEHANDLEEX_RETURNED\r\n");
+    if (result != 0) serial_text("GXOS_NET10:GETMODULEHANDLEEX_OK\r\n");
+}
+
+static int EFIAPI platform_get_module_handle_ex_w(
+    uint32_t flags,
+    uintptr_t address,
+    GXOS_MODULE_HANDLE_HMODULE *module_handle_out)
+{
+    GXOS_MODULE_HANDLE_EX_STATUS status;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uint32_t prior_onexit_callback_executed = 0;
+    int result;
+
+    ++g_get_module_handle_ex_calls;
+#ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
+    prior_onexit_callback_executed =
+        g_crt_onexit_register_callback_executed != 0;
+#endif
+    status = gxos_get_module_handle_ex_checked(
+        flags, address, module_handle_out, &g_main_module_facts,
+        (uintptr_t)g_stack_lower, (uintptr_t)g_stack_upper,
+        g_main_module_permanent_residency_proven,
+        &g_get_module_handle_ex_last_report);
+    g_get_module_handle_ex_last_report.prior_onexit_callback_executed =
+        prior_onexit_callback_executed;
+    result = status == GXOS_MODULE_HANDLE_EX_STATUS_OK ? 1 : 0;
+    if (result != 0) ++g_get_module_handle_ex_successes;
+    else ++g_get_module_handle_ex_failures;
+    platform_get_module_handle_ex_emit_call(
+        flags, address, module_handle_out, result,
+        &g_get_module_handle_ex_last_report, return_address,
+        prior_onexit_callback_executed);
     return result;
 }
 #endif
@@ -2601,9 +2813,6 @@ typedef struct {
     uint32_t Padding1;
 } PlatformMemoryBasicInformation;
 
-static uint64_t g_stack_lower;
-static uint64_t g_stack_upper;
-
 static EFI_UINTN EFIAPI platform_virtual_query(const void *address,
                                                PlatformMemoryBasicInformation *information,
                                                EFI_UINTN length)
@@ -2701,7 +2910,6 @@ static uint64_t g_crt_onexit_register_allocation_attempts;
 static uint64_t g_crt_onexit_register_allocator_calls;
 static uint64_t g_crt_onexit_register_allocation_count;
 static uint64_t g_crt_onexit_register_allocated_bytes;
-static uint64_t g_crt_onexit_register_callback_executed;
 static GXOS_CRT_ONEXIT_REPORT g_crt_onexit_register_report;
 static GXOS_CRT_ONEXIT_STATUS g_crt_onexit_register_status;
 #endif
@@ -3337,6 +3545,12 @@ static void *platform_import_target(const char *module, const char *symbol)
         return (void *)(uintptr_t)platform_get_module_handle_w;
     }
 #endif
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE_EX
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetModuleHandleExW")) {
+        return (void *)(uintptr_t)platform_get_module_handle_ex_w;
+    }
+#endif
 #ifdef GXOS_ENABLE_GET_PROC_ADDRESS
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "GetProcAddress")) {
@@ -3563,6 +3777,13 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 equal_text(g_import_records[symbols].symbol, "GetModuleHandleW")) {
                 g_get_module_handle_import_descriptor_index = descriptors - 1U;
                 g_get_module_handle_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE_EX
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "GetModuleHandleExW")) {
+                g_get_module_handle_ex_import_descriptor_index = descriptors - 1U;
+                g_get_module_handle_ex_importing_iat_rva = first_thunk_rva + index * 8U;
             }
 #endif
 #ifdef GXOS_ENABLE_GET_PROC_ADDRESS
@@ -5240,6 +5461,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:PE_READ_OK\r\n");
     load_pe_image(&image, boot_services);
     serial_text("GXOS_NET10:PE_RELOCATIONS_OK\r\n");
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE_EX
+    g_main_module_permanent_residency_proven = 1;
+    serial_text("GXOS_NET10:GETMODULEHANDLEEX_PERMANENT_RESIDENCY_INVARIANT=ALLOCATEPAGES_NO_IMAGE_FREE_EFI_MAIN_NONRETURNING\r\n");
+#endif
 #ifdef GXOS_ENABLE_CRT_STRLEN
     if (image.actual_base == 0 || image.actual_base > UINTPTR_MAX - (uintptr_t)image.loaded_size ||
         image.memory_region_count == 0 || image.relocations_applied == 0) {
@@ -5387,6 +5612,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     g_main_module_facts.mapped_region_count = image.memory_region_count;
     gxos_get_module_handle_configure(&g_main_module_facts);
     serial_text("GXOS_NET10:GETMODULEHANDLEW_VALIDATION_CONTEXT_OK\r\n");
+#endif
+#ifdef GXOS_ENABLE_GET_MODULE_HANDLE_EX
+    if (g_main_module_permanent_residency_proven == 0 ||
+        g_main_module_facts.mapped_image_base == 0 ||
+        g_main_module_facts.size_of_image == 0 ||
+        g_get_module_handle_ex_importing_iat_rva == 0) {
+        fail("getmodulehandleex-context");
+    }
+    serial_text("GXOS_NET10:GETMODULEHANDLEEX_VALIDATION_CONTEXT_OK\r\n");
 #endif
 #ifdef GXOS_ENABLE_GET_PROC_ADDRESS
     if (image.memory_region_count == 0 || image.memory_region_count > 32U ||
