@@ -18,6 +18,7 @@
 #include "platform_get_module_handle.h"
 #include "platform_get_module_handle_ex.h"
 #include "platform_get_proc_address.h"
+#include "crt_malloc.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -238,6 +239,11 @@ static uint32_t g_platform_last_error;
 static uint64_t g_stack_lower;
 static uint64_t g_stack_upper;
 static void serial_text(const char *text);
+#ifdef GXOS_ENABLE_CRT_MALLOC
+static GXOS_CRT_MALLOC_CONTEXT g_crt_malloc_context;
+static uint32_t g_crt_malloc_import_descriptor_index;
+static uint32_t g_crt_malloc_importing_iat_rva;
+#endif
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
 static GXOS_MAIN_MODULE_FACTS g_main_module_facts;
 static uint32_t g_get_module_handle_import_descriptor_index;
@@ -543,6 +549,116 @@ static void serial_field_hex(const char *name, uint64_t value)
     serial_text(name);
     serial_hex64(value);
 }
+
+#ifdef GXOS_ENABLE_CRT_MALLOC
+static void GXOS_CRT_MALLOC_MS_ABI platform_crt_malloc_trace(
+    const GXOS_CRT_MALLOC_DIAGNOSTIC *diagnostic,
+    void *context)
+{
+    uint64_t call_site_rva = 0;
+    (void)context;
+    if (diagnostic->runtime_call_site >= g_managed_image_base) {
+        call_site_rva = diagnostic->runtime_call_site - g_managed_image_base;
+    }
+    serial_text("GXOS_NET10:MALLOC_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_INVOCATION_NUMBER=0x",
+                     diagnostic->invocation_number);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_STATIC_CALL_SITE=0x",
+                     diagnostic->static_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_RUNTIME_CALL_SITE=0x",
+                     diagnostic->runtime_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_CALL_SITE_RVA=0x", call_site_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_REQUESTED_SIZE=0x",
+                     diagnostic->requested_size);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_LIVE_COUNT_BEFORE=0x",
+                     diagnostic->live_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_REGISTRY_SLOT=0x",
+                     diagnostic->registry_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_POOL_SERVICE_AVAILABLE=0x",
+                     diagnostic->pool_service_available);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_ALLOCATE_POOL_STATUS=0x",
+                     diagnostic->allocate_pool_status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_RETURNED_POINTER=0x",
+                     diagnostic->returned_pointer);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_ALIGNMENT_MOD8=0x",
+                     diagnostic->alignment_mod8);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_ALIGNMENT_MOD16=0x",
+                     diagnostic->alignment_mod16);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_RANGE_BASE=0x",
+                     diagnostic->allocation_range_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_RANGE_END=0x",
+                     diagnostic->allocation_range_end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_OVERLAP_VALIDATION=0x",
+                     diagnostic->overlap_validation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_LIVE_COUNT_AFTER=0x",
+                     diagnostic->live_count_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_ROLLBACK_COUNT=0x",
+                     diagnostic->rollback_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_ROLLBACK_STATUS=0x",
+                     diagnostic->rollback_status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_RETURN_VALUE=0x",
+                     diagnostic->return_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_FAILURE=0x", diagnostic->failure);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MALLOC_RETURNED\r\n");
+}
+
+static void emit_crt_malloc_summary(void)
+{
+    serial_field_hex("GXOS_NET10:MALLOC_MAX_LIVE_ALLOCATION_COUNT=0x",
+                     g_crt_malloc_context.max_live_allocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_TOTAL_REQUESTED_BYTES=0x",
+                     g_crt_malloc_context.total_requested_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_LARGEST_REQUEST=0x",
+                     g_crt_malloc_context.largest_request);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_ALLOCATION_FAILURE_COUNT=0x",
+                     g_crt_malloc_context.allocation_failure_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_METADATA_EXHAUSTION_COUNT=0x",
+                     g_crt_malloc_context.metadata_exhaustion_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_DUPLICATE_POINTER_REJECTION_COUNT=0x",
+                     g_crt_malloc_context.duplicate_pointer_rejection_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_POOL_ROLLBACK_COUNT=0x",
+                     g_crt_malloc_context.pool_rollback_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_CALLNEWH_REACHED=0x",
+                     g_crt_malloc_context.callnewh_reached);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_DIAGNOSTIC_COUNT=0x",
+                     g_crt_malloc_context.diagnostic_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_DIAGNOSTIC_OVERFLOW_COUNT=0x",
+                     g_crt_malloc_context.diagnostic_overflow_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_LIVE_COUNT=0x",
+                     g_crt_malloc_context.live_count);
+    serial_text("\r\n");
+}
+#endif
 
 #ifdef GXOS_ENABLE_CRT_STRCMP
 static uint64_t g_crt_strcmp_calls;
@@ -2081,6 +2197,18 @@ static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t origin
     uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
     if (g_phase == PHASE_AFTER_TIME_CALL) g_phase = PHASE_IN_TIME_CONSUMER;
     if (g_phase == PHASE_AFTER_QPC_CALL) g_phase = PHASE_AFTER_SECURITY_COOKIE_INIT;
+#ifdef GXOS_ENABLE_CRT_MALLOC
+    if (equal_text(record->module, "api-ms-win-crt-heap-l1-1-0.dll") &&
+        equal_text(record->symbol, "_callnewh")) {
+        g_crt_malloc_context.callnewh_reached++;
+    }
+    emit_crt_malloc_summary();
+    serial_text("GXOS_NET10:MALLOC_NEXT_UNRESOLVED_IMPORT=");
+    serial_text(record->module);
+    serial_text("!");
+    serial_text(record->symbol);
+    serial_text("\r\n");
+#endif
     if (equal_text(record->module, "KERNEL32.dll") && equal_text(record->symbol, "GetSystemInfo")) {
         serial_field_hex("GXOS_NET10:GETSYSTEMINFO_FAILFAST_RETURN_ADDRESS=0x", return_address);
         serial_text("\r\n");
@@ -3280,6 +3408,122 @@ static int GXOS_CRT_EFIAPI platform_register_onexit_function(
 #endif
 #endif
 
+#ifdef GXOS_ENABLE_CRT_MALLOC
+static uint64_t GXOS_CRT_MALLOC_MS_ABI platform_crt_malloc_allocate_pool(
+    uint32_t pool_type,
+    uintptr_t size,
+    void **buffer,
+    void *context)
+{
+    EFI_BOOT_SERVICES *boot_services = (EFI_BOOT_SERVICES *)context;
+    if (boot_services == 0 || boot_services->AllocatePool == 0 || buffer == 0) {
+        return (uint64_t)1 << 63;
+    }
+    return boot_services->AllocatePool(
+        pool_type, (EFI_UINTN)size, buffer);
+}
+
+static uint64_t GXOS_CRT_MALLOC_MS_ABI platform_crt_malloc_free_pool(
+    void *buffer,
+    void *context)
+{
+    EFI_BOOT_SERVICES *boot_services = (EFI_BOOT_SERVICES *)context;
+    if (boot_services == 0 || boot_services->FreePool == 0) {
+        return (uint64_t)1 << 63;
+    }
+    return boot_services->FreePool(buffer);
+}
+
+static void *GXOS_CRT_MALLOC_MS_ABI platform_crt_malloc(uintptr_t size)
+{
+    return gxos_crt_malloc_entry(
+        &g_crt_malloc_context,
+        (uint64_t)size,
+        (uintptr_t)__builtin_return_address(0));
+}
+
+static void configure_platform_crt_malloc(
+    const PE_IMAGE *image,
+    EFI_BOOT_SERVICES *boot_services)
+{
+    uintptr_t image_end;
+
+    if (image == 0 || boot_services == 0 || image->actual_base == 0 ||
+        image->loaded_size == 0 || image->actual_base >
+            UINTPTR_MAX - (uintptr_t)image->loaded_size ||
+        g_stack_lower >= g_stack_upper) {
+        fail("crt-malloc-context");
+    }
+    image_end = image->actual_base + (uintptr_t)image->loaded_size;
+    gxos_crt_malloc_context_reset(&g_crt_malloc_context);
+    g_crt_malloc_context.boot_services = boot_services;
+    g_crt_malloc_context.boot_services_available = 1;
+    g_crt_malloc_context.allocate_pool = platform_crt_malloc_allocate_pool;
+    g_crt_malloc_context.free_pool = platform_crt_malloc_free_pool;
+    g_crt_malloc_context.allocator_context = boot_services;
+    g_crt_malloc_context.preferred_image_base =
+        (uintptr_t)image->preferred_base;
+    g_crt_malloc_context.image_base = (uintptr_t)image->actual_base;
+    g_crt_malloc_context.image_end = image_end;
+    g_crt_malloc_context.trace = platform_crt_malloc_trace;
+    g_crt_malloc_context.trace_context = 0;
+    if (gxos_crt_malloc_add_protected_range(
+            &g_crt_malloc_context,
+            (uintptr_t)image->actual_base,
+            image_end,
+            1) != 0 ||
+        gxos_crt_malloc_add_protected_range(
+            &g_crt_malloc_context,
+            (uintptr_t)g_stack_lower,
+            (uintptr_t)g_stack_upper,
+            3) != 0) {
+        fail("crt-malloc-protected-ranges");
+    }
+#ifdef GXOS_ENABLE_CRT_ONEXIT
+    if (gxos_crt_malloc_add_protected_range(
+            &g_crt_malloc_context,
+            (uintptr_t)&g_crt_onexit_context,
+            (uintptr_t)&g_crt_onexit_context + sizeof(g_crt_onexit_context),
+            2) != 0 ||
+        gxos_crt_malloc_add_protected_range(
+            &g_crt_malloc_context,
+            (uintptr_t)g_crt_onexit_initialized_tables,
+            (uintptr_t)g_crt_onexit_initialized_tables +
+                sizeof(g_crt_onexit_initialized_tables),
+            2) != 0) {
+        fail("crt-malloc-onexit-protected-ranges");
+    }
+#endif
+    serial_text("GXOS_NET10:MALLOC_CONTEXT_VALID=1\r\n");
+    serial_text("GXOS_NET10:MALLOC_IMPORT_MODULE=api-ms-win-crt-heap-l1-1-0.dll\r\n");
+    serial_text("GXOS_NET10:MALLOC_IMPORT_SYMBOL=malloc\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_crt_malloc_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_IAT_RVA=0x",
+                     g_crt_malloc_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_PREFERRED_IAT=0x",
+                     (uint64_t)image->preferred_base +
+                         g_crt_malloc_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_RUNTIME_IAT=0x",
+                     (uint64_t)image->actual_base +
+                         g_crt_malloc_importing_iat_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MALLOC_ALLOCATION_PRIMITIVE=AllocatePool(EFI_LOADER_DATA,requestedSize,&pointer)\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_MAX_REQUEST=0x",
+                     GXOS_CRT_MALLOC_MAX_REQUEST);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MALLOC_REGISTRY_CAPACITY=0x",
+                     GXOS_CRT_MALLOC_REGISTRY_CAPACITY);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MALLOC_HIDDEN_HEADER=0\r\n");
+    serial_text("GXOS_NET10:MALLOC_ZEROING=0\r\n");
+}
+
+#endif
+
 #ifdef GXOS_ENABLE_SLIST
 static void GXOS_SLIST_EFIAPI platform_initialize_slist_head(GXOS_SLIST_HEADER *head)
 {
@@ -3630,6 +3874,12 @@ static void *platform_import_target(const char *module, const char *symbol)
         equal_text(symbol, "_register_onexit_function")) return (void *)(uintptr_t)platform_register_onexit_function;
 #endif
 #endif
+#ifdef GXOS_ENABLE_CRT_MALLOC
+    if (equal_text(module, "api-ms-win-crt-heap-l1-1-0.dll") &&
+        equal_text(symbol, "malloc")) {
+        return (void *)(uintptr_t)platform_crt_malloc;
+    }
+#endif
     return 0;
 }
 
@@ -3798,6 +4048,13 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 equal_text(g_import_records[symbols].symbol, "_register_onexit_function")) {
                 g_crt_onexit_register_import_descriptor_index = descriptors - 1U;
                 g_crt_onexit_register_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_CRT_MALLOC
+            if (equal_text(module, "api-ms-win-crt-heap-l1-1-0.dll") &&
+                equal_text(g_import_records[symbols].symbol, "malloc")) {
+                g_crt_malloc_import_descriptor_index = descriptors - 1U;
+                g_crt_malloc_importing_iat_rva = first_thunk_rva + index * 8U;
             }
 #endif
             {
@@ -5657,6 +5914,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
     install_fault_handlers();
     initialize_nativeaot_tls(&image, boot_services);
+#ifdef GXOS_ENABLE_CRT_MALLOC
+    configure_platform_crt_malloc(&image, boot_services);
+#endif
 #ifdef GXOS_ENABLE_SYSTEM_INFO
     configure_platform_system_info(&image);
 #endif

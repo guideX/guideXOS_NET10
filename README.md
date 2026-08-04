@@ -15,7 +15,7 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
-The allocation/GC follow-on remains bounded negative for allocation: the allocation artifact and differential census pass, and the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, `_initterm`, `strcmp`, `strlen`, `GetEnvironmentVariableW`, and Microsoft x64 `_stricmp` contracts advance authentic startup. Three fresh positive QEMU runs now stop at the next authentic `KERNEL32.dll!GetSystemInfo` import after 885 checked `_stricmp` calls. No allocation, GC startup, managed-thread registration, general SLIST operation, or general CRT/C++ initialization is claimed. The first allocation remains unproven. See [the `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md) and [the preceding `GetEnvironmentVariableW` bootstrap contract](docs/KERNEL32_GETENVIRONMENTVARIABLEW_BOOTSTRAP.md).
+The allocation/GC follow-on remains bounded: the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, `_initterm`, `strcmp`, `strlen`, `GetEnvironmentVariableW`, Microsoft x64 `_stricmp`, and the bounded pre-heap `malloc` contracts advance authentic startup. Three fresh positive malloc runs reach the first three payload allocations and stop at the next authentic `KERNEL32.dll!AddVectoredExceptionHandler` import. No `free`, `calloc`, `realloc`, `_recalloc`, `_callnewh`, GC startup, managed-thread registration, general SLIST operation, or generalized heap behavior is claimed. See [the bounded `malloc` bootstrap contract](docs/CRT_MALLOC_BOOTSTRAP.md) and [the `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md).
 
 ## Provisional first-image path
 
@@ -50,6 +50,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Windows x64 `strlen` bootstrap contract](docs/CRT_STRLEN_BOOTSTRAP.md)
 - [Windows x64 `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md)
 - [Microsoft x64 `_register_onexit_function` bootstrap contract](docs/CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md)
+- [Microsoft x64 bounded `malloc` bootstrap contract](docs/CRT_MALLOC_BOOTSTRAP.md)
 - [`GetSystemInfo` bootstrap contract](docs/KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md)
 - [`GetNumaHighestNodeNumber` bootstrap contract](docs/KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md)
 - [`GetProcessGroupAffinity` bootstrap contract](docs/KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md)
@@ -146,3 +147,9 @@ The final immutable evidence is under `artifacts\getprocaddress-final-v3-2026080
 ## `_register_onexit_function` evidence status (2026-08-02)
 
 This task implements only the Microsoft x64 `_register_onexit_function` initial-storage success path required by the current NativeAOT startup path. Three fresh QEMU runs prove the exact payload hash, live import routing, decoded empty input, one `0x100`-byte UEFI `AllocatePool` block, 32 encoded slots, callback storage in slot 0, encoded-null slots 1 through 31, return `0`, callback non-execution, and continuation to the later `KERNEL32.dll!GetModuleHandleExW` blocker. Nonempty growth, `_recalloc`, callback execution, shutdown, GC initialization, and managed allocation remain out of scope. The enabled census is `37 / 87 / 0`, and the disabled control retains the register fail-fast boundary. See [CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md](docs/CRT_REGISTER_ONEXIT_FUNCTION_BOOTSTRAP.md).
+
+## Bounded `malloc` bootstrap evidence status (2026-08-04)
+
+The narrow Microsoft x64 `api-ms-win-crt-heap-l1-1-0.dll!malloc` bridge is implemented only for the exact NativeAOT payload. It accepts nonzero requests through `0xC8000`, calls `AllocatePool(EFI_LOADER_DATA, requestedSize, &pointer)`, returns the direct pool pointer without a hidden header or zeroing, and records ownership in a fixed 64-slot external registry. The deterministic host suite covers the verified 39-entry Windows oracle replay plus positive, rollback, overlap, duplicate-pointer, malformed-state, exhaustion, accounting, and isolation vectors.
+
+Three fresh QEMU runs with the required payload hash reached `malloc(88)`, `malloc(72)`, and `malloc(56)` with identical semantic sequences, direct non-null 8-byte-aligned pointers, registry slots `0,1,2`, live counts `1,2,3`, and `_callnewh` count `0`. They then stopped at the next authentic unresolved import, `KERNEL32.dll!AddVectoredExceptionHandler`. `free`, `calloc`, `realloc`, `_recalloc`, `_callnewh`, and generalized heap behavior remain unimplemented. See [CRT_MALLOC_BOOTSTRAP.md](docs/CRT_MALLOC_BOOTSTRAP.md).
