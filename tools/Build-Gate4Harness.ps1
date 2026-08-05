@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWPreferredBaseExperiment', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'Malloc', 'MallocDisabled')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWPreferredBaseExperiment', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -26,6 +26,7 @@ $timeSource = Join-Path $root 'src\Gate4Harness\platform_time.c'
 $performanceSource = Join-Path $root 'src\Gate4Harness\platform_performance.c'
 $exceptionSource = Join-Path $root 'src\Gate4Harness\exception_context.c'
 $exceptionAssembly = Join-Path $root 'src\Gate4Harness\exception_entry.S'
+$vectoredHandlerSource = Join-Path $root 'src\Gate4Harness\vectored_handler.c'
 $startupSource = Join-Path $root 'src\Gate4Harness\startup.nsh'
 $efi = Join-Path $efiDirectory 'BOOTX64.EFI'
 $payload = Join-Path $payloadDirectory 'gxos-managed-entry-probe.dll'
@@ -41,6 +42,7 @@ if (-not (Test-Path -LiteralPath $timeSource)) { throw "Platform time source not
 if (-not (Test-Path -LiteralPath $performanceSource)) { throw "Platform performance source not found: $performanceSource" }
 if (-not (Test-Path -LiteralPath $exceptionSource)) { throw "Exception context source not found: $exceptionSource" }
 if (-not (Test-Path -LiteralPath $exceptionAssembly)) { throw "Exception entry assembly not found: $exceptionAssembly" }
+if (-not (Test-Path -LiteralPath $vectoredHandlerSource)) { throw "Vectored handler source not found: $vectoredHandlerSource" }
 if (-not (Test-Path -LiteralPath $startupSource)) { throw "UEFI startup script not found: $startupSource" }
 if (-not (Test-Path -LiteralPath $managedArtifact)) {
     throw "Build the Gate 1 shared artifact first: $managedArtifact"
@@ -61,7 +63,7 @@ $gccArguments = @(
     '-nostdlib', '-Wl,--entry,efi_main', '-Wl,--subsystem,10',
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
     '-o', $efi, $source, $timeSource, $performanceSource,
-    $exceptionSource, $exceptionAssembly,
+    $exceptionSource, $exceptionAssembly, $vectoredHandlerSource,
     (Join-Path $root 'src\Gate4Harness\crt_onexit.c'),
     (Join-Path $root 'src\Gate4Harness\crt_initterm_e.c'),
     (Join-Path $root 'src\Gate4Harness\crt_initterm.c'),
@@ -88,6 +90,23 @@ switch ($Scenario) {
     'ExceptionProbeContinueSearch' {
         $gccArguments += '-DGXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE'
         $gccArguments += '-DGXOS_EXCEPTION_SYNTHETIC_CONTINUE_SEARCH'
+        $gccArguments += '-DGXOS_EXCEPTION_REGISTRY_ALL_CONTINUE_SEARCH'
+    }
+    'ExceptionRegistryAllContinueSearch' {
+        $gccArguments += '-DGXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE'
+        $gccArguments += '-DGXOS_EXCEPTION_REGISTRY_ALL_CONTINUE_SEARCH'
+    }
+    'ExceptionRegistryInvalidReturn' {
+        $gccArguments += '-DGXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE'
+        $gccArguments += '-DGXOS_EXCEPTION_REGISTRY_INVALID_RETURN'
+    }
+    'ExceptionRegistryEmpty' {
+        $gccArguments += '-DGXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE'
+        $gccArguments += '-DGXOS_EXCEPTION_REGISTRY_EMPTY'
+    }
+    'ExceptionRegistryNested' {
+        $gccArguments += '-DGXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE'
+        $gccArguments += '-DGXOS_EXCEPTION_REGISTRY_NESTED'
     }
     'TimeDisabled' { $gccArguments += '-DGXOS_DISABLE_TIME_IMPLEMENTATION' }
     'TimeInvalidMonth' { $gccArguments += '-DGXOS_TIME_TEST_INVALID_MONTH' }
@@ -783,8 +802,50 @@ switch ($Scenario) {
         $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
         $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT_REGISTER'
     }
+    'VectoredExceptionHandler' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE_EX'
+        $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT_REGISTER'
+        $gccArguments += '-DGXOS_ENABLE_CRT_MALLOC'
+        $gccArguments += '-DGXOS_ENABLE_VECTORED_EXCEPTION_HANDLER'
+    }
+    'VectoredExceptionHandlerDisabled' {
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE_EX'
+        $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT_REGISTER'
+        $gccArguments += '-DGXOS_ENABLE_CRT_MALLOC'
+    }
 }
-if ($Scenario -eq 'Malloc') {
+if ($Scenario -eq 'Malloc' -or $Scenario -eq 'VectoredExceptionHandler' -or
+    $Scenario -eq 'VectoredExceptionHandlerDisabled') {
     $gccArguments += (Join-Path $root 'src\Gate4Harness\crt_malloc.c')
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }

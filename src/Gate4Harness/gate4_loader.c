@@ -20,6 +20,7 @@
 #include "platform_get_proc_address.h"
 #include "crt_malloc.h"
 #include "exception_context.h"
+#include "vectored_handler.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -152,6 +153,14 @@ typedef struct {
     EFI_SYSTEM_TABLE *SystemTable;
     EFI_HANDLE DeviceHandle;
     void *FilePath;
+    void *Reserved;
+    uint32_t LoadOptionsSize;
+    void *LoadOptions;
+    void *ImageBase;
+    uint64_t ImageSize;
+    uint32_t ImageCodeType;
+    uint32_t ImageDataType;
+    void *Unload;
 } EFI_LOADED_IMAGE_PROTOCOL;
 
 typedef struct _EFI_FILE_PROTOCOL EFI_FILE_PROTOCOL;
@@ -252,8 +261,32 @@ uint64_t gxos_probe_landing_rcx;
 uint64_t gxos_probe_landing_rdx;
 uint64_t gxos_probe_landing_rsp;
 uint32_t gxos_probe_landing_reached;
+ #ifdef GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE
 static uint64_t g_synthetic_handler_calls;
 static uint32_t g_probe_context_modifications_validated;
+#endif
+#if defined(GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE) || defined(GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER)
+static GXOS_VEH_REGISTRY g_veh_registry;
+static GXOS_VEH_IMAGE g_veh_payload_image;
+static GXOS_VEH_IMAGE g_veh_harness_image;
+#ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
+static uint64_t g_veh_add_invocation_count;
+static uint64_t g_veh_add_returned_handle;
+static uint64_t g_veh_add_last_first;
+static uint64_t g_veh_add_last_callback;
+static uint64_t g_veh_add_last_return_address;
+static uint64_t g_veh_add_last_call_site;
+static uint64_t g_veh_add_last_registration_sequence;
+static uint32_t g_veh_add_last_slot;
+static uint32_t g_veh_add_last_insertion_position;
+static uint32_t g_veh_add_import_descriptor_index;
+static uint32_t g_veh_add_import_symbol_index;
+static uint32_t g_veh_add_importing_iat_rva;
+#endif
+#ifdef GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE
+static uint32_t g_veh_nested_registration_rejected;
+#endif
+#endif
 
 extern void gxos_fault_no_error_0(void);
 extern void gxos_fault_no_error_1(void);
@@ -2004,7 +2037,7 @@ static void fault_handler(const GXOS_X64_TRAP_FRAME *frame)
     halt_forever();
 }
 
-static int breakpoint_exception_address(const GXOS_X64_TRAP_FRAME *trap,
+__attribute__((unused)) static int breakpoint_exception_address(const GXOS_X64_TRAP_FRAME *trap,
                                         uint64_t *exception_address,
                                         const char **rip_semantics)
 {
@@ -2029,7 +2062,7 @@ static int breakpoint_exception_address(const GXOS_X64_TRAP_FRAME *trap,
     return 1;
 }
 
-static void fill_exception_context(const GXOS_X64_TRAP_FRAME *trap,
+__attribute__((unused)) static void fill_exception_context(const GXOS_X64_TRAP_FRAME *trap,
                                    GXOS_CONTEXT_COMPAT *context)
 {
     context->context_flags = GXOS_EXCEPTION_CONTEXT_FLAGS_BOUNDED;
@@ -2055,80 +2088,129 @@ static void fill_exception_context(const GXOS_X64_TRAP_FRAME *trap,
     context->rip = trap->rip;
 }
 
-static int32_t GXOS_EXCEPTION_MS_ABI synthetic_handler(
-    GXOS_EXCEPTION_POINTERS_COMPAT *exception_pointers)
+#ifdef GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE
+static int probe_callback_arguments(
+    GXOS_EXCEPTION_POINTERS_COMPAT *exception_pointers,
+    GXOS_EXCEPTION_RECORD_COMPAT **record_out,
+    GXOS_CONTEXT_COMPAT **context_out)
 {
     GXOS_EXCEPTION_RECORD_COMPAT *record;
     GXOS_CONTEXT_COMPAT *context;
-
-    serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_ENTERED=1\r\n");
-    g_synthetic_handler_calls++;
-    serial_field_hex("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_CALL_COUNT=0x",
-                     g_synthetic_handler_calls);
-    serial_text("\r\n");
     if (exception_pointers == 0 || exception_pointers->exception_record == 0 ||
-        exception_pointers->context_record == 0) {
-        serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_VALIDATION=0\r\n");
-        return GXOS_EXCEPTION_CONTINUE_SEARCH;
-    }
+        exception_pointers->context_record == 0) return 0;
     record = (GXOS_EXCEPTION_RECORD_COMPAT *)exception_pointers->exception_record;
     context = (GXOS_CONTEXT_COMPAT *)exception_pointers->context_record;
-    serial_field_hex("GXOS_NET10:EXCEPTION_INCOMING_RCX=0x", context->rcx);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_EXPECTED_RCX=0x", gxos_probe_expected_rcx);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_INCOMING_RDX=0x", context->rdx);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_EXPECTED_RDX=0x", gxos_probe_expected_rdx);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_INCOMING_RSP=0x", context->rsp);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_EXPECTED_RSP=0x", gxos_probe_expected_rsp);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_INCOMING_RIP=0x", context->rip);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_EXPECTED_RIP=0x", gxos_probe_expected_rip);
-    serial_text("\r\n");
     if (record->exception_code != 0x80000003U ||
         record->exception_address != (uint64_t)(uintptr_t)gxos_exception_probe_int3 ||
         context->rcx != gxos_probe_expected_rcx ||
         context->rdx != gxos_probe_expected_rdx ||
         context->rsp != gxos_probe_expected_rsp ||
-        context->rip != gxos_probe_expected_rip) {
-        serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_VALIDATION=0\r\n");
+        context->rip != gxos_probe_expected_rip) return 0;
+    *record_out = record;
+    *context_out = context;
+    return 1;
+}
+
+__attribute__((unused)) static int32_t GXOS_VEH_MS_ABI probe_handler_a(
+    GXOS_EXCEPTION_POINTERS_COMPAT *exception_pointers)
+{
+    GXOS_EXCEPTION_RECORD_COMPAT *record;
+    GXOS_CONTEXT_COMPAT *context;
+    (void)record;
+    (void)context;
+    g_synthetic_handler_calls++;
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_A_INVOKED=1\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_A_RETURN=0x0000000000000000\r\n");
+    return probe_callback_arguments(exception_pointers, &record, &context)
+        ? GXOS_EXCEPTION_CONTINUE_SEARCH : GXOS_EXCEPTION_CONTINUE_SEARCH;
+}
+
+__attribute__((unused)) static int32_t GXOS_VEH_MS_ABI probe_handler_b(
+    GXOS_EXCEPTION_POINTERS_COMPAT *exception_pointers)
+{
+    GXOS_EXCEPTION_RECORD_COMPAT *record;
+    GXOS_CONTEXT_COMPAT *context;
+    g_synthetic_handler_calls++;
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_B_INVOKED=1\r\n");
+    if (!probe_callback_arguments(exception_pointers, &record, &context)) {
+        serial_text("GXOS_NET10:EXCEPTION_HANDLER_B_VALIDATION=0\r\n");
+    }
+#ifdef GXOS_EXCEPTION_REGISTRY_NESTED
+    {
+        GXOS_VEH_CALLBACK_DIAGNOSTICS diagnostics = {0};
+        if (gxos_veh_registry_add(&g_veh_registry, 0, probe_handler_a, &diagnostics) == 0 &&
+            diagnostics.validation == GXOS_VEH_VALIDATION_REGISTRY_ACTIVE) {
+            g_veh_nested_registration_rejected = 1;
+            serial_text("GXOS_NET10:EXCEPTION_NESTED_REGISTRATION_REJECTED=1\r\n");
+        }
+    }
+    __asm__ volatile ("int3");
+#endif
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_B_RETURN=0x0000000000000000\r\n");
+    return GXOS_EXCEPTION_CONTINUE_SEARCH;
+}
+
+__attribute__((unused)) static int32_t GXOS_VEH_MS_ABI probe_handler_c(
+    GXOS_EXCEPTION_POINTERS_COMPAT *exception_pointers)
+{
+    GXOS_EXCEPTION_RECORD_COMPAT *record;
+    GXOS_CONTEXT_COMPAT *context;
+    GXOS_VEH_CALLBACK_DIAGNOSTICS diagnostics = {0};
+    g_synthetic_handler_calls++;
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_C_INVOKED=1\r\n");
+    if (!probe_callback_arguments(exception_pointers, &record, &context)) {
+        serial_text("GXOS_NET10:EXCEPTION_HANDLER_C_VALIDATION=0\r\n");
+        serial_text("GXOS_NET10:EXCEPTION_HANDLER_C_RETURN=0x0000000000000000\r\n");
         return GXOS_EXCEPTION_CONTINUE_SEARCH;
     }
-    serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_VALIDATION=1\r\n");
-#ifdef GXOS_EXCEPTION_SYNTHETIC_CONTINUE_SEARCH
-    serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_MODE=CONTINUE_SEARCH\r\n");
-    return GXOS_EXCEPTION_CONTINUE_SEARCH;
-#else
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_C_VALIDATION=1\r\n");
+    if (gxos_veh_registry_add(&g_veh_registry, 0, probe_handler_a, &diagnostics) == 0 &&
+        diagnostics.validation == GXOS_VEH_VALIDATION_REGISTRY_ACTIVE) {
+        g_veh_nested_registration_rejected = 1;
+        serial_text("GXOS_NET10:EXCEPTION_NESTED_REGISTRATION_REJECTED=1\r\n");
+    }
     gxos_probe_sentinel_rcx = 0xA1B2C3D4E5F60718ULL;
     gxos_probe_sentinel_rdx = 0x8192A3B4C5D6E7F8ULL;
     context->rcx = gxos_probe_sentinel_rcx;
     context->rdx = gxos_probe_sentinel_rdx;
     context->rip = (uint64_t)(uintptr_t)gxos_exception_probe_landing;
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_C_RETURN=0x00000000FFFFFFFF\r\n");
     return GXOS_EXCEPTION_CONTINUE_EXECUTION;
-#endif
 }
+
+__attribute__((unused)) static int32_t GXOS_VEH_MS_ABI probe_handler_invalid(
+    GXOS_EXCEPTION_POINTERS_COMPAT *exception_pointers)
+{
+    GXOS_EXCEPTION_RECORD_COMPAT *record;
+    GXOS_CONTEXT_COMPAT *context;
+    (void)record;
+    (void)context;
+    g_synthetic_handler_calls++;
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_INVALID_INVOKED=1\r\n");
+    (void)probe_callback_arguments(exception_pointers, &record, &context);
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_INVALID_RETURN=0x0000000000000001\r\n");
+    return 1;
+}
+#endif
 
 __attribute__((used)) int32_t GXOS_EXCEPTION_MS_ABI gxos_exception_dispatch(
     GXOS_X64_TRAP_FRAME *trap)
 {
+#if !defined(GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE) && !defined(GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER)
+    (void)trap;
+    return GXOS_EXCEPTION_CONTINUE_SEARCH;
+#else
     GXOS_EXCEPTION_RECORD_COMPAT record = {0};
     GXOS_CONTEXT_COMPAT context = {0};
     GXOS_EXCEPTION_POINTERS_COMPAT pointers;
     GXOS_EXCEPTION_VALIDATION_BOUNDS bounds;
+    GXOS_VEH_DISPATCH_REPORT dispatch_report = {0};
     uint64_t exception_address;
     const char *rip_semantics;
-    int32_t handler_result;
     int validation_result;
+    uint32_t i;
 
-    /* Keep the guard set on every fatal path so logging faults take the
-       double-fault-style terminal route instead of re-entering dispatch. */
-    if (trap == 0 || gxos_exception_probe_enabled == 0) {
-        return GXOS_EXCEPTION_CONTINUE_SEARCH;
-    }
+    if (trap == 0) return GXOS_EXCEPTION_CONTINUE_SEARCH;
     serial_text("GXOS_NET10:EXCEPTION_TRAP_ENTERED=1\r\n");
     serial_field_hex("GXOS_NET10:EXCEPTION_VECTOR=0x", trap->vector);
     serial_text("\r\n");
@@ -2147,45 +2229,59 @@ __attribute__((used)) int32_t GXOS_EXCEPTION_MS_ABI gxos_exception_dispatch(
     fill_exception_context(trap, &context);
     pointers.exception_record = &record;
     pointers.context_record = &context;
-    serial_field_hex("GXOS_NET10:EXCEPTION_ENTRY_FLAGS=0x", trap->entry_flags);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_CS=0x", trap->cs);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_FRAME=0x", trap->raw_frame);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x28_ADDRESS=0x",
-                     trap->raw_frame + 0x28U);
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x10=0x",
-                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x10U));
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x18=0x",
-                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x18U));
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x20=0x",
-                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x20U));
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x28=0x",
-                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x28U));
-    serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x30=0x",
-                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x30U));
-    serial_text("\r\n");
     serial_text("GXOS_NET10:EXCEPTION_COMPATIBILITY_STRUCTURES_BUILT=1\r\n");
     serial_field_hex("GXOS_NET10:EXCEPTION_CODE=0x", record.exception_code);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:EXCEPTION_ADDRESS=0x", record.exception_address);
     serial_text("\r\n");
-    handler_result = synthetic_handler(&pointers);
-    serial_field_hex("GXOS_NET10:EXCEPTION_HANDLER_RESULT=0x",
-                     (uint64_t)(uint32_t)handler_result);
+    serial_field_hex("GXOS_NET10:EXCEPTION_DISPATCH_ACTIVE_BEFORE=0x",
+                     gxos_veh_registry_dispatch_active(&g_veh_registry));
     serial_text("\r\n");
-    if (handler_result == GXOS_EXCEPTION_CONTINUE_SEARCH) {
-        serial_text("GXOS_NET10:EXCEPTION_HANDLER_RETURNED_CONTINUE_SEARCH=1\r\n");
-        return handler_result;
+    if (!gxos_veh_dispatch(&g_veh_registry, &pointers, 0, 0, &dispatch_report)) {
+        serial_text("GXOS_NET10:EXCEPTION_REGISTRY_DISPATCH_REJECTED=1\r\n");
+        return GXOS_EXCEPTION_CONTINUE_SEARCH;
     }
-    if (handler_result != GXOS_EXCEPTION_CONTINUE_EXECUTION) {
-        serial_text("GXOS_NET10:EXCEPTION_HANDLER_INVALID_RESULT=1\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_ORDER_SNAPSHOT=");
+    for (i = 0; i != dispatch_report.snapshot_count; i++) {
+        const GXOS_VEH_RECORD *snapshot_record = gxos_veh_registry_record(
+            &g_veh_registry, dispatch_report.snapshot_slots[i]);
+        if (i != 0) serial_text(",");
+        if (snapshot_record == 0) serial_text("?");
+#ifdef GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE
+        else if (snapshot_record->callback == probe_handler_a) serial_text("A");
+        else if (snapshot_record->callback == probe_handler_b) serial_text("B");
+        else if (snapshot_record->callback == probe_handler_c) serial_text("C");
+        else if (snapshot_record->callback == probe_handler_invalid) serial_text("INVALID");
+        else serial_text(snapshot_record->callback_section_name);
+#else
+        else serial_text(snapshot_record->callback_section_name);
+#endif
+    }
+    serial_text("\r\n");
+    for (i = 0; i != dispatch_report.invoked_count; i++) {
+        const GXOS_VEH_RECORD *invoked_record = gxos_veh_registry_record(
+            &g_veh_registry, dispatch_report.invoked_slots[i]);
+        serial_field_hex("GXOS_NET10:EXCEPTION_CALLBACK_SLOT=0x",
+                         dispatch_report.invoked_slots[i]);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:EXCEPTION_CALLBACK_RVA=0x",
+                         invoked_record == 0 ? 0 : invoked_record->callback_rva);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:EXCEPTION_CALLBACK_INVOCATION=0x",
+                         dispatch_report.invocation_numbers[i]);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:EXCEPTION_CALLBACK_RETURN=0x",
+                         (uint64_t)(uint32_t)dispatch_report.return_values[i]);
+        serial_text("\r\n");
+    }
+    serial_field_hex("GXOS_NET10:EXCEPTION_INVALID_RETURN_COUNT=0x",
+                     dispatch_report.invalid_return_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_DISPATCH_ACTIVE_AFTER=0x",
+                     gxos_veh_registry_dispatch_active(&g_veh_registry));
+    serial_text("\r\n");
+    if (!dispatch_report.final_continue_execution) {
+        serial_text("GXOS_NET10:EXCEPTION_HANDLER_RETURNED_CONTINUE_SEARCH=1\r\n");
         return GXOS_EXCEPTION_CONTINUE_SEARCH;
     }
     serial_text("GXOS_NET10:EXCEPTION_HANDLER_RETURNED_CONTINUE_EXECUTION=1\r\n");
@@ -2193,8 +2289,20 @@ __attribute__((used)) int32_t GXOS_EXCEPTION_MS_ABI gxos_exception_dispatch(
     bounds.stack_upper = (uintptr_t)g_stack_upper;
     bounds.executable_lower = (uintptr_t)gxos_exception_probe_int3;
     bounds.executable_upper = (uintptr_t)gxos_exception_probe_landing + 32U;
+    serial_field_hex("GXOS_NET10:EXCEPTION_CONTEXT_DIFF_RCX=0x",
+                     context.rcx ^ trap->rcx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_CONTEXT_DIFF_RDX=0x",
+                     context.rdx ^ trap->rdx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_CONTEXT_DIFF_RIP=0x",
+                     context.rip ^ trap->rip);
+    serial_text("\r\n");
     validation_result = gxos_exception_validate_context_modifications(
         trap, &context, &bounds);
+    serial_field_hex("GXOS_NET10:EXCEPTION_CONTEXT_VALIDATION_RESULT=0x",
+                     (uint64_t)(uint32_t)validation_result);
+    serial_text("\r\n");
     if (validation_result != GXOS_EXCEPTION_VALIDATION_OK) {
         serial_field_hex("GXOS_NET10:EXCEPTION_CONTEXT_REJECTED=0x",
                          (uint64_t)(uint32_t)validation_result);
@@ -2202,13 +2310,16 @@ __attribute__((used)) int32_t GXOS_EXCEPTION_MS_ABI gxos_exception_dispatch(
         return GXOS_EXCEPTION_CONTINUE_SEARCH;
     }
     gxos_exception_apply_context_modifications(trap, &context);
+#ifdef GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE
     g_probe_context_modifications_validated = 1;
+#endif
     serial_text("GXOS_NET10:EXCEPTION_REQUESTED_CONTEXT_MODIFICATION_VALIDATED=1\r\n");
     serial_field_hex("GXOS_NET10:EXCEPTION_REDIRECTED_RIP=0x", trap->rip);
     serial_text("\r\n");
     serial_text("GXOS_NET10:EXCEPTION_IRETQ_RESTORATION_STARTED=1\r\n");
     gxos_exception_dispatch_active = 0;
     return GXOS_EXCEPTION_CONTINUE_EXECUTION;
+#endif
 }
 
 __attribute__((used)) static void fault_common_legacy_documentation(void)
@@ -2226,6 +2337,10 @@ __attribute__((used)) void GXOS_EXCEPTION_MS_ABI gxos_exception_fatal_dispatch(
 __attribute__((used)) void GXOS_EXCEPTION_MS_ABI gxos_exception_nested_terminal(
     GXOS_X64_TRAP_FRAME *frame)
 {
+#if defined(GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE) || defined(GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER)
+    g_veh_registry.dispatch_active = 0;
+    serial_text("GXOS_NET10:EXCEPTION_DISPATCH_ACTIVE_TERMINAL_CLEAR=1\r\n");
+#endif
     serial_text("GXOS_NET10:EXCEPTION_NESTED_DISPATCH_TERMINAL=1\r\n");
     fault_handler(frame);
 }
@@ -2247,22 +2362,69 @@ void GXOS_EXCEPTION_MS_ABI gxos_exception_probe_landing_report(void)
     serial_text("GXOS_NET10:EXCEPTION_PROBE_COMPLETED=1\r\n");
 }
 
-__attribute__((unused)) static void run_synthetic_breakpoint_probe(void)
+#ifdef GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE
+__attribute__((unused)) static void register_probe_handler(
+    const char *label,
+    uint32_t first,
+    GXOS_VEH_CALLBACK callback)
+{
+    GXOS_VEH_CALLBACK_DIAGNOSTICS diagnostics = {0};
+    void *handle = gxos_veh_registry_add(&g_veh_registry, first, callback, &diagnostics);
+    serial_text("GXOS_NET10:EXCEPTION_REGISTERED_HANDLER=");
+    serial_text(label);
+    serial_text("\r\n");
+    if (handle == 0 || diagnostics.validation != GXOS_VEH_VALIDATION_OK) {
+        serial_text("GXOS_NET10:EXCEPTION_REGISTERED_HANDLER_RESULT=0\r\n");
+        fail("exception-registry-registration");
+    }
+    serial_field_hex("GXOS_NET10:EXCEPTION_REGISTERED_HANDLER_HANDLE=0x",
+                     (uint64_t)(uintptr_t)handle);
+    serial_text("\r\n");
+}
+
+static void run_synthetic_breakpoint_probe(void)
 {
     gxos_exception_probe_enabled = 1;
     gxos_probe_landing_reached = 0;
     g_synthetic_handler_calls = 0;
     g_probe_context_modifications_validated = 0;
+    g_veh_nested_registration_rejected = 0;
+#ifdef GXOS_EXCEPTION_REGISTRY_EMPTY
+    serial_text("GXOS_NET10:EXCEPTION_REGISTRY_MODE=EMPTY\r\n");
+#elif defined(GXOS_EXCEPTION_REGISTRY_ALL_CONTINUE_SEARCH)
+    serial_text("GXOS_NET10:EXCEPTION_REGISTRY_MODE=ALL_CONTINUE_SEARCH\r\n");
+    register_probe_handler("B", 1, probe_handler_b);
+    register_probe_handler("A", 0, probe_handler_a);
+#elif defined(GXOS_EXCEPTION_REGISTRY_INVALID_RETURN)
+    serial_text("GXOS_NET10:EXCEPTION_REGISTRY_MODE=INVALID_RETURN\r\n");
+    register_probe_handler("INVALID", 1, probe_handler_invalid);
+    register_probe_handler("A", 0, probe_handler_a);
+#else
+    serial_text("GXOS_NET10:EXCEPTION_REGISTRY_MODE=B_C_A\r\n");
+    register_probe_handler("B", 1, probe_handler_b);
+    register_probe_handler("C", 0, probe_handler_c);
+    register_probe_handler("A", 0, probe_handler_a);
+#endif
+    serial_field_hex("GXOS_NET10:EXCEPTION_REGISTRY_LIVE_COUNT_BEFORE=0x",
+                     gxos_veh_registry_live_count(&g_veh_registry));
+    serial_text("\r\n");
     serial_text("GXOS_NET10:EXCEPTION_PROBE_BEGIN=1\r\n");
     gxos_exception_probe();
-    if (gxos_probe_landing_reached == 0 || g_synthetic_handler_calls != 1 ||
+#if !defined(GXOS_EXCEPTION_REGISTRY_EMPTY) && \
+    !defined(GXOS_EXCEPTION_REGISTRY_ALL_CONTINUE_SEARCH) && \
+    !defined(GXOS_EXCEPTION_REGISTRY_INVALID_RETURN) && \
+    !defined(GXOS_EXCEPTION_REGISTRY_NESTED)
+    if (gxos_probe_landing_reached == 0 || g_synthetic_handler_calls != 2 ||
         g_probe_context_modifications_validated == 0 ||
+        g_veh_nested_registration_rejected == 0 ||
         gxos_probe_landing_rcx != gxos_probe_sentinel_rcx ||
         gxos_probe_landing_rdx != gxos_probe_sentinel_rdx) {
         fail("synthetic-breakpoint-proof");
     }
+#endif
     serial_text("GXOS_NET10:EXCEPTION_PROBE_SUCCESS=1\r\n");
 }
+#endif
 
 typedef struct __attribute__((packed)) {
     uint16_t limit;
@@ -2438,6 +2600,178 @@ typedef struct {
     uint32_t executable_region_count;
     GXOS_CRT_INITTERM_E_EXECUTABLE_REGION executable_regions[GXOS_CRT_INITTERM_E_MAX_EXECUTABLE_REGIONS];
 } PE_IMAGE;
+
+#if defined(GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE) || defined(GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER)
+static const void *g_veh_harness_identity;
+static uintptr_t g_veh_harness_image_base;
+static uint64_t g_veh_harness_image_size;
+
+#ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
+static const char *veh_validation_name(GXOS_VEH_VALIDATION_RESULT result)
+{
+    switch (result) {
+    case GXOS_VEH_VALIDATION_OK: return "OK";
+    case GXOS_VEH_VALIDATION_NULL_CALLBACK: return "NULL_CALLBACK";
+    case GXOS_VEH_VALIDATION_NONCANONICAL_CALLBACK: return "NONCANONICAL_CALLBACK";
+    case GXOS_VEH_VALIDATION_NO_IMAGE: return "NO_IMAGE";
+    case GXOS_VEH_VALIDATION_BAD_IMAGE: return "BAD_IMAGE";
+    case GXOS_VEH_VALIDATION_IMAGE_OVERFLOW: return "IMAGE_OVERFLOW";
+    case GXOS_VEH_VALIDATION_OUTSIDE_IMAGE: return "OUTSIDE_IMAGE";
+    case GXOS_VEH_VALIDATION_BAD_SECTION: return "BAD_SECTION";
+    case GXOS_VEH_VALIDATION_NOT_EXECUTABLE: return "NOT_EXECUTABLE";
+    case GXOS_VEH_VALIDATION_NOT_READABLE: return "NOT_READABLE";
+    case GXOS_VEH_VALIDATION_WRITABLE_SECTION: return "WRITABLE_SECTION";
+    case GXOS_VEH_VALIDATION_REGISTRY_ACTIVE: return "REGISTRY_ACTIVE";
+    case GXOS_VEH_VALIDATION_REGISTRY_FULL: return "REGISTRY_FULL";
+    case GXOS_VEH_VALIDATION_SEQUENCE_EXHAUSTED: return "SEQUENCE_EXHAUSTED";
+    default: return "BAD_REGISTRY";
+    }
+}
+#endif
+
+static void configure_veh_registry(const PE_IMAGE *image)
+{
+    const GXOS_VEH_IMAGE *images[GXOS_VEH_MAX_IMAGES];
+
+    gxos_veh_registry_init(&g_veh_registry);
+    if (image == 0 || !gxos_veh_image_parse_pe(
+            &g_veh_payload_image, image->loaded, image->actual_base, image->loaded_size)) {
+        fail("veh-payload-image");
+    }
+    if (g_veh_harness_identity == 0 || !gxos_veh_image_parse_pe(
+            &g_veh_harness_image, g_veh_harness_identity,
+            g_veh_harness_image_base, g_veh_harness_image_size)) {
+        fail("veh-harness-image");
+    }
+    images[0] = &g_veh_payload_image;
+    images[1] = &g_veh_harness_image;
+    if (!gxos_veh_registry_configure_images(&g_veh_registry, images, 2)) {
+        fail("veh-image-registry");
+    }
+    serial_text("GXOS_NET10:VEH_REGISTRY_INITIALIZED=1\r\n");
+    serial_field_hex("GXOS_NET10:VEH_REGISTRY_CAPACITY=0x", GXOS_VEH_REGISTRY_CAPACITY);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:VEH_REGISTRY_ALLOCATION_COUNT=0x0000000000000000\r\n");
+    serial_text("GXOS_NET10:VEH_CALLBACK_VALIDATION=BOUNDED_PE_SECTIONS\r\n");
+}
+
+#ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
+static void *GXOS_VEH_MS_ABI platform_add_vectored_exception_handler(
+    uint32_t first,
+    void *handler)
+{
+    GXOS_VEH_CALLBACK_DIAGNOSTICS diagnostics = {0};
+    void *opaque_handle;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uint32_t slot = UINT32_MAX;
+    uint32_t position = UINT32_MAX;
+    uint32_t i;
+
+    g_veh_add_invocation_count++;
+    g_veh_add_last_first = first;
+    g_veh_add_last_callback = (uint64_t)(uintptr_t)handler;
+    g_veh_add_last_return_address = return_address;
+    g_veh_add_last_call_site = return_address >= 6 ? return_address - 6U : 0;
+    serial_field_hex("GXOS_NET10:VEH_ADD_INVOCATION=0x", g_veh_add_invocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_ADD_FIRST=0x", first);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_ADD_CALLBACK=0x", (uint64_t)(uintptr_t)handler);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_ADD_RETURN_ADDRESS=0x", return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_ADD_CALL_SITE=0x", g_veh_add_last_call_site);
+    serial_text("\r\n");
+    if (g_veh_payload_image.image_base != 0 &&
+        return_address >= g_veh_payload_image.image_base &&
+        g_veh_payload_image.image_base <= UINTPTR_MAX -
+            (uintptr_t)g_veh_payload_image.image_size &&
+        return_address < g_veh_payload_image.image_base +
+            (uintptr_t)g_veh_payload_image.image_size) {
+        serial_field_hex("GXOS_NET10:VEH_ADD_RETURN_ADDRESS_RVA=0x",
+                         return_address - g_veh_payload_image.image_base);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:VEH_ADD_CALL_SITE_RVA=0x",
+                         g_veh_add_last_call_site - g_veh_payload_image.image_base);
+        serial_text("\r\n");
+    }
+    opaque_handle = gxos_veh_registry_add(
+        &g_veh_registry, first, (GXOS_VEH_CALLBACK)(uintptr_t)handler, &diagnostics);
+    serial_text("GXOS_NET10:VEH_ADD_VALIDATION=");
+    serial_text(veh_validation_name(diagnostics.validation));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_ADD_CALLBACK_IMAGE_BASE=0x", diagnostics.image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_ADD_CALLBACK_RVA=0x", diagnostics.callback_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:VEH_ADD_CALLBACK_SECTION=");
+    serial_text(diagnostics.section_name);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_ADD_CALLBACK_SECTION_EXECUTABLE=0x",
+                     diagnostics.section_executable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_ADD_SELECTED_SLOT=0x", UINT32_MAX);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_ADD_INSERTION_POSITION=0x", UINT32_MAX);
+    serial_text("\r\n");
+    if (opaque_handle != 0) {
+        const GXOS_VEH_RECORD *record;
+        g_veh_add_returned_handle = (uint64_t)(uintptr_t)opaque_handle;
+        for (i = 0; i != GXOS_VEH_REGISTRY_CAPACITY; i++) {
+            record = gxos_veh_registry_record(&g_veh_registry, i);
+            if (record != 0 && record->opaque_handle == (uintptr_t)opaque_handle) {
+                slot = i;
+                break;
+            }
+        }
+        for (i = 0; i != gxos_veh_registry_live_count(&g_veh_registry); i++) {
+            if (gxos_veh_registry_order_slot(&g_veh_registry, i) == slot) {
+                position = i;
+                break;
+            }
+        }
+        record = gxos_veh_registry_record(&g_veh_registry, slot);
+        g_veh_add_last_slot = slot;
+        g_veh_add_last_insertion_position = position;
+        g_veh_add_last_registration_sequence = record->registration_sequence;
+        serial_field_hex("GXOS_NET10:VEH_ADD_SELECTED_SLOT=0x", slot);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:VEH_ADD_INSERTION_POSITION=0x", position);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:VEH_ADD_SEQUENCE=0x", record->registration_sequence);
+        serial_text("\r\n");
+    }
+    else {
+        g_veh_add_returned_handle = 0;
+        g_veh_add_last_slot = UINT32_MAX;
+        g_veh_add_last_insertion_position = UINT32_MAX;
+        g_veh_add_last_registration_sequence = 0;
+    }
+    serial_field_hex("GXOS_NET10:VEH_ADD_HANDLE=0x", g_veh_add_returned_handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_REGISTRY_LIVE_COUNT=0x",
+                     gxos_veh_registry_live_count(&g_veh_registry));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:VEH_ADD_ORDER_AFTER=");
+    for (i = 0; i != gxos_veh_registry_live_count(&g_veh_registry); i++) {
+        if (i != 0) {
+            serial_text(",");
+        }
+        serial_field_hex("", gxos_veh_registry_order_slot(&g_veh_registry, i));
+    }
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_REGISTRY_DISPATCH_ACTIVE=0x",
+                     gxos_veh_registry_dispatch_active(&g_veh_registry));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_REGISTRY_ALLOCATION_COUNT=0x",
+                     gxos_veh_registry_allocation_count(&g_veh_registry));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:VEH_ADD_RESULT=");
+    serial_text(opaque_handle != 0 ? "SUCCESS\r\n" : "NULL\r\n");
+    return opaque_handle;
+}
+#endif
+#endif
 
 typedef struct {
     const char *module;
@@ -4040,6 +4374,12 @@ static void *platform_import_target(const char *module, const char *symbol)
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetCurrentProcess")) return (void *)(uintptr_t)platform_get_current_process;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetLastError")) return (void *)(uintptr_t)platform_get_last_error;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "SetLastError")) return (void *)(uintptr_t)platform_set_last_error;
+#ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "AddVectoredExceptionHandler")) {
+        return (void *)(uintptr_t)platform_add_vectored_exception_handler;
+    }
+#endif
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "GetModuleHandleW")) {
@@ -4291,6 +4631,14 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 equal_text(g_import_records[symbols].symbol, "GetModuleHandleExW")) {
                 g_get_module_handle_ex_import_descriptor_index = descriptors - 1U;
                 g_get_module_handle_ex_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "AddVectoredExceptionHandler")) {
+                g_veh_add_import_descriptor_index = descriptors - 1U;
+                g_veh_add_import_symbol_index = index;
+                g_veh_add_importing_iat_rva = first_thunk_rva + index * 8U;
             }
 #endif
 #ifdef GXOS_ENABLE_GET_PROC_ADDRESS
@@ -5924,6 +6272,11 @@ static void read_payload(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table
 
     status = system_table->BootServices->HandleProtocol(image_handle, (EFI_GUID *)&gLoadedImageProtocol, (void **)&loaded_image);
     if (EFI_ERROR(status) || !loaded_image) fail("loaded-image-protocol");
+#if defined(GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE) || defined(GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER)
+    g_veh_harness_identity = loaded_image->ImageBase;
+    g_veh_harness_image_base = (uintptr_t)loaded_image->ImageBase;
+    g_veh_harness_image_size = loaded_image->ImageSize;
+#endif
     status = system_table->BootServices->HandleProtocol(loaded_image->DeviceHandle, (EFI_GUID *)&gSimpleFileSystemProtocol, (void **)&file_system);
     if (EFI_ERROR(status) || !file_system) fail("simple-file-system");
     status = file_system->OpenVolume(file_system, &root);
@@ -5975,6 +6328,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:PE_READ_OK\r\n");
     load_pe_image(&image, boot_services);
     serial_text("GXOS_NET10:PE_RELOCATIONS_OK\r\n");
+#if defined(GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE) || defined(GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER)
+    configure_veh_registry(&image);
+#endif
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE_EX
     g_main_module_permanent_residency_proven = 1;
     serial_text("GXOS_NET10:GETMODULEHANDLEEX_PERMANENT_RESIDENCY_INVARIANT=ALLOCATEPAGES_NO_IMAGE_FREE_EFI_MAIN_NONRETURNING\r\n");
@@ -6102,6 +6458,22 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     resolve_imports(&image, boot_services, &import_descriptors, &import_symbols,
                     &import_functional, &import_failfast, &unresolved_imports);
+#ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
+    if (g_veh_add_import_descriptor_index != 2U ||
+        g_veh_add_import_symbol_index != 30U ||
+        g_veh_add_importing_iat_rva != 0x7D128U) {
+        fail("veh-import-contract");
+    }
+    serial_text("GXOS_NET10:VEH_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:VEH_IMPORT_SYMBOL=AddVectoredExceptionHandler\r\n");
+    serial_field_hex("GXOS_NET10:VEH_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_veh_add_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_IMPORT_SYMBOL_INDEX=0x", g_veh_add_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VEH_IMPORT_IAT_RVA=0x", g_veh_add_importing_iat_rva);
+    serial_text("\r\n");
+#endif
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
     if (image.loaded_size > UINT32_MAX || image.actual_base == 0 ||
         image.preferred_base == 0 || image.size_of_headers == 0 ||

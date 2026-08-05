@@ -1,9 +1,11 @@
 # Resumable x64 exception-context foundation
 
-This milestone is scoped to a harness-owned synthetic `#BP` proof. It does
-not implement vectored-handler registration/removal, payload callback
-invocation, exception raising, unwinding, XState, or generalized managed
-dispatch. The normal NativeAOT path keeps its visible fatal behavior.
+This document describes the bounded trap/context substrate. The ordered
+vectored-handler registry and exact NativeAOT registration route are
+documented separately in
+[`VECTORED_EXCEPTION_HANDLER_REGISTRY.md`](VECTORED_EXCEPTION_HANDLER_REGISTRY.md).
+This substrate still does not implement exception raising, unwinding, XState,
+or generalized managed dispatch.
 
 ## Existing entry audit
 
