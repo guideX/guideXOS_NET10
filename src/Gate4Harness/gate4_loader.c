@@ -19,6 +19,7 @@
 #include "platform_get_module_handle_ex.h"
 #include "platform_get_proc_address.h"
 #include "crt_malloc.h"
+#include "exception_context.h"
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -238,6 +239,57 @@ static uint64_t g_managed_image_base;
 static uint32_t g_platform_last_error;
 static uint64_t g_stack_lower;
 static uint64_t g_stack_upper;
+/* These symbols are intentionally external to the assembly entry file. */
+volatile uint32_t gxos_exception_dispatch_active;
+uint32_t gxos_exception_probe_enabled;
+uint64_t gxos_probe_expected_rip;
+uint64_t gxos_probe_expected_rsp;
+uint64_t gxos_probe_expected_rcx;
+uint64_t gxos_probe_expected_rdx;
+uint64_t gxos_probe_sentinel_rcx;
+uint64_t gxos_probe_sentinel_rdx;
+uint64_t gxos_probe_landing_rcx;
+uint64_t gxos_probe_landing_rdx;
+uint64_t gxos_probe_landing_rsp;
+uint32_t gxos_probe_landing_reached;
+static uint64_t g_synthetic_handler_calls;
+static uint32_t g_probe_context_modifications_validated;
+
+extern void gxos_fault_no_error_0(void);
+extern void gxos_fault_no_error_1(void);
+extern void gxos_fault_no_error_2(void);
+extern void gxos_fault_no_error_3(void);
+extern void gxos_fault_no_error_4(void);
+extern void gxos_fault_no_error_5(void);
+extern void gxos_fault_no_error_6(void);
+extern void gxos_fault_no_error_7(void);
+extern void gxos_fault_with_error_8(void);
+extern void gxos_fault_no_error_9(void);
+extern void gxos_fault_with_error_10(void);
+extern void gxos_fault_with_error_11(void);
+extern void gxos_fault_with_error_12(void);
+extern void gxos_fault_with_error_13(void);
+extern void gxos_fault_with_error_14(void);
+extern void gxos_fault_no_error_15(void);
+extern void gxos_fault_no_error_16(void);
+extern void gxos_fault_with_error_17(void);
+extern void gxos_fault_no_error_18(void);
+extern void gxos_fault_no_error_19(void);
+extern void gxos_fault_no_error_20(void);
+extern void gxos_fault_with_error_21(void);
+extern void gxos_fault_no_error_22(void);
+extern void gxos_fault_no_error_23(void);
+extern void gxos_fault_no_error_24(void);
+extern void gxos_fault_no_error_25(void);
+extern void gxos_fault_no_error_26(void);
+extern void gxos_fault_no_error_27(void);
+extern void gxos_fault_no_error_28(void);
+extern void gxos_fault_with_error_29(void);
+extern void gxos_fault_with_error_30(void);
+extern void gxos_fault_no_error_31(void);
+extern void gxos_exception_probe(void);
+extern const uint8_t gxos_exception_probe_int3[];
+extern void gxos_exception_probe_landing(void);
 static void serial_text(const char *text);
 #ifdef GXOS_ENABLE_CRT_MALLOC
 static GXOS_CRT_MALLOC_CONTEXT g_crt_malloc_context;
@@ -1895,10 +1947,8 @@ __attribute__((unused)) static void run_performance_diagnostics(EFI_BOOT_SERVICE
 #endif
 }
 
-__attribute__((used)) static void fault_handler(uint64_t *frame)
+static void fault_handler(const GXOS_X64_TRAP_FRAME *frame)
 {
-    uint64_t cr2;
-    __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
 #ifdef GXOS_ENABLE_CRT_INITTERM
     if (g_crt_initterm_callback_active != 0) {
         serial_text("GXOS_NET10:CRT_INITTERM_CALLBACK_FAULT_ACTIVE=1\r\n");
@@ -1911,15 +1961,15 @@ __attribute__((used)) static void fault_handler(uint64_t *frame)
     if (g_phase < PHASE_BEFORE_MANAGED_CALL || g_phase >= PHASE_AFTER_SECURITY_COOKIE_INIT) serial_text("GXOS_NET10:FAULT_BEFORE_MANAGED\r\n");
     else if (g_phase == PHASE_IN_MANAGED || g_phase == PHASE_BEFORE_MANAGED_CALL) serial_text("GXOS_NET10:FAULT_IN_MANAGED\r\n");
     else serial_text("GXOS_NET10:FAULT_AFTER_MANAGED_RETURN\r\n");
-    serial_field_u32("GXOS_NET10:FAULT_VECTOR=0x", (uint32_t)frame[0]);
+    serial_field_u32("GXOS_NET10:FAULT_VECTOR=0x", (uint32_t)frame->vector);
     serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:FAULT_ERROR=0x", frame[1]);
+    serial_field_hex("GXOS_NET10:FAULT_ERROR=0x", frame->error_code);
     serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:FAULT_RIP=0x", frame[2]);
+    serial_field_hex("GXOS_NET10:FAULT_RIP=0x", frame->rip);
     serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:FAULT_RSP=0x", frame[5]);
+    serial_field_hex("GXOS_NET10:FAULT_RSP=0x", frame->rsp);
     serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:FAULT_CR2=0x", cr2);
+    serial_field_hex("GXOS_NET10:FAULT_CR2=0x", frame->cr2);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:FAULT_IMAGE_BASE=0x", g_managed_image_base);
     serial_text("\r\n");
@@ -1954,57 +2004,265 @@ __attribute__((used)) static void fault_handler(uint64_t *frame)
     halt_forever();
 }
 
-__attribute__((used, naked)) static void fault_common(void)
+static int breakpoint_exception_address(const GXOS_X64_TRAP_FRAME *trap,
+                                        uint64_t *exception_address,
+                                        const char **rip_semantics)
 {
-    __asm__(
-        "movq %rsp, %rcx\n"
-        "andq $-16, %rsp\n"
-        "subq $32, %rsp\n"
-        "call fault_handler\n"
-        "cli\n"
-        "1: hlt\n"
-        "jmp 1b\n");
+    uintptr_t int3 = (uintptr_t)gxos_exception_probe_int3;
+    uint64_t captured_rip = trap->rip;
+    uint32_t semantics = 0;
+    uint8_t byte_before = 0;
+    uint8_t byte_at = 0;
+
+    if (trap->vector != 3 || int3 == 0 || int3 == UINTPTR_MAX) return 0;
+    if (captured_rip == (uint64_t)(int3 + 1U)) {
+        byte_before = *(const uint8_t *)(uintptr_t)(captured_rip - 1U);
+    } else if (captured_rip == (uint64_t)int3) {
+        byte_at = *(const uint8_t *)(uintptr_t)captured_rip;
+    }
+    if (!gxos_exception_translate_breakpoint_rip(
+            captured_rip, int3, byte_before, byte_at, exception_address, &semantics)) {
+        return 0;
+    }
+    *rip_semantics = semantics == GXOS_EXCEPTION_BP_RIP_AFTER_INT3
+        ? "AFTER_INT3" : "AT_INT3";
+    return 1;
 }
 
-#define GX_FAULT_NO_ERROR(number) \
-    __attribute__((naked)) static void fault_no_error_##number(void) \
-    { __asm__("pushq $0\n" "pushq $" #number "\n" "jmp fault_common\n"); }
-#define GX_FAULT_WITH_ERROR(number) \
-    __attribute__((naked)) static void fault_with_error_##number(void) \
-    { __asm__("pushq $" #number "\n" "jmp fault_common\n"); }
+static void fill_exception_context(const GXOS_X64_TRAP_FRAME *trap,
+                                   GXOS_CONTEXT_COMPAT *context)
+{
+    context->context_flags = GXOS_EXCEPTION_CONTEXT_FLAGS_BOUNDED;
+    context->seg_cs = (uint16_t)trap->cs;
+    context->seg_ss = (uint16_t)trap->ss;
+    context->eflags = (uint32_t)trap->rflags;
+    context->rax = trap->rax;
+    context->rcx = trap->rcx;
+    context->rdx = trap->rdx;
+    context->rbx = trap->rbx;
+    context->rsp = trap->rsp;
+    context->rbp = trap->rbp;
+    context->rsi = trap->rsi;
+    context->rdi = trap->rdi;
+    context->r8 = trap->r8;
+    context->r9 = trap->r9;
+    context->r10 = trap->r10;
+    context->r11 = trap->r11;
+    context->r12 = trap->r12;
+    context->r13 = trap->r13;
+    context->r14 = trap->r14;
+    context->r15 = trap->r15;
+    context->rip = trap->rip;
+}
 
-GX_FAULT_NO_ERROR(0)
-GX_FAULT_NO_ERROR(1)
-GX_FAULT_NO_ERROR(2)
-GX_FAULT_NO_ERROR(3)
-GX_FAULT_NO_ERROR(4)
-GX_FAULT_NO_ERROR(5)
-GX_FAULT_NO_ERROR(6)
-GX_FAULT_NO_ERROR(7)
-GX_FAULT_WITH_ERROR(8)
-GX_FAULT_NO_ERROR(9)
-GX_FAULT_WITH_ERROR(10)
-GX_FAULT_WITH_ERROR(11)
-GX_FAULT_WITH_ERROR(12)
-GX_FAULT_WITH_ERROR(13)
-GX_FAULT_WITH_ERROR(14)
-GX_FAULT_NO_ERROR(15)
-GX_FAULT_NO_ERROR(16)
-GX_FAULT_NO_ERROR(17)
-GX_FAULT_NO_ERROR(18)
-GX_FAULT_NO_ERROR(19)
-GX_FAULT_WITH_ERROR(20)
-GX_FAULT_WITH_ERROR(21)
-GX_FAULT_NO_ERROR(22)
-GX_FAULT_NO_ERROR(23)
-GX_FAULT_NO_ERROR(24)
-GX_FAULT_NO_ERROR(25)
-GX_FAULT_NO_ERROR(26)
-GX_FAULT_NO_ERROR(27)
-GX_FAULT_NO_ERROR(28)
-GX_FAULT_NO_ERROR(29)
-GX_FAULT_NO_ERROR(30)
-GX_FAULT_NO_ERROR(31)
+static int32_t GXOS_EXCEPTION_MS_ABI synthetic_handler(
+    GXOS_EXCEPTION_POINTERS_COMPAT *exception_pointers)
+{
+    GXOS_EXCEPTION_RECORD_COMPAT *record;
+    GXOS_CONTEXT_COMPAT *context;
+
+    serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_ENTERED=1\r\n");
+    g_synthetic_handler_calls++;
+    serial_field_hex("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_CALL_COUNT=0x",
+                     g_synthetic_handler_calls);
+    serial_text("\r\n");
+    if (exception_pointers == 0 || exception_pointers->exception_record == 0 ||
+        exception_pointers->context_record == 0) {
+        serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_VALIDATION=0\r\n");
+        return GXOS_EXCEPTION_CONTINUE_SEARCH;
+    }
+    record = (GXOS_EXCEPTION_RECORD_COMPAT *)exception_pointers->exception_record;
+    context = (GXOS_CONTEXT_COMPAT *)exception_pointers->context_record;
+    serial_field_hex("GXOS_NET10:EXCEPTION_INCOMING_RCX=0x", context->rcx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_EXPECTED_RCX=0x", gxos_probe_expected_rcx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_INCOMING_RDX=0x", context->rdx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_EXPECTED_RDX=0x", gxos_probe_expected_rdx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_INCOMING_RSP=0x", context->rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_EXPECTED_RSP=0x", gxos_probe_expected_rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_INCOMING_RIP=0x", context->rip);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_EXPECTED_RIP=0x", gxos_probe_expected_rip);
+    serial_text("\r\n");
+    if (record->exception_code != 0x80000003U ||
+        record->exception_address != (uint64_t)(uintptr_t)gxos_exception_probe_int3 ||
+        context->rcx != gxos_probe_expected_rcx ||
+        context->rdx != gxos_probe_expected_rdx ||
+        context->rsp != gxos_probe_expected_rsp ||
+        context->rip != gxos_probe_expected_rip) {
+        serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_VALIDATION=0\r\n");
+        return GXOS_EXCEPTION_CONTINUE_SEARCH;
+    }
+    serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_VALIDATION=1\r\n");
+#ifdef GXOS_EXCEPTION_SYNTHETIC_CONTINUE_SEARCH
+    serial_text("GXOS_NET10:EXCEPTION_SYNTHETIC_HANDLER_MODE=CONTINUE_SEARCH\r\n");
+    return GXOS_EXCEPTION_CONTINUE_SEARCH;
+#else
+    gxos_probe_sentinel_rcx = 0xA1B2C3D4E5F60718ULL;
+    gxos_probe_sentinel_rdx = 0x8192A3B4C5D6E7F8ULL;
+    context->rcx = gxos_probe_sentinel_rcx;
+    context->rdx = gxos_probe_sentinel_rdx;
+    context->rip = (uint64_t)(uintptr_t)gxos_exception_probe_landing;
+    return GXOS_EXCEPTION_CONTINUE_EXECUTION;
+#endif
+}
+
+__attribute__((used)) int32_t GXOS_EXCEPTION_MS_ABI gxos_exception_dispatch(
+    GXOS_X64_TRAP_FRAME *trap)
+{
+    GXOS_EXCEPTION_RECORD_COMPAT record = {0};
+    GXOS_CONTEXT_COMPAT context = {0};
+    GXOS_EXCEPTION_POINTERS_COMPAT pointers;
+    GXOS_EXCEPTION_VALIDATION_BOUNDS bounds;
+    uint64_t exception_address;
+    const char *rip_semantics;
+    int32_t handler_result;
+    int validation_result;
+
+    /* Keep the guard set on every fatal path so logging faults take the
+       double-fault-style terminal route instead of re-entering dispatch. */
+    if (trap == 0 || gxos_exception_probe_enabled == 0) {
+        return GXOS_EXCEPTION_CONTINUE_SEARCH;
+    }
+    serial_text("GXOS_NET10:EXCEPTION_TRAP_ENTERED=1\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_VECTOR=0x", trap->vector);
+    serial_text("\r\n");
+    if (trap->vector != 3 || !breakpoint_exception_address(
+            trap, &exception_address, &rip_semantics)) {
+        serial_text("GXOS_NET10:EXCEPTION_UNSUPPORTED_VECTOR=1\r\n");
+        return GXOS_EXCEPTION_CONTINUE_SEARCH;
+    }
+    serial_text("GXOS_NET10:EXCEPTION_COMPLETE_FRAME_CAPTURED=1\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_VECTOR_EQUALS_3=1\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_RIP_SEMANTICS=");
+    serial_text(rip_semantics);
+    serial_text("\r\n");
+    record.exception_code = gxos_exception_translate_vector_code(trap->vector);
+    record.exception_address = exception_address;
+    fill_exception_context(trap, &context);
+    pointers.exception_record = &record;
+    pointers.context_record = &context;
+    serial_field_hex("GXOS_NET10:EXCEPTION_ENTRY_FLAGS=0x", trap->entry_flags);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_CS=0x", trap->cs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_FRAME=0x", trap->raw_frame);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x28_ADDRESS=0x",
+                     trap->raw_frame + 0x28U);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x10=0x",
+                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x10U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x18=0x",
+                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x18U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x20=0x",
+                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x20U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x28=0x",
+                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x28U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_RAW_PLUS_0x30=0x",
+                     *(const uint64_t *)(uintptr_t)(trap->raw_frame + 0x30U));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_COMPATIBILITY_STRUCTURES_BUILT=1\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_CODE=0x", record.exception_code);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_ADDRESS=0x", record.exception_address);
+    serial_text("\r\n");
+    handler_result = synthetic_handler(&pointers);
+    serial_field_hex("GXOS_NET10:EXCEPTION_HANDLER_RESULT=0x",
+                     (uint64_t)(uint32_t)handler_result);
+    serial_text("\r\n");
+    if (handler_result == GXOS_EXCEPTION_CONTINUE_SEARCH) {
+        serial_text("GXOS_NET10:EXCEPTION_HANDLER_RETURNED_CONTINUE_SEARCH=1\r\n");
+        return handler_result;
+    }
+    if (handler_result != GXOS_EXCEPTION_CONTINUE_EXECUTION) {
+        serial_text("GXOS_NET10:EXCEPTION_HANDLER_INVALID_RESULT=1\r\n");
+        return GXOS_EXCEPTION_CONTINUE_SEARCH;
+    }
+    serial_text("GXOS_NET10:EXCEPTION_HANDLER_RETURNED_CONTINUE_EXECUTION=1\r\n");
+    bounds.stack_lower = (uintptr_t)g_stack_lower;
+    bounds.stack_upper = (uintptr_t)g_stack_upper;
+    bounds.executable_lower = (uintptr_t)gxos_exception_probe_int3;
+    bounds.executable_upper = (uintptr_t)gxos_exception_probe_landing + 32U;
+    validation_result = gxos_exception_validate_context_modifications(
+        trap, &context, &bounds);
+    if (validation_result != GXOS_EXCEPTION_VALIDATION_OK) {
+        serial_field_hex("GXOS_NET10:EXCEPTION_CONTEXT_REJECTED=0x",
+                         (uint64_t)(uint32_t)validation_result);
+        serial_text("\r\n");
+        return GXOS_EXCEPTION_CONTINUE_SEARCH;
+    }
+    gxos_exception_apply_context_modifications(trap, &context);
+    g_probe_context_modifications_validated = 1;
+    serial_text("GXOS_NET10:EXCEPTION_REQUESTED_CONTEXT_MODIFICATION_VALIDATED=1\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_REDIRECTED_RIP=0x", trap->rip);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_IRETQ_RESTORATION_STARTED=1\r\n");
+    gxos_exception_dispatch_active = 0;
+    return GXOS_EXCEPTION_CONTINUE_EXECUTION;
+}
+
+__attribute__((used)) static void fault_common_legacy_documentation(void)
+{
+    /* The implementation is in exception_entry.S; this symbol anchors the C audit. */
+}
+
+__attribute__((used)) void GXOS_EXCEPTION_MS_ABI gxos_exception_fatal_dispatch(
+    GXOS_X64_TRAP_FRAME *frame)
+{
+    serial_text("GXOS_NET10:EXCEPTION_FATAL_PATH=1\r\n");
+    fault_handler(frame);
+}
+
+__attribute__((used)) void GXOS_EXCEPTION_MS_ABI gxos_exception_nested_terminal(
+    GXOS_X64_TRAP_FRAME *frame)
+{
+    serial_text("GXOS_NET10:EXCEPTION_NESTED_DISPATCH_TERMINAL=1\r\n");
+    fault_handler(frame);
+}
+
+void GXOS_EXCEPTION_MS_ABI gxos_exception_probe_landing_report(void)
+{
+    serial_text("GXOS_NET10:EXCEPTION_LANDING_PAD_REACHED=1\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_MODIFIED_RCX=0x", gxos_probe_landing_rcx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:EXCEPTION_MODIFIED_RDX=0x", gxos_probe_landing_rdx);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_MODIFIED_RCX_VERIFIED=");
+    serial_text(gxos_probe_landing_rcx == gxos_probe_sentinel_rcx ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_MODIFIED_RDX_VERIFIED=");
+    serial_text(gxos_probe_landing_rdx == gxos_probe_sentinel_rdx ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_STACK_POINTER_VALID=");
+    serial_text(gxos_probe_landing_rsp >= g_stack_lower &&
+                gxos_probe_landing_rsp < g_stack_upper ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:EXCEPTION_PROBE_COMPLETED=1\r\n");
+}
+
+__attribute__((unused)) static void run_synthetic_breakpoint_probe(void)
+{
+    gxos_exception_probe_enabled = 1;
+    gxos_probe_landing_reached = 0;
+    g_synthetic_handler_calls = 0;
+    g_probe_context_modifications_validated = 0;
+    serial_text("GXOS_NET10:EXCEPTION_PROBE_BEGIN=1\r\n");
+    gxos_exception_probe();
+    if (gxos_probe_landing_reached == 0 || g_synthetic_handler_calls != 1 ||
+        g_probe_context_modifications_validated == 0 ||
+        gxos_probe_landing_rcx != gxos_probe_sentinel_rcx ||
+        gxos_probe_landing_rdx != gxos_probe_sentinel_rdx) {
+        fail("synthetic-breakpoint-proof");
+    }
+    serial_text("GXOS_NET10:EXCEPTION_PROBE_SUCCESS=1\r\n");
+}
 
 typedef struct __attribute__((packed)) {
     uint16_t limit;
@@ -2071,39 +2329,38 @@ static void install_fault_handlers(void)
     copy_count = (uint32_t)g_saved_idtr.limit + 1U;
     if (copy_count > (uint32_t)sizeof(g_gate4_idt)) copy_count = (uint32_t)sizeof(g_gate4_idt);
     for (i = 0; i != copy_count; i++) destination[i] = source[i];
-    for (i = 0; i != 32; i++) set_idt_gate(&g_gate4_idt[i], fault_no_error_0);
-    set_idt_gate(&g_gate4_idt[0], fault_no_error_0);
-    set_idt_gate(&g_gate4_idt[1], fault_no_error_1);
-    set_idt_gate(&g_gate4_idt[2], fault_no_error_2);
-    set_idt_gate(&g_gate4_idt[3], fault_no_error_3);
-    set_idt_gate(&g_gate4_idt[4], fault_no_error_4);
-    set_idt_gate(&g_gate4_idt[5], fault_no_error_5);
-    set_idt_gate(&g_gate4_idt[6], fault_no_error_6);
-    set_idt_gate(&g_gate4_idt[7], fault_no_error_7);
-    set_idt_gate(&g_gate4_idt[8], fault_with_error_8);
-    set_idt_gate(&g_gate4_idt[9], fault_no_error_9);
-    set_idt_gate(&g_gate4_idt[10], fault_with_error_10);
-    set_idt_gate(&g_gate4_idt[11], fault_with_error_11);
-    set_idt_gate(&g_gate4_idt[12], fault_with_error_12);
-    set_idt_gate(&g_gate4_idt[13], fault_with_error_13);
-    set_idt_gate(&g_gate4_idt[14], fault_with_error_14);
-    set_idt_gate(&g_gate4_idt[15], fault_no_error_15);
-    set_idt_gate(&g_gate4_idt[16], fault_no_error_16);
-    set_idt_gate(&g_gate4_idt[17], fault_no_error_17);
-    set_idt_gate(&g_gate4_idt[18], fault_no_error_18);
-    set_idt_gate(&g_gate4_idt[19], fault_no_error_19);
-    set_idt_gate(&g_gate4_idt[20], fault_with_error_20);
-    set_idt_gate(&g_gate4_idt[21], fault_with_error_21);
-    set_idt_gate(&g_gate4_idt[22], fault_no_error_22);
-    set_idt_gate(&g_gate4_idt[23], fault_no_error_23);
-    set_idt_gate(&g_gate4_idt[24], fault_no_error_24);
-    set_idt_gate(&g_gate4_idt[25], fault_no_error_25);
-    set_idt_gate(&g_gate4_idt[26], fault_no_error_26);
-    set_idt_gate(&g_gate4_idt[27], fault_no_error_27);
-    set_idt_gate(&g_gate4_idt[28], fault_no_error_28);
-    set_idt_gate(&g_gate4_idt[29], fault_no_error_29);
-    set_idt_gate(&g_gate4_idt[30], fault_no_error_30);
-    set_idt_gate(&g_gate4_idt[31], fault_no_error_31);
+    set_idt_gate(&g_gate4_idt[0], gxos_fault_no_error_0);
+    set_idt_gate(&g_gate4_idt[1], gxos_fault_no_error_1);
+    set_idt_gate(&g_gate4_idt[2], gxos_fault_no_error_2);
+    set_idt_gate(&g_gate4_idt[3], gxos_fault_no_error_3);
+    set_idt_gate(&g_gate4_idt[4], gxos_fault_no_error_4);
+    set_idt_gate(&g_gate4_idt[5], gxos_fault_no_error_5);
+    set_idt_gate(&g_gate4_idt[6], gxos_fault_no_error_6);
+    set_idt_gate(&g_gate4_idt[7], gxos_fault_no_error_7);
+    set_idt_gate(&g_gate4_idt[8], gxos_fault_with_error_8);
+    set_idt_gate(&g_gate4_idt[9], gxos_fault_no_error_9);
+    set_idt_gate(&g_gate4_idt[10], gxos_fault_with_error_10);
+    set_idt_gate(&g_gate4_idt[11], gxos_fault_with_error_11);
+    set_idt_gate(&g_gate4_idt[12], gxos_fault_with_error_12);
+    set_idt_gate(&g_gate4_idt[13], gxos_fault_with_error_13);
+    set_idt_gate(&g_gate4_idt[14], gxos_fault_with_error_14);
+    set_idt_gate(&g_gate4_idt[15], gxos_fault_no_error_15);
+    set_idt_gate(&g_gate4_idt[16], gxos_fault_no_error_16);
+    set_idt_gate(&g_gate4_idt[17], gxos_fault_with_error_17);
+    set_idt_gate(&g_gate4_idt[18], gxos_fault_no_error_18);
+    set_idt_gate(&g_gate4_idt[19], gxos_fault_no_error_19);
+    set_idt_gate(&g_gate4_idt[20], gxos_fault_no_error_20);
+    set_idt_gate(&g_gate4_idt[21], gxos_fault_with_error_21);
+    set_idt_gate(&g_gate4_idt[22], gxos_fault_no_error_22);
+    set_idt_gate(&g_gate4_idt[23], gxos_fault_no_error_23);
+    set_idt_gate(&g_gate4_idt[24], gxos_fault_no_error_24);
+    set_idt_gate(&g_gate4_idt[25], gxos_fault_no_error_25);
+    set_idt_gate(&g_gate4_idt[26], gxos_fault_no_error_26);
+    set_idt_gate(&g_gate4_idt[27], gxos_fault_no_error_27);
+    set_idt_gate(&g_gate4_idt[28], gxos_fault_no_error_28);
+    set_idt_gate(&g_gate4_idt[29], gxos_fault_with_error_29);
+    set_idt_gate(&g_gate4_idt[30], gxos_fault_with_error_30);
+    set_idt_gate(&g_gate4_idt[31], gxos_fault_no_error_31);
     {
         IDTR idtr = { (uint16_t)(sizeof(g_gate4_idt) - 1), (uint64_t)(uintptr_t)g_gate4_idt };
         write_idtr(&idtr);
@@ -5913,6 +6170,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     ((void (EFIAPI *)(void))(uintptr_t)g_import_stub_pages)();
 #endif
     install_fault_handlers();
+#ifdef GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE
+    initialize_nativeaot_tls(&image, boot_services);
+    run_synthetic_breakpoint_probe();
+    halt_forever();
+#endif
     initialize_nativeaot_tls(&image, boot_services);
 #ifdef GXOS_ENABLE_CRT_MALLOC
     configure_platform_crt_malloc(&image, boot_services);
