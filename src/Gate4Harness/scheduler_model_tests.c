@@ -1,0 +1,224 @@
+#include "scheduler_foundation.h"
+
+#include <stdio.h>
+
+static unsigned char g_pages[256U * GXOS_SCHEDULER_PAGE_SIZE]
+    __attribute__((aligned(GXOS_SCHEDULER_PAGE_SIZE)));
+static unsigned char g_page_used[256U];
+static GXOS_SCHEDULER g_scheduler;
+static unsigned int g_checks;
+static unsigned int g_failures;
+
+#define CHECK(condition) do { \
+    ++g_checks; \
+    if (!(condition)) { \
+        ++g_failures; \
+        (void)printf("FAIL:%s:%u\n", #condition, (unsigned)__LINE__); \
+    } \
+} while (0)
+
+static uint64_t GXOS_SCHEDULER_MS_ABI model_allocate(
+    uint32_t type, uint32_t memory_type, uint64_t pages, uint64_t *memory)
+{
+    uint32_t index;
+    uint32_t run;
+    (void)type;
+    (void)memory_type;
+    if (memory == 0 || pages == 0 || pages > 256U) return 1;
+    for (index = 0; index + pages <= 256U; ++index) {
+        for (run = 0; run != pages && g_page_used[index + run] == 0; ++run) {
+        }
+        if (run == pages) {
+            for (run = 0; run != pages; ++run) g_page_used[index + run] = 1;
+            *memory = (uint64_t)(uintptr_t)(g_pages +
+                                           index * GXOS_SCHEDULER_PAGE_SIZE);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static uint64_t GXOS_SCHEDULER_MS_ABI model_free(
+    uint64_t memory, uint64_t pages)
+{
+    uint64_t base = (uint64_t)(uintptr_t)g_pages;
+    uint64_t end = base + sizeof(g_pages);
+    uint32_t index;
+    if (memory < base || memory >= end ||
+        (memory - base) % GXOS_SCHEDULER_PAGE_SIZE != 0 ||
+        pages == 0 || pages > 256U ||
+        memory + pages * GXOS_SCHEDULER_PAGE_SIZE > end) return 1;
+    index = (uint32_t)((memory - base) / GXOS_SCHEDULER_PAGE_SIZE);
+    while (pages-- != 0) g_page_used[index++] = 0;
+    return 0;
+}
+
+static void GXOS_SCHEDULER_MS_ABI model_log_text(const char *text)
+{
+    (void)text;
+}
+
+static void GXOS_SCHEDULER_MS_ABI model_log_hex(const char *name,
+                                                 uint64_t value)
+{
+    (void)name;
+    (void)value;
+}
+
+static void GXOS_SCHEDULER_MS_ABI model_log_u32(const char *name,
+                                                uint32_t value)
+{
+    (void)name;
+    (void)value;
+}
+
+static uintptr_t model_entry(void *argument)
+{
+    return (uintptr_t)argument;
+}
+
+void gxos_scheduler_start_worker(void)
+{
+}
+
+void gxos_scheduler_invalid_thread_return(void)
+{
+}
+
+static void destroy_event(GXOS_SCHEDULER_HANDLE handle)
+{
+    CHECK(gxos_scheduler_close_handle(handle));
+    CHECK(gxos_scheduler_try_destroy_event(handle));
+}
+
+int main(void)
+{
+    GXOS_SCHEDULER_HANDLE auto_event;
+    GXOS_SCHEDULER_HANDLE manual_event;
+    GXOS_SCHEDULER_HANDLE worker_handle;
+    GXOS_SCHEDULER_HANDLE stale_handle;
+    GXOS_SCHEDULER_HANDLE temporary_handles[GXOS_SCHEDULER_MAX_THREADS] = {0};
+    GXOS_SCHEDULER_TCB *temporary_threads[GXOS_SCHEDULER_MAX_THREADS] = {0};
+    GXOS_SCHEDULER_HANDLE temporary_events[GXOS_SCHEDULER_MAX_EVENTS] = {0};
+    GXOS_SCHEDULER_TCB *worker;
+    GXOS_SCHEDULER_SWITCH_PLAN plan;
+    uint32_t previous_suspend_count;
+    uint32_t thread_count;
+    uint32_t event_count;
+    uint32_t index;
+
+    CHECK(gxos_scheduler_initialize(&g_scheduler, model_allocate, model_free,
+                                    model_log_text, model_log_hex,
+                                    model_log_u32));
+    CHECK(gxos_scheduler_current_thread() == g_scheduler.boot_thread);
+    CHECK(gxos_scheduler_current_gs_base() != 0);
+
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 0, 0, &auto_event));
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 0, &manual_event));
+    CHECK(!gxos_scheduler_resume_thread(auto_event, &previous_suspend_count));
+    CHECK(!gxos_scheduler_signal_event((GXOS_SCHEDULER_HANDLE)0x1234));
+    CHECK(!gxos_scheduler_reset_event((GXOS_SCHEDULER_HANDLE)0x1234));
+
+    CHECK(gxos_scheduler_create_suspended_thread(
+        &g_scheduler, model_entry, (void *)(uintptr_t)0x55,
+        &worker_handle, &worker));
+    CHECK(worker->state == GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED);
+    CHECK(worker->execution_refs == 1);
+    CHECK(worker->public_handle_refs == 1);
+    CHECK(gxos_scheduler_thread_from_handle(worker_handle) == worker);
+    CHECK(gxos_scheduler_prepare_wait(worker_handle, &plan) ==
+          GXOS_SCHEDULER_WAIT_FAILURE);
+    CHECK(gxos_scheduler_resume_thread(worker_handle, &previous_suspend_count));
+    CHECK(previous_suspend_count == 1);
+    CHECK(worker->state == GXOS_SCHEDULER_THREAD_RUNNABLE);
+    CHECK(!gxos_scheduler_resume_thread(worker_handle, &previous_suspend_count));
+
+    CHECK(gxos_scheduler_signal_event(auto_event));
+    CHECK(gxos_scheduler_event_is_signaled(auto_event));
+    CHECK(gxos_scheduler_prepare_wait(auto_event, &plan) ==
+          GXOS_SCHEDULER_WAIT_SIGNALED);
+    CHECK(gxos_scheduler_finish_wait(auto_event) == GXOS_SCHEDULER_WAIT_SIGNALED);
+    CHECK(!gxos_scheduler_event_is_signaled(auto_event));
+    CHECK(gxos_scheduler_signal_event(manual_event));
+    CHECK(gxos_scheduler_event_is_signaled(manual_event));
+    CHECK(gxos_scheduler_prepare_wait(manual_event, &plan) ==
+          GXOS_SCHEDULER_WAIT_SIGNALED);
+    CHECK(gxos_scheduler_finish_wait(manual_event) == GXOS_SCHEDULER_WAIT_SIGNALED);
+    CHECK(gxos_scheduler_event_is_signaled(manual_event));
+    CHECK(gxos_scheduler_reset_event(manual_event));
+    CHECK(!gxos_scheduler_event_is_signaled(manual_event));
+
+    stale_handle = auto_event;
+    destroy_event(auto_event);
+    CHECK(gxos_scheduler_event_from_handle(stale_handle) == 0);
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 0, 0, &auto_event));
+    CHECK(auto_event != stale_handle);
+    CHECK(!gxos_scheduler_try_destroy_event(stale_handle));
+
+    CHECK(gxos_scheduler_close_handle(worker_handle));
+    CHECK(worker->live && worker->execution_refs == 1);
+    CHECK(!gxos_scheduler_close_handle(worker_handle));
+    CHECK(!gxos_scheduler_try_reclaim_thread(worker));
+    worker->state = GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED;
+    CHECK(gxos_scheduler_discard_created_thread(worker));
+    CHECK(gxos_scheduler_thread_from_handle(worker_handle) == 0);
+
+    destroy_event(manual_event);
+
+    /* A registered waiter prevents event destruction until it is woken. */
+    CHECK(gxos_scheduler_create_suspended_thread(
+        &g_scheduler, model_entry, 0, &worker_handle, &worker));
+    CHECK(gxos_scheduler_resume_thread(worker_handle, &previous_suspend_count));
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 0, &manual_event));
+    CHECK(gxos_scheduler_prepare_wait(manual_event, &plan) ==
+          GXOS_SCHEDULER_WAIT_BLOCKED);
+    stale_handle = manual_event;
+    CHECK(gxos_scheduler_close_handle(manual_event));
+    CHECK(!gxos_scheduler_try_destroy_event(manual_event));
+    CHECK(gxos_scheduler_signal_event(manual_event));
+    g_scheduler.current = g_scheduler.boot_thread;
+    g_scheduler.boot_thread->state = GXOS_SCHEDULER_THREAD_RUNNING;
+    worker->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
+    CHECK(gxos_scheduler_try_destroy_event(stale_handle));
+    CHECK(gxos_scheduler_close_handle(worker_handle));
+    CHECK(gxos_scheduler_discard_created_thread(worker));
+
+    destroy_event(auto_event);
+
+    thread_count = 0;
+    while (thread_count != GXOS_SCHEDULER_MAX_THREADS &&
+           gxos_scheduler_create_suspended_thread(
+               &g_scheduler, model_entry, 0,
+               &temporary_handles[thread_count],
+               &temporary_threads[thread_count])) {
+        ++thread_count;
+    }
+    CHECK(thread_count != 0);
+    CHECK(thread_count < GXOS_SCHEDULER_MAX_THREADS ||
+          !gxos_scheduler_create_suspended_thread(
+              &g_scheduler, model_entry, 0, &worker_handle, &worker));
+    for (index = 0; index != thread_count; ++index) {
+        CHECK(gxos_scheduler_close_handle(temporary_handles[index]));
+        CHECK(gxos_scheduler_discard_created_thread(temporary_threads[index]));
+    }
+
+    event_count = 0;
+    while (event_count != GXOS_SCHEDULER_MAX_EVENTS &&
+           gxos_scheduler_create_event(&g_scheduler, 0, 0,
+                                       &temporary_events[event_count])) {
+        ++event_count;
+    }
+    CHECK(event_count != 0);
+    CHECK(event_count < GXOS_SCHEDULER_MAX_EVENTS ||
+          !gxos_scheduler_create_event(&g_scheduler, 0, 0, &auto_event));
+    for (index = 0; index != event_count; ++index) {
+        CHECK(gxos_scheduler_close_handle(temporary_events[index]));
+        CHECK(gxos_scheduler_try_destroy_event(temporary_events[index]));
+    }
+
+    CHECK(gxos_scheduler_teardown(&g_scheduler));
+    CHECK(gxos_scheduler_current_gs_base() == 0);
+    CHECK(g_failures == 0);
+    (void)printf("SCHEDULER_MODEL_TESTS=PASSED checks=%u\n", g_checks);
+    return g_failures == 0 ? 0 : 1;
+}

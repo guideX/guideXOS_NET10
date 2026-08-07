@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWPreferredBaseExperiment', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWPreferredBaseExperiment', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled', 'SyntheticScheduler')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -27,6 +27,9 @@ $performanceSource = Join-Path $root 'src\Gate4Harness\platform_performance.c'
 $exceptionSource = Join-Path $root 'src\Gate4Harness\exception_context.c'
 $exceptionAssembly = Join-Path $root 'src\Gate4Harness\exception_entry.S'
 $vectoredHandlerSource = Join-Path $root 'src\Gate4Harness\vectored_handler.c'
+$schedulerSource = Join-Path $root 'src\Gate4Harness\scheduler_foundation.c'
+$schedulerAssembly = Join-Path $root 'src\Gate4Harness\scheduler_context.S'
+$schedulerProofSource = Join-Path $root 'src\Gate4Harness\scheduler_proof.c'
 $startupSource = Join-Path $root 'src\Gate4Harness\startup.nsh'
 $efi = Join-Path $efiDirectory 'BOOTX64.EFI'
 $payload = Join-Path $payloadDirectory 'gxos-managed-entry-probe.dll'
@@ -43,6 +46,9 @@ if (-not (Test-Path -LiteralPath $performanceSource)) { throw "Platform performa
 if (-not (Test-Path -LiteralPath $exceptionSource)) { throw "Exception context source not found: $exceptionSource" }
 if (-not (Test-Path -LiteralPath $exceptionAssembly)) { throw "Exception entry assembly not found: $exceptionAssembly" }
 if (-not (Test-Path -LiteralPath $vectoredHandlerSource)) { throw "Vectored handler source not found: $vectoredHandlerSource" }
+if (-not (Test-Path -LiteralPath $schedulerSource)) { throw "Scheduler source not found: $schedulerSource" }
+if (-not (Test-Path -LiteralPath $schedulerAssembly)) { throw "Scheduler assembly not found: $schedulerAssembly" }
+if (-not (Test-Path -LiteralPath $schedulerProofSource)) { throw "Scheduler proof source not found: $schedulerProofSource" }
 if (-not (Test-Path -LiteralPath $startupSource)) { throw "UEFI startup script not found: $startupSource" }
 if (-not (Test-Path -LiteralPath $managedArtifact)) {
     throw "Build the Gate 1 shared artifact first: $managedArtifact"
@@ -850,6 +856,12 @@ if ($Scenario -eq 'Malloc' -or $Scenario -eq 'VectoredExceptionHandler' -or
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
 if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }
+if ($Scenario -eq 'SyntheticScheduler') {
+    $gccArguments += '-DGXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF'
+    $gccArguments += $schedulerSource
+    $gccArguments += $schedulerAssembly
+    $gccArguments += $schedulerProofSource
+}
 
 & $gccCommand.Source @gccArguments 1> $buildLog 2> $buildErrorLog
 if ($LASTEXITCODE -ne 0) {

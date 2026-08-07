@@ -21,6 +21,9 @@
 #include "crt_malloc.h"
 #include "exception_context.h"
 #include "vectored_handler.h"
+#ifdef GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF
+#include "scheduler_foundation.h"
+#endif
 
 typedef uint64_t EFI_STATUS;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
@@ -324,6 +327,12 @@ extern void gxos_exception_probe(void);
 extern const uint8_t gxos_exception_probe_int3[];
 extern void gxos_exception_probe_landing(void);
 static void serial_text(const char *text);
+#ifdef GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF
+static void GXOS_SCHEDULER_MS_ABI scheduler_log_hex(const char *name,
+                                                    uint64_t value);
+static void GXOS_SCHEDULER_MS_ABI scheduler_log_u32(const char *name,
+                                                    uint32_t value);
+#endif
 #ifdef GXOS_ENABLE_CRT_MALLOC
 static GXOS_CRT_MALLOC_CONTEXT g_crt_malloc_context;
 static uint32_t g_crt_malloc_import_descriptor_index;
@@ -634,6 +643,22 @@ static void serial_field_hex(const char *name, uint64_t value)
     serial_text(name);
     serial_hex64(value);
 }
+
+#ifdef GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF
+static void GXOS_SCHEDULER_MS_ABI scheduler_log_hex(const char *name,
+                                                    uint64_t value)
+{
+    serial_field_hex(name, value);
+    serial_text("\r\n");
+}
+
+static void GXOS_SCHEDULER_MS_ABI scheduler_log_u32(const char *name,
+                                                    uint32_t value)
+{
+    serial_field_hex(name, value);
+    serial_text("\r\n");
+}
+#endif
 
 #ifdef GXOS_ENABLE_CRT_MALLOC
 static void GXOS_CRT_MALLOC_MS_ABI platform_crt_malloc_trace(
@@ -6320,6 +6345,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:LOADER_START\r\n");
     g_phase = PHASE_LOADER;
     boot_services = system_table->BootServices;
+#ifdef GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF
+    if (!gxos_synthetic_scheduler_proof(
+            boot_services->AllocatePages, boot_services->FreePages,
+            serial_text, scheduler_log_hex, scheduler_log_u32)) {
+        fail("synthetic-scheduler-proof");
+    }
+    serial_text("GXOS_NET10:SYNTHETIC_SCHEDULER_PROOF_RETURNED\r\n");
+    halt_forever();
+#endif
     configure_platform_time(system_table->RuntimeServices);
 #ifdef GXOS_ENABLE_NATIVEAOT_STARTUP
     configure_platform_performance(system_table);
