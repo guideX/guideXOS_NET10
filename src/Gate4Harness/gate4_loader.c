@@ -21,8 +21,11 @@
 #include "crt_malloc.h"
 #include "exception_context.h"
 #include "vectored_handler.h"
-#ifdef GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF
+#if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || defined(GXOS_ENABLE_CREATE_EVENT_W)
 #include "scheduler_foundation.h"
+#endif
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
+#include "create_event_w.h"
 #endif
 
 typedef uint64_t EFI_STATUS;
@@ -248,9 +251,27 @@ enum {
 static uint32_t g_phase;
 static uint64_t g_managed_target;
 static uint64_t g_managed_image_base;
+static uint64_t g_managed_image_size;
 static uint32_t g_platform_last_error;
 static uint64_t g_stack_lower;
 static uint64_t g_stack_upper;
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
+static GXOS_SCHEDULER g_create_event_scheduler;
+static GXOS_CREATE_EVENT_W_CONTEXT g_create_event_context;
+static uint32_t g_create_event_scheduler_initialize_count;
+static uint32_t g_create_event_w_invocation_count;
+static uint32_t g_create_event_w_success_count;
+static uint32_t g_create_event_w_storage_failures;
+static GXOS_SCHEDULER_HANDLE g_create_event_w_handles[GXOS_SCHEDULER_MAX_EVENTS];
+static uintptr_t g_create_event_w_storage_addresses[GXOS_SCHEDULER_MAX_EVENTS];
+static uint32_t g_create_event_w_import_descriptor_index;
+static uint32_t g_create_event_w_import_symbol_index;
+static uint32_t g_create_event_w_importing_iat_rva;
+static void *EFIAPI platform_create_event_w(void *event_attributes,
+                                             int32_t manual_reset,
+                                             int32_t initial_state,
+                                             const uint16_t *name);
+#endif
 /* These symbols are intentionally external to the assembly entry file. */
 volatile uint32_t gxos_exception_dispatch_active;
 uint32_t gxos_exception_probe_enabled;
@@ -624,7 +645,7 @@ static void serial_u32(uint32_t value)
     while (count != 0) serial_char((uint8_t)digits[--count]);
 }
 
-static void halt_forever(void)
+static void __attribute__((noreturn)) halt_forever(void)
 {
     __asm__ volatile ("cli");
     for (;;) __asm__ volatile ("hlt");
@@ -643,6 +664,289 @@ static void serial_field_hex(const char *name, uint64_t value)
     serial_text(name);
     serial_hex64(value);
 }
+
+static uintptr_t import_call_site(uintptr_t return_address)
+{
+    if (g_managed_image_base != 0 &&
+        return_address >= g_managed_image_base + 6U &&
+        ((const uint8_t *)(uintptr_t)(return_address - 6U))[0] == 0xFF) {
+        return return_address - 6U;
+    }
+    if (g_managed_image_base != 0 &&
+        return_address >= g_managed_image_base + 5U &&
+        ((const uint8_t *)(uintptr_t)(return_address - 5U))[0] == 0xE8) {
+        return return_address - 5U;
+    }
+    return return_address;
+}
+
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
+static uintptr_t capture_caller_rbx(void)
+{
+    uintptr_t value;
+    __asm__ volatile ("mov %%rbx, %0" : "=r"(value));
+    return value;
+}
+
+static uint32_t create_event_w_storage_address_valid(uintptr_t address)
+{
+    return g_managed_image_base != 0 && g_managed_image_size >= 8U &&
+           address >= g_managed_image_base &&
+           address <= g_managed_image_base + g_managed_image_size - 8U;
+}
+
+static uint32_t create_event_w_validate_storage_history(void)
+{
+    uint32_t index;
+    for (index = 0; index != g_create_event_w_success_count; ++index) {
+        uintptr_t address = g_create_event_w_storage_addresses[index];
+        if (!create_event_w_storage_address_valid(address) ||
+            *(const uint64_t *)(uintptr_t)address != g_create_event_w_handles[index]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void create_event_w_live_counts(uint32_t *events,
+                                       uint32_t *event_objects,
+                                       uint32_t *event_handles,
+                                       uint32_t *waiters,
+                                       uint32_t *thread_objects,
+                                       uint32_t *additional_threads)
+{
+    uint32_t index;
+    *events = 0;
+    *event_objects = 0;
+    *event_handles = 0;
+    *waiters = 0;
+    *thread_objects = 0;
+    *additional_threads = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_EVENTS; ++index) {
+        if (g_create_event_scheduler.events[index].live) {
+            (*events)++;
+            *waiters += g_create_event_scheduler.events[index].waiter_count;
+        }
+    }
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        GXOS_SCHEDULER_OBJECT *object = &g_create_event_scheduler.objects[index];
+        if (!object->live) continue;
+        if (object->type == GXOS_SCHEDULER_OBJECT_EVENT) {
+            (*event_objects)++;
+            *event_handles += object->public_handle_refs;
+        } else if (object->type == GXOS_SCHEDULER_OBJECT_THREAD) {
+            (*thread_objects)++;
+        }
+    }
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        if (g_create_event_scheduler.threads[index].live &&
+            !g_create_event_scheduler.threads[index].is_boot_thread) {
+            (*additional_threads)++;
+        }
+    }
+}
+
+static void emit_create_event_w_final_summary(void)
+{
+    uint32_t events;
+    uint32_t event_objects;
+    uint32_t event_handles;
+    uint32_t waiters;
+    uint32_t thread_objects;
+    uint32_t additional_threads;
+    uint32_t index;
+    uint32_t signaled = 0;
+    uint32_t auto_reset = 0;
+    uint32_t manual_reset = 0;
+
+    if (!create_event_w_validate_storage_history()) {
+        ++g_create_event_w_storage_failures;
+    }
+    create_event_w_live_counts(&events, &event_objects, &event_handles,
+                               &waiters, &thread_objects, &additional_threads);
+    for (index = 0; index != GXOS_SCHEDULER_MAX_EVENTS; ++index) {
+        GXOS_SCHEDULER_EVENT *event = &g_create_event_scheduler.events[index];
+        if (!event->live) continue;
+        if (event->signaled) ++signaled;
+        if (event->manual_reset) ++manual_reset;
+        else ++auto_reset;
+    }
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_SUCCESS_COUNT=0x",
+                     g_create_event_w_success_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_LIVE_EVENT_COUNT=0x", events);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_LIVE_EVENT_OBJECT_COUNT=0x",
+                     event_objects);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_LIVE_PUBLIC_HANDLE_COUNT=0x",
+                     event_handles);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_LIVE_EVENT_WAITER_COUNT=0x",
+                     waiters);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_INITIALLY_SIGNALED_COUNT=0x",
+                     signaled);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_AUTO_RESET_COUNT=0x", auto_reset);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_MANUAL_RESET_COUNT=0x",
+                     manual_reset);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_LIVE_THREAD_OBJECT_COUNT=0x",
+                     thread_objects);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_ADDITIONAL_THREAD_COUNT=0x",
+                     additional_threads);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_SCHEDULER_INITIALIZE_COUNT=0x",
+                     g_create_event_scheduler_initialize_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_STORAGE_FAILURE_COUNT=0x",
+                     g_create_event_w_storage_failures);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CREATEEVENTW_SYNTHETIC_PROOF_OBJECTS_LIVE=0\r\n");
+    serial_text("GXOS_NET10:CREATEEVENTW_FINAL_SUMMARY=READY\r\n");
+}
+
+static void *EFIAPI platform_create_event_w(void *event_attributes,
+                                             int32_t manual_reset,
+                                             int32_t initial_state,
+                                             const uint16_t *name)
+{
+    GXOS_SCHEDULER_TCB *before_thread = gxos_scheduler_current_thread();
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = import_call_site(return_address);
+    uintptr_t storage_address = capture_caller_rbx();
+    uint32_t invocation = ++g_create_event_w_invocation_count;
+    uint32_t previous_storage_valid = create_event_w_validate_storage_history();
+    GXOS_SCHEDULER_HANDLE handle;
+    GXOS_SCHEDULER_EVENT *event;
+    GXOS_SCHEDULER_OBJECT *object;
+    uint32_t success_index;
+    uint32_t index;
+    uint32_t storage_class = 0;
+    uint32_t tcb_unchanged;
+
+    if (!previous_storage_valid) ++g_create_event_w_storage_failures;
+    if (event_attributes != 0 || name != 0 ||
+        !g_create_event_scheduler.active) {
+        g_platform_last_error = GXOS_CREATE_EVENT_W_ERROR_INVALID_PARAMETER;
+        serial_field_hex("GXOS_NET10:CREATEEVENTW_FAILED_INVOCATION=0x", invocation);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CREATEEVENTW_FAILED_RCX=0x",
+                         (uint64_t)(uintptr_t)event_attributes);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CREATEEVENTW_FAILED_RDX=0x",
+                         (uint32_t)manual_reset);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CREATEEVENTW_FAILED_R8=0x",
+                         (uint32_t)initial_state);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CREATEEVENTW_FAILED_R9=0x",
+                         (uint64_t)(uintptr_t)name);
+        serial_text("\r\n");
+        return 0;
+    }
+    handle = gxos_create_event_w_contract(&g_create_event_context,
+                                          event_attributes, manual_reset,
+                                          initial_state, name);
+    if (handle == 0) {
+        g_platform_last_error = GXOS_CREATE_EVENT_W_ERROR_NOT_ENOUGH_MEMORY;
+        return 0;
+    }
+    if (g_create_event_w_success_count >= GXOS_SCHEDULER_MAX_EVENTS) {
+        fail("createeventw-diagnostic-capacity");
+    }
+    success_index = g_create_event_w_success_count++;
+    event = gxos_scheduler_event_from_handle(handle);
+    if (event == 0 || event->object_slot >= GXOS_SCHEDULER_MAX_OBJECTS) {
+        fail("createeventw-handle-decode");
+    }
+    object = &g_create_event_scheduler.objects[event->object_slot];
+    for (index = 0; index != success_index; ++index) {
+        if (g_create_event_w_handles[index] == handle) {
+            fail("createeventw-duplicate-handle");
+        }
+    }
+    g_create_event_w_handles[success_index] = handle;
+    g_create_event_w_storage_addresses[success_index] = storage_address;
+    if (invocation == 1U && storage_address ==
+            g_managed_image_base + 0xADA08U) {
+        storage_class = 1;
+    } else if (invocation == 2U && storage_address ==
+                   g_managed_image_base + 0xADA18U) {
+        storage_class = 1;
+    } else if (invocation >= 3U) {
+        storage_class = 2;
+    }
+    if (storage_class == 0U || !create_event_w_storage_address_valid(storage_address)) {
+        ++g_create_event_w_storage_failures;
+    }
+    tcb_unchanged = before_thread != 0 &&
+        before_thread == gxos_scheduler_current_thread() &&
+        before_thread->state == GXOS_SCHEDULER_THREAD_RUNNING &&
+        before_thread->execution_refs == 1U &&
+        before_thread->public_handle_refs == 0U;
+    serial_text("GXOS_NET10:CREATEEVENTW_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_INVOCATION=0x", invocation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_RUNTIME_CALLER_ADDRESS=0x", return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_RCX=0x",
+                     (uint64_t)(uintptr_t)event_attributes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_RDX=0x", (uint32_t)manual_reset);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_R8=0x", (uint32_t)initial_state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_R9=0x", (uint64_t)(uintptr_t)name);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_RETURNED_HANDLE=0x", handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_HANDLE_GENERATION=0x", event->generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_HANDLE_TYPE=0x", object->type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_EVENT_REGISTRY_SLOT=0x",
+                     (uint64_t)(event - g_create_event_scheduler.events));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_OBJECT_REGISTRY_SLOT=0x",
+                     event->object_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_EVENT_MANUAL_RESET=0x", event->manual_reset);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_EVENT_SIGNALED=0x", event->signaled);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_PUBLIC_REFERENCE_COUNT=0x",
+                     object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_WAITER_COUNT=0x", event->waiter_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_STORAGE_ADDRESS=0x", storage_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_STORAGE_RVA=0x",
+                     storage_address >= g_managed_image_base
+                         ? storage_address - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CREATEEVENTW_STORAGE_CLASS=");
+    serial_text(storage_class == 1U ? "KNOWN_PERSISTENT_SLOT\r\n" :
+                "ALLOCATOR_RECORD_SLOT0\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_PREVIOUS_STORAGE_VALID=0x",
+                     previous_storage_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_TCB_STATE_UNCHANGED=0x", tcb_unchanged);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CREATEEVENTW_RETURNED\r\n");
+    return (void *)(uintptr_t)handle;
+}
+#endif
 
 #ifdef GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF
 static void GXOS_SCHEDULER_MS_ABI scheduler_log_hex(const char *name,
@@ -2801,6 +3105,9 @@ static void *GXOS_VEH_MS_ABI platform_add_vectored_exception_handler(
 typedef struct {
     const char *module;
     const char *symbol;
+    uint32_t descriptor_index;
+    uint32_t symbol_index;
+    uint32_t iat_rva;
 } IMPORT_RECORD;
 
 #define MAX_IMPORT_SYMBOLS 256
@@ -2808,11 +3115,54 @@ static IMPORT_RECORD g_import_records[MAX_IMPORT_SYMBOLS];
 static EFI_PHYSICAL_ADDRESS g_import_stub_pages;
 static uint32_t g_import_symbol_count;
 
-static void EFIAPI import_failfast(const IMPORT_RECORD *record, uintptr_t original_rcx)
+static void __attribute__((noreturn)) EFIAPI import_failfast(
+    const IMPORT_RECORD *record, const uint64_t *arguments)
 {
-    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t return_address = arguments == 0 ? 0 : (uintptr_t)arguments[4];
+    uintptr_t call_site = import_call_site(return_address);
+    uintptr_t original_rcx = arguments == 0 ? 0 : (uintptr_t)arguments[3];
+    uintptr_t original_rdx = arguments == 0 ? 0 : (uintptr_t)arguments[2];
+    uintptr_t original_r8 = arguments == 0 ? 0 : (uintptr_t)arguments[1];
+    uintptr_t original_r9 = arguments == 0 ? 0 : (uintptr_t)arguments[0];
     if (g_phase == PHASE_AFTER_TIME_CALL) g_phase = PHASE_IN_TIME_CONSUMER;
     if (g_phase == PHASE_AFTER_QPC_CALL) g_phase = PHASE_AFTER_SECURITY_COOKIE_INIT;
+    serial_text("GXOS_NET10:IMPORT_BLOCKER_DLL=");
+    serial_text(record->module);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:IMPORT_BLOCKER_SYMBOL=");
+    serial_text(record->symbol);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_DESCRIPTOR_INDEX=0x",
+                     record->descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_SYMBOL_INDEX=0x",
+                     record->symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_IAT_RVA=0x", record->iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_RUNTIME_IAT=0x",
+                     g_managed_image_base + record->iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_RCX=0x", original_rcx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_RDX=0x", original_rdx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_R8=0x", original_r8);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_R9=0x", original_r9);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_STACK_ARG5=0x",
+                     arguments == 0 ? 0 : arguments[9]);
+    serial_text("\r\n");
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
+    emit_create_event_w_final_summary();
+#endif
 #ifdef GXOS_ENABLE_CRT_MALLOC
     if (equal_text(record->module, "api-ms-win-crt-heap-l1-1-0.dll") &&
         equal_text(record->symbol, "_callnewh")) {
@@ -3059,10 +3409,20 @@ static void emit_import_failfast_stub(uint8_t *stub, const IMPORT_RECORD *record
     uint64_t handler_address = (uint64_t)(uintptr_t)import_failfast;
     uint32_t cursor = 0;
 
-    /* mov rdx, rcx; mov rcx, record; mov rax, import_failfast; jmp rax */
+    /*
+     * Push the four original register arguments.  The original return
+     * address remains at arguments[4].  The handler never returns, so this
+     * temporary stack frame needs no unwind or restore path.
+     */
+    stub[cursor++] = 0x51; /* push rcx */
+    stub[cursor++] = 0x52; /* push rdx */
+    stub[cursor++] = 0x41;
+    stub[cursor++] = 0x50; /* push r8 */
+    stub[cursor++] = 0x41;
+    stub[cursor++] = 0x51; /* push r9 */
     stub[cursor++] = 0x48;
     stub[cursor++] = 0x89;
-    stub[cursor++] = 0xCA;
+    stub[cursor++] = 0xE2; /* mov rdx, rsp */
     stub[cursor++] = 0x48;
     stub[cursor++] = 0xB9;
     *(uint64_t *)(stub + cursor) = record_address;
@@ -4376,6 +4736,12 @@ static void GXOS_CRT_INITTERM_MS_ABI platform_initterm(
 
 static void *platform_import_target(const char *module, const char *symbol)
 {
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "CreateEventW")) {
+        return (void *)(uintptr_t)platform_create_event_w;
+    }
+#endif
 #ifndef GXOS_DISABLE_TIME_IMPLEMENTATION
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetSystemTimeAsFileTime")) return (void *)(uintptr_t)gxos_get_system_time_as_file_time;
 #endif
@@ -4644,6 +5010,17 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
             if (symbols >= MAX_IMPORT_SYMBOLS) fail("import-symbol-capacity");
             g_import_records[symbols].module = module;
             g_import_records[symbols].symbol = (const char *)(hint_name + 2);
+            g_import_records[symbols].descriptor_index = descriptors - 1U;
+            g_import_records[symbols].symbol_index = index;
+            g_import_records[symbols].iat_rva = first_thunk_rva + index * 8U;
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "CreateEventW")) {
+                g_create_event_w_import_descriptor_index = descriptors - 1U;
+                g_create_event_w_import_symbol_index = index;
+                g_create_event_w_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
             if (equal_text(module, "KERNEL32.dll") &&
                 equal_text(g_import_records[symbols].symbol, "GetModuleHandleW")) {
@@ -6485,6 +6862,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_hex64(image.managed_main_rva);
     serial_text("\r\n");
     g_managed_image_base = image.actual_base;
+    g_managed_image_size = image.loaded_size;
     g_managed_target = image.actual_base + image.managed_main_rva;
     serial_field_hex("GXOS_NET10:IMAGE_BASE=0x", image.actual_base);
     serial_text("\r\n");
@@ -6492,6 +6870,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     resolve_imports(&image, boot_services, &import_descriptors, &import_symbols,
                     &import_functional, &import_failfast, &unresolved_imports);
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
+    if (g_create_event_w_import_descriptor_index != 2U ||
+        g_create_event_w_import_symbol_index != 42U ||
+        g_create_event_w_importing_iat_rva != 0x7D188U) {
+        fail("createeventw-import-contract");
+    }
+    serial_text("GXOS_NET10:CREATEEVENTW_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:CREATEEVENTW_IMPORT_SYMBOL=CreateEventW\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_create_event_w_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_IMPORT_SYMBOL_INDEX=0x",
+                     g_create_event_w_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_IMPORT_IAT_RVA=0x",
+                     g_create_event_w_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_PREFERRED_IAT=0x",
+                     image.preferred_base + g_create_event_w_importing_iat_rva);
+    serial_text("\r\n");
+#endif
 #ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
     if (g_veh_add_import_descriptor_index != 2U ||
         g_veh_add_import_symbol_index != 30U ||
@@ -6628,6 +7027,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:TLS_ALLOC_LIMIT=0x", *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x30));
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:TLS_ALLOC_PTR=0x", *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x38));
+    serial_text("\r\n");
+#endif
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
+    if (!gxos_scheduler_initialize(&g_create_event_scheduler,
+                                   boot_services->AllocatePages,
+                                   boot_services->FreePages,
+                                   0, 0, 0)) {
+        fail("createeventw-scheduler-initialize");
+    }
+    ++g_create_event_scheduler_initialize_count;
+    if (!gxos_scheduler_adopt_boot_environment(
+            &g_create_event_scheduler,
+            g_gs_area, g_teb_area, g_tls_vector, g_tls_block,
+            g_stack_lower, g_stack_upper)) {
+        fail("createeventw-scheduler-adopt-environment");
+    }
+    g_create_event_context.scheduler = &g_create_event_scheduler;
+    serial_text("GXOS_NET10:CREATEEVENTW_SCHEDULER_INITIALIZED=1\r\n");
+    serial_text("GXOS_NET10:CREATEEVENTW_SCHEDULER_BOOT_ENVIRONMENT=PAYLOAD_TLS\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_SCHEDULER_BOOT_OBJECT_SLOT=0x",
+                     g_create_event_scheduler.boot_thread->object_slot);
     serial_text("\r\n");
 #endif
     g_boot_info_address = (uint64_t)(uintptr_t)&g_boot_info;

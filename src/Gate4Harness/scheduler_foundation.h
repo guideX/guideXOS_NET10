@@ -154,7 +154,7 @@ typedef struct GXOS_SCHEDULER_TCB {
     uint8_t live;
     uint8_t is_boot_thread;
     uint8_t close_state;
-    uint8_t reserved;
+    uint8_t environment_owned;
     uint32_t identity;
     uint16_t generation;
     uint16_t object_slot;
@@ -231,6 +231,13 @@ int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
                               GXOS_SCHEDULER_LOG_TEXT log_text,
                               GXOS_SCHEDULER_LOG_HEX log_hex,
                               GXOS_SCHEDULER_LOG_U32 log_u32);
+int gxos_scheduler_adopt_boot_environment(GXOS_SCHEDULER *scheduler,
+                                           uint64_t gs_base,
+                                           uint64_t teb_base,
+                                           uint64_t tls_vector_base,
+                                           uint64_t tls_block_base,
+                                           uint64_t stack_lower,
+                                           uint64_t stack_upper);
 int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
                                 uint8_t manual_reset,
                                 uint8_t initial_signaled,

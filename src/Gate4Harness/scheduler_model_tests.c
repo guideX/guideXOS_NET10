@@ -1,4 +1,5 @@
 #include "scheduler_foundation.h"
+#include "create_event_w.h"
 
 #include <stdio.h>
 
@@ -91,6 +92,16 @@ static void destroy_event(GXOS_SCHEDULER_HANDLE handle)
     CHECK(gxos_scheduler_try_destroy_event(handle));
 }
 
+static uint32_t live_event_count(void)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_EVENTS; ++index) {
+        if (g_scheduler.events[index].live) ++count;
+    }
+    return count;
+}
+
 int main(void)
 {
     GXOS_SCHEDULER_HANDLE auto_event;
@@ -102,6 +113,8 @@ int main(void)
     GXOS_SCHEDULER_HANDLE temporary_events[GXOS_SCHEDULER_MAX_EVENTS] = {0};
     GXOS_SCHEDULER_TCB *worker;
     GXOS_SCHEDULER_SWITCH_PLAN plan;
+    GXOS_CREATE_EVENT_W_CONTEXT event_context;
+    GXOS_SCHEDULER_HANDLE contract_events[4] = {0};
     uint32_t previous_suspend_count;
     uint32_t thread_count;
     uint32_t event_count;
@@ -110,6 +123,68 @@ int main(void)
     CHECK(gxos_scheduler_initialize(&g_scheduler, model_allocate, model_free,
                                     model_log_text, model_log_hex,
                                     model_log_u32));
+    CHECK(gxos_scheduler_current_thread() == g_scheduler.boot_thread);
+    CHECK(gxos_scheduler_current_gs_base() != 0);
+
+    event_context.scheduler = &g_scheduler;
+    CHECK((contract_events[0] = gxos_create_event_w_contract(
+               &event_context, 0, 0, 0, 0)) != 0);
+    CHECK((contract_events[1] = gxos_create_event_w_contract(
+               &event_context, 0, 1, 0, 0)) != 0);
+    CHECK((contract_events[2] = gxos_create_event_w_contract(
+               &event_context, 0, 0, 1, 0)) != 0);
+    CHECK((contract_events[3] = gxos_create_event_w_contract(
+               &event_context, 0, 1, 1, 0)) != 0);
+    CHECK(gxos_scheduler_event_from_handle(contract_events[0])->manual_reset == 0);
+    CHECK(gxos_scheduler_event_from_handle(contract_events[0])->signaled == 0);
+    CHECK(gxos_scheduler_event_from_handle(contract_events[1])->manual_reset == 1);
+    CHECK(gxos_scheduler_event_from_handle(contract_events[1])->signaled == 0);
+    CHECK(gxos_scheduler_event_from_handle(contract_events[2])->manual_reset == 0);
+    CHECK(gxos_scheduler_event_from_handle(contract_events[2])->signaled == 1);
+    CHECK(gxos_scheduler_event_from_handle(contract_events[3])->manual_reset == 1);
+    CHECK(gxos_scheduler_event_from_handle(contract_events[3])->signaled == 1);
+    {
+        uint32_t before = live_event_count();
+        CHECK(gxos_create_event_w_contract(&event_context, (void *)(uintptr_t)1,
+                                           0, 0, 0) == 0);
+        CHECK(live_event_count() == before);
+        CHECK(gxos_scheduler_get_last_error() ==
+              GXOS_CREATE_EVENT_W_ERROR_INVALID_PARAMETER);
+        CHECK(gxos_create_event_w_contract(&event_context, 0, 0, 0,
+                                           (const uint16_t *)(uintptr_t)1) == 0);
+        CHECK(live_event_count() == before);
+        CHECK(gxos_scheduler_get_last_error() ==
+              GXOS_CREATE_EVENT_W_ERROR_INVALID_PARAMETER);
+    }
+    event_count = 0;
+    while (event_count != GXOS_SCHEDULER_MAX_EVENTS &&
+           gxos_create_event_w_contract(&event_context, 0, 0, 0, 0) != 0) {
+        ++event_count;
+    }
+    CHECK(gxos_create_event_w_contract(&event_context, 0, 0, 0, 0) == 0);
+    CHECK(gxos_scheduler_get_last_error() ==
+          GXOS_CREATE_EVENT_W_ERROR_NOT_ENOUGH_MEMORY);
+    CHECK(live_event_count() == GXOS_SCHEDULER_MAX_EVENTS);
+    for (index = 0; index != GXOS_SCHEDULER_MAX_EVENTS; ++index) {
+        if (g_scheduler.events[index].live) {
+            GXOS_SCHEDULER_OBJECT *object =
+                &g_scheduler.objects[g_scheduler.events[index].object_slot];
+            GXOS_SCHEDULER_HANDLE live_handle =
+                ((uint64_t)GXOS_SCHEDULER_HANDLE_MAGIC << 56) |
+                ((uint64_t)GXOS_SCHEDULER_OBJECT_EVENT << 48) |
+                ((uint64_t)g_scheduler.events[index].generation << 16) |
+                ((uint64_t)g_scheduler.events[index].object_slot + 1U);
+            CHECK(object->type == GXOS_SCHEDULER_OBJECT_EVENT);
+            CHECK(gxos_scheduler_event_from_handle(live_handle) ==
+                  &g_scheduler.events[index]);
+            CHECK(gxos_scheduler_close_handle(live_handle));
+            CHECK(gxos_scheduler_try_destroy_event(live_handle));
+        }
+    }
+    CHECK(live_event_count() == 0);
+    CHECK(!gxos_scheduler_initialize(&g_scheduler, model_allocate, model_free,
+                                     model_log_text, model_log_hex,
+                                     model_log_u32));
     CHECK(gxos_scheduler_current_thread() == g_scheduler.boot_thread);
     CHECK(gxos_scheduler_current_gs_base() != 0);
 
@@ -126,6 +201,7 @@ int main(void)
     CHECK(worker->execution_refs == 1);
     CHECK(worker->public_handle_refs == 1);
     CHECK(gxos_scheduler_thread_from_handle(worker_handle) == worker);
+    CHECK(gxos_scheduler_event_from_handle(worker_handle) == 0);
     CHECK(gxos_scheduler_prepare_wait(worker_handle, &plan) ==
           GXOS_SCHEDULER_WAIT_FAILURE);
     CHECK(gxos_scheduler_resume_thread(worker_handle, &previous_suspend_count));

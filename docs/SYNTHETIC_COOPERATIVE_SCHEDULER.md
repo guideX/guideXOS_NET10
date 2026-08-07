@@ -1,10 +1,11 @@
 # Synthetic cooperative scheduler foundation
 
-This document describes the bounded Gate4 scheduler contract proof.  It is an
-internal test foundation only.  It is not connected to NativeAOT import
-routing and it does not claim Windows thread, event, or handle compatibility.
-The real payload path therefore remains unchanged and still stops at the
-unresolved `KERNEL32.dll!CreateEventW` import.
+This document describes the bounded Gate4 scheduler contract proof.  The proof
+remains an internal synthetic test foundation; it does not by itself claim
+Windows thread, event, or handle compatibility.  A separate, payload-facing
+`CreateEventW` bridge now reuses the object and handle machinery after the
+NativeAOT bootstrap has established the payload's own TLS/TEB state.  That
+boundary is documented in [KERNEL32_CREATEEVENTW_BOOTSTRAP.md](KERNEL32_CREATEEVENTW_BOOTSTRAP.md).
 
 ## Purpose and limits
 
@@ -26,7 +27,8 @@ Current limitations are explicit:
 - cooperative scheduling only, with no preemption or SMP;
 - no timeout queue yet, although wait preparation is the integration point for
   a future timer queue;
-- no NativeAOT payload import integration and no general Windows API claim;
+- only the separately documented, exact `KERNEL32.dll!CreateEventW` payload
+  boundary; no general Windows API claim;
 - unnamed events only, with no `SECURITY_ATTRIBUTES` support;
 - no production post-`ExitBootServices` scheduler claim;
 - synthetic contract proof only.

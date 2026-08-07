@@ -232,20 +232,24 @@ static int allocate_thread_environment(GXOS_SCHEDULER_TCB *thread)
         ? scheduler->boot_stack_lower : thread->stack_base;
     *(uint64_t *)(teb_bytes + 0x100) = thread->identity;
     zero_bytes((void *)(uintptr_t)block, GXOS_SCHEDULER_PAGE_SIZE);
+    thread->environment_owned = 1;
     return 1;
 }
 
 static void free_thread_environment(GXOS_SCHEDULER_TCB *thread)
 {
     if (thread == 0 || g_scheduler == 0) return;
-    page_free(g_scheduler, thread->gs_base);
-    page_free(g_scheduler, thread->tls_vector_base);
-    page_free(g_scheduler, thread->tls_block_base);
-    page_free(g_scheduler, thread->teb_base);
+    if (thread->environment_owned) {
+        page_free(g_scheduler, thread->gs_base);
+        page_free(g_scheduler, thread->tls_vector_base);
+        page_free(g_scheduler, thread->tls_block_base);
+        page_free(g_scheduler, thread->teb_base);
+    }
     thread->gs_base = 0;
     thread->tls_vector_base = 0;
     thread->tls_block_base = 0;
     thread->teb_base = 0;
+    thread->environment_owned = 0;
 }
 
 static GXOS_SCHEDULER_TCB *find_free_thread(void)
@@ -323,6 +327,9 @@ int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
     uint16_t object_slot;
     uint64_t rsp;
     if (scheduler == 0 || allocate_pages == 0 || free_pages == 0) return 0;
+    if ((g_scheduler != 0 && g_scheduler->active) || scheduler->active) {
+        return 0;
+    }
     zero_bytes(scheduler, sizeof(*scheduler));
     scheduler->allocate_pages = allocate_pages;
     scheduler->free_pages = free_pages;
@@ -365,6 +372,44 @@ int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
     return 1;
 }
 
+int gxos_scheduler_adopt_boot_environment(GXOS_SCHEDULER *scheduler,
+                                           uint64_t gs_base,
+                                           uint64_t teb_base,
+                                           uint64_t tls_vector_base,
+                                           uint64_t tls_block_base,
+                                           uint64_t stack_lower,
+                                           uint64_t stack_upper)
+{
+    GXOS_SCHEDULER_TCB *boot;
+    uint8_t *gs;
+    uint8_t *teb;
+    if (scheduler == 0 || scheduler != g_scheduler || !scheduler->active ||
+        scheduler->boot_thread == 0 || scheduler->current != scheduler->boot_thread ||
+        gs_base == 0 || teb_base == 0 || tls_vector_base == 0 ||
+        tls_block_base == 0 || stack_upper <= stack_lower) {
+        return 0;
+    }
+    boot = scheduler->boot_thread;
+    free_thread_environment(boot);
+    boot->gs_base = gs_base;
+    boot->teb_base = teb_base;
+    boot->tls_vector_base = tls_vector_base;
+    boot->tls_block_base = tls_block_base;
+    boot->environment_owned = 0;
+    scheduler->boot_stack_lower = stack_lower;
+    scheduler->boot_stack_upper = stack_upper;
+    gs = (uint8_t *)(uintptr_t)gs_base;
+    teb = (uint8_t *)(uintptr_t)teb_base;
+    *(uint64_t *)(gs + 0x30) = teb_base;
+    *(uint64_t *)(gs + 0x58) = tls_vector_base;
+    *(uint64_t *)(teb + 0x08) = stack_upper;
+    *(uint64_t *)(teb + 0x10) = stack_lower;
+    boot->context.gs_base = gs_base;
+    boot->saved_context = &boot->context;
+    set_gs_base(gs_base);
+    return 1;
+}
+
 int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
                                 uint8_t manual_reset,
                                 uint8_t initial_signaled,
@@ -374,6 +419,7 @@ int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
     uint16_t object_slot;
     GXOS_SCHEDULER_OBJECT *object;
     GXOS_SCHEDULER_EVENT *event = 0;
+    if (handle != 0) *handle = 0;
     if (scheduler == 0 || scheduler != g_scheduler || handle == 0) return 0;
     for (index = 0; index != GXOS_SCHEDULER_MAX_EVENTS; ++index) {
         if (!scheduler->events[index].live) {
@@ -385,7 +431,10 @@ int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
     zero_bytes(event, sizeof(*event));
     object = allocate_object(GXOS_SCHEDULER_OBJECT_EVENT, event, &object_slot,
                              handle);
-    if (object == 0) return 0;
+    if (object == 0) {
+        zero_bytes(event, sizeof(*event));
+        return 0;
+    }
     event->live = 1;
     event->manual_reset = manual_reset != 0;
     event->signaled = initial_signaled != 0;

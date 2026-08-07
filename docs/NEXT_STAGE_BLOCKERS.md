@@ -22,6 +22,26 @@ Gate 4 still proves the first no-allocation managed handoff. The allocation foll
 
 Other deferred areas are CRT startup/termination, process time/environment, COM, diagnostics, networking, filesystem, globalization, and broad Windows compatibility. The current 95 fail-fast imports make accidental entry into those areas visible. Do not port them as no-op shims.
 
+## `CreateEventW` payload boundary (2026-08-07)
+
+The exact `KERNEL32.dll!CreateEventW` route is implemented only for unnamed
+events with NULL `SECURITY_ATTRIBUTES`. It creates real guideXOS Event
+objects and generation/type-checked opaque handles. Three fresh enabled QEMU
+runs agree on two successful calls (`FALSE/FALSE`, then `TRUE/FALSE`), two
+live Event objects, two live public handles, zero waiters, and no added thread.
+The disabled route restores the original unresolved CreateEventW boundary
+without creating an object.
+
+The exact payload next reaches
+`KERNEL32.dll!CreateMemoryResourceNotification` at descriptor `2`, symbol
+index `0x36`, IAT RVA `0x7D1E8`, runtime IAT `0x054F81E8`, runtime call site
+`0x054B03F8` (caller RVA `0x353F8`, arguments `RCX=0`, `RDX=1`, `R8=0x3F8`,
+`R9=0`). It is intentionally not implemented here. The Windows ten-call
+CreateEventW oracle therefore remains a later continuation target, not a
+claim of this milestone. Do not implement named events, security attributes,
+waits, signaling/reset, close, duplicate, thread creation, or timeout
+scheduling as part of this boundary.
+
 ## `strcmp` evidence-closure result (2026-07-30)
 
 The narrow Microsoft x64 `strcmp` contract is closed by [CRT_STRCMP_BOOTSTRAP.md](CRT_STRCMP_BOOTSTRAP.md). Three immutable fresh QEMU runs compare `gcServer` with `gcConservative`, return `+1`, preserve zero TLS allocation context/managed-thread/GC state, and reach `strlen`. The subsequent narrow `strlen` contract is closed by [CRT_STRLEN_BOOTSTRAP.md](CRT_STRLEN_BOOTSTRAP.md), and the missing `DOTNET_gcServer` lookup is closed by [KERNEL32_GETENVIRONMENTVARIABLEW_BOOTSTRAP.md](KERNEL32_GETENVIRONMENTVARIABLEW_BOOTSTRAP.md); the next boundary is `api-ms-win-crt-string-l1-1-0.dll!_stricmp`.
