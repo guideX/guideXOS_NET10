@@ -54,6 +54,25 @@ IAT RVA `0x7D1B0`, caller RVA `0x3CFC1`). The disabled control restores
 unresolved CreateThread after the two Events and one MemoryResourceNotification.
 See [KERNEL32_CREATETHREAD_BOOTSTRAP.md](KERNEL32_CREATETHREAD_BOOTSTRAP.md).
 
+## `SetThreadPriority` payload boundary (2026-08-08)
+
+The exact `KERNEL32.dll!SetThreadPriority` route is closed only for the
+generation-checked Thread handle and signed relative priority `2`
+(`THREAD_PRIORITY_HIGHEST`) observed in the exact payload. The value is
+retained in explicit `GXOS_SCHEDULER_TCB.relative_priority` metadata; the
+metadata-only update returns TRUE and leaves the worker `CreatedSuspended`,
+with suspend count `1`, execution count `0`, and `runnable=false`.
+
+Three fresh enabled QEMU runs agree on the first next unresolved import,
+`KERNEL32.dll!ResumeThread` (descriptor `2`, symbol index `0x31`, IAT RVA
+`0x7D1C0`, caller RVA `0x3CFCA`). It is intentionally not routed. The
+disabled control restores unresolved `SetThreadPriority` after the two Event
+objects, one LowMemory notification, and one suspended worker. This milestone
+retains a relative priority value but does not claim priority-sensitive
+cooperative selection, preemptive scheduling, complete Windows thread
+priority semantics, or process-priority-class behavior. See
+[KERNEL32_SETTHREADPRIORITY_BOOTSTRAP.md](KERNEL32_SETTHREADPRIORITY_BOOTSTRAP.md).
+
 ## `CreateEventW` payload boundary (2026-08-07)
 
 The exact `KERNEL32.dll!CreateEventW` route is implemented only for unnamed

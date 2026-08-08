@@ -24,7 +24,8 @@
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
-    defined(GXOS_ENABLE_CREATE_THREAD)
+    defined(GXOS_ENABLE_CREATE_THREAD) || \
+    defined(GXOS_ENABLE_SET_THREAD_PRIORITY)
 #include "scheduler_foundation.h"
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -35,6 +36,9 @@
 #endif
 #ifdef GXOS_ENABLE_CREATE_THREAD
 #include "create_thread.h"
+#endif
+#ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
+#include "set_thread_priority.h"
 #endif
 
 typedef uint64_t EFI_STATUS;
@@ -266,7 +270,8 @@ static uint64_t g_stack_lower;
 static uint64_t g_stack_upper;
 #if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
-    defined(GXOS_ENABLE_CREATE_THREAD)
+    defined(GXOS_ENABLE_CREATE_THREAD) || \
+    defined(GXOS_ENABLE_SET_THREAD_PRIORITY)
 static GXOS_SCHEDULER g_create_event_scheduler;
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -334,6 +339,38 @@ void *EFIAPI gxos_create_thread_platform_impl(
     uintptr_t thread_id,
     uintptr_t import_entry_rsp);
 extern void gxos_create_thread_entry(void);
+#endif
+#ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
+static uint32_t g_set_thread_priority_invocation_count;
+static uint32_t g_set_thread_priority_success_count;
+static uint32_t g_set_thread_priority_failure_count;
+static uint32_t g_set_thread_priority_import_descriptor_index;
+static uint32_t g_set_thread_priority_import_symbol_index;
+static uint32_t g_set_thread_priority_importing_iat_rva;
+static GXOS_SCHEDULER_HANDLE g_set_thread_priority_handle;
+static uint64_t g_set_thread_priority_rcx;
+static uint64_t g_set_thread_priority_rdx_raw;
+static uint64_t g_set_thread_priority_r8;
+static uint64_t g_set_thread_priority_r9;
+static int32_t g_set_thread_priority_signed_value;
+static int32_t g_set_thread_priority_before;
+static int32_t g_set_thread_priority_after;
+static uint32_t g_set_thread_priority_state_before;
+static uint32_t g_set_thread_priority_state_after;
+static uint32_t g_set_thread_priority_suspend_before;
+static uint32_t g_set_thread_priority_suspend_after;
+static uint64_t g_set_thread_priority_execution_count;
+static uint32_t g_set_thread_priority_runnable;
+static uint32_t g_set_thread_priority_return_value;
+static void emit_set_thread_priority_final_summary(void);
+int EFIAPI gxos_set_thread_priority_platform_impl(
+    void *thread_handle,
+    int32_t relative_priority,
+    uintptr_t import_entry_rsp,
+    uint64_t original_r8,
+    uint64_t original_r9,
+    uint64_t original_rdx);
+extern void gxos_set_thread_priority_entry(void);
 #endif
 /* These symbols are intentionally external to the assembly entry file. */
 volatile uint32_t gxos_exception_dispatch_active;
@@ -3480,6 +3517,9 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
 #ifdef GXOS_ENABLE_CREATE_THREAD
     emit_create_thread_final_summary();
 #endif
+#ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
+    emit_set_thread_priority_final_summary();
+#endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
     emit_create_event_w_final_summary();
 #endif
@@ -5531,12 +5571,245 @@ void *EFIAPI gxos_create_thread_platform_impl(
 }
 #endif
 
+#ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
+static void emit_set_thread_priority_final_summary(void)
+{
+    GXOS_SCHEDULER_OBJECT *object =
+        gxos_scheduler_object_from_handle(g_set_thread_priority_handle);
+    GXOS_SCHEDULER_TCB *thread =
+        gxos_scheduler_thread_from_handle(g_set_thread_priority_handle);
+    uint32_t object_slot = object == 0 ? UINT32_MAX : object->slot;
+    uint32_t generation = object == 0 ? 0 : object->generation;
+    uint32_t tcb_slot = thread == 0
+        ? UINT32_MAX
+        : (uint32_t)(thread - g_create_event_scheduler.threads);
+
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_INVOCATION_COUNT=0x",
+                     g_set_thread_priority_invocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_SUCCESS_COUNT=0x",
+                     g_set_thread_priority_success_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_FAILURE_COUNT=0x",
+                     g_set_thread_priority_failure_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_HANDLE=0x",
+                     g_set_thread_priority_handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_HANDLE_TYPE=0x",
+                     object == 0 ? 0 : object->type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_OBJECT_SLOT=0x",
+                     object_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_GENERATION=0x",
+                     generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_TCB_SLOT=0x",
+                     tcb_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_INTERNAL_IDENTITY=0x",
+                     thread == 0 ? 0 : thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_STORED_PRIORITY=0x",
+                     thread == 0
+                         ? (uint64_t)(int64_t)GXOS_SCHEDULER_DEFAULT_RELATIVE_PRIORITY
+                         : (uint64_t)(int64_t)thread->relative_priority);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_STATE=0x",
+                     thread == 0 ? 0 : thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_SUSPEND_COUNT=0x",
+                     thread == 0 ? 0 : thread->suspend_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_EXECUTION_COUNT=0x",
+                     thread == 0 ? 0 : thread->execution_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_RUNNABLE=0x",
+                     thread != 0 && thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_PUBLIC_REFERENCE_COUNT=0x",
+                     object == 0 ? 0 : object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_EXECUTION_REFERENCE_LIVE=0x",
+                     thread != 0 && thread->execution_refs != 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_STACK_BASE=0x",
+                     thread == 0 ? 0 : thread->stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_STACK_LIMIT=0x",
+                     thread == 0 ? 0 : thread->stack_limit);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_STACK_SIZE=0x",
+                     thread == 0 ? 0 : thread->stack_limit - thread->stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_STACK_CANARIES=0x",
+                     thread != 0 && gxos_scheduler_check_canaries(thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_GS_BASE=0x",
+                     thread == 0 ? 0 : thread->gs_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_TEB_BASE=0x",
+                     thread == 0 ? 0 : thread->teb_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_TLS_VECTOR_BASE=0x",
+                     thread == 0 ? 0 : thread->tls_vector_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_TLS_BLOCK_BASE=0x",
+                     thread == 0 ? 0 : thread->tls_block_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_FINAL_FLS_SLOTS=0x",
+                     thread == 0 ? 0 : GXOS_SCHEDULER_FLS_SLOTS);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:SETTHREADPRIORITY_FINAL_SUMMARY=READY\r\n");
+}
+
+int EFIAPI gxos_set_thread_priority_platform_impl(
+    void *thread_handle,
+    int32_t relative_priority,
+    uintptr_t import_entry_rsp,
+    uint64_t original_r8,
+    uint64_t original_r9,
+    uint64_t original_rdx)
+{
+    GXOS_SCHEDULER_HANDLE handle = (GXOS_SCHEDULER_HANDLE)(uintptr_t)thread_handle;
+    GXOS_SCHEDULER_OBJECT *object = gxos_scheduler_object_from_handle(handle);
+    GXOS_SCHEDULER_TCB *before_thread = 0;
+    GXOS_SCHEDULER_TCB *after_thread;
+    int result;
+    uint32_t invocation = ++g_set_thread_priority_invocation_count;
+    uintptr_t return_address = import_entry_rsp == 0
+        ? 0 : *(const uintptr_t *)(uintptr_t)import_entry_rsp;
+    uintptr_t call_site = import_call_site(return_address);
+
+    if (object != 0 && object->type == GXOS_SCHEDULER_OBJECT_THREAD) {
+        before_thread = (GXOS_SCHEDULER_TCB *)object->target;
+    }
+    g_set_thread_priority_handle = handle;
+    g_set_thread_priority_rcx = (uint64_t)(uintptr_t)thread_handle;
+    g_set_thread_priority_rdx_raw = original_rdx;
+    g_set_thread_priority_r8 = original_r8;
+    g_set_thread_priority_r9 = original_r9;
+    g_set_thread_priority_signed_value = (int32_t)(uint32_t)original_rdx;
+    g_set_thread_priority_before = before_thread == 0
+        ? GXOS_SCHEDULER_DEFAULT_RELATIVE_PRIORITY
+        : before_thread->relative_priority;
+    g_set_thread_priority_state_before = before_thread == 0 ? 0 : before_thread->state;
+    g_set_thread_priority_suspend_before = before_thread == 0 ? 0 : before_thread->suspend_count;
+
+    result = gxos_scheduler_set_thread_priority(handle, relative_priority);
+    if (result) {
+        ++g_set_thread_priority_success_count;
+    } else {
+        ++g_set_thread_priority_failure_count;
+        g_platform_last_error = 87U;
+    }
+    g_set_thread_priority_return_value = result != 0;
+    after_thread = gxos_scheduler_thread_from_handle(handle);
+    g_set_thread_priority_after = after_thread == 0
+        ? GXOS_SCHEDULER_DEFAULT_RELATIVE_PRIORITY
+        : after_thread->relative_priority;
+    g_set_thread_priority_state_after = after_thread == 0 ? 0 : after_thread->state;
+    g_set_thread_priority_suspend_after = after_thread == 0 ? 0 : after_thread->suspend_count;
+    g_set_thread_priority_execution_count = after_thread == 0 ? 0 : after_thread->execution_count;
+    g_set_thread_priority_runnable = after_thread != 0 &&
+        after_thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE;
+
+    serial_text("GXOS_NET10:SETTHREADPRIORITY_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_INVOCATION=0x", invocation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_PAYLOAD_BASE=0x", g_managed_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_set_thread_priority_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_RCX=0x", g_set_thread_priority_rcx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_RDX_RAW=0x",
+                     g_set_thread_priority_rdx_raw);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_SIGNED_PRIORITY=0x",
+                     (uint64_t)(int64_t)g_set_thread_priority_signed_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_R8=0x", g_set_thread_priority_r8);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_R9=0x", g_set_thread_priority_r9);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_STACK_ARG5=0x",
+                     import_entry_rsp == 0 ? 0 : ((const uint64_t *)(uintptr_t)import_entry_rsp)[5]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_STACK_ARG6=0x",
+                     import_entry_rsp == 0 ? 0 : ((const uint64_t *)(uintptr_t)import_entry_rsp)[6]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_HANDLE=0x", handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_HANDLE_TYPE=0x",
+                     object == 0 ? 0 : object->type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_OBJECT_SLOT=0x",
+                     object == 0 ? UINT32_MAX : object->slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_GENERATION=0x",
+                     object == 0 ? 0 : object->generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_TCB_SLOT=0x",
+                     before_thread == 0
+                         ? UINT32_MAX
+                         : (uint32_t)(before_thread - g_create_event_scheduler.threads));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_INTERNAL_IDENTITY=0x",
+                     before_thread == 0 ? 0 : before_thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_STORED_PRIORITY_BEFORE=0x",
+                     (uint64_t)(int64_t)g_set_thread_priority_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_STORED_PRIORITY_AFTER=0x",
+                     (uint64_t)(int64_t)g_set_thread_priority_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_STATE_BEFORE=0x",
+                     g_set_thread_priority_state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_SUSPEND_COUNT_BEFORE=0x",
+                     g_set_thread_priority_suspend_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_RETURN_VALUE=0x",
+                     g_set_thread_priority_return_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_STATE_AFTER=0x",
+                     g_set_thread_priority_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_SUSPEND_COUNT_AFTER=0x",
+                     g_set_thread_priority_suspend_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_EXECUTION_COUNT=0x",
+                     g_set_thread_priority_execution_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_RUNNABLE=0x",
+                     g_set_thread_priority_runnable);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:SETTHREADPRIORITY_RETURNED\r\n");
+    return result ? 1 : 0;
+}
+#endif
+
 static void *platform_import_target(const char *module, const char *symbol)
 {
 #ifdef GXOS_ENABLE_CREATE_THREAD
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "CreateThread")) {
         return (void *)(uintptr_t)gxos_create_thread_entry;
+    }
+#endif
+#ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "SetThreadPriority")) {
+        return (void *)(uintptr_t)gxos_set_thread_priority_entry;
     }
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -5828,6 +6101,16 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 g_create_thread_import_descriptor_index = descriptors - 1U;
                 g_create_thread_import_symbol_index = index;
                 g_create_thread_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "SetThreadPriority")) {
+                g_set_thread_priority_import_descriptor_index = descriptors - 1U;
+                g_set_thread_priority_import_symbol_index = index;
+                g_set_thread_priority_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
             }
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -7792,6 +8075,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
                      image.preferred_base + g_create_thread_importing_iat_rva);
     serial_text("\r\n");
 #endif
+#ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
+    if (g_set_thread_priority_import_descriptor_index != 2U ||
+        g_set_thread_priority_import_symbol_index != 0x2FU ||
+        g_set_thread_priority_importing_iat_rva != 0x7D1B0U) {
+        fail("setthreadpriority-import-contract");
+    }
+    serial_text("GXOS_NET10:SETTHREADPRIORITY_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:SETTHREADPRIORITY_IMPORT_SYMBOL=SetThreadPriority\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_set_thread_priority_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_IMPORT_SYMBOL_INDEX=0x",
+                     g_set_thread_priority_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_IMPORT_IAT_RVA=0x",
+                     g_set_thread_priority_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:SETTHREADPRIORITY_PREFERRED_IAT=0x",
+                     image.preferred_base + g_set_thread_priority_importing_iat_rva);
+    serial_text("\r\n");
+#endif
 #ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
     if (g_veh_add_import_descriptor_index != 2U ||
         g_veh_add_import_symbol_index != 30U ||
@@ -7932,7 +8236,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
 #if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
-    defined(GXOS_ENABLE_CREATE_THREAD)
+    defined(GXOS_ENABLE_CREATE_THREAD) || \
+    defined(GXOS_ENABLE_SET_THREAD_PRIORITY)
     if (!gxos_scheduler_initialize(&g_create_event_scheduler,
                                    boot_services->AllocatePages,
                                    boot_services->FreePages,

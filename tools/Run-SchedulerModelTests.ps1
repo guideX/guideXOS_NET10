@@ -19,6 +19,7 @@ if ($null -eq $gcc) { throw 'gcc is required for the scheduler model test.' }
 $source = Join-Path $root 'src\Gate4Harness\scheduler_foundation.c'
 $createEventSource = Join-Path $root 'src\Gate4Harness\create_event_w.c'
 $createMemoryResourceNotificationSource = Join-Path $root 'src\Gate4Harness\create_memory_resource_notification.c'
+$setThreadPrioritySource = Join-Path $root 'src\Gate4Harness\set_thread_priority.c'
 $test = Join-Path $root 'src\Gate4Harness\scheduler_model_tests.c'
 $binary = Join-Path $outputDirectory 'scheduler-model-tests.exe'
 $arguments = @(
@@ -26,7 +27,7 @@ $arguments = @(
     '-DGXOS_SCHEDULER_HOST_TEST',
     '-I', (Join-Path $root 'src\Gate4Harness'),
     '-o', $binary, $test, $source, $createEventSource,
-    $createMemoryResourceNotificationSource
+    $createMemoryResourceNotificationSource, $setThreadPrioritySource
 )
 
 & $gcc.Source @arguments

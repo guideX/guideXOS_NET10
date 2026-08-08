@@ -30,6 +30,8 @@
 #define GXOS_SCHEDULER_TLS_OFFSET 0x100U
 #define GXOS_SCHEDULER_FLS_PROOF_SLOT 7U
 #define GXOS_SCHEDULER_HANDLE_MAGIC 0xA7U
+#define GXOS_SCHEDULER_DEFAULT_RELATIVE_PRIORITY 0
+#define GXOS_SCHEDULER_SUPPORTED_RELATIVE_PRIORITY 2
 
 #define GXOS_SCHEDULER_MAIN_GPR_SENTINEL(index) \
     (0x4D4D000000000000ULL + (uint64_t)(index))
@@ -174,6 +176,7 @@ typedef struct GXOS_SCHEDULER_TCB {
     uint16_t object_slot;
     GXOS_SCHEDULER_THREAD_STATE state;
     uint32_t suspend_count;
+    int32_t relative_priority;
     uint32_t public_handle_refs;
     uint32_t execution_refs;
     uint64_t execution_count;

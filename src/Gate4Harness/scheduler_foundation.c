@@ -281,6 +281,8 @@ static GXOS_SCHEDULER_TCB *pick_next_runnable(GXOS_SCHEDULER_TCB *current)
     uint32_t offset;
     uint32_t index;
     if (current == 0) return 0;
+    /* Relative priority is retained in each TCB; cooperative selection remains
+       the proven round-robin policy until a separate priority contract exists. */
     current_index = (uint32_t)(current - g_scheduler->threads);
     for (offset = 1; offset <= GXOS_SCHEDULER_MAX_THREADS; ++offset) {
         index = (current_index + offset) % GXOS_SCHEDULER_MAX_THREADS;
@@ -365,6 +367,7 @@ int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
     boot->identity = scheduler->next_identity++;
     boot->generation = 1;
     boot->state = GXOS_SCHEDULER_THREAD_RUNNING;
+    boot->relative_priority = GXOS_SCHEDULER_DEFAULT_RELATIVE_PRIORITY;
     boot->execution_refs = 1;
     object = allocate_object(GXOS_SCHEDULER_OBJECT_THREAD, boot, &object_slot,
                              &unused_handle);
@@ -513,6 +516,7 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
     thread->live = 1;
     thread->state = GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED;
     thread->suspend_count = 1;
+    thread->relative_priority = GXOS_SCHEDULER_DEFAULT_RELATIVE_PRIORITY;
     thread->public_handle_refs = 1;
     thread->execution_refs = 1;
     thread->entry = entry;
