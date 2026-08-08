@@ -4,6 +4,18 @@ This document records the exact imports of the Gate 1 shared NativeAOT artifact,
 
 The initial Gate 4 stop was a correct ten-descriptor/124-symbol census. The current `_stricmp` control patches every IAT slot: 29 imports have bounded functional implementations, including the exact `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`, `QueryPerformanceFrequency`, `_initialize_onexit_table`, `InitializeSListHead`, `_initterm_e`, `_initterm`, `strcmp`, `strlen`, `GetEnvironmentVariableW`, and `_stricmp` contracts, and the other 95 receive deterministic guideXOS-owned fail-fast stubs. The current `GetSystemInfo` opt-in adds one exact `KERNEL32.dll!GetSystemInfo` route for 30 functional / 94 fail-fast imports. A fail-fast stub is not support for the service; it proves that the symbol is not reached by the legitimate path. The allocation-enabled variant keeps the same 10/124 import set and adds only managed allocation code and metadata; it does not make the remaining services functional.
 
+## `CreateMemoryResourceNotification` addendum (2026-08-07)
+
+The exact payload-facing scheduler profile adds one functional route for
+`KERNEL32.dll!CreateMemoryResourceNotification` at IAT RVA `0x7d1e8`, and only
+for raw notification type `0` (`LowMemoryResourceNotification`). It creates a
+typed generation-checked opaque waitable object and advances the three-run
+enabled trace to `KERNEL32.dll!CreateThread`. The disabled profile leaves the
+import fail-fast boundary unchanged after the two established `CreateEventW`
+calls. This opt-in does not route any wait, close, duplicate, query, signal,
+reset, thread, or memory-status import. See
+[KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md](KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md).
+
 Final control treatment totals for the performance-enabled build are A=functional `21`, B=deterministic fail-fast `103`, C=import elimination `0`, and D=deferred required symbols `0`. The CRT opt-in follow-on adds `_initialize_onexit_table`, for A=`22` / B=`102`; the SLIST opt-in adds `InitializeSListHead`, for A=`23` / B=`101`; the `_initterm_e` opt-in adds one more, for A=`24` / B=`100`; the `_initterm` opt-in adds one more, for A=`25` / B=`99`; the `strcmp` opt-in adds one more, for A=`26` / B=`98`; the `strlen` opt-in adds one more, for A=`27` / B=`97`; the `GetEnvironmentVariableW` opt-in adds one more, for A=`28` / B=`96`; and the `_stricmp` opt-in adds one more, for A=`29` / B=`95`. The separate `GetSystemInfo` opt-in is A=`30` / B=`94`. All other deferred symbols retain their fail-fast treatment. The no-allocation control still passes managed entry. The current allocation/startup trace initializes both empty on-exit tables, initializes one x64 SLIST header, completes the one-entry `_initterm_e` range, completes the nine-entry `_initterm` range, compares `gcServer` with `gcConservative`, computes `strlen("gcServer") = 8`, queries missing `DOTNET_gcServer`, completes 885 checked `_stricmp` calls, completes the bounded `GetSystemInfo` contract, and stops at `KERNEL32.dll!GetNumaHighestNodeNumber`; the first allocation probe remains `-10` without a GC allocation context.
 
 ## `QueryInformationJobObject` addendum (2026-08-01)

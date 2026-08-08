@@ -54,6 +54,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [`GetSystemInfo` bootstrap contract](docs/KERNEL32_GETSYSTEMINFO_BOOTSTRAP.md)
 - [`GetNumaHighestNodeNumber` bootstrap contract](docs/KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md)
 - [`GetProcessGroupAffinity` bootstrap contract](docs/KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md)
+- [`CreateMemoryResourceNotification` bootstrap contract](docs/KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 

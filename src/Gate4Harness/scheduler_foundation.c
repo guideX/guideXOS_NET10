@@ -261,6 +261,20 @@ static GXOS_SCHEDULER_TCB *find_free_thread(void)
     return 0;
 }
 
+static GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *
+find_free_memory_resource_notification(void)
+{
+    uint32_t index;
+    for (index = 0;
+         index != GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS;
+         ++index) {
+        if (!g_scheduler->memory_resource_notifications[index].live) {
+            return &g_scheduler->memory_resource_notifications[index];
+        }
+    }
+    return 0;
+}
+
 static GXOS_SCHEDULER_TCB *pick_next_runnable(GXOS_SCHEDULER_TCB *current)
 {
     uint32_t current_index = 0;
@@ -443,6 +457,43 @@ int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
     return 1;
 }
 
+int gxos_scheduler_create_memory_resource_notification(
+    GXOS_SCHEDULER *scheduler,
+    uint32_t notification_type,
+    GXOS_SCHEDULER_HANDLE *handle)
+{
+    GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *notification;
+    GXOS_SCHEDULER_OBJECT *object;
+    uint16_t object_slot;
+
+    if (handle != 0) *handle = 0;
+    if (scheduler == 0 || scheduler != g_scheduler || !scheduler->active ||
+        handle == 0 || notification_type != 0) {
+        return 0;
+    }
+    notification = find_free_memory_resource_notification();
+    if (notification == 0) return 0;
+    object = allocate_object(
+        GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION,
+        notification, &object_slot, handle);
+    if (object == 0) return 0;
+
+    zero_bytes(notification, sizeof(*notification));
+    notification->live = 1;
+    notification->generation = object->generation;
+    notification->object_slot = object_slot;
+    notification->registry_slot =
+        (uint16_t)(notification - scheduler->memory_resource_notifications);
+    notification->notification_type = notification_type;
+    notification->waitable.live = 1;
+    notification->waitable.manual_reset = 1;
+    notification->waitable.signaled = 0;
+    notification->waitable.generation = notification->generation;
+    notification->waitable.object_slot = object_slot;
+    /* Bootstrap is deliberately nonsignaled until a proven pressure model exists. */
+    return 1;
+}
+
 int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
                                             GXOS_SCHEDULER_ENTRY entry,
                                             void *argument,
@@ -605,23 +656,22 @@ int gxos_scheduler_reset_event(GXOS_SCHEDULER_HANDLE handle)
 int gxos_scheduler_prepare_wait(GXOS_SCHEDULER_HANDLE handle,
                                 GXOS_SCHEDULER_SWITCH_PLAN *plan)
 {
-    GXOS_SCHEDULER_OBJECT *object = lookup_object(handle,
-                                                   GXOS_SCHEDULER_OBJECT_EVENT);
-    GXOS_SCHEDULER_EVENT *event;
+    GXOS_SCHEDULER_WAITABLE *waitable =
+        gxos_scheduler_waitable_from_handle(handle);
     GXOS_SCHEDULER_TCB *current;
     GXOS_SCHEDULER_TCB *next;
-    if (object == 0 || plan == 0) return GXOS_SCHEDULER_WAIT_FAILURE;
-    event = (GXOS_SCHEDULER_EVENT *)object->target;
+    if (waitable == 0 || plan == 0) return GXOS_SCHEDULER_WAIT_FAILURE;
     current = g_scheduler->current;
-    if (event == 0 || current == 0 || current->state != GXOS_SCHEDULER_THREAD_RUNNING) {
+    if (!waitable->live || current == 0 ||
+        current->state != GXOS_SCHEDULER_THREAD_RUNNING) {
         return GXOS_SCHEDULER_WAIT_FAILURE;
     }
-    if (event->signaled) {
-        if (!event->manual_reset) event->signaled = 0;
+    if (waitable->signaled) {
+        if (!waitable->manual_reset) waitable->signaled = 0;
         current->blocked_result = GXOS_SCHEDULER_WAIT_SIGNALED;
         return GXOS_SCHEDULER_WAIT_SIGNALED;
     }
-    if (!add_waiter(event, current)) return GXOS_SCHEDULER_WAIT_FAILURE;
+    if (!add_waiter(waitable, current)) return GXOS_SCHEDULER_WAIT_FAILURE;
     current->blocked_object = handle;
     current->blocked_result = GXOS_SCHEDULER_WAIT_FAILURE;
     current->state = GXOS_SCHEDULER_THREAD_BLOCKED;
@@ -629,7 +679,7 @@ int gxos_scheduler_prepare_wait(GXOS_SCHEDULER_HANDLE handle,
     if (next == 0) {
         current->state = GXOS_SCHEDULER_THREAD_RUNNING;
         current->blocked_object = 0;
-        remove_waiter(event, event->waiter_count - 1U);
+        remove_waiter(waitable, waitable->waiter_count - 1U);
         return GXOS_SCHEDULER_WAIT_FAILURE;
     }
     choose_next(next, plan);
@@ -722,6 +772,25 @@ int gxos_scheduler_try_destroy_event(GXOS_SCHEDULER_HANDLE handle)
     return 1;
 }
 
+int gxos_scheduler_try_destroy_memory_resource_notification(
+    GXOS_SCHEDULER_HANDLE handle)
+{
+    GXOS_SCHEDULER_OBJECT *object = lookup_object(
+        handle, GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION);
+    GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *notification;
+    if (object == 0) return 0;
+    notification = (GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *)object->target;
+    if (notification == 0 || notification->waitable.waiter_count != 0 ||
+        object->public_handle_refs != 0) {
+        return 0;
+    }
+    notification->close_state = 1;
+    notification->live = 0;
+    object->internal_refs = 0;
+    release_object_record(object);
+    return 1;
+}
+
 int gxos_scheduler_try_reclaim_thread(GXOS_SCHEDULER_TCB *thread)
 {
     if (thread == 0 || !thread->live || thread->execution_refs != 0 ||
@@ -764,6 +833,11 @@ int gxos_scheduler_teardown(GXOS_SCHEDULER *scheduler)
     for (index = 0; index != GXOS_SCHEDULER_MAX_EVENTS; ++index) {
         if (scheduler->events[index].live) success = 0;
     }
+    for (index = 0;
+         index != GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS;
+         ++index) {
+        if (scheduler->memory_resource_notifications[index].live) success = 0;
+    }
     for (index = 1; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
         if (scheduler->threads[index].live) success = 0;
     }
@@ -801,6 +875,45 @@ GXOS_SCHEDULER_EVENT *gxos_scheduler_event_from_handle(GXOS_SCHEDULER_HANDLE han
     GXOS_SCHEDULER_OBJECT *object = lookup_object(handle,
                                                    GXOS_SCHEDULER_OBJECT_EVENT);
     return object == 0 ? 0 : (GXOS_SCHEDULER_EVENT *)object->target;
+}
+
+GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *
+gxos_scheduler_memory_resource_notification_from_handle(
+    GXOS_SCHEDULER_HANDLE handle)
+{
+    GXOS_SCHEDULER_OBJECT *object = lookup_object(
+        handle, GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION);
+    return object == 0
+        ? 0
+        : (GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *)object->target;
+}
+
+GXOS_SCHEDULER_OBJECT *gxos_scheduler_object_from_handle(
+    GXOS_SCHEDULER_HANDLE handle)
+{
+    uint8_t type = (uint8_t)(handle >> 48);
+    if (type != GXOS_SCHEDULER_OBJECT_THREAD &&
+        type != GXOS_SCHEDULER_OBJECT_EVENT &&
+        type != GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION) {
+        return 0;
+    }
+    return lookup_object(handle, type);
+}
+
+GXOS_SCHEDULER_WAITABLE *gxos_scheduler_waitable_from_handle(
+    GXOS_SCHEDULER_HANDLE handle)
+{
+    GXOS_SCHEDULER_OBJECT *object = gxos_scheduler_object_from_handle(handle);
+    if (object == 0) return 0;
+    if (object->type == GXOS_SCHEDULER_OBJECT_EVENT) {
+        return (GXOS_SCHEDULER_WAITABLE *)object->target;
+    }
+    if (object->type == GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION) {
+        GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *notification =
+            (GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *)object->target;
+        return notification == 0 ? 0 : &notification->waitable;
+    }
+    return 0;
 }
 
 uint64_t gxos_scheduler_current_gs_base(void)

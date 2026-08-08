@@ -18,6 +18,7 @@
  */
 #define GXOS_SCHEDULER_MAX_THREADS 6U
 #define GXOS_SCHEDULER_MAX_EVENTS 12U
+#define GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS 1U
 #define GXOS_SCHEDULER_MAX_OBJECTS 16U
 #define GXOS_SCHEDULER_MAX_WAITERS GXOS_SCHEDULER_MAX_THREADS
 #define GXOS_SCHEDULER_FLS_SLOTS 64U
@@ -106,7 +107,8 @@ typedef enum {
 typedef enum {
     GXOS_SCHEDULER_OBJECT_FREE = 0,
     GXOS_SCHEDULER_OBJECT_THREAD = 1,
-    GXOS_SCHEDULER_OBJECT_EVENT = 2
+    GXOS_SCHEDULER_OBJECT_EVENT = 2,
+    GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION = 3
 } GXOS_SCHEDULER_OBJECT_TYPE;
 
 typedef enum {
@@ -120,7 +122,7 @@ typedef uintptr_t (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_ENTRY)(void *argument);
 
 struct GXOS_SCHEDULER;
 struct GXOS_SCHEDULER_TCB;
-struct GXOS_SCHEDULER_EVENT;
+struct GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION;
 
 typedef struct {
     GXOS_SCHEDULER_CONTEXT **old_context;
@@ -139,7 +141,7 @@ typedef struct {
     void *target;
 } GXOS_SCHEDULER_OBJECT;
 
-typedef struct GXOS_SCHEDULER_EVENT {
+typedef struct GXOS_SCHEDULER_WAITABLE {
     uint8_t live;
     uint8_t manual_reset;
     uint8_t signaled;
@@ -148,7 +150,19 @@ typedef struct GXOS_SCHEDULER_EVENT {
     uint16_t object_slot;
     uint32_t waiter_count;
     struct GXOS_SCHEDULER_TCB *waiters[GXOS_SCHEDULER_MAX_WAITERS];
-} GXOS_SCHEDULER_EVENT;
+} GXOS_SCHEDULER_WAITABLE;
+
+typedef GXOS_SCHEDULER_WAITABLE GXOS_SCHEDULER_EVENT;
+
+typedef struct GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION {
+    uint8_t live;
+    uint8_t close_state;
+    uint16_t generation;
+    uint16_t object_slot;
+    uint16_t registry_slot;
+    uint32_t notification_type;
+    GXOS_SCHEDULER_WAITABLE waitable;
+} GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION;
 
 typedef struct GXOS_SCHEDULER_TCB {
     uint8_t live;
@@ -193,6 +207,8 @@ typedef struct GXOS_SCHEDULER {
     GXOS_SCHEDULER_LOG_U32 log_u32;
     GXOS_SCHEDULER_TCB threads[GXOS_SCHEDULER_MAX_THREADS];
     GXOS_SCHEDULER_EVENT events[GXOS_SCHEDULER_MAX_EVENTS];
+    GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION
+        memory_resource_notifications[GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS];
     GXOS_SCHEDULER_OBJECT objects[GXOS_SCHEDULER_MAX_OBJECTS];
     GXOS_SCHEDULER_TCB *current;
     GXOS_SCHEDULER_TCB *boot_thread;
@@ -242,6 +258,10 @@ int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
                                 uint8_t manual_reset,
                                 uint8_t initial_signaled,
                                 GXOS_SCHEDULER_HANDLE *handle);
+int gxos_scheduler_create_memory_resource_notification(
+    GXOS_SCHEDULER *scheduler,
+    uint32_t notification_type,
+    GXOS_SCHEDULER_HANDLE *handle);
 int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
                                             GXOS_SCHEDULER_ENTRY entry,
                                             void *argument,
@@ -261,6 +281,8 @@ int gxos_scheduler_prepare_terminate(uintptr_t return_value,
 int gxos_scheduler_thread_is_terminated(const GXOS_SCHEDULER_TCB *thread);
 int gxos_scheduler_event_is_signaled(GXOS_SCHEDULER_HANDLE handle);
 int gxos_scheduler_try_destroy_event(GXOS_SCHEDULER_HANDLE handle);
+int gxos_scheduler_try_destroy_memory_resource_notification(
+    GXOS_SCHEDULER_HANDLE handle);
 int gxos_scheduler_try_reclaim_thread(GXOS_SCHEDULER_TCB *thread);
 int gxos_scheduler_check_canaries(const GXOS_SCHEDULER_TCB *thread);
 int gxos_scheduler_discard_created_thread(GXOS_SCHEDULER_TCB *thread);
@@ -270,6 +292,13 @@ int gxos_scheduler_teardown(GXOS_SCHEDULER *scheduler);
 GXOS_SCHEDULER_TCB *gxos_scheduler_current_thread(void);
 GXOS_SCHEDULER_TCB *gxos_scheduler_thread_from_handle(GXOS_SCHEDULER_HANDLE handle);
 GXOS_SCHEDULER_EVENT *gxos_scheduler_event_from_handle(GXOS_SCHEDULER_HANDLE handle);
+GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *
+gxos_scheduler_memory_resource_notification_from_handle(
+    GXOS_SCHEDULER_HANDLE handle);
+GXOS_SCHEDULER_OBJECT *gxos_scheduler_object_from_handle(
+    GXOS_SCHEDULER_HANDLE handle);
+GXOS_SCHEDULER_WAITABLE *gxos_scheduler_waitable_from_handle(
+    GXOS_SCHEDULER_HANDLE handle);
 uint64_t gxos_scheduler_current_gs_base(void);
 uint64_t gxos_scheduler_current_teb_base(void);
 uint64_t gxos_scheduler_current_tls_vector(void);

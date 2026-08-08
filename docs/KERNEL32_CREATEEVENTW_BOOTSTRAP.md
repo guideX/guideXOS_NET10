@@ -82,9 +82,15 @@ two live Event objects, two live public handles, zero waiters, one auto-reset
 event, one manual-reset event, and no additional scheduler thread.
 
 The requested Windows oracle describes ten CreateEventW calls. This exact
-payload run reaches the next unresolved import after calls 1 and 2, before
-the later static CreateEventW call forms execute. The bridge does not route or
-fabricate continuation through that blocker. The honest next blocker is:
+payload run reaches the next dependency after calls 1 and 2, before the later
+static CreateEventW call forms execute. The separately documented
+`CreateMemoryResourceNotification` milestone now routes that exact dependency
+and proves its return storage at `base + 0xADA28`. The next honest blocker after
+that successful creation is `KERNEL32.dll!CreateThread`; the complete
+notification boundary and its bounded controls are recorded in
+[KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md](KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md).
+
+The pre-notification blocker, retained as the disabled-route control, is:
 
 ```text
 DLL:           KERNEL32.dll
@@ -95,12 +101,12 @@ IAT RVA:       0x7D1E8
 Runtime IAT:   0x054F81E8
 Call site:     0x054B03F8
 Caller RVA:    0x353F8
-RCX/RDX/R8/R9: 0 / 1 / 0x3F8 / 0
+RCX/RDX/R8/R9: 0 / 0x3F8 / 1 / 0
 Stack arg 5:   0
 ```
 
-Implementing that import is explicitly outside this milestone, so the
-ten-call oracle and ten-object postcondition are not claimed by this build.
+The ten-call oracle and ten-object postcondition remain outside this bounded
+milestone and are not claimed by the enabled build.
 
 ## Disabled-route control
 

@@ -1,5 +1,6 @@
 #include "scheduler_foundation.h"
 #include "create_event_w.h"
+#include "create_memory_resource_notification.h"
 
 #include <stdio.h>
 
@@ -102,6 +103,28 @@ static uint32_t live_event_count(void)
     return count;
 }
 
+static uint32_t live_notification_count(void)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0;
+         index != GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS;
+         ++index) {
+        if (g_scheduler.memory_resource_notifications[index].live) ++count;
+    }
+    return count;
+}
+
+static uint32_t live_object_count(void)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        if (g_scheduler.objects[index].live) ++count;
+    }
+    return count;
+}
+
 int main(void)
 {
     GXOS_SCHEDULER_HANDLE auto_event;
@@ -114,11 +137,18 @@ int main(void)
     GXOS_SCHEDULER_TCB *worker;
     GXOS_SCHEDULER_SWITCH_PLAN plan;
     GXOS_CREATE_EVENT_W_CONTEXT event_context;
+    GXOS_CREATE_MEMORY_RESOURCE_NOTIFICATION_CONTEXT notification_context;
     GXOS_SCHEDULER_HANDLE contract_events[4] = {0};
+    GXOS_SCHEDULER_HANDLE notification_handle = 0;
+    GXOS_SCHEDULER_HANDLE stale_notification_handle = 0;
+    GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *notification;
+    GXOS_SCHEDULER_OBJECT *notification_object;
+    GXOS_SCHEDULER_WAITABLE *notification_waitable;
     uint32_t previous_suspend_count;
     uint32_t thread_count;
     uint32_t event_count;
     uint32_t index;
+    uint32_t objects_before_failed_notification_creation;
 
     CHECK(gxos_scheduler_initialize(&g_scheduler, model_allocate, model_free,
                                     model_log_text, model_log_hex,
@@ -188,8 +218,118 @@ int main(void)
     CHECK(gxos_scheduler_current_thread() == g_scheduler.boot_thread);
     CHECK(gxos_scheduler_current_gs_base() != 0);
 
+    notification_context.scheduler = &g_scheduler;
+    objects_before_failed_notification_creation = live_object_count();
+    CHECK(gxos_create_memory_resource_notification_contract(
+              &notification_context, GXOS_MEMORY_RESOURCE_NOTIFICATION_HIGH) == 0);
+    CHECK(live_notification_count() == 0);
+    CHECK(live_object_count() == objects_before_failed_notification_creation);
+    CHECK(gxos_scheduler_get_last_error() ==
+          GXOS_CREATE_MEMORY_RESOURCE_NOTIFICATION_ERROR_INVALID_PARAMETER);
+    CHECK(gxos_create_memory_resource_notification_contract(
+              &notification_context, 2U) == 0);
+    CHECK(live_notification_count() == 0);
+    CHECK(live_object_count() == objects_before_failed_notification_creation);
+    CHECK((notification_handle =
+               gxos_create_memory_resource_notification_contract(
+                   &notification_context,
+                   GXOS_MEMORY_RESOURCE_NOTIFICATION_LOW)) != 0);
+    CHECK(live_notification_count() == 1);
+    notification = gxos_scheduler_memory_resource_notification_from_handle(
+        notification_handle);
+    notification_object = gxos_scheduler_object_from_handle(notification_handle);
+    notification_waitable = gxos_scheduler_waitable_from_handle(notification_handle);
+    CHECK(notification != 0);
+    CHECK(notification_object != 0);
+    CHECK(notification_object->type ==
+          GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION);
+    CHECK(notification->notification_type ==
+          GXOS_MEMORY_RESOURCE_NOTIFICATION_LOW);
+    CHECK(notification->waitable.signaled == 0);
+    CHECK(notification->waitable.waiter_count == 0);
+    CHECK(notification_object->public_handle_refs == 1);
+    CHECK(notification->close_state == 0);
+    CHECK(notification_waitable == &notification->waitable);
+    CHECK(gxos_scheduler_prepare_wait(notification_handle, &plan) ==
+          GXOS_SCHEDULER_WAIT_FAILURE);
+    CHECK(notification->waitable.waiter_count == 0);
+    notification->waitable.signaled = 1;
+    CHECK(gxos_scheduler_prepare_wait(notification_handle, &plan) ==
+          GXOS_SCHEDULER_WAIT_SIGNALED);
+    CHECK(gxos_scheduler_finish_wait(notification_handle) ==
+          GXOS_SCHEDULER_WAIT_SIGNALED);
+    CHECK(notification->waitable.signaled == 1);
+    notification->waitable.signaled = 0;
+    CHECK(gxos_scheduler_event_from_handle(notification_handle) == 0);
+    CHECK(gxos_scheduler_thread_from_handle(notification_handle) == 0);
+    CHECK(!gxos_scheduler_close_handle(notification_handle));
+    CHECK(gxos_create_memory_resource_notification_contract(
+              &notification_context, GXOS_MEMORY_RESOURCE_NOTIFICATION_LOW) == 0);
+    CHECK(live_notification_count() == 1);
+    CHECK(gxos_scheduler_memory_resource_notification_from_handle(
+              notification_handle) == notification);
+    stale_notification_handle = notification_handle;
+    notification_object->public_handle_refs = 0;
+    CHECK(gxos_scheduler_try_destroy_memory_resource_notification(
+        stale_notification_handle));
+    CHECK(gxos_scheduler_memory_resource_notification_from_handle(
+              stale_notification_handle) == 0);
+    CHECK(notification->live == 0);
+    CHECK(notification->close_state == 1);
+    CHECK((notification_handle =
+               gxos_create_memory_resource_notification_contract(
+                   &notification_context,
+                   GXOS_MEMORY_RESOURCE_NOTIFICATION_LOW)) != 0);
+    CHECK(notification_handle != stale_notification_handle);
+    CHECK(gxos_scheduler_memory_resource_notification_from_handle(
+              stale_notification_handle) == 0);
+    CHECK(gxos_scheduler_memory_resource_notification_from_handle(
+              notification_handle) != 0);
+    notification_object = gxos_scheduler_object_from_handle(notification_handle);
+    CHECK(notification_object != 0);
+    notification_object->public_handle_refs = 0;
+    CHECK(gxos_scheduler_try_destroy_memory_resource_notification(
+        notification_handle));
+    CHECK(live_notification_count() == 0);
+
+    /* Fill every object record, then prove notification creation is atomic. */
+    event_count = 0;
+    while (event_count != GXOS_SCHEDULER_MAX_EVENTS &&
+           gxos_scheduler_create_event(&g_scheduler, 0, 0,
+                                       &temporary_events[event_count])) {
+        ++event_count;
+    }
+    thread_count = 0;
+    while (thread_count != GXOS_SCHEDULER_MAX_THREADS &&
+           gxos_scheduler_create_suspended_thread(
+               &g_scheduler, model_entry, 0,
+               &temporary_handles[thread_count],
+               &temporary_threads[thread_count])) {
+        ++thread_count;
+    }
+    CHECK(live_object_count() == GXOS_SCHEDULER_MAX_OBJECTS);
+    CHECK(GXOS_SCHEDULER_MAX_OBJECTS - live_object_count() == 0);
+    CHECK(gxos_create_memory_resource_notification_contract(
+              &notification_context,
+              GXOS_MEMORY_RESOURCE_NOTIFICATION_LOW) == 0);
+    CHECK(live_notification_count() == 0);
+    CHECK(live_object_count() == GXOS_SCHEDULER_MAX_OBJECTS);
+    CHECK(gxos_scheduler_event_from_handle(temporary_events[0]) != 0);
+    CHECK(gxos_scheduler_thread_from_handle(temporary_handles[0]) != 0);
+    for (index = 0; index != thread_count; ++index) {
+        CHECK(gxos_scheduler_close_handle(temporary_handles[index]));
+        CHECK(gxos_scheduler_discard_created_thread(temporary_threads[index]));
+    }
+    for (index = 0; index != event_count; ++index) {
+        CHECK(gxos_scheduler_close_handle(temporary_events[index]));
+        CHECK(gxos_scheduler_try_destroy_event(temporary_events[index]));
+    }
+    CHECK(live_object_count() == 1);
+
     CHECK(gxos_scheduler_create_event(&g_scheduler, 0, 0, &auto_event));
     CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 0, &manual_event));
+    CHECK(gxos_scheduler_memory_resource_notification_from_handle(auto_event) == 0);
+    CHECK(gxos_scheduler_memory_resource_notification_from_handle(manual_event) == 0);
     CHECK(!gxos_scheduler_resume_thread(auto_event, &previous_suspend_count));
     CHECK(!gxos_scheduler_signal_event((GXOS_SCHEDULER_HANDLE)0x1234));
     CHECK(!gxos_scheduler_reset_event((GXOS_SCHEDULER_HANDLE)0x1234));
@@ -202,6 +342,7 @@ int main(void)
     CHECK(worker->public_handle_refs == 1);
     CHECK(gxos_scheduler_thread_from_handle(worker_handle) == worker);
     CHECK(gxos_scheduler_event_from_handle(worker_handle) == 0);
+    CHECK(gxos_scheduler_memory_resource_notification_from_handle(worker_handle) == 0);
     CHECK(gxos_scheduler_prepare_wait(worker_handle, &plan) ==
           GXOS_SCHEDULER_WAIT_FAILURE);
     CHECK(gxos_scheduler_resume_thread(worker_handle, &previous_suspend_count));

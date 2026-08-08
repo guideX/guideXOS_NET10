@@ -21,11 +21,16 @@
 #include "crt_malloc.h"
 #include "exception_context.h"
 #include "vectored_handler.h"
-#if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || defined(GXOS_ENABLE_CREATE_EVENT_W)
+#if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
+    defined(GXOS_ENABLE_CREATE_EVENT_W) || \
+    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION)
 #include "scheduler_foundation.h"
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
 #include "create_event_w.h"
+#endif
+#ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
+#include "create_memory_resource_notification.h"
 #endif
 
 typedef uint64_t EFI_STATUS;
@@ -255,8 +260,11 @@ static uint64_t g_managed_image_size;
 static uint32_t g_platform_last_error;
 static uint64_t g_stack_lower;
 static uint64_t g_stack_upper;
-#ifdef GXOS_ENABLE_CREATE_EVENT_W
+#if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
+    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION)
 static GXOS_SCHEDULER g_create_event_scheduler;
+#endif
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
 static GXOS_CREATE_EVENT_W_CONTEXT g_create_event_context;
 static uint32_t g_create_event_scheduler_initialize_count;
 static uint32_t g_create_event_w_invocation_count;
@@ -271,6 +279,20 @@ static void *EFIAPI platform_create_event_w(void *event_attributes,
                                              int32_t manual_reset,
                                              int32_t initial_state,
                                              const uint16_t *name);
+#endif
+#ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
+static GXOS_CREATE_MEMORY_RESOURCE_NOTIFICATION_CONTEXT
+    g_memory_resource_notification_context;
+static uint32_t g_memory_resource_notification_invocation_count;
+static uint32_t g_memory_resource_notification_success_count;
+static uint32_t g_memory_resource_notification_storage_failures;
+static GXOS_SCHEDULER_HANDLE g_memory_resource_notification_handle;
+static uintptr_t g_memory_resource_notification_storage_address;
+static uint32_t g_memory_resource_notification_import_descriptor_index;
+static uint32_t g_memory_resource_notification_import_symbol_index;
+static uint32_t g_memory_resource_notification_importing_iat_rva;
+static void *EFIAPI platform_create_memory_resource_notification(
+    uint32_t notification_type);
 #endif
 /* These symbols are intentionally external to the assembly entry file. */
 volatile uint32_t gxos_exception_dispatch_active;
@@ -713,7 +735,13 @@ static void create_event_w_live_counts(uint32_t *events,
                                        uint32_t *event_handles,
                                        uint32_t *waiters,
                                        uint32_t *thread_objects,
-                                       uint32_t *additional_threads)
+                                       uint32_t *additional_threads,
+                                       uint32_t *notification_objects,
+                                       uint32_t *notification_handles,
+                                       uint32_t *notification_waiters,
+                                       uint32_t *total_live_objects,
+                                       uint32_t *free_object_slots,
+                                       uint32_t *live_public_handles)
 {
     uint32_t index;
     *events = 0;
@@ -722,6 +750,12 @@ static void create_event_w_live_counts(uint32_t *events,
     *waiters = 0;
     *thread_objects = 0;
     *additional_threads = 0;
+    *notification_objects = 0;
+    *notification_handles = 0;
+    *notification_waiters = 0;
+    *total_live_objects = 0;
+    *free_object_slots = 0;
+    *live_public_handles = 0;
     for (index = 0; index != GXOS_SCHEDULER_MAX_EVENTS; ++index) {
         if (g_create_event_scheduler.events[index].live) {
             (*events)++;
@@ -730,12 +764,30 @@ static void create_event_w_live_counts(uint32_t *events,
     }
     for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
         GXOS_SCHEDULER_OBJECT *object = &g_create_event_scheduler.objects[index];
-        if (!object->live) continue;
+        if (!object->live) {
+            (*free_object_slots)++;
+            continue;
+        }
+        (*total_live_objects)++;
+        *live_public_handles += object->public_handle_refs;
         if (object->type == GXOS_SCHEDULER_OBJECT_EVENT) {
             (*event_objects)++;
             *event_handles += object->public_handle_refs;
         } else if (object->type == GXOS_SCHEDULER_OBJECT_THREAD) {
             (*thread_objects)++;
+        } else if (object->type ==
+                   GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION) {
+            (*notification_objects)++;
+            *notification_handles += object->public_handle_refs;
+        }
+    }
+    for (index = 0;
+         index != GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS;
+         ++index) {
+        GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *notification =
+            &g_create_event_scheduler.memory_resource_notifications[index];
+        if (notification->live) {
+            *notification_waiters += notification->waitable.waiter_count;
         }
     }
     for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
@@ -754,6 +806,12 @@ static void emit_create_event_w_final_summary(void)
     uint32_t waiters;
     uint32_t thread_objects;
     uint32_t additional_threads;
+    uint32_t notification_objects;
+    uint32_t notification_handles;
+    uint32_t notification_waiters;
+    uint32_t total_live_objects;
+    uint32_t free_object_slots;
+    uint32_t live_public_handles;
     uint32_t index;
     uint32_t signaled = 0;
     uint32_t auto_reset = 0;
@@ -763,7 +821,10 @@ static void emit_create_event_w_final_summary(void)
         ++g_create_event_w_storage_failures;
     }
     create_event_w_live_counts(&events, &event_objects, &event_handles,
-                               &waiters, &thread_objects, &additional_threads);
+                               &waiters, &thread_objects, &additional_threads,
+                               &notification_objects, &notification_handles,
+                               &notification_waiters, &total_live_objects,
+                               &free_object_slots, &live_public_handles);
     for (index = 0; index != GXOS_SCHEDULER_MAX_EVENTS; ++index) {
         GXOS_SCHEDULER_EVENT *event = &g_create_event_scheduler.events[index];
         if (!event->live) continue;
@@ -798,6 +859,43 @@ static void emit_create_event_w_final_summary(void)
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_ADDITIONAL_THREAD_COUNT=0x",
                      additional_threads);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_LIVE_MEMORY_RESOURCE_NOTIFICATION_OBJECT_COUNT=0x",
+                     notification_objects);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_LIVE_MEMORY_RESOURCE_NOTIFICATION_HANDLE_COUNT=0x",
+                     notification_handles);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_LIVE_MEMORY_RESOURCE_NOTIFICATION_WAITER_COUNT=0x",
+                     notification_waiters);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_TOTAL_LIVE_OBJECT_COUNT=0x",
+                     total_live_objects);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_OBJECT_CAPACITY=0x",
+                     GXOS_SCHEDULER_MAX_OBJECTS);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_FREE_OBJECT_COUNT=0x",
+                     free_object_slots);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_TOTAL_LIVE_PUBLIC_HANDLE_COUNT=0x",
+                     live_public_handles);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_EVENT_CAPACITY=0x",
+                     GXOS_SCHEDULER_MAX_EVENTS);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_FREE_EVENT_CAPACITY=0x",
+                     GXOS_SCHEDULER_MAX_EVENTS - events);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_NOTIFICATION_CAPACITY=0x",
+                     GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_FREE_NOTIFICATION_CAPACITY=0x",
+                     GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS -
+                         notification_objects);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATEEVENTW_FINAL_SCHEDULER_THREAD_OBJECT_COUNT=0x",
+                     thread_objects);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:CREATEEVENTW_SCHEDULER_INITIALIZE_COUNT=0x",
                      g_create_event_scheduler_initialize_count);
@@ -944,6 +1042,181 @@ static void *EFIAPI platform_create_event_w(void *event_attributes,
     serial_field_hex("GXOS_NET10:CREATEEVENTW_TCB_STATE_UNCHANGED=0x", tcb_unchanged);
     serial_text("\r\n");
     serial_text("GXOS_NET10:CREATEEVENTW_RETURNED\r\n");
+    return (void *)(uintptr_t)handle;
+}
+#endif
+
+#ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
+static uint32_t memory_resource_notification_storage_address_valid(
+    uintptr_t address)
+{
+    return g_managed_image_base != 0 && g_managed_image_size >= 8U &&
+           address >= g_managed_image_base &&
+           address <= g_managed_image_base + g_managed_image_size - 8U;
+}
+
+static void emit_memory_resource_notification_summary(void)
+{
+    GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *notification =
+        gxos_scheduler_memory_resource_notification_from_handle(
+            g_memory_resource_notification_handle);
+    GXOS_SCHEDULER_OBJECT *object = gxos_scheduler_object_from_handle(
+        g_memory_resource_notification_handle);
+    uintptr_t storage_value = 0;
+    uint32_t storage_valid = memory_resource_notification_storage_address_valid(
+        g_memory_resource_notification_storage_address);
+
+    if (storage_valid) {
+        storage_value = *(const uintptr_t *)(uintptr_t)
+            g_memory_resource_notification_storage_address;
+        if (storage_value != g_memory_resource_notification_handle) {
+            ++g_memory_resource_notification_storage_failures;
+        }
+    } else {
+        ++g_memory_resource_notification_storage_failures;
+    }
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_INVOCATION_COUNT=0x",
+                     g_memory_resource_notification_invocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_SUCCESS_COUNT=0x",
+                     g_memory_resource_notification_success_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_LIVE_OBJECT_COUNT=0x",
+                     notification != 0 && notification->live ? 1U : 0U);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_LIVE_HANDLE_COUNT=0x",
+                     object == 0 ? 0U : object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_WAITER_COUNT=0x",
+                     notification == 0 ? 0U : notification->waitable.waiter_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_STORAGE_VALUE=0x",
+                     storage_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_STORAGE_FAILURE_COUNT=0x",
+                     g_memory_resource_notification_storage_failures);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_QUERY_COUNT=0x0\r\n");
+    serial_text("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_CLOSE_COUNT=0x0\r\n");
+    serial_text("GXOS_NET10:MEMORYRESOURCENOTIFICATION_FINAL_DUPLICATE_COUNT=0x0\r\n");
+}
+
+static void *EFIAPI platform_create_memory_resource_notification(
+    uint32_t notification_type)
+{
+    GXOS_SCHEDULER_TCB *before_thread = gxos_scheduler_current_thread();
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = import_call_site(return_address);
+    uintptr_t storage_address = g_managed_image_base + 0xADA28U;
+    uint32_t invocation = ++g_memory_resource_notification_invocation_count;
+    uint32_t previous_storage_valid = create_event_w_validate_storage_history();
+    GXOS_SCHEDULER_HANDLE handle;
+    GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *notification;
+    GXOS_SCHEDULER_OBJECT *object;
+    uint32_t tcb_unchanged;
+
+    if (!previous_storage_valid) {
+        ++g_memory_resource_notification_storage_failures;
+    }
+    handle = gxos_create_memory_resource_notification_contract(
+        &g_memory_resource_notification_context, notification_type);
+    if (handle == 0) {
+        g_platform_last_error =
+            GXOS_CREATE_MEMORY_RESOURCE_NOTIFICATION_ERROR_NOT_ENOUGH_MEMORY;
+        return 0;
+    }
+    notification = gxos_scheduler_memory_resource_notification_from_handle(handle);
+    object = gxos_scheduler_object_from_handle(handle);
+    if (notification == 0 || object == 0 ||
+        notification->registry_slot >=
+            GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS ||
+        object->type != GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION) {
+        fail("memory-resource-notification-handle-decode");
+    }
+    if (g_memory_resource_notification_success_count != 0U) {
+        fail("memory-resource-notification-duplicate-success");
+    }
+    g_memory_resource_notification_success_count++;
+    g_memory_resource_notification_handle = handle;
+    g_memory_resource_notification_storage_address = storage_address;
+    tcb_unchanged = before_thread != 0 &&
+        before_thread == gxos_scheduler_current_thread() &&
+        before_thread->state == GXOS_SCHEDULER_THREAD_RUNNING &&
+        before_thread->execution_refs == 1U &&
+        before_thread->public_handle_refs == 0U;
+    if (!memory_resource_notification_storage_address_valid(storage_address) ||
+        storage_address != g_managed_image_base + 0xADA28U) {
+        ++g_memory_resource_notification_storage_failures;
+    }
+    serial_text("GXOS_NET10:MEMORYRESOURCENOTIFICATION_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_INVOCATION=0x",
+                     invocation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_RUNTIME_CALLER_ADDRESS=0x",
+                     return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_RCX=0x",
+                     notification_type);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MEMORYRESOURCENOTIFICATION_TYPE=LowMemoryResourceNotification\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_RETURNED_HANDLE=0x",
+                     handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_HANDLE_GENERATION=0x",
+                     notification->generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_HANDLE_TYPE=0x",
+                     object->type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_REGISTRY_SLOT=0x",
+                     notification->registry_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_OBJECT_REGISTRY_SLOT=0x",
+                     notification->object_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_RAW_TYPE=0x",
+                     notification->notification_type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_SIGNALED=0x",
+                     notification->waitable.signaled);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_WAITABLE_LIVE=0x",
+                     notification->waitable.live);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_WAITABLE_COMPATIBLE=0x",
+                     gxos_scheduler_waitable_from_handle(handle) ==
+                         &notification->waitable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_CLOSE_STATE=0x",
+                     notification->close_state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_PUBLIC_REFERENCE_COUNT=0x",
+                     object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_WAITER_COUNT=0x",
+                     notification->waitable.waiter_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_STORAGE_ADDRESS=0x",
+                     storage_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_STORAGE_RVA=0x",
+                     storage_address >= g_managed_image_base
+                         ? storage_address - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_PREVIOUS_STORAGE_VALID=0x",
+                     previous_storage_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_TCB_STATE_UNCHANGED=0x",
+                     tcb_unchanged);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MEMORYRESOURCENOTIFICATION_RETURNED\r\n");
     return (void *)(uintptr_t)handle;
 }
 #endif
@@ -3163,6 +3436,9 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
     emit_create_event_w_final_summary();
 #endif
+#ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
+    emit_memory_resource_notification_summary();
+#endif
 #ifdef GXOS_ENABLE_CRT_MALLOC
     if (equal_text(record->module, "api-ms-win-crt-heap-l1-1-0.dll") &&
         equal_text(record->symbol, "_callnewh")) {
@@ -4742,6 +5018,12 @@ static void *platform_import_target(const char *module, const char *symbol)
         return (void *)(uintptr_t)platform_create_event_w;
     }
 #endif
+#ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "CreateMemoryResourceNotification")) {
+        return (void *)(uintptr_t)platform_create_memory_resource_notification;
+    }
+#endif
 #ifndef GXOS_DISABLE_TIME_IMPLEMENTATION
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetSystemTimeAsFileTime")) return (void *)(uintptr_t)gxos_get_system_time_as_file_time;
 #endif
@@ -5019,6 +5301,17 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 g_create_event_w_import_descriptor_index = descriptors - 1U;
                 g_create_event_w_import_symbol_index = index;
                 g_create_event_w_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "CreateMemoryResourceNotification")) {
+                g_memory_resource_notification_import_descriptor_index =
+                    descriptors - 1U;
+                g_memory_resource_notification_import_symbol_index = index;
+                g_memory_resource_notification_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
             }
 #endif
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
@@ -6891,6 +7184,28 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
                      image.preferred_base + g_create_event_w_importing_iat_rva);
     serial_text("\r\n");
 #endif
+#ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
+    if (g_memory_resource_notification_import_descriptor_index != 2U ||
+        g_memory_resource_notification_import_symbol_index != 0x36U ||
+        g_memory_resource_notification_importing_iat_rva != 0x7D1E8U) {
+        fail("memory-resource-notification-import-contract");
+    }
+    serial_text("GXOS_NET10:MEMORYRESOURCENOTIFICATION_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:MEMORYRESOURCENOTIFICATION_IMPORT_SYMBOL=CreateMemoryResourceNotification\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_memory_resource_notification_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_IMPORT_SYMBOL_INDEX=0x",
+                     g_memory_resource_notification_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_IMPORT_IAT_RVA=0x",
+                     g_memory_resource_notification_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_PREFERRED_IAT=0x",
+                     image.preferred_base +
+                         g_memory_resource_notification_importing_iat_rva);
+    serial_text("\r\n");
+#endif
 #ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
     if (g_veh_add_import_descriptor_index != 2U ||
         g_veh_add_import_symbol_index != 30U ||
@@ -7029,7 +7344,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:TLS_ALLOC_PTR=0x", *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x38));
     serial_text("\r\n");
 #endif
-#ifdef GXOS_ENABLE_CREATE_EVENT_W
+#if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
+    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION)
     if (!gxos_scheduler_initialize(&g_create_event_scheduler,
                                    boot_services->AllocatePages,
                                    boot_services->FreePages,
@@ -7043,7 +7359,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
             g_stack_lower, g_stack_upper)) {
         fail("createeventw-scheduler-adopt-environment");
     }
+#ifdef GXOS_ENABLE_CREATE_EVENT_W
     g_create_event_context.scheduler = &g_create_event_scheduler;
+#endif
+#ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
+    g_memory_resource_notification_context.scheduler =
+        &g_create_event_scheduler;
+#endif
     serial_text("GXOS_NET10:CREATEEVENTW_SCHEDULER_INITIALIZED=1\r\n");
     serial_text("GXOS_NET10:CREATEEVENTW_SCHEDULER_BOOT_ENVIRONMENT=PAYLOAD_TLS\r\n");
     serial_field_hex("GXOS_NET10:CREATEEVENTW_SCHEDULER_BOOT_OBJECT_SLOT=0x",

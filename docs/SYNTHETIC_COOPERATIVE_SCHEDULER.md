@@ -121,7 +121,11 @@ deterministic teardown.
 
 ## Synthetic objects and handles
 
-The object registry is fixed-capacity and currently tags `Thread` and `Event`.
+The object registry is fixed-capacity and tags `Thread`, `Event`, and the
+explicit `MemoryResourceNotification` waitable type. The scheduler retains
+six TCB slots, twelve Event slots, one separate memory-resource-notification
+record slot, and sixteen total object slots; these capacities are not expanded
+by the payload milestone.
 Handles are opaque 64-bit values:
 
 ```text
