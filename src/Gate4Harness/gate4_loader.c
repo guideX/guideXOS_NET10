@@ -23,7 +23,8 @@
 #include "vectored_handler.h"
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
-    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION)
+    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
+    defined(GXOS_ENABLE_CREATE_THREAD)
 #include "scheduler_foundation.h"
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -31,6 +32,9 @@
 #endif
 #ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
 #include "create_memory_resource_notification.h"
+#endif
+#ifdef GXOS_ENABLE_CREATE_THREAD
+#include "create_thread.h"
 #endif
 
 typedef uint64_t EFI_STATUS;
@@ -261,7 +265,8 @@ static uint32_t g_platform_last_error;
 static uint64_t g_stack_lower;
 static uint64_t g_stack_upper;
 #if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
-    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION)
+    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
+    defined(GXOS_ENABLE_CREATE_THREAD)
 static GXOS_SCHEDULER g_create_event_scheduler;
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -293,6 +298,42 @@ static uint32_t g_memory_resource_notification_import_symbol_index;
 static uint32_t g_memory_resource_notification_importing_iat_rva;
 static void *EFIAPI platform_create_memory_resource_notification(
     uint32_t notification_type);
+#endif
+#ifdef GXOS_ENABLE_CREATE_THREAD
+static GXOS_CREATE_THREAD_CONTEXT g_create_thread_context;
+static GXOS_CREATE_THREAD_EXECUTABLE_REGION
+    g_create_thread_executable_regions[GXOS_CRT_INITTERM_E_MAX_EXECUTABLE_REGIONS];
+static GXOS_SCHEDULER_HANDLE g_create_thread_handle;
+static uint32_t g_create_thread_invocation_count;
+static uint32_t g_create_thread_success_count;
+static uint32_t g_create_thread_failure_count;
+static uint32_t g_create_thread_import_descriptor_index;
+static uint32_t g_create_thread_import_symbol_index;
+static uint32_t g_create_thread_importing_iat_rva;
+static uint64_t g_create_thread_entry_rsp;
+static uint64_t g_create_thread_stack_arg5;
+static uint64_t g_create_thread_stack_arg6;
+static uint64_t g_create_thread_decoded_flags;
+static uint64_t g_create_thread_decoded_thread_id;
+static uint64_t g_create_thread_parameter;
+static uintptr_t g_create_thread_return_address;
+static uintptr_t g_create_thread_call_site;
+static uint32_t g_create_thread_stack_capture_valid;
+static uint32_t g_create_thread_event_public_refs_before;
+static uint32_t g_create_thread_event_public_refs_after;
+static uint32_t g_create_thread_bootstrap_stack_valid;
+static uint32_t g_create_thread_worker_entry_alignment;
+static uint32_t g_create_thread_shadow_space_valid;
+static void emit_create_thread_final_summary(void);
+void *EFIAPI gxos_create_thread_platform_impl(
+    void *thread_attributes,
+    uint64_t stack_size,
+    void *start_routine,
+    void *parameter,
+    uint64_t creation_flags,
+    uintptr_t thread_id,
+    uintptr_t import_entry_rsp);
+extern void gxos_create_thread_entry(void);
 #endif
 /* These symbols are intentionally external to the assembly entry file. */
 volatile uint32_t gxos_exception_dispatch_active;
@@ -3433,6 +3474,12 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
     serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_STACK_ARG5=0x",
                      arguments == 0 ? 0 : arguments[9]);
     serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_STACK_ARG6=0x",
+                     arguments == 0 ? 0 : arguments[10]);
+    serial_text("\r\n");
+#ifdef GXOS_ENABLE_CREATE_THREAD
+    emit_create_thread_final_summary();
+#endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
     emit_create_event_w_final_summary();
 #endif
@@ -5010,8 +5057,488 @@ static void GXOS_CRT_INITTERM_MS_ABI platform_initterm(
 }
 #endif
 
+#ifdef GXOS_ENABLE_CREATE_THREAD
+static uint32_t create_thread_live_count(uint8_t type,
+                                         uint32_t *public_handles)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    uint32_t handles = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        GXOS_SCHEDULER_OBJECT *object = &g_create_event_scheduler.objects[index];
+        if (object->live && object->type == type) {
+            ++count;
+            handles += object->public_handle_refs;
+        }
+    }
+    if (public_handles != 0) *public_handles = handles;
+    return count;
+}
+
+static uint32_t create_thread_state_count(GXOS_SCHEDULER_THREAD_STATE state)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        if (g_create_event_scheduler.threads[index].live &&
+            g_create_event_scheduler.threads[index].state == state) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static void emit_create_thread_final_summary(void)
+{
+    GXOS_SCHEDULER_OBJECT *object =
+        gxos_scheduler_object_from_handle(g_create_thread_handle);
+    GXOS_SCHEDULER_TCB *thread =
+        gxos_scheduler_thread_from_handle(g_create_thread_handle);
+    uint32_t event_handles = 0;
+    uint32_t notification_handles = 0;
+    uint32_t live_public_handles = 0;
+    uint32_t live_objects = 0;
+    uint32_t index;
+
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        GXOS_SCHEDULER_OBJECT *record = &g_create_event_scheduler.objects[index];
+        if (record->live) {
+            ++live_objects;
+            live_public_handles += record->public_handle_refs;
+        }
+    }
+    create_thread_live_count(GXOS_SCHEDULER_OBJECT_EVENT, &event_handles);
+    create_thread_live_count(GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION,
+                             &notification_handles);
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_INVOCATION_COUNT=0x",
+                     g_create_thread_invocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_SUCCESS_COUNT=0x",
+                     g_create_thread_success_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_FAILURE_COUNT=0x",
+                     g_create_thread_failure_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_LIVE_THREAD_OBJECT_COUNT=0x",
+                     create_thread_live_count(GXOS_SCHEDULER_OBJECT_THREAD, 0));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_LIVE_EVENT_OBJECT_COUNT=0x",
+                     create_thread_live_count(GXOS_SCHEDULER_OBJECT_EVENT, 0));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_LIVE_MEMORY_RESOURCE_NOTIFICATION_OBJECT_COUNT=0x",
+                     create_thread_live_count(
+                         GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION, 0));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_LIVE_PUBLIC_HANDLE_COUNT=0x",
+                     live_public_handles);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_EVENT_PUBLIC_HANDLE_COUNT=0x",
+                     event_handles);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_NOTIFICATION_PUBLIC_HANDLE_COUNT=0x",
+                     notification_handles);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_LIVE_OBJECT_COUNT=0x",
+                     live_objects);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_RUNNABLE_COUNT=0x",
+                     create_thread_state_count(GXOS_SCHEDULER_THREAD_RUNNABLE));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_BLOCKED_COUNT=0x",
+                     create_thread_state_count(GXOS_SCHEDULER_THREAD_BLOCKED));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_HANDLE=0x",
+                     g_create_thread_handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_OBJECT_SLOT=0x",
+                     object == 0 ? UINT32_MAX : object->slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_GENERATION=0x",
+                     object == 0 ? 0 : object->generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_INTERNAL_IDENTITY=0x",
+                     thread == 0 ? 0 : thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_TCB_SLOT=0x",
+                     thread == 0 ? UINT32_MAX :
+                         (uint32_t)(thread - g_create_event_scheduler.threads));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_STATE=0x",
+                     thread == 0 ? 0 : thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_SUSPEND_COUNT=0x",
+                     thread == 0 ? 0 : thread->suspend_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_EXECUTION_COUNT=0x",
+                     thread == 0 ? 0 : thread->execution_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_PUBLIC_REFERENCE_COUNT=0x",
+                     object == 0 ? 0 : object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_EXECUTION_REFERENCE_LIVE=0x",
+                     thread != 0 && thread->execution_refs != 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_STACK_BASE=0x",
+                     thread == 0 ? 0 : thread->stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_STACK_LIMIT=0x",
+                     thread == 0 ? 0 : thread->stack_limit);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_STACK_SIZE=0x",
+                     thread == 0 ? 0 : thread->stack_limit - thread->stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_INITIAL_RSP=0x",
+                     thread == 0 ? 0 : thread->initial_rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_INITIAL_RSP_MOD16=0x",
+                     thread == 0 ? 0 : thread->initial_rsp & 0xFULL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_WORKER_ENTRY_RSP=0x",
+                     thread == 0 ? 0 : thread->initial_rsp - 0x30U);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_WORKER_ENTRY_RSP_MOD16=0x",
+                     thread == 0 ? 0 : (thread->initial_rsp - 0x30U) & 0xFULL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_STACK_CANARIES=0x",
+                     thread != 0 && gxos_scheduler_check_canaries(thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_BOOTSTRAP_STACK_VALID=0x",
+                     g_create_thread_bootstrap_stack_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_SHADOW_SPACE_VALID=0x",
+                     g_create_thread_shadow_space_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_ENTRY_RVA=0x",
+                     thread != 0 && thread->entry != 0 &&
+                             (uintptr_t)thread->entry >= g_managed_image_base
+                         ? (uintptr_t)thread->entry - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_ENTRY_ARGUMENT=0x",
+                     thread == 0 ? 0 : (uintptr_t)thread->entry_argument);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_CONTEXT_RSP=0x",
+                     thread == 0 ? 0 : thread->context.rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_CONTEXT_RIP=0x",
+                     thread == 0 ? 0 : thread->context.rip);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_CONTEXT_ENTRY_ARGUMENT=0x",
+                     thread == 0 ? 0 : thread->context.r13);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_GS_BASE=0x",
+                     thread == 0 ? 0 : thread->gs_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_TEB_BASE=0x",
+                     thread == 0 ? 0 : thread->teb_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_TLS_VECTOR_BASE=0x",
+                     thread == 0 ? 0 : thread->tls_vector_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_TLS_BLOCK_BASE=0x",
+                     thread == 0 ? 0 : thread->tls_block_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_FLS_SLOTS=0x",
+                     thread == 0 ? 0 : GXOS_SCHEDULER_FLS_SLOTS);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_LAST_ERROR=0x",
+                     thread == 0 ? 0 : thread->last_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_EVENT_PARAMETER_PUBLIC_REFS_BEFORE=0x",
+                     g_create_thread_event_public_refs_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FINAL_EVENT_PARAMETER_PUBLIC_REFS_AFTER=0x",
+                     g_create_thread_event_public_refs_after);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CREATETHREAD_FINAL_SUMMARY=READY\r\n");
+}
+
+void *EFIAPI gxos_create_thread_platform_impl(
+    void *thread_attributes,
+    uint64_t stack_size,
+    void *start_routine,
+    void *parameter,
+    uint64_t creation_flags,
+    uintptr_t thread_id,
+    uintptr_t import_entry_rsp)
+{
+    GXOS_SCHEDULER_TCB *before_thread = gxos_scheduler_current_thread();
+    GXOS_SCHEDULER_TCB *thread = 0;
+    GXOS_SCHEDULER_OBJECT *object;
+    GXOS_SCHEDULER_OBJECT *event_object;
+    GXOS_SCHEDULER_EVENT *event;
+    GXOS_SCHEDULER_HANDLE parameter_handle = (GXOS_SCHEDULER_HANDLE)(uintptr_t)parameter;
+    GXOS_SCHEDULER_HANDLE handle;
+    uintptr_t start = (uintptr_t)start_routine;
+    uintptr_t return_address;
+    uintptr_t call_site;
+    uint64_t stack_arg5;
+    uint64_t stack_arg6;
+    uint64_t start_rva = 0;
+    uint32_t invocation = ++g_create_thread_invocation_count;
+    uint32_t tcb_unchanged;
+    uint32_t start_executable;
+
+    if (import_entry_rsp == 0) {
+        ++g_create_thread_failure_count;
+        g_platform_last_error = GXOS_CREATE_THREAD_ERROR_INVALID_PARAMETER;
+        return 0;
+    }
+    return_address = *(const uintptr_t *)(uintptr_t)import_entry_rsp;
+    call_site = import_call_site(return_address);
+    stack_arg5 = ((const uint64_t *)(uintptr_t)import_entry_rsp)[5];
+    stack_arg6 = ((const uint64_t *)(uintptr_t)import_entry_rsp)[6];
+    g_create_thread_entry_rsp = import_entry_rsp;
+    g_create_thread_stack_arg5 = stack_arg5;
+    g_create_thread_stack_arg6 = stack_arg6;
+    g_create_thread_decoded_flags = stack_arg5;
+    g_create_thread_decoded_thread_id = stack_arg6;
+    g_create_thread_parameter = (uint64_t)(uintptr_t)parameter;
+    g_create_thread_return_address = return_address;
+    g_create_thread_call_site = call_site;
+    g_create_thread_stack_capture_valid =
+        stack_arg5 == creation_flags && stack_arg6 == (uint64_t)thread_id;
+    start_executable = gxos_create_thread_start_is_executable(
+        &g_create_thread_context,
+        (GXOS_SCHEDULER_ENTRY)(uintptr_t)start_routine);
+    if (start >= g_managed_image_base &&
+        start - g_managed_image_base <= UINT32_MAX) {
+        start_rva = start - g_managed_image_base;
+    }
+    if (!g_create_thread_stack_capture_valid ||
+        !start_executable ||
+        !g_create_thread_context.scheduler->active) {
+        ++g_create_thread_failure_count;
+        g_platform_last_error = GXOS_CREATE_THREAD_ERROR_INVALID_PARAMETER;
+        gxos_scheduler_set_last_error(
+            GXOS_CREATE_THREAD_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    event = gxos_scheduler_event_from_handle(parameter_handle);
+    if (g_create_event_w_success_count == 0 ||
+        parameter_handle != g_create_event_w_handles[0] ||
+        event != &g_create_event_scheduler.events[0] || event == 0 ||
+        event->manual_reset != 0 || event->signaled != 0) {
+        ++g_create_thread_failure_count;
+        g_platform_last_error = GXOS_CREATE_THREAD_ERROR_INVALID_PARAMETER;
+        gxos_scheduler_set_last_error(
+            GXOS_CREATE_THREAD_ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    event_object = gxos_scheduler_object_from_handle(parameter_handle);
+    g_create_thread_event_public_refs_before =
+        event_object == 0 ? 0 : event_object->public_handle_refs;
+    handle = gxos_create_thread_contract(
+        &g_create_thread_context, thread_attributes, stack_size,
+        (GXOS_SCHEDULER_ENTRY)(uintptr_t)start_routine, parameter,
+        stack_arg5, stack_arg6, &thread);
+    if (handle == 0 || thread == 0) {
+        ++g_create_thread_failure_count;
+        g_platform_last_error = GXOS_CREATE_THREAD_ERROR_NOT_ENOUGH_MEMORY;
+        return 0;
+    }
+    ++g_create_thread_success_count;
+    g_create_thread_handle = handle;
+    object = gxos_scheduler_object_from_handle(handle);
+    if (object == 0 || object->type != GXOS_SCHEDULER_OBJECT_THREAD) {
+        fail("createthread-handle-decode");
+    }
+    event_object = gxos_scheduler_object_from_handle(parameter_handle);
+    g_create_thread_event_public_refs_after =
+        event_object == 0 ? 0 : event_object->public_handle_refs;
+    g_create_thread_bootstrap_stack_valid =
+        thread->initial_rsp >= thread->stack_base + 0x30U &&
+        thread->initial_rsp < thread->stack_limit &&
+        thread->initial_rsp - 0x30U >= thread->stack_base;
+    g_create_thread_worker_entry_alignment =
+        (uint32_t)((thread->initial_rsp - 0x30U) & 0xFULL);
+    g_create_thread_shadow_space_valid =
+        g_create_thread_bootstrap_stack_valid &&
+        thread->initial_rsp >= thread->stack_base + 0x30U &&
+        thread->initial_rsp - 0x30U + 0x28U <=
+            thread->stack_limit - GXOS_SCHEDULER_CANARY_BYTES;
+    tcb_unchanged = before_thread != 0 &&
+        before_thread == gxos_scheduler_current_thread() &&
+        before_thread->state == GXOS_SCHEDULER_THREAD_RUNNING &&
+        before_thread->execution_refs == 1U &&
+        before_thread->public_handle_refs == 0U;
+    if (start_rva != 0x35320U || thread->entry !=
+            (GXOS_SCHEDULER_ENTRY)(uintptr_t)start_routine ||
+        thread->entry_argument != parameter || thread->state !=
+            GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED ||
+        thread->suspend_count != 1U || thread->execution_count != 0U ||
+        thread->public_handle_refs != 1U || thread->execution_refs != 1U ||
+        g_create_thread_event_public_refs_before !=
+            g_create_thread_event_public_refs_after ||
+        g_create_thread_worker_entry_alignment != 8U ||
+        !g_create_thread_bootstrap_stack_valid ||
+        !g_create_thread_shadow_space_valid || !tcb_unchanged) {
+        fail("createthread-postcondition");
+    }
+    serial_text("GXOS_NET10:CREATETHREAD_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_INVOCATION=0x", invocation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_PAYLOAD_BASE=0x",
+                     g_managed_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_create_thread_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_ENTRY_RSP=0x",
+                     g_create_thread_entry_rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_RETURN_ADDRESS=0x",
+                     g_create_thread_return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_RCX=0x",
+                     (uint64_t)(uintptr_t)thread_attributes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_RDX=0x", stack_size);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_R8=0x",
+                     (uint64_t)(uintptr_t)start_routine);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_R9=0x",
+                     (uint64_t)(uintptr_t)parameter);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_STACK_ARG5=0x", stack_arg5);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_STACK_ARG6=0x", stack_arg6);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_DECODED_ATTRIBUTES=0x",
+                     (uint64_t)(uintptr_t)thread_attributes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_DECODED_STACK_SIZE=0x",
+                     stack_size);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_DECODED_START=0x", start);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_DECODED_PARAMETER=0x",
+                     g_create_thread_parameter);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_DECODED_CREATION_FLAGS=0x",
+                     g_create_thread_decoded_flags);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_DECODED_THREAD_ID=0x",
+                     g_create_thread_decoded_thread_id);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_STACK_CAPTURE_VALID=0x",
+                     g_create_thread_stack_capture_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_START_EXECUTABLE=0x", start_executable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_START_RVA=0x", start_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_RETURNED_HANDLE=0x", handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_HANDLE_TYPE=0x",
+                     object == 0 ? 0 : object->type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_OBJECT_SLOT=0x",
+                     object == 0 ? UINT32_MAX : object->slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_GENERATION=0x",
+                     object == 0 ? 0 : object->generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_INTERNAL_IDENTITY=0x",
+                     thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_TCB_SLOT=0x",
+                     (uint32_t)(thread - g_create_event_scheduler.threads));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_STATE=0x", thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_SUSPEND_COUNT=0x",
+                     thread->suspend_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_STACK_BASE=0x", thread->stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_STACK_LIMIT=0x", thread->stack_limit);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_STACK_SIZE=0x",
+                     thread->stack_limit - thread->stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_INITIAL_RSP=0x", thread->initial_rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_INITIAL_RSP_MOD16=0x",
+                     thread->initial_rsp & 0xFULL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_WORKER_ENTRY_RSP_MOD16=0x",
+                     g_create_thread_worker_entry_alignment);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_BOOTSTRAP_STACK_VALID=0x",
+                     g_create_thread_bootstrap_stack_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_SHADOW_SPACE_VALID=0x",
+                     g_create_thread_shadow_space_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_ENTRY_ARGUMENT=0x",
+                     (uint64_t)(uintptr_t)thread->entry_argument);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_CONTEXT_RSP=0x", thread->context.rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_CONTEXT_RIP=0x", thread->context.rip);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_CONTEXT_ENTRY_ARGUMENT=0x",
+                     thread->context.r13);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_PUBLIC_REFERENCE_COUNT=0x",
+                     object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_EXECUTION_REFERENCE_LIVE=0x",
+                     thread->execution_refs != 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_EXECUTION_COUNT=0x",
+                     thread->execution_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_RUNNABLE=0x",
+                     thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_EVENT_PARAMETER_VALID=0x", 1);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_EVENT_PARAMETER_AUTO_RESET=0x",
+                     event->manual_reset == 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_EVENT_PARAMETER_NONSIGNALED=0x",
+                     event->signaled == 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_EVENT_PUBLIC_REFS_BEFORE=0x",
+                     g_create_thread_event_public_refs_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_EVENT_PUBLIC_REFS_AFTER=0x",
+                     g_create_thread_event_public_refs_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_GS_BASE=0x", thread->gs_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_TLS_VECTOR_BASE=0x",
+                     thread->tls_vector_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_TLS_BLOCK_BASE=0x",
+                     thread->tls_block_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_FLS_SLOT_COUNT=0x",
+                     GXOS_SCHEDULER_FLS_SLOTS);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_LAST_ERROR=0x", thread->last_error);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CREATETHREAD_RETURNED\r\n");
+    return (void *)(uintptr_t)handle;
+}
+#endif
+
 static void *platform_import_target(const char *module, const char *symbol)
 {
+#ifdef GXOS_ENABLE_CREATE_THREAD
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "CreateThread")) {
+        return (void *)(uintptr_t)gxos_create_thread_entry;
+    }
+#endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "CreateEventW")) {
@@ -5295,6 +5822,14 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
             g_import_records[symbols].descriptor_index = descriptors - 1U;
             g_import_records[symbols].symbol_index = index;
             g_import_records[symbols].iat_rva = first_thunk_rva + index * 8U;
+#ifdef GXOS_ENABLE_CREATE_THREAD
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "CreateThread")) {
+                g_create_thread_import_descriptor_index = descriptors - 1U;
+                g_create_thread_import_symbol_index = index;
+                g_create_thread_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
             if (equal_text(module, "KERNEL32.dll") &&
                 equal_text(g_import_records[symbols].symbol, "CreateEventW")) {
@@ -7161,6 +7696,36 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_TARGET_VA=0x", g_managed_target);
     serial_text("\r\n");
+#ifdef GXOS_ENABLE_CREATE_THREAD
+    if (image.actual_base == 0 || image.loaded_size == 0 ||
+        image.loaded_size > UINTPTR_MAX - image.actual_base ||
+        image.executable_region_count == 0 ||
+        image.executable_region_count >
+            GXOS_CRT_INITTERM_E_MAX_EXECUTABLE_REGIONS) {
+        fail("createthread-image-context");
+    }
+    g_create_thread_context.scheduler = &g_create_event_scheduler;
+    g_create_thread_context.payload_base = (uintptr_t)image.actual_base;
+    g_create_thread_context.payload_size = image.loaded_size;
+    g_create_thread_context.executable_regions =
+        g_create_thread_executable_regions;
+    g_create_thread_context.executable_region_count =
+        image.executable_region_count;
+    for (uint32_t create_thread_index = 0;
+         create_thread_index != image.executable_region_count;
+         ++create_thread_index) {
+        g_create_thread_executable_regions[create_thread_index].base =
+            image.executable_regions[create_thread_index].base;
+        g_create_thread_executable_regions[create_thread_index].end =
+            image.executable_regions[create_thread_index].end;
+    }
+    serial_field_hex("GXOS_NET10:CREATETHREAD_PAYLOAD_SIZE=0x",
+                     g_create_thread_context.payload_size);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_EXECUTABLE_REGION_COUNT=0x",
+                     g_create_thread_context.executable_region_count);
+    serial_text("\r\n");
+#endif
     resolve_imports(&image, boot_services, &import_descriptors, &import_symbols,
                     &import_functional, &import_failfast, &unresolved_imports);
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -7204,6 +7769,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:MEMORYRESOURCENOTIFICATION_PREFERRED_IAT=0x",
                      image.preferred_base +
                          g_memory_resource_notification_importing_iat_rva);
+    serial_text("\r\n");
+#endif
+#ifdef GXOS_ENABLE_CREATE_THREAD
+    if (g_create_thread_import_descriptor_index != 2U ||
+        g_create_thread_import_symbol_index != 0x2DU ||
+        g_create_thread_importing_iat_rva != 0x7D1A0U) {
+        fail("createthread-import-contract");
+    }
+    serial_text("GXOS_NET10:CREATETHREAD_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:CREATETHREAD_IMPORT_SYMBOL=CreateThread\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_create_thread_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_IMPORT_SYMBOL_INDEX=0x",
+                     g_create_thread_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_IMPORT_IAT_RVA=0x",
+                     g_create_thread_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CREATETHREAD_PREFERRED_IAT=0x",
+                     image.preferred_base + g_create_thread_importing_iat_rva);
     serial_text("\r\n");
 #endif
 #ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
@@ -7345,7 +7931,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
 #endif
 #if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
-    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION)
+    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
+    defined(GXOS_ENABLE_CREATE_THREAD)
     if (!gxos_scheduler_initialize(&g_create_event_scheduler,
                                    boot_services->AllocatePages,
                                    boot_services->FreePages,

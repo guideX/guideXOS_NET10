@@ -511,8 +511,6 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
     if (thread == 0) return 0;
     zero_bytes(thread, sizeof(*thread));
     thread->live = 1;
-    thread->identity = scheduler->next_identity++;
-    thread->generation = 1;
     thread->state = GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED;
     thread->suspend_count = 1;
     thread->public_handle_refs = 1;
@@ -525,11 +523,14 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
         zero_bytes(thread, sizeof(*thread));
         return 0;
     }
+    thread->identity = scheduler->next_identity++;
+    thread->generation = object->generation;
     thread->object_slot = object_slot;
     stack_memory = 0;
     if (scheduler->allocate_pages(0, 4, GXOS_SCHEDULER_STACK_PAGES,
                                   &stack_memory) != 0 || stack_memory == 0) {
         release_object_record(object);
+        --scheduler->next_identity;
         zero_bytes(thread, sizeof(*thread));
         return 0;
     }
@@ -541,6 +542,7 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
     if (!allocate_thread_environment(thread)) {
         page_free(scheduler, stack_memory);
         release_object_record(object);
+        --scheduler->next_identity;
         zero_bytes(thread, sizeof(*thread));
         return 0;
     }
@@ -567,6 +569,15 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
     thread->saved_context = &thread->context;
     *thread_out = thread;
     return 1;
+}
+
+void gxos_scheduler_note_worker_started(void)
+{
+    if (g_scheduler != 0 && g_scheduler->current != 0 &&
+        !g_scheduler->current->is_boot_thread &&
+        g_scheduler->current->live) {
+        ++g_scheduler->current->execution_count;
+    }
 }
 
 int gxos_scheduler_resume_thread(GXOS_SCHEDULER_HANDLE handle,

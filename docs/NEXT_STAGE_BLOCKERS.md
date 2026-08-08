@@ -12,7 +12,7 @@ Gate 4 still proves the first no-allocation managed handoff. The allocation foll
 | CRT on-exit lifecycle | `_initialize_onexit_table` is proven for two empty tables. The current register-enabled trace reaches `_register_onexit_function`, proves the initialized encoded-null table, and returns `GROWTH_REQUIRED` / `-1` at `_recalloc_crt_t(_PVFV,NULL,0x20)` without allocation or callback execution. Execution, shutdown, and callback ownership remain unimplemented. | Keep `_recalloc_crt_t` as a separate allocator milestone. Do not add `_execute_onexit_table`, shutdown, or general CRT teardown to this contract. |
 | Error-returning CRT initializers | The actual range is one null `.rdata` entry; `_initterm_e` validates, skips it, returns zero, and reaches the now-closed `_initterm` range. No actual NativeAOT callback was present in this family. | Keep other `.CRT` families separate. Do not generalize these table results into C++ processing or implement initializer entries not present in a traced artifact. |
 | Monotonic performance counter | QPC returns normalized signed-64 units backed by the ACPI PM timer at port `0x608`, width 24, frequency `0x369E99`; QPF returns the same positive frequency. CPUID invariant TSC/leaf 15 is supported in code but unavailable on the default QEMU CPU. | No longer a blocker. Preserve the host vectors, source-selection negative, and QEMU Stall probe as regression tests. |
-| Runtime thread state | One boot CPU has a synthesized TLS vector, TLS block, TEB-like stack fields, FLS slots, identity, pseudo handles, and one-thread lock state. The deeper runtime trace reaches `CreateThread`, which is not implemented. | Prove actual thread creation, context/TLS ownership, scheduler interaction, and lifecycle teardown. |
+| Runtime thread state | The exact payload `CreateThread(NULL,0,payload+0x35320,Event #1,CREATE_SUSPENDED,NULL)` now creates one genuine typed Thread object, TCB, 16 KiB stack, independent GS/TLS/FLS/last-error state, and a live execution reference without running the worker. | The next honest boundary is `SetThreadPriority`; do not route it until its exact handle/priority contract is separately proven. |
 | TLS | The PE TLS template and `_tls_index` are initialized for one thread; the image has no TLS callback work in this probe. | Prove TLS allocation/reclamation and callbacks across actual thread creation. |
 | Exceptions | No managed exception path is present; `RhpThrowEx`, `RaiseException`, and broad diagnostics are fail-fast. | Decide whether to implement an exception ABI or keep exceptions outside the freestanding profile. |
 | Unwinding | `.pdata` is loaded as image data, but Windows `RtlVirtualUnwind`/context services and registration are not implemented. | Build a separately verified x64 unwind registration/lookup experiment before any exception or stack walk. |
@@ -40,6 +40,19 @@ honest blocker:
 `0x7D1A0`, caller RVA `0x3CFA0`). The disabled control retains the exact
 CreateMemoryResourceNotification blocker after the two established Event
 calls. See [KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md](KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md).
+
+## `CreateThread` payload boundary (2026-08-08)
+
+The exact `KERNEL32.dll!CreateThread` route is closed only for the observed
+NULL-attribute, zero-stack-size, executable `payload + 0x35320`, Event #1,
+`CREATE_SUSPENDED`, NULL-thread-ID contract. It returns a genuine typed,
+generation-checked Thread handle backed by the established scheduler's
+`CreatedSuspended` TCB and independent 16 KiB stack/environment. The real
+worker does not execute. Three fresh enabled runs agree on the next honest
+blocker, `KERNEL32.dll!SetThreadPriority` (descriptor `2`, symbol index `0x2F`,
+IAT RVA `0x7D1B0`, caller RVA `0x3CFC1`). The disabled control restores
+unresolved CreateThread after the two Events and one MemoryResourceNotification.
+See [KERNEL32_CREATETHREAD_BOOTSTRAP.md](KERNEL32_CREATETHREAD_BOOTSTRAP.md).
 
 ## `CreateEventW` payload boundary (2026-08-07)
 

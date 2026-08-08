@@ -412,6 +412,7 @@ gxos_scheduler_start_worker:
     movw    $0x03F8, %dx
     movb    $0x53, %al
     outb    %al, (%dx)
+    call    gxos_scheduler_note_worker_started
     movq    %r12, %r10
     movq    %r13, %r11
     subq    $8, %rsp

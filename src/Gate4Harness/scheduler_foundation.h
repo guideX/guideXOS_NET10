@@ -176,6 +176,7 @@ typedef struct GXOS_SCHEDULER_TCB {
     uint32_t suspend_count;
     uint32_t public_handle_refs;
     uint32_t execution_refs;
+    uint64_t execution_count;
     uint32_t deferred_reclaim;
     GXOS_SCHEDULER_CONTEXT context;
     GXOS_SCHEDULER_CONTEXT *saved_context;
@@ -239,6 +240,7 @@ void gxos_scheduler_set_worker_sentinels(void);
 void gxos_scheduler_capture_worker_sentinels(
     GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot);
 void gxos_scheduler_start_worker(void);
+void gxos_scheduler_note_worker_started(void);
 void gxos_scheduler_invalid_thread_return(void);
 
 int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
