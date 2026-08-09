@@ -24,6 +24,19 @@ The query-enabled artifact is a separate exact-import closure over the current p
 
 Static disassembly contains a second reference at `0x1800432bd` for class `9` and a `0x90`-byte buffer. It is retained in the inventory as dormant static reachability. The actual startup path records one class-15 call per QEMU run, returns the modeled no-associated-job failure, and advances to `KERNEL32.dll!GetModuleHandleW`. The exact call, class, structure, fifth stack argument, branch, output mutation, and next-boundary evidence is in [KERNEL32_QUERYINFORMATIONJOBOBJECT_BOOTSTRAP.md](KERNEL32_QUERYINFORMATIONJOBOBJECT_BOOTSTRAP.md).
 
+## `IsProcessInJob` addendum (2026-08-09)
+
+The exact scheduler/payload profile adds only `KERNEL32.dll!IsProcessInJob` at
+IAT RVA `0x7d290`. It accepts the existing current-process pseudo-handle
+(`(HANDLE)-1`), requires `JobHandle == NULL`, validates a four-byte writable
+`Result` range, writes `FALSE`, and returns `TRUE`. This records that guideXOS
+currently reports its current process is not contained in a Windows-style job;
+it does not implement Windows job objects. Three fresh enabled QEMU runs take
+the success/Result-FALSE fallback and stop at
+`KERNEL32.dll!GlobalMemoryStatusEx` on the main thread. The disabled control
+restores the unresolved `IsProcessInJob` boundary. See
+[KERNEL32_ISPROCESSINJOB_BOOTSTRAP.md](KERNEL32_ISPROCESSINJOB_BOOTSTRAP.md).
+
 ## Exact descriptor and symbol inventory
 
 IAT RVAs below are relative to the preferred image base `0x180000000`. Each `symbol (RVA)` pair is one imported symbol; no ordinal-only import exists in this artifact. “Before” means before the first instruction of the exported `ManagedMain` thunk. “Probe” means the legitimate path from that thunk through validation, the borrowed callback, and return.

@@ -15,6 +15,7 @@
 #include "platform_process_group_affinity.h"
 #include "platform_process_affinity.h"
 #include "platform_query_information_job_object.h"
+#include "platform_is_process_in_job.h"
 #include "platform_get_module_handle.h"
 #include "platform_get_module_handle_ex.h"
 #include "platform_get_proc_address.h"
@@ -26,7 +27,8 @@
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
     defined(GXOS_ENABLE_CREATE_THREAD) || \
     defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
-    defined(GXOS_ENABLE_RESUME_THREAD)
+    defined(GXOS_ENABLE_RESUME_THREAD) || \
+    defined(GXOS_ENABLE_IS_PROCESS_IN_JOB)
 #include "scheduler_foundation.h"
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -276,7 +278,8 @@ static uint64_t g_stack_upper;
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
     defined(GXOS_ENABLE_CREATE_THREAD) || \
     defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
-    defined(GXOS_ENABLE_RESUME_THREAD)
+    defined(GXOS_ENABLE_RESUME_THREAD) || \
+    defined(GXOS_ENABLE_IS_PROCESS_IN_JOB)
 static GXOS_SCHEDULER g_create_event_scheduler;
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -407,6 +410,31 @@ static uint64_t g_resume_thread_current_gs_before;
 static uint64_t g_resume_thread_current_gs_after;
 static void emit_resume_thread_final_summary(void);
 extern void gxos_resume_thread_entry(void);
+#endif
+extern void gxos_import_failfast_entry(void);
+#ifdef GXOS_ENABLE_IS_PROCESS_IN_JOB
+static uint64_t g_is_process_in_job_invocation_count;
+static uint64_t g_is_process_in_job_success_count;
+static uint64_t g_is_process_in_job_failure_count;
+static uint32_t g_is_process_in_job_import_descriptor_index;
+static uint32_t g_is_process_in_job_import_symbol_index;
+static uint32_t g_is_process_in_job_importing_iat_rva;
+static GXOS_IS_PROCESS_IN_JOB_FACTS g_is_process_in_job_facts;
+static uint64_t g_is_process_in_job_last_rcx;
+static uint64_t g_is_process_in_job_last_rdx;
+static uint64_t g_is_process_in_job_last_r8;
+static uint64_t g_is_process_in_job_last_r9;
+static uint64_t g_is_process_in_job_last_call_site;
+static uint64_t g_is_process_in_job_last_return_address;
+static GXOS_IS_PROCESS_IN_JOB_REPORT g_is_process_in_job_last_report;
+static GXOS_IS_PROCESS_IN_JOB_STATUS g_is_process_in_job_last_status;
+GXOS_IS_PROCESS_IN_JOB_BOOL EFIAPI platform_is_process_in_job(
+    GXOS_IS_PROCESS_IN_JOB_HANDLE process_handle,
+    GXOS_IS_PROCESS_IN_JOB_HANDLE job_handle,
+    GXOS_IS_PROCESS_IN_JOB_RESULT result,
+    uint64_t original_r9,
+    uintptr_t import_return_address);
+extern void gxos_is_process_in_job_entry(void);
 #endif
 /* These symbols are intentionally external to the assembly entry file. */
 volatile uint32_t gxos_exception_dispatch_active;
@@ -3502,7 +3530,7 @@ static IMPORT_RECORD g_import_records[MAX_IMPORT_SYMBOLS];
 static EFI_PHYSICAL_ADDRESS g_import_stub_pages;
 static uint32_t g_import_symbol_count;
 
-static void __attribute__((noreturn)) EFIAPI import_failfast(
+void __attribute__((noreturn)) EFIAPI import_failfast(
     const IMPORT_RECORD *record, const uint64_t *arguments)
 {
     uintptr_t return_address = arguments == 0 ? 0 : (uintptr_t)arguments[4];
@@ -3515,11 +3543,15 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
     defined(GXOS_ENABLE_CREATE_THREAD) || \
     defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
-    defined(GXOS_ENABLE_RESUME_THREAD)
+    defined(GXOS_ENABLE_RESUME_THREAD) || \
+    defined(GXOS_ENABLE_IS_PROCESS_IN_JOB)
     GXOS_SCHEDULER_TCB *current_scheduler_thread =
         gxos_scheduler_current_thread();
     uint32_t blocked_count = 0;
+    uint32_t live_object_count = 0;
+    uint32_t live_public_handle_count = 0;
     uint32_t scheduler_index;
+    uint32_t object_index;
 #ifdef GXOS_ENABLE_CREATE_THREAD
     GXOS_SCHEDULER_TCB *worker_scheduler_thread =
         gxos_scheduler_thread_from_handle(g_create_thread_handle);
@@ -3582,13 +3614,23 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
     defined(GXOS_ENABLE_CREATE_THREAD) || \
     defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
-    defined(GXOS_ENABLE_RESUME_THREAD)
+    defined(GXOS_ENABLE_RESUME_THREAD) || \
+    defined(GXOS_ENABLE_IS_PROCESS_IN_JOB)
     for (scheduler_index = 0;
          scheduler_index != GXOS_SCHEDULER_MAX_THREADS; ++scheduler_index) {
         if (g_create_event_scheduler.threads[scheduler_index].live &&
             g_create_event_scheduler.threads[scheduler_index].state ==
                 GXOS_SCHEDULER_THREAD_BLOCKED) {
             ++blocked_count;
+        }
+    }
+    for (object_index = 0;
+         object_index != GXOS_SCHEDULER_MAX_OBJECTS; ++object_index) {
+        GXOS_SCHEDULER_OBJECT *object =
+            &g_create_event_scheduler.objects[object_index];
+        if (object->live) {
+            ++live_object_count;
+            live_public_handle_count += object->public_handle_refs;
         }
     }
     serial_text("GXOS_NET10:IMPORT_BLOCKER_SCHEDULER_THREAD=");
@@ -3624,6 +3666,18 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
                      worker_scheduler_thread == 0 ? 0 :
                          worker_scheduler_thread->state);
     serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_PRIORITY=0x",
+                     worker_scheduler_thread == 0 ? 0 :
+                         (uint64_t)(int64_t)worker_scheduler_thread->relative_priority);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_SUSPEND_COUNT=0x",
+                     worker_scheduler_thread == 0 ? 0 :
+                         worker_scheduler_thread->suspend_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_RUNNABLE=0x",
+                     worker_scheduler_thread != 0 &&
+                         worker_scheduler_thread->runnable_queued);
+    serial_text("\r\n");
     serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_RUNNABLE_COUNT=0x",
                      gxos_scheduler_runnable_count());
     serial_text("\r\n");
@@ -3633,6 +3687,12 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
     serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_PUBLIC_THREAD_HANDLE_REFS=0x",
                      worker_scheduler_object == 0
                          ? 0 : worker_scheduler_object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_LIVE_OBJECT_COUNT=0x",
+                     live_object_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_LIVE_PUBLIC_HANDLE_COUNT=0x",
+                     live_public_handle_count);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_EXECUTION_REFERENCE_LIVE=0x",
                      worker_scheduler_thread != 0 &&
@@ -3754,6 +3814,25 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
         serial_text("\r\n");
         serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_OTHER_FAILURE_COUNT=0x",
                          g_query_job_other_failures);
+        serial_text("\r\n");
+    }
+#endif
+#ifdef GXOS_ENABLE_IS_PROCESS_IN_JOB
+    if (g_is_process_in_job_invocation_count != 0) {
+        serial_text("GXOS_NET10:ISPROCESSINJOB_CALLER_CONSUMPTION_COMPLETE\r\n");
+        serial_text("GXOS_NET10:ISPROCESSINJOB_NEXT_BOUNDARY=");
+        serial_text(record->module);
+        serial_text("!");
+        serial_text(record->symbol);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:ISPROCESSINJOB_CALL_COUNT=0x",
+                         g_is_process_in_job_invocation_count);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:ISPROCESSINJOB_SUCCESS_COUNT=0x",
+                         g_is_process_in_job_success_count);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:ISPROCESSINJOB_FAILURE_COUNT=0x",
+                         g_is_process_in_job_failure_count);
         serial_text("\r\n");
     }
 #endif
@@ -3892,33 +3971,25 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
 static void emit_import_failfast_stub(uint8_t *stub, const IMPORT_RECORD *record)
 {
     uint64_t record_address = (uint64_t)(uintptr_t)record;
-    uint64_t handler_address = (uint64_t)(uintptr_t)import_failfast;
+    uint64_t handler_address = (uint64_t)(uintptr_t)gxos_import_failfast_entry;
     uint32_t cursor = 0;
 
     /*
-     * Push the four original register arguments.  The original return
-     * address remains at arguments[4].  The handler never returns, so this
-     * temporary stack frame needs no unwind or restore path.
+     * Keep the record address in volatile R10 and enter the common assembly
+     * helper.  That helper builds a real call frame before entering the
+     * never-returning C diagnostic handler.
      */
-    stub[cursor++] = 0x51; /* push rcx */
-    stub[cursor++] = 0x52; /* push rdx */
-    stub[cursor++] = 0x41;
-    stub[cursor++] = 0x50; /* push r8 */
-    stub[cursor++] = 0x41;
-    stub[cursor++] = 0x51; /* push r9 */
-    stub[cursor++] = 0x48;
-    stub[cursor++] = 0x89;
-    stub[cursor++] = 0xE2; /* mov rdx, rsp */
-    stub[cursor++] = 0x48;
-    stub[cursor++] = 0xB9;
+    stub[cursor++] = 0x49;
+    stub[cursor++] = 0xBA; /* mov r10, record */
     *(uint64_t *)(stub + cursor) = record_address;
     cursor += 8;
-    stub[cursor++] = 0x48;
-    stub[cursor++] = 0xB8;
+    stub[cursor++] = 0x49;
+    stub[cursor++] = 0xBB; /* mov r11, helper */
     *(uint64_t *)(stub + cursor) = handler_address;
     cursor += 8;
+    stub[cursor++] = 0x41;
     stub[cursor++] = 0xFF;
-    stub[cursor++] = 0xE0;
+    stub[cursor++] = 0xE3; /* jmp r11 */
     while (cursor < 32) stub[cursor++] = 0xCC;
 }
 
@@ -6369,6 +6440,12 @@ static void *platform_import_target(const char *module, const char *symbol)
         return (void *)(uintptr_t)platform_get_process_affinity_mask;
     }
 #endif
+#ifdef GXOS_ENABLE_IS_PROCESS_IN_JOB
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "IsProcessInJob")) {
+        return (void *)(uintptr_t)gxos_is_process_in_job_entry;
+    }
+#endif
 #ifdef GXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "QueryInformationJobObject")) {
@@ -6622,6 +6699,16 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 g_crt_malloc_importing_iat_rva = first_thunk_rva + index * 8U;
             }
 #endif
+#ifdef GXOS_ENABLE_IS_PROCESS_IN_JOB
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "IsProcessInJob")) {
+                g_is_process_in_job_import_descriptor_index = descriptors - 1U;
+                g_is_process_in_job_import_symbol_index = index;
+                g_is_process_in_job_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
+#endif
             {
                 void *target = platform_import_target(module, g_import_records[symbols].symbol);
 #ifdef GXOS_NEGATIVE_UNRESOLVED_IMPORT
@@ -6835,6 +6922,18 @@ static void configure_platform_system_info(const PE_IMAGE *image)
     serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_FACTS_SOURCE=GETSYSTEMINFO_AND_PROCESSGROUP_SNAPSHOT\r\n");
     serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_FACTS_POLICY=SINGLE_GROUP_ZERO_BOOTSTRAP_PROCESSOR\r\n");
 #endif
+#ifdef GXOS_ENABLE_IS_PROCESS_IN_JOB
+    /* This is only a current-process identity fact, not a job-object model. */
+    g_is_process_in_job_facts.current_process_handle =
+        (GXOS_IS_PROCESS_IN_JOB_HANDLE)(uintptr_t)platform_get_current_process();
+    if (g_is_process_in_job_facts.current_process_handle !=
+        GXOS_IS_PROCESS_IN_JOB_CURRENT_PROCESS) {
+        fail("isprocessinjob-current-process-token");
+    }
+    serial_text("GXOS_NET10:ISPROCESSINJOB_FACTS_SOURCE=GETCURRENT_PROCESS\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_JOB_OBJECT_MODEL=ABSENT\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_CURRENT_PROCESS_IS_IN_JOB=0\r\n");
+#endif
 #ifdef GXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT
     /* guideXOS has no job-object manager or current-process job association. */
     g_query_job_facts.supported_job_handle = GXOS_QUERY_JOB_CURRENT_HANDLE;
@@ -6868,6 +6967,234 @@ static void configure_platform_system_info(const PE_IMAGE *image)
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_SOURCE=UEFI_PAGE_AND_LOADED_IMAGE\r\n");
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_POLICY=IMAGE_BACKED_RANGE_SINGLE_BOOTSTRAP_PROCESSOR\r\n");
 }
+
+#ifdef GXOS_ENABLE_IS_PROCESS_IN_JOB
+static const char *is_process_in_job_status_name(
+    GXOS_IS_PROCESS_IN_JOB_STATUS status)
+{
+    switch (status) {
+    case GXOS_IS_PROCESS_IN_JOB_STATUS_OK: return "OK";
+    case GXOS_IS_PROCESS_IN_JOB_STATUS_INVALID_PROCESS_HANDLE:
+        return "INVALID_PROCESS_HANDLE";
+    case GXOS_IS_PROCESS_IN_JOB_STATUS_NON_NULL_JOB_HANDLE:
+        return "NON_NULL_JOB_HANDLE";
+    case GXOS_IS_PROCESS_IN_JOB_STATUS_NULL_RESULT: return "NULL_RESULT";
+    case GXOS_IS_PROCESS_IN_JOB_STATUS_NONCANONICAL_RESULT:
+        return "NONCANONICAL_RESULT";
+    case GXOS_IS_PROCESS_IN_JOB_STATUS_UNWRITABLE_RESULT:
+        return "UNWRITABLE_RESULT";
+    case GXOS_IS_PROCESS_IN_JOB_STATUS_RANGE_OVERFLOW:
+        return "RANGE_OVERFLOW";
+    case GXOS_IS_PROCESS_IN_JOB_STATUS_INVALID_MEMORY_CONTEXT:
+        return "INVALID_MEMORY_CONTEXT";
+    default: return "UNKNOWN";
+    }
+}
+
+GXOS_IS_PROCESS_IN_JOB_BOOL EFIAPI platform_is_process_in_job(
+    GXOS_IS_PROCESS_IN_JOB_HANDLE process_handle,
+    GXOS_IS_PROCESS_IN_JOB_HANDLE job_handle,
+    GXOS_IS_PROCESS_IN_JOB_RESULT result,
+    uint64_t original_r9,
+    uintptr_t import_return_address)
+{
+    uintptr_t return_address = import_return_address;
+    uintptr_t call_site = import_call_site(return_address);
+    GXOS_IS_PROCESS_IN_JOB_STATUS status;
+    GXOS_IS_PROCESS_IN_JOB_BOOL return_value;
+    GXOS_SCHEDULER_TCB *worker;
+    GXOS_SCHEDULER_OBJECT *worker_object;
+    uint32_t blocked_count = 0;
+    uint32_t live_objects = 0;
+    uint32_t live_handles = 0;
+    uint32_t object_index;
+    uint32_t thread_index;
+
+    ++g_is_process_in_job_invocation_count;
+    g_is_process_in_job_last_rcx = (uint64_t)(uintptr_t)process_handle;
+    g_is_process_in_job_last_rdx = (uint64_t)(uintptr_t)job_handle;
+    g_is_process_in_job_last_r8 = (uint64_t)(uintptr_t)result;
+    g_is_process_in_job_last_r9 = original_r9;
+    g_is_process_in_job_last_return_address = return_address;
+    g_is_process_in_job_last_call_site = call_site;
+    status = gxos_is_process_in_job_checked(
+        process_handle, job_handle, result, &g_is_process_in_job_facts,
+        &g_system_info_memory, &g_is_process_in_job_last_report);
+    g_is_process_in_job_last_status = status;
+    return_value = status == GXOS_IS_PROCESS_IN_JOB_STATUS_OK
+        ? GXOS_IS_PROCESS_IN_JOB_TRUE : GXOS_IS_PROCESS_IN_JOB_FALSE;
+    if (return_value != GXOS_IS_PROCESS_IN_JOB_FALSE ||
+        status == GXOS_IS_PROCESS_IN_JOB_STATUS_OK) {
+        if (status == GXOS_IS_PROCESS_IN_JOB_STATUS_OK) {
+            ++g_is_process_in_job_success_count;
+        }
+    } else {
+        ++g_is_process_in_job_failure_count;
+    }
+
+    worker = gxos_scheduler_thread_from_handle(g_create_thread_handle);
+    worker_object = gxos_scheduler_object_from_handle(g_create_thread_handle);
+    for (thread_index = 0; thread_index != GXOS_SCHEDULER_MAX_THREADS;
+         ++thread_index) {
+        if (g_create_event_scheduler.threads[thread_index].live &&
+            g_create_event_scheduler.threads[thread_index].state ==
+                GXOS_SCHEDULER_THREAD_BLOCKED) {
+            ++blocked_count;
+        }
+    }
+    for (object_index = 0; object_index != GXOS_SCHEDULER_MAX_OBJECTS;
+         ++object_index) {
+        GXOS_SCHEDULER_OBJECT *object =
+            &g_create_event_scheduler.objects[object_index];
+        if (object->live) {
+            ++live_objects;
+            live_handles += object->public_handle_refs;
+        }
+    }
+    serial_text("GXOS_NET10:ISPROCESSINJOB_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_CALL_INDEX=0x",
+                     g_is_process_in_job_invocation_count - 1U);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_IMPORT_SYMBOL=IsProcessInJob\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_is_process_in_job_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_IMPORT_SYMBOL_INDEX=0x",
+                     g_is_process_in_job_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_IAT_RVA=0x",
+                     g_is_process_in_job_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_PAYLOAD_BASE=0x",
+                     g_managed_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RUNTIME_IAT=0x",
+                     g_managed_image_base +
+                         g_is_process_in_job_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RETURN_ADDRESS=0x",
+                     return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RCX=0x",
+                     g_is_process_in_job_last_rcx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RDX=0x",
+                     g_is_process_in_job_last_rdx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_R8=0x",
+                     g_is_process_in_job_last_r8);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_R9=0x",
+                     g_is_process_in_job_last_r9);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_PROCESS_HANDLE=0x",
+                     process_handle);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_PROCESS_HANDLE_CLASS=");
+    serial_text(process_handle == GXOS_IS_PROCESS_IN_JOB_CURRENT_PROCESS
+                    ? "CURRENT_PROCESS_PSEUDO_HANDLE\r\n"
+                    : "UNSUPPORTED\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_PROCESS_HANDLE_ORIGIN=GetCurrentProcess\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_JOB_HANDLE=0x", job_handle);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_JOB_HANDLE_CLASS=");
+    serial_text(job_handle == GXOS_IS_PROCESS_IN_JOB_NULL_JOB
+                    ? "NULL\r\n" : "NON_NULL_UNSUPPORTED\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_POINTER=0x",
+                     (uint64_t)(uintptr_t)result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_RANGE_BASE=0x",
+                     g_is_process_in_job_last_report.result_range_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_RANGE_END=0x",
+                     g_is_process_in_job_last_report.result_range_end);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_POINTER_CANONICAL=0x",
+                     g_is_process_in_job_last_report.result_pointer_canonical);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_POINTER_WRITABLE=0x",
+                     g_is_process_in_job_last_report.result_pointer_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_RANGE_VALID=0x",
+                     g_is_process_in_job_last_report.result_range_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_VALUE_BEFORE=0x",
+                     g_is_process_in_job_last_report.result_value_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_BYTES_WRITTEN=0x",
+                     g_is_process_in_job_last_report.result_bytes_written);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RETURN_VALUE=0x",
+                     return_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_VALUE_AFTER=0x",
+                     g_is_process_in_job_last_report.result_value_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RESULT_WRITTEN=0x",
+                     g_is_process_in_job_last_report.result_written);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_STATUS=");
+    serial_text(is_process_in_job_status_name(status));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_CALLER_BRANCH=");
+    if (status == GXOS_IS_PROCESS_IN_JOB_STATUS_OK &&
+        g_is_process_in_job_last_report.result_value_after == 0) {
+        serial_text("SUCCESS_RESULT_FALSE_FALLBACK\r\n");
+    } else {
+        serial_text("FAILURE_RESULT_UNTOUCHED\r\n");
+    }
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_MAIN_IDENTITY=0x",
+                     g_create_event_scheduler.boot_thread == 0 ? 0 :
+                         g_create_event_scheduler.boot_thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_MAIN_STATE=0x",
+                     g_create_event_scheduler.boot_thread == 0 ? 0 :
+                         g_create_event_scheduler.boot_thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_WORKER_IDENTITY=0x",
+                     worker == 0 ? 0 : worker->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_WORKER_STATE=0x",
+                     worker == 0 ? 0 : worker->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_WORKER_PRIORITY=0x",
+                     worker == 0 ? 0 : (uint32_t)worker->relative_priority);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_WORKER_SUSPEND_COUNT=0x",
+                     worker == 0 ? 0 : worker->suspend_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_WORKER_RUNNABLE=0x",
+                     worker == 0 ? 0 : worker->runnable_queued);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_WORKER_EXECUTION_COUNT=0x",
+                     worker == 0 ? 0 : worker->execution_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_WORKER_PUBLIC_HANDLE_REFS=0x",
+                     worker_object == 0 ? 0 : worker_object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_LIVE_OBJECT_COUNT=0x",
+                     live_objects);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_LIVE_PUBLIC_HANDLE_COUNT=0x",
+                     live_handles);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_RUNNABLE_COUNT=0x",
+                     gxos_scheduler_runnable_count());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_BLOCKED_COUNT=0x",
+                     blocked_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_RETURNED\r\n");
+    return return_value;
+}
+#endif
 
 static void serial_system_info_status(GXOS_SYSTEM_INFO_STATUS status)
 {
@@ -8564,6 +8891,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
                      image.preferred_base + g_resume_thread_importing_iat_rva);
     serial_text("\r\n");
 #endif
+#ifdef GXOS_ENABLE_IS_PROCESS_IN_JOB
+    if (g_is_process_in_job_import_descriptor_index != 2U ||
+        g_is_process_in_job_import_symbol_index != 0x4BU ||
+        g_is_process_in_job_importing_iat_rva != 0x7D290U) {
+        fail("isprocessinjob-import-contract");
+    }
+    serial_text("GXOS_NET10:ISPROCESSINJOB_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:ISPROCESSINJOB_IMPORT_SYMBOL=IsProcessInJob\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_is_process_in_job_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_IMPORT_SYMBOL_INDEX=0x",
+                     g_is_process_in_job_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_IMPORT_IAT_RVA=0x",
+                     g_is_process_in_job_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:ISPROCESSINJOB_PREFERRED_IAT=0x",
+                     image.preferred_base + g_is_process_in_job_importing_iat_rva);
+    serial_text("\r\n");
+#endif
 #ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
     if (g_veh_add_import_descriptor_index != 2U ||
         g_veh_add_import_symbol_index != 30U ||
@@ -8706,7 +9054,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
     defined(GXOS_ENABLE_CREATE_THREAD) || \
     defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
-    defined(GXOS_ENABLE_RESUME_THREAD)
+    defined(GXOS_ENABLE_RESUME_THREAD) || \
+    defined(GXOS_ENABLE_IS_PROCESS_IN_JOB)
     if (!gxos_scheduler_initialize(&g_create_event_scheduler,
                                    boot_services->AllocatePages,
                                    boot_services->FreePages,

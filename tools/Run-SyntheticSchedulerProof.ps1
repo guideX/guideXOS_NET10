@@ -66,6 +66,7 @@ $required = @(
     'GXOS_NET10:SCHEDULER_FAILURE_COUNT=0x0000000000000000',
     'GXOS_NET10:SYNTHETIC_SCHEDULER_PROOF_RETURNED'
 )
+$ownedProcesses = @()
 
 try {
     for ($sequence = 1; $sequence -le $RunCount; $sequence++) {
@@ -91,6 +92,7 @@ try {
             '-no-reboot', '-no-shutdown'
         )
         $process = Start-Process -FilePath $qemu -ArgumentList $arguments -WorkingDirectory $buildDirectory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+        $ownedProcesses += $process
         $completed = $process.WaitForExit($TimeoutSeconds * 1000)
         if (-not $completed) {
             Stop-Process -Id $process.Id -Force
@@ -118,13 +120,19 @@ try {
     }
 }
 finally {
-    $remaining = @(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue)
-    foreach ($process in $remaining) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    foreach ($ownedProcess in $ownedProcesses) {
+        try {
+            if (-not $ownedProcess.HasExited) {
+                Stop-Process -Id $ownedProcess.Id -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+        try { $ownedProcess.WaitForExit(5000) } catch { }
     }
 }
 
-if (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count -ne 0) {
+if (@($ownedProcesses | Where-Object {
+        Get-Process -Id $_.Id -ErrorAction SilentlyContinue
+    }).Count -ne 0) {
     throw 'QEMU cleanup failed.'
 }
 Write-Output "SYNTHETIC_QEMU_RUNS=$RunCount"

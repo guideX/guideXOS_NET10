@@ -56,6 +56,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [`GetProcessGroupAffinity` bootstrap contract](docs/KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md)
 - [`CreateMemoryResourceNotification` bootstrap contract](docs/KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md)
 - [`ResumeThread` bootstrap contract](docs/KERNEL32_RESUMETHREAD_BOOTSTRAP.md)
+- [`IsProcessInJob` bootstrap contract](docs/KERNEL32_ISPROCESSINJOB_BOOTSTRAP.md)
 - [`SetThreadPriority` bootstrap contract](docs/KERNEL32_SETTHREADPRIORITY_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
