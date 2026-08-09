@@ -261,6 +261,53 @@ static GXOS_SCHEDULER_TCB *find_free_thread(void)
     return 0;
 }
 
+static int canonical_nonzero_pointer(uint64_t value)
+{
+    uint64_t high = value >> 48;
+    return value >= 0x10000U && (high == 0 || high == 0xFFFFU);
+}
+
+static int aligned_page_pointer(uint64_t value)
+{
+    return canonical_nonzero_pointer(value) &&
+           (value & (GXOS_SCHEDULER_PAGE_SIZE - 1U)) == 0;
+}
+
+static int enqueue_runnable(GXOS_SCHEDULER_TCB *thread)
+{
+    if (g_scheduler == 0 || thread == 0 || !thread->live ||
+        thread->state != GXOS_SCHEDULER_THREAD_RUNNABLE) {
+        return 0;
+    }
+    if (thread->runnable_queued) return 1;
+    if (g_scheduler->runnable_count >= GXOS_SCHEDULER_MAX_THREADS) return 0;
+    g_scheduler->runnable_queue[g_scheduler->runnable_count++] = thread;
+    thread->runnable_queued = 1;
+    return 1;
+}
+
+static int remove_runnable(GXOS_SCHEDULER_TCB *thread)
+{
+    uint32_t index;
+    if (g_scheduler == 0 || thread == 0 || !thread->runnable_queued) return 0;
+    for (index = 0; index != g_scheduler->runnable_count; ++index) {
+        if (g_scheduler->runnable_queue[index] == thread) {
+            uint32_t tail = g_scheduler->runnable_count - 1U;
+            while (index != tail) {
+                g_scheduler->runnable_queue[index] =
+                    g_scheduler->runnable_queue[index + 1U];
+                ++index;
+            }
+            g_scheduler->runnable_queue[tail] = 0;
+            g_scheduler->runnable_count = tail;
+            thread->runnable_queued = 0;
+            return 1;
+        }
+    }
+    thread->runnable_queued = 0;
+    return 0;
+}
+
 static GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *
 find_free_memory_resource_notification(void)
 {
@@ -287,7 +334,8 @@ static GXOS_SCHEDULER_TCB *pick_next_runnable(GXOS_SCHEDULER_TCB *current)
     for (offset = 1; offset <= GXOS_SCHEDULER_MAX_THREADS; ++offset) {
         index = (current_index + offset) % GXOS_SCHEDULER_MAX_THREADS;
         if (g_scheduler->threads[index].live &&
-            g_scheduler->threads[index].state == GXOS_SCHEDULER_THREAD_RUNNABLE) {
+            g_scheduler->threads[index].state == GXOS_SCHEDULER_THREAD_RUNNABLE &&
+            g_scheduler->threads[index].runnable_queued) {
             return &g_scheduler->threads[index];
         }
     }
@@ -298,6 +346,7 @@ static void choose_next(GXOS_SCHEDULER_TCB *next,
                         GXOS_SCHEDULER_SWITCH_PLAN *plan)
 {
     GXOS_SCHEDULER_TCB *old = g_scheduler->current;
+    (void)remove_runnable(next);
     next->state = GXOS_SCHEDULER_THREAD_RUNNING;
     g_scheduler->current = next;
     plan->old_context = &old->saved_context;
@@ -328,6 +377,11 @@ static void wake_waiter(GXOS_SCHEDULER_EVENT *event, uint32_t index)
     thread->blocked_object = 0;
     thread->blocked_result = GXOS_SCHEDULER_WAIT_SIGNALED;
     thread->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
+    if (!enqueue_runnable(thread)) {
+        thread->state = GXOS_SCHEDULER_THREAD_BLOCKED;
+        thread->blocked_object = 0;
+        thread->blocked_result = GXOS_SCHEDULER_WAIT_FAILURE;
+    }
 }
 
 int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
@@ -584,19 +638,98 @@ void gxos_scheduler_note_worker_started(void)
     }
 }
 
+int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread)
+{
+    const uint8_t *gs;
+    const uint8_t *teb;
+    const uint64_t *tls_vector;
+    uint32_t index;
+
+    if (thread == 0 || !thread->live || thread->is_boot_thread ||
+        thread->execution_refs == 0 || thread->saved_context != &thread->context ||
+        thread->entry == 0 || !canonical_nonzero_pointer((uint64_t)(uintptr_t)thread->entry) ||
+        thread->stack_pages_memory == 0 ||
+        !aligned_page_pointer(thread->stack_base) ||
+        thread->stack_limit != thread->stack_base + GXOS_SCHEDULER_STACK_SIZE ||
+        thread->initial_rsp < thread->stack_base + GXOS_SCHEDULER_CANARY_BYTES ||
+        thread->initial_rsp >= thread->stack_limit - GXOS_SCHEDULER_CANARY_BYTES ||
+        (thread->initial_rsp & 0xFULL) != 8U ||
+        thread->context.rsp != thread->initial_rsp ||
+        thread->context.rip != (uint64_t)(uintptr_t)gxos_scheduler_start_worker ||
+        thread->context.r12 != (uint64_t)(uintptr_t)thread->entry ||
+        thread->context.r13 != (uint64_t)(uintptr_t)thread->entry_argument ||
+        thread->context.rbx != GXOS_SCHEDULER_WORKER_GPR_SENTINEL(1) ||
+        thread->context.rbp != GXOS_SCHEDULER_WORKER_GPR_SENTINEL(2) ||
+        thread->context.rsi != GXOS_SCHEDULER_WORKER_GPR_SENTINEL(3) ||
+        thread->context.rdi != GXOS_SCHEDULER_WORKER_GPR_SENTINEL(4) ||
+        thread->context.r14 != GXOS_SCHEDULER_WORKER_GPR_SENTINEL(7) ||
+        thread->context.r15 != GXOS_SCHEDULER_WORKER_GPR_SENTINEL(8) ||
+        (thread->context.rflags & 2U) == 0 ||
+        (thread->context.mxcsr & 0xFFFF0000U) != 0 ||
+        thread->context.gs_base != thread->gs_base || !thread->environment_owned ||
+        !aligned_page_pointer(thread->gs_base) ||
+        !aligned_page_pointer(thread->teb_base) ||
+        !aligned_page_pointer(thread->tls_vector_base) ||
+        !aligned_page_pointer(thread->tls_block_base) ||
+        !gxos_scheduler_check_canaries(thread)) {
+        return 0;
+    }
+
+    gs = (const uint8_t *)(uintptr_t)thread->gs_base;
+    teb = (const uint8_t *)(uintptr_t)thread->teb_base;
+    tls_vector = (const uint64_t *)(uintptr_t)thread->tls_vector_base;
+    if (*(const uint64_t *)(gs + 0x30) != thread->teb_base ||
+        *(const uint64_t *)(gs + 0x58) != thread->tls_vector_base ||
+        tls_vector[0] != thread->tls_block_base ||
+        *(const uint64_t *)(teb + 0x08) != thread->stack_limit ||
+        *(const uint64_t *)(teb + 0x10) != thread->stack_base ||
+        *(const uint64_t *)(teb + 0x100) != thread->identity) {
+        return 0;
+    }
+    for (index = 0; index != GXOS_SCHEDULER_FLS_SLOTS; ++index) {
+        if (thread->fls_allocated[index] > 1U) return 0;
+    }
+    return 1;
+}
+
 int gxos_scheduler_resume_thread(GXOS_SCHEDULER_HANDLE handle,
                                  uint32_t *previous_suspend_count)
 {
     GXOS_SCHEDULER_OBJECT *object = lookup_object(handle,
                                                    GXOS_SCHEDULER_OBJECT_THREAD);
     GXOS_SCHEDULER_TCB *thread;
-    if (object == 0) return 0;
+    if (object == 0 || object->public_handle_refs == 0 ||
+        object->internal_refs == 0 || object->target == 0) return 0;
     thread = (GXOS_SCHEDULER_TCB *)object->target;
-    if (thread == 0 || thread->state != GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED ||
-        thread->suspend_count == 0) return 0;
-    if (previous_suspend_count != 0) *previous_suspend_count = thread->suspend_count;
-    --thread->suspend_count;
-    if (thread->suspend_count == 0) thread->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
+    if (thread == 0 || !thread->live || thread->execution_refs == 0 ||
+        thread->deferred_reclaim != 0 || thread->object_slot != object->slot ||
+        thread->generation != object->generation ||
+        thread->state == GXOS_SCHEDULER_THREAD_FREE ||
+        thread->state == GXOS_SCHEDULER_THREAD_TERMINATED) {
+        return 0;
+    }
+    if (thread->suspend_count == 0) {
+        /* The bounded model has no nested suspend operation.  A repeat resume
+           is a successful no-op with the Windows-compatible previous count 0. */
+        if (thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE &&
+            !thread->runnable_queued) return 0;
+        if (previous_suspend_count != 0) *previous_suspend_count = 0;
+        return 1;
+    }
+    if (thread->state != GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED ||
+        thread->suspend_count != 1U ||
+        !gxos_scheduler_validate_thread_context(thread)) {
+        return 0;
+    }
+    if (previous_suspend_count != 0) *previous_suspend_count = 1;
+    thread->suspend_count = 0;
+    thread->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
+    if (!enqueue_runnable(thread)) {
+        thread->state = GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED;
+        thread->suspend_count = 1;
+        if (previous_suspend_count != 0) *previous_suspend_count = 0;
+        return 0;
+    }
     return 1;
 }
 
@@ -606,7 +739,7 @@ static void maybe_reclaim_thread(GXOS_SCHEDULER_TCB *thread)
     if (thread == 0 || !thread->live || thread == g_scheduler->current ||
         thread->state != GXOS_SCHEDULER_THREAD_TERMINATED ||
         thread->execution_refs != 0 || thread->public_handle_refs != 0 ||
-        !gxos_scheduler_check_canaries(thread)) return;
+        thread->runnable_queued || !gxos_scheduler_check_canaries(thread)) return;
     object = &g_scheduler->objects[thread->object_slot];
     if (!object->live || object->type != GXOS_SCHEDULER_OBJECT_THREAD) return;
     object->internal_refs = 0;
@@ -721,8 +854,13 @@ int gxos_scheduler_prepare_yield(GXOS_SCHEDULER_SWITCH_PLAN *plan)
     current = g_scheduler->current;
     if (current->state != GXOS_SCHEDULER_THREAD_RUNNING) return 0;
     current->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
+    if (!enqueue_runnable(current)) {
+        current->state = GXOS_SCHEDULER_THREAD_RUNNING;
+        return 0;
+    }
     next = pick_next_runnable(current);
     if (next == 0) {
+        (void)remove_runnable(current);
         current->state = GXOS_SCHEDULER_THREAD_RUNNING;
         return 0;
     }
@@ -821,6 +959,7 @@ int gxos_scheduler_discard_created_thread(GXOS_SCHEDULER_TCB *thread)
         (thread->state != GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED &&
          thread->state != GXOS_SCHEDULER_THREAD_RUNNABLE) ||
         thread->public_handle_refs != 0) return 0;
+    if (thread->runnable_queued && !remove_runnable(thread)) return 0;
     thread->state = GXOS_SCHEDULER_THREAD_TERMINATED;
     thread->execution_refs = 0;
     maybe_reclaim_thread(thread);
@@ -835,6 +974,28 @@ int gxos_scheduler_collect(GXOS_SCHEDULER *scheduler)
         maybe_reclaim_thread(&scheduler->threads[index]);
     }
     return 1;
+}
+
+uint32_t gxos_scheduler_runnable_count(void)
+{
+    return g_scheduler == 0 ? 0 : g_scheduler->runnable_count;
+}
+
+uint32_t gxos_scheduler_runnable_position(const GXOS_SCHEDULER_TCB *thread)
+{
+    uint32_t index;
+    if (g_scheduler == 0 || thread == 0 || !thread->runnable_queued) {
+        return UINT32_MAX;
+    }
+    for (index = 0; index != g_scheduler->runnable_count; ++index) {
+        if (g_scheduler->runnable_queue[index] == thread) return index;
+    }
+    return UINT32_MAX;
+}
+
+int gxos_scheduler_is_runnable_queued(const GXOS_SCHEDULER_TCB *thread)
+{
+    return gxos_scheduler_runnable_position(thread) != UINT32_MAX;
 }
 
 int gxos_scheduler_teardown(GXOS_SCHEDULER *scheduler)

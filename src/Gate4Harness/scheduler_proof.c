@@ -317,7 +317,8 @@ static uint32_t run_negative_controls(GXOS_SCHEDULER_PROOF_STATE *proof)
     }
     if (!gxos_scheduler_resume_thread(temp, &previous_suspend_count) ||
         previous_suspend_count != 1 ||
-        gxos_scheduler_resume_thread(temp, &previous_suspend_count) ||
+        !gxos_scheduler_resume_thread(temp, &previous_suspend_count) ||
+        previous_suspend_count != 0 ||
         !gxos_scheduler_close_handle(temp) ||
         !gxos_scheduler_discard_created_thread(temp_thread)) {
         pass = 0;

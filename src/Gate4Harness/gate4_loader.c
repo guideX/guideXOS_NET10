@@ -25,7 +25,8 @@
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
     defined(GXOS_ENABLE_CREATE_THREAD) || \
-    defined(GXOS_ENABLE_SET_THREAD_PRIORITY)
+    defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
+    defined(GXOS_ENABLE_RESUME_THREAD)
 #include "scheduler_foundation.h"
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -39,6 +40,9 @@
 #endif
 #ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
 #include "set_thread_priority.h"
+#endif
+#ifdef GXOS_ENABLE_RESUME_THREAD
+#include "resume_thread.h"
 #endif
 
 typedef uint64_t EFI_STATUS;
@@ -271,7 +275,8 @@ static uint64_t g_stack_upper;
 #if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
     defined(GXOS_ENABLE_CREATE_THREAD) || \
-    defined(GXOS_ENABLE_SET_THREAD_PRIORITY)
+    defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
+    defined(GXOS_ENABLE_RESUME_THREAD)
 static GXOS_SCHEDULER g_create_event_scheduler;
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -371,6 +376,37 @@ int EFIAPI gxos_set_thread_priority_platform_impl(
     uint64_t original_r9,
     uint64_t original_rdx);
 extern void gxos_set_thread_priority_entry(void);
+#endif
+#ifdef GXOS_ENABLE_RESUME_THREAD
+static uint32_t g_resume_thread_invocation_count;
+static uint32_t g_resume_thread_success_count;
+static uint32_t g_resume_thread_failure_count;
+static uint32_t g_resume_thread_import_descriptor_index;
+static uint32_t g_resume_thread_import_symbol_index;
+static uint32_t g_resume_thread_importing_iat_rva;
+static GXOS_SCHEDULER_HANDLE g_resume_thread_handle;
+static uint64_t g_resume_thread_rcx;
+static uint64_t g_resume_thread_rdx;
+static uint64_t g_resume_thread_r8;
+static uint64_t g_resume_thread_r9;
+static uint64_t g_resume_thread_previous_suspend_count;
+static uint32_t g_resume_thread_return_value;
+static uint32_t g_resume_thread_state_before;
+static uint32_t g_resume_thread_state_after;
+static uint32_t g_resume_thread_suspend_before;
+static uint32_t g_resume_thread_suspend_after;
+static uint64_t g_resume_thread_execution_count_before;
+static uint64_t g_resume_thread_execution_count_after;
+static uint32_t g_resume_thread_runnable_before;
+static uint32_t g_resume_thread_runnable_after;
+static uint32_t g_resume_thread_queue_position;
+static uint32_t g_resume_thread_queue_count;
+static uint32_t g_resume_thread_current_identity_before;
+static uint32_t g_resume_thread_current_identity_after;
+static uint64_t g_resume_thread_current_gs_before;
+static uint64_t g_resume_thread_current_gs_after;
+static void emit_resume_thread_final_summary(void);
+extern void gxos_resume_thread_entry(void);
 #endif
 /* These symbols are intentionally external to the assembly entry file. */
 volatile uint32_t gxos_exception_dispatch_active;
@@ -3475,6 +3511,25 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
     uintptr_t original_rdx = arguments == 0 ? 0 : (uintptr_t)arguments[2];
     uintptr_t original_r8 = arguments == 0 ? 0 : (uintptr_t)arguments[1];
     uintptr_t original_r9 = arguments == 0 ? 0 : (uintptr_t)arguments[0];
+#if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
+    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
+    defined(GXOS_ENABLE_CREATE_THREAD) || \
+    defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
+    defined(GXOS_ENABLE_RESUME_THREAD)
+    GXOS_SCHEDULER_TCB *current_scheduler_thread =
+        gxos_scheduler_current_thread();
+    uint32_t blocked_count = 0;
+    uint32_t scheduler_index;
+#ifdef GXOS_ENABLE_CREATE_THREAD
+    GXOS_SCHEDULER_TCB *worker_scheduler_thread =
+        gxos_scheduler_thread_from_handle(g_create_thread_handle);
+    GXOS_SCHEDULER_OBJECT *worker_scheduler_object =
+        gxos_scheduler_object_from_handle(g_create_thread_handle);
+#else
+    GXOS_SCHEDULER_TCB *worker_scheduler_thread = 0;
+    GXOS_SCHEDULER_OBJECT *worker_scheduler_object = 0;
+#endif
+#endif
     if (g_phase == PHASE_AFTER_TIME_CALL) g_phase = PHASE_IN_TIME_CONSUMER;
     if (g_phase == PHASE_AFTER_QPC_CALL) g_phase = PHASE_AFTER_SECURITY_COOKIE_INIT;
     serial_text("GXOS_NET10:IMPORT_BLOCKER_DLL=");
@@ -3519,6 +3574,74 @@ static void __attribute__((noreturn)) EFIAPI import_failfast(
 #endif
 #ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
     emit_set_thread_priority_final_summary();
+#endif
+#ifdef GXOS_ENABLE_RESUME_THREAD
+    emit_resume_thread_final_summary();
+#endif
+#if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
+    defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
+    defined(GXOS_ENABLE_CREATE_THREAD) || \
+    defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
+    defined(GXOS_ENABLE_RESUME_THREAD)
+    for (scheduler_index = 0;
+         scheduler_index != GXOS_SCHEDULER_MAX_THREADS; ++scheduler_index) {
+        if (g_create_event_scheduler.threads[scheduler_index].live &&
+            g_create_event_scheduler.threads[scheduler_index].state ==
+                GXOS_SCHEDULER_THREAD_BLOCKED) {
+            ++blocked_count;
+        }
+    }
+    serial_text("GXOS_NET10:IMPORT_BLOCKER_SCHEDULER_THREAD=");
+    serial_text(current_scheduler_thread != 0 &&
+                current_scheduler_thread == g_create_event_scheduler.boot_thread
+                    ? "main\r\n" : "worker\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_CURRENT_THREAD_IDENTITY=0x",
+                     current_scheduler_thread == 0 ? 0 :
+                         current_scheduler_thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_CURRENT_GS_BASE=0x",
+                     gxos_scheduler_current_gs_base());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_CURRENT_STACK_LOWER=0x",
+                     current_scheduler_thread != 0 &&
+                             current_scheduler_thread->is_boot_thread
+                         ? g_create_event_scheduler.boot_stack_lower
+                         : current_scheduler_thread == 0 ? 0
+                         : current_scheduler_thread->stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_CURRENT_STACK_UPPER=0x",
+                     current_scheduler_thread != 0 &&
+                             current_scheduler_thread->is_boot_thread
+                         ? g_create_event_scheduler.boot_stack_upper
+                         : current_scheduler_thread == 0 ? 0
+                         : current_scheduler_thread->stack_limit);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_MAIN_STATE=0x",
+                     g_create_event_scheduler.boot_thread == 0 ? 0 :
+                         g_create_event_scheduler.boot_thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_STATE=0x",
+                     worker_scheduler_thread == 0 ? 0 :
+                         worker_scheduler_thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_RUNNABLE_COUNT=0x",
+                     gxos_scheduler_runnable_count());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_BLOCKED_COUNT=0x",
+                     blocked_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_PUBLIC_THREAD_HANDLE_REFS=0x",
+                     worker_scheduler_object == 0
+                         ? 0 : worker_scheduler_object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_EXECUTION_REFERENCE_LIVE=0x",
+                     worker_scheduler_thread != 0 &&
+                         worker_scheduler_thread->execution_refs != 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_EXECUTION_COUNT=0x",
+                     worker_scheduler_thread == 0 ? 0 :
+                         worker_scheduler_thread->execution_count);
+    serial_text("\r\n");
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
     emit_create_event_w_final_summary();
@@ -5097,6 +5220,316 @@ static void GXOS_CRT_INITTERM_MS_ABI platform_initterm(
 }
 #endif
 
+#ifdef GXOS_ENABLE_RESUME_THREAD
+static void emit_resume_thread_final_summary(void)
+{
+    GXOS_SCHEDULER_OBJECT *object =
+        gxos_scheduler_object_from_handle(g_resume_thread_handle);
+    GXOS_SCHEDULER_TCB *thread =
+        gxos_scheduler_thread_from_handle(g_resume_thread_handle);
+    uint32_t object_slot = object == 0 ? UINT32_MAX : object->slot;
+    uint32_t generation = object == 0 ? 0 : object->generation;
+    uint32_t tcb_slot = thread == 0
+        ? UINT32_MAX
+        : (uint32_t)(thread - g_create_event_scheduler.threads);
+
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_INVOCATION_COUNT=0x",
+                     g_resume_thread_invocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_SUCCESS_COUNT=0x",
+                     g_resume_thread_success_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_FAILURE_COUNT=0x",
+                     g_resume_thread_failure_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_HANDLE=0x",
+                     g_resume_thread_handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_OBJECT_SLOT=0x", object_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_GENERATION=0x", generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_TCB_SLOT=0x", tcb_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_INTERNAL_IDENTITY=0x",
+                     thread == 0 ? 0 : thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_PRIORITY=0x",
+                     thread == 0 ? 0 : (uint64_t)(int64_t)thread->relative_priority);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_STATE=0x",
+                     thread == 0 ? 0 : thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_SUSPEND_COUNT=0x",
+                     thread == 0 ? 0 : thread->suspend_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_RUNNABLE=0x",
+                     thread != 0 && thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_QUEUE_POSITION=0x",
+                     thread == 0 ? UINT32_MAX : gxos_scheduler_runnable_position(thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_QUEUE_COUNT=0x",
+                     gxos_scheduler_runnable_count());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_EXECUTION_COUNT=0x",
+                     thread == 0 ? 0 : thread->execution_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_PUBLIC_REFERENCE_COUNT=0x",
+                     object == 0 ? 0 : object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_EXECUTION_REFERENCE_LIVE=0x",
+                     thread != 0 && thread->execution_refs != 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_STACK_BASE=0x",
+                     thread == 0 ? 0 : thread->stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_STACK_LIMIT=0x",
+                     thread == 0 ? 0 : thread->stack_limit);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_INITIAL_RSP=0x",
+                     thread == 0 ? 0 : thread->initial_rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_ENTRY_RVA=0x",
+                     thread != 0 && (uintptr_t)thread->entry >= g_managed_image_base
+                         ? (uintptr_t)thread->entry - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_ENTRY_ARGUMENT=0x",
+                     thread == 0 ? 0 : (uint64_t)(uintptr_t)thread->entry_argument);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_CONTEXT_RSP=0x",
+                     thread == 0 ? 0 : thread->context.rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_CONTEXT_RIP=0x",
+                     thread == 0 ? 0 : thread->context.rip);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_CONTEXT_ENTRY_ARGUMENT=0x",
+                     thread == 0 ? 0 : thread->context.r13);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_STACK_CANARIES=0x",
+                     thread != 0 && gxos_scheduler_check_canaries(thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_GS_BASE=0x",
+                     thread == 0 ? 0 : thread->gs_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_TEB_BASE=0x",
+                     thread == 0 ? 0 : thread->teb_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_TLS_VECTOR_BASE=0x",
+                     thread == 0 ? 0 : thread->tls_vector_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_TLS_BLOCK_BASE=0x",
+                     thread == 0 ? 0 : thread->tls_block_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_FLS_SLOTS=0x",
+                     thread == 0 ? 0 : GXOS_SCHEDULER_FLS_SLOTS);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_CURRENT_IDENTITY_BEFORE=0x",
+                     g_resume_thread_current_identity_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_CURRENT_IDENTITY_AFTER=0x",
+                     g_resume_thread_current_identity_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_CURRENT_GS_BEFORE=0x",
+                     g_resume_thread_current_gs_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_FINAL_CURRENT_GS_AFTER=0x",
+                     g_resume_thread_current_gs_after);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:RESUMETHREAD_FINAL_SUMMARY=READY\r\n");
+}
+
+uint32_t EFIAPI gxos_resume_thread_platform_impl(
+    void *thread_handle,
+    uintptr_t import_entry_rsp,
+    uint64_t original_rdx,
+    uint64_t original_r8,
+    uint64_t original_r9)
+{
+    GXOS_SCHEDULER_HANDLE handle = (GXOS_SCHEDULER_HANDLE)(uintptr_t)thread_handle;
+    GXOS_SCHEDULER_OBJECT *object = gxos_scheduler_object_from_handle(handle);
+    GXOS_SCHEDULER_TCB *before_thread = 0;
+    GXOS_SCHEDULER_TCB *current_before = gxos_scheduler_current_thread();
+    GXOS_SCHEDULER_TCB *after_thread;
+    GXOS_SCHEDULER_TCB *current_after;
+    GXOS_SCHEDULER_EVENT *event;
+    uint32_t previous = 0;
+    uint32_t result;
+    uint32_t invocation = ++g_resume_thread_invocation_count;
+    uintptr_t return_address = import_entry_rsp == 0
+        ? 0 : *(const uintptr_t *)(uintptr_t)import_entry_rsp;
+    uintptr_t call_site = import_call_site(return_address);
+    uintptr_t start;
+    uint32_t start_rva = 0;
+    uint32_t prepared_context_valid = 0;
+
+    if (object != 0 && object->type == GXOS_SCHEDULER_OBJECT_THREAD) {
+        before_thread = (GXOS_SCHEDULER_TCB *)object->target;
+    }
+    if (before_thread != 0 && before_thread->entry != 0) {
+        start = (uintptr_t)before_thread->entry;
+        if (start >= g_managed_image_base &&
+            start - g_managed_image_base <= UINT32_MAX) {
+            start_rva = (uint32_t)(start - g_managed_image_base);
+        }
+        prepared_context_valid =
+            start_rva == 0x35320U &&
+            gxos_create_thread_start_is_executable(
+                &g_create_thread_context, before_thread->entry) &&
+            before_thread->entry_argument ==
+                (void *)(uintptr_t)g_create_event_w_handles[0] &&
+            gxos_scheduler_validate_thread_context(before_thread);
+    }
+
+    g_resume_thread_handle = handle;
+    g_resume_thread_rcx = (uint64_t)(uintptr_t)thread_handle;
+    g_resume_thread_rdx = original_rdx;
+    g_resume_thread_r8 = original_r8;
+    g_resume_thread_r9 = original_r9;
+    g_resume_thread_state_before = before_thread == 0 ? 0 : before_thread->state;
+    g_resume_thread_suspend_before = before_thread == 0 ? 0 : before_thread->suspend_count;
+    g_resume_thread_execution_count_before = before_thread == 0 ? 0 : before_thread->execution_count;
+    g_resume_thread_runnable_before = before_thread != 0 &&
+        before_thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE;
+    g_resume_thread_current_identity_before = current_before == 0 ? 0 : current_before->identity;
+    g_resume_thread_current_gs_before = gxos_scheduler_current_gs_base();
+
+    result = prepared_context_valid ||
+        (before_thread != 0 && before_thread->suspend_count == 0)
+        ? (uint32_t)gxos_scheduler_resume_thread(handle, &previous) : 0;
+    if (result) {
+        ++g_resume_thread_success_count;
+    } else {
+        ++g_resume_thread_failure_count;
+        g_platform_last_error = 6U;
+    }
+    g_resume_thread_previous_suspend_count = result ? previous : UINT32_MAX;
+    g_resume_thread_return_value = result ? previous : UINT32_MAX;
+    after_thread = gxos_scheduler_thread_from_handle(handle);
+    current_after = gxos_scheduler_current_thread();
+    g_resume_thread_state_after = after_thread == 0 ? 0 : after_thread->state;
+    g_resume_thread_suspend_after = after_thread == 0 ? 0 : after_thread->suspend_count;
+    g_resume_thread_execution_count_after = after_thread == 0 ? 0 : after_thread->execution_count;
+    g_resume_thread_runnable_after = after_thread != 0 &&
+        after_thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE;
+    g_resume_thread_queue_position = after_thread == 0
+        ? UINT32_MAX : gxos_scheduler_runnable_position(after_thread);
+    g_resume_thread_queue_count = gxos_scheduler_runnable_count();
+    g_resume_thread_current_identity_after = current_after == 0 ? 0 : current_after->identity;
+    g_resume_thread_current_gs_after = gxos_scheduler_current_gs_base();
+    event = before_thread == 0 || g_create_event_w_success_count == 0
+        ? 0 : gxos_scheduler_event_from_handle(g_create_event_w_handles[0]);
+
+    serial_text("GXOS_NET10:RESUMETHREAD_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_INVOCATION=0x", invocation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_PAYLOAD_BASE=0x", g_managed_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_resume_thread_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_RCX=0x", g_resume_thread_rcx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_RDX_INCIDENTAL=0x", g_resume_thread_rdx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_R8_INCIDENTAL=0x", g_resume_thread_r8);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_R9_INCIDENTAL=0x", g_resume_thread_r9);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_HANDLE_TYPE=0x",
+                     object == 0 ? 0 : object->type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_OBJECT_SLOT=0x",
+                     object == 0 ? UINT32_MAX : object->slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_GENERATION=0x",
+                     object == 0 ? 0 : object->generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_TCB_SLOT=0x",
+                     before_thread == 0 ? UINT32_MAX :
+                         (uint32_t)(before_thread - g_create_event_scheduler.threads));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_INTERNAL_IDENTITY=0x",
+                     before_thread == 0 ? 0 : before_thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_PRIORITY=0x",
+                     before_thread == 0 ? 0 : (uint64_t)(int64_t)before_thread->relative_priority);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_STATE_BEFORE=0x",
+                     g_resume_thread_state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_SUSPEND_COUNT_BEFORE=0x",
+                     g_resume_thread_suspend_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_RUNNABLE_BEFORE=0x",
+                     g_resume_thread_runnable_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_PREVIOUS_SUSPEND_COUNT=0x",
+                     g_resume_thread_previous_suspend_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_RETURN_VALUE=0x",
+                     g_resume_thread_return_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_STATE_AFTER=0x",
+                     g_resume_thread_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_SUSPEND_COUNT_AFTER=0x",
+                     g_resume_thread_suspend_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_RUNNABLE_AFTER=0x",
+                     g_resume_thread_runnable_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_QUEUE_POSITION=0x",
+                     g_resume_thread_queue_position);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_QUEUE_COUNT=0x",
+                     g_resume_thread_queue_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_EXECUTION_COUNT_BEFORE=0x",
+                     g_resume_thread_execution_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_EXECUTION_COUNT_AFTER=0x",
+                     g_resume_thread_execution_count_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_PUBLIC_REFERENCE_COUNT=0x",
+                     object == 0 ? 0 : object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_EXECUTION_REFERENCE_LIVE=0x",
+                     after_thread != 0 && after_thread->execution_refs != 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_ENTRY_RVA=0x", start_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_ENTRY_ARGUMENT=0x",
+                     before_thread == 0 ? 0 : (uint64_t)(uintptr_t)before_thread->entry_argument);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_EVENT_ARGUMENT_VALID=0x",
+                     event != 0 && event->manual_reset == 0 && event->signaled == 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_CONTEXT_VALID=0x", prepared_context_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_CURRENT_IDENTITY_BEFORE=0x",
+                     g_resume_thread_current_identity_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_CURRENT_IDENTITY_AFTER=0x",
+                     g_resume_thread_current_identity_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_CURRENT_GS_BEFORE=0x",
+                     g_resume_thread_current_gs_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_CURRENT_GS_AFTER=0x",
+                     g_resume_thread_current_gs_after);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:RESUMETHREAD_RETURNED\r\n");
+    return g_resume_thread_return_value;
+}
+#endif
+
 #ifdef GXOS_ENABLE_CREATE_THREAD
 static uint32_t create_thread_live_count(uint8_t type,
                                          uint32_t *public_handles)
@@ -5800,6 +6233,12 @@ int EFIAPI gxos_set_thread_priority_platform_impl(
 
 static void *platform_import_target(const char *module, const char *symbol)
 {
+#ifdef GXOS_ENABLE_RESUME_THREAD
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "ResumeThread")) {
+        return (void *)(uintptr_t)gxos_resume_thread_entry;
+    }
+#endif
 #ifdef GXOS_ENABLE_CREATE_THREAD
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "CreateThread")) {
@@ -6101,6 +6540,14 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 g_create_thread_import_descriptor_index = descriptors - 1U;
                 g_create_thread_import_symbol_index = index;
                 g_create_thread_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_RESUME_THREAD
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "ResumeThread")) {
+                g_resume_thread_import_descriptor_index = descriptors - 1U;
+                g_resume_thread_import_symbol_index = index;
+                g_resume_thread_importing_iat_rva = first_thunk_rva + index * 8U;
             }
 #endif
 #ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
@@ -8096,6 +8543,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
                      image.preferred_base + g_set_thread_priority_importing_iat_rva);
     serial_text("\r\n");
 #endif
+#ifdef GXOS_ENABLE_RESUME_THREAD
+    if (g_resume_thread_import_descriptor_index != 2U ||
+        g_resume_thread_import_symbol_index != 0x31U ||
+        g_resume_thread_importing_iat_rva != 0x7D1C0U) {
+        fail("resumethread-import-contract");
+    }
+    serial_text("GXOS_NET10:RESUMETHREAD_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:RESUMETHREAD_IMPORT_SYMBOL=ResumeThread\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_resume_thread_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_IMPORT_SYMBOL_INDEX=0x",
+                     g_resume_thread_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_IMPORT_IAT_RVA=0x",
+                     g_resume_thread_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESUMETHREAD_PREFERRED_IAT=0x",
+                     image.preferred_base + g_resume_thread_importing_iat_rva);
+    serial_text("\r\n");
+#endif
 #ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
     if (g_veh_add_import_descriptor_index != 2U ||
         g_veh_add_import_symbol_index != 30U ||
@@ -8237,7 +8705,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
     defined(GXOS_ENABLE_CREATE_THREAD) || \
-    defined(GXOS_ENABLE_SET_THREAD_PRIORITY)
+    defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
+    defined(GXOS_ENABLE_RESUME_THREAD)
     if (!gxos_scheduler_initialize(&g_create_event_scheduler,
                                    boot_services->AllocatePages,
                                    boot_services->FreePages,

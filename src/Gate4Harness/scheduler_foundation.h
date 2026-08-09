@@ -175,6 +175,8 @@ typedef struct GXOS_SCHEDULER_TCB {
     uint16_t generation;
     uint16_t object_slot;
     GXOS_SCHEDULER_THREAD_STATE state;
+    uint8_t runnable_queued;
+    uint8_t reserved_state[3];
     uint32_t suspend_count;
     int32_t relative_priority;
     uint32_t public_handle_refs;
@@ -214,6 +216,8 @@ typedef struct GXOS_SCHEDULER {
     GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION
         memory_resource_notifications[GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS];
     GXOS_SCHEDULER_OBJECT objects[GXOS_SCHEDULER_MAX_OBJECTS];
+    GXOS_SCHEDULER_TCB *runnable_queue[GXOS_SCHEDULER_MAX_THREADS];
+    uint32_t runnable_count;
     GXOS_SCHEDULER_TCB *current;
     GXOS_SCHEDULER_TCB *boot_thread;
     uint32_t next_identity;
@@ -274,6 +278,10 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
                                             GXOS_SCHEDULER_TCB **thread_out);
 int gxos_scheduler_resume_thread(GXOS_SCHEDULER_HANDLE handle,
                                  uint32_t *previous_suspend_count);
+int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread);
+uint32_t gxos_scheduler_runnable_count(void);
+uint32_t gxos_scheduler_runnable_position(const GXOS_SCHEDULER_TCB *thread);
+int gxos_scheduler_is_runnable_queued(const GXOS_SCHEDULER_TCB *thread);
 int gxos_scheduler_close_handle(GXOS_SCHEDULER_HANDLE handle);
 int gxos_scheduler_signal_event(GXOS_SCHEDULER_HANDLE handle);
 int gxos_scheduler_reset_event(GXOS_SCHEDULER_HANDLE handle);

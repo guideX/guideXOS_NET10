@@ -348,7 +348,10 @@ int main(void)
     CHECK(gxos_scheduler_resume_thread(worker_handle, &previous_suspend_count));
     CHECK(previous_suspend_count == 1);
     CHECK(worker->state == GXOS_SCHEDULER_THREAD_RUNNABLE);
-    CHECK(!gxos_scheduler_resume_thread(worker_handle, &previous_suspend_count));
+    CHECK(gxos_scheduler_resume_thread(worker_handle, &previous_suspend_count));
+    CHECK(previous_suspend_count == 0);
+    CHECK(worker->state == GXOS_SCHEDULER_THREAD_RUNNABLE);
+    CHECK(gxos_scheduler_runnable_count() == 1);
 
     CHECK(gxos_scheduler_signal_event(auto_event));
     CHECK(gxos_scheduler_event_is_signaled(auto_event));

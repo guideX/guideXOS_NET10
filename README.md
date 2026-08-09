@@ -55,6 +55,7 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [`GetNumaHighestNodeNumber` bootstrap contract](docs/KERNEL32_GETNUMAHIGHESTNODENUMBER_BOOTSTRAP.md)
 - [`GetProcessGroupAffinity` bootstrap contract](docs/KERNEL32_GETPROCESSGROUPAFFINITY_BOOTSTRAP.md)
 - [`CreateMemoryResourceNotification` bootstrap contract](docs/KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md)
+- [`ResumeThread` bootstrap contract](docs/KERNEL32_RESUMETHREAD_BOOTSTRAP.md)
 - [`SetThreadPriority` bootstrap contract](docs/KERNEL32_SETTHREADPRIORITY_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
@@ -155,3 +156,9 @@ This task implements only the Microsoft x64 `_register_onexit_function` initial-
 The narrow Microsoft x64 `api-ms-win-crt-heap-l1-1-0.dll!malloc` bridge is implemented only for the exact NativeAOT payload. It accepts nonzero requests through `0xC8000`, calls `AllocatePool(EFI_LOADER_DATA, requestedSize, &pointer)`, returns the direct pool pointer without a hidden header or zeroing, and records ownership in a fixed 64-slot external registry. The deterministic host suite covers the verified 39-entry Windows oracle replay plus positive, rollback, overlap, duplicate-pointer, malformed-state, exhaustion, accounting, and isolation vectors.
 
 Three fresh QEMU runs with the required payload hash reached `malloc(88)`, `malloc(72)`, and `malloc(56)` with identical semantic sequences, direct non-null 8-byte-aligned pointers, registry slots `0,1,2`, live counts `1,2,3`, and `_callnewh` count `0`. They then stopped at the next authentic unresolved import, `KERNEL32.dll!AddVectoredExceptionHandler`. `free`, `calloc`, `realloc`, `_recalloc`, `_callnewh`, and generalized heap behavior remain unimplemented. See [CRT_MALLOC_BOOTSTRAP.md](docs/CRT_MALLOC_BOOTSTRAP.md).
+
+## `ResumeThread` evidence status (2026-08-08)
+
+The exact `KERNEL32.dll!ResumeThread` route is closed for the required NativeAOT payload. A generation-checked genuine Thread handle returns previous suspend count `1`, changes the worker from `CreatedSuspended` to `Runnable`, changes suspend count `1` to `0`, and inserts exactly one runnable-queue entry. It preserves priority `2`, the public handle, execution lifetime, stack, GS/TLS/FLS state, and execution count `0`. The route does not force a cooperative context switch, so runnable eligibility is not conflated with worker execution.
+
+Three fresh enabled QEMU runs agree on the immediate transition and naturally stop at the main-thread unresolved `KERNEL32.dll!IsProcessInJob` import. The disabled control omits only ResumeThread and restores the unresolved ResumeThread boundary. See [KERNEL32_RESUMETHREAD_BOOTSTRAP.md](docs/KERNEL32_RESUMETHREAD_BOOTSTRAP.md).

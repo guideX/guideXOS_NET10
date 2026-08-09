@@ -12,7 +12,7 @@ Gate 4 still proves the first no-allocation managed handoff. The allocation foll
 | CRT on-exit lifecycle | `_initialize_onexit_table` is proven for two empty tables. The current register-enabled trace reaches `_register_onexit_function`, proves the initialized encoded-null table, and returns `GROWTH_REQUIRED` / `-1` at `_recalloc_crt_t(_PVFV,NULL,0x20)` without allocation or callback execution. Execution, shutdown, and callback ownership remain unimplemented. | Keep `_recalloc_crt_t` as a separate allocator milestone. Do not add `_execute_onexit_table`, shutdown, or general CRT teardown to this contract. |
 | Error-returning CRT initializers | The actual range is one null `.rdata` entry; `_initterm_e` validates, skips it, returns zero, and reaches the now-closed `_initterm` range. No actual NativeAOT callback was present in this family. | Keep other `.CRT` families separate. Do not generalize these table results into C++ processing or implement initializer entries not present in a traced artifact. |
 | Monotonic performance counter | QPC returns normalized signed-64 units backed by the ACPI PM timer at port `0x608`, width 24, frequency `0x369E99`; QPF returns the same positive frequency. CPUID invariant TSC/leaf 15 is supported in code but unavailable on the default QEMU CPU. | No longer a blocker. Preserve the host vectors, source-selection negative, and QEMU Stall probe as regression tests. |
-| Runtime thread state | The exact payload `CreateThread(NULL,0,payload+0x35320,Event #1,CREATE_SUSPENDED,NULL)` now creates one genuine typed Thread object, TCB, 16 KiB stack, independent GS/TLS/FLS/last-error state, and a live execution reference without running the worker. | The next honest boundary is `SetThreadPriority`; do not route it until its exact handle/priority contract is separately proven. |
+| Runtime thread state | The exact payload now creates and resumes one genuine typed Thread object. `ResumeThread` returns previous suspend count `1`, changes `CreatedSuspended`/`1` to `Runnable`/`0`, queues the worker exactly once, preserves priority `2` and the live execution reference, and does not execute the worker. | The main thread naturally reaches `KERNEL32.dll!IsProcessInJob`; do not route it or any worker dependency until separately proven. |
 | TLS | The PE TLS template and `_tls_index` are initialized for one thread; the image has no TLS callback work in this probe. | Prove TLS allocation/reclamation and callbacks across actual thread creation. |
 | Exceptions | No managed exception path is present; `RhpThrowEx`, `RaiseException`, and broad diagnostics are fail-fast. | Decide whether to implement an exception ABI or keep exceptions outside the freestanding profile. |
 | Unwinding | `.pdata` is loaded as image data, but Windows `RtlVirtualUnwind`/context services and registration are not implemented. | Build a separately verified x64 unwind registration/lookup experiment before any exception or stack walk. |
@@ -72,6 +72,32 @@ retains a relative priority value but does not claim priority-sensitive
 cooperative selection, preemptive scheduling, complete Windows thread
 priority semantics, or process-priority-class behavior. See
 [KERNEL32_SETTHREADPRIORITY_BOOTSTRAP.md](KERNEL32_SETTHREADPRIORITY_BOOTSTRAP.md).
+
+## `ResumeThread` payload boundary (2026-08-08)
+
+The exact `KERNEL32.dll!ResumeThread` route is closed only for the required
+payload and its generation-checked Thread handle. The route consumes only
+`RCX`, returns the previous suspend count `1`, changes the worker from
+`CreatedSuspended` to `Runnable`, changes suspend count `1` to `0`, and queues
+the worker exactly once. Priority `2`, the public handle, live execution
+reference, independent stack, GS/TLS/FLS state, canaries, and saved context
+survive unchanged. ResumeThread does not explicitly yield or context-switch;
+the worker is eligible but has not executed.
+
+Three fresh enabled runs agree on the transition and all stop at the first
+unresolved continuation import, main-thread `KERNEL32.dll!IsProcessInJob`
+(descriptor `2`, symbol index `0x4B`, IAT RVA `0x7D290`, caller RVA `0x4328B`).
+The worker remains runnable with execution count `0`; it does not reach entry
+RVA `0x35320`. The disabled control omits only ResumeThread and restores the
+exact unresolved ResumeThread boundary with the worker still
+`CreatedSuspended`, suspend count `1`, and non-runnable. See
+[KERNEL32_RESUMETHREAD_BOOTSTRAP.md](KERNEL32_RESUMETHREAD_BOOTSTRAP.md).
+
+The bounded scheduler supports only one suspend level. A repeat resume at
+count zero is a successful no-op returning previous count `0`, with no
+underflow or duplicate queue entry. No arbitrary nested suspend behavior is
+claimed, and no `IsProcessInJob`, worker bootstrap dependency, COM, FLS,
+CloseHandle, wait, signal, reset, sleep, or switch route was added.
 
 ## `CreateEventW` payload boundary (2026-08-07)
 
