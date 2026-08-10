@@ -55,6 +55,27 @@ static int range_contains(uint64_t outer_base,
     return inner_base >= outer_base && inner_end <= outer_end;
 }
 
+static int align_up_u64(uint64_t value, uint64_t alignment,
+                        uint64_t *result)
+{
+    uint64_t remainder;
+    uint64_t increment;
+    if (result == 0 || alignment == 0) return 0;
+    remainder = value % alignment;
+    increment = remainder == 0 ? 0 : alignment - remainder;
+    return add_u64(value, increment, result);
+}
+
+static uint64_t page_round_bytes(uint64_t bytes)
+{
+    uint64_t rounded;
+    if (bytes == 0 || bytes > UINT64_MAX - (GXOS_VM_PAGE_SIZE - 1U)) {
+        return 0;
+    }
+    rounded = bytes + GXOS_VM_PAGE_SIZE - 1U;
+    return rounded & ~(GXOS_VM_PAGE_SIZE - 1U);
+}
+
 static uint64_t map_growth_size(uint64_t map_bytes, uint64_t descriptor_size,
                                 int *ok)
 {
@@ -483,7 +504,8 @@ const char *gxos_memory_allocation_class_name(
     static const char *const names[GXOS_MEMORY_ALLOCATION_COUNT] = {
         "IMAGE", "PAYLOAD_STAGING", "IMPORT_STUB", "TLS_VECTOR",
         "TLS_BLOCK", "GS", "TEB", "MAIN_STACK", "SCHEDULER_STACK",
-        "SCHEDULER_PAGE", "MEMORY_MAP", "PERSISTENT_POOL", "OTHER"
+        "SCHEDULER_PAGE", "MEMORY_MAP", "PERSISTENT_POOL", "PAGE_TABLE",
+        "VM_DATA", "OTHER"
     };
     if ((uint32_t)allocation_class >= GXOS_MEMORY_ALLOCATION_COUNT) return "INVALID";
     return names[allocation_class];
@@ -493,7 +515,7 @@ const char *gxos_memory_owner_name(GXOS_MEMORY_OWNER owner)
 {
     static const char *const names[GXOS_MEMORY_OWNER_COUNT] = {
         "LOADER", "NATIVEAOT", "IMPORTS", "TLS", "SCHEDULER", "CRT",
-        "MEMORY_ACCOUNTING", "OTHER"
+        "MEMORY_ACCOUNTING", "PAGING", "VM", "OTHER"
     };
     if ((uint32_t)owner >= GXOS_MEMORY_OWNER_COUNT) return "INVALID";
     return names[owner];
@@ -556,7 +578,10 @@ GXOS_VM_STATUS gxos_vm_arena_reserve(GXOS_VM_ARENA *arena,
             reservation->live = 1;
             reservation->base = base;
             reservation->bytes = bytes;
+            reservation->requested_bytes = bytes;
             reservation->kind = kind;
+            reservation->state = GXOS_VM_RESERVATION_STATE_RESERVED;
+            reservation->owner = 0;
             reservation->generation = generation;
             reservation->committed_bytes = 0;
             arena->reservation_count++;
@@ -566,6 +591,114 @@ GXOS_VM_STATUS gxos_vm_arena_reserve(GXOS_VM_ARENA *arena,
         }
     }
     return GXOS_VM_STATUS_CAPACITY;
+}
+
+GXOS_VM_STATUS gxos_vm_arena_reserve_fixed(
+    GXOS_VM_ARENA *arena,
+    uint64_t base,
+    uint64_t requested_bytes,
+    uint32_t kind,
+    uint32_t owner,
+    uint64_t generation,
+    uint32_t *slot_out)
+{
+    uint64_t reserved_bytes;
+    GXOS_VM_STATUS status;
+    if (arena == 0 || slot_out == 0 || requested_bytes == 0) {
+        return GXOS_VM_STATUS_INVALID_ARGUMENT;
+    }
+    if (base % GXOS_VM_RESERVATION_GRANULARITY != 0) {
+        return GXOS_VM_STATUS_ALIGNMENT;
+    }
+    reserved_bytes = page_round_bytes(requested_bytes);
+    if (reserved_bytes == 0) return GXOS_VM_STATUS_OVERFLOW;
+    status = gxos_vm_arena_reserve(arena, base, reserved_bytes, kind,
+                                   generation, slot_out);
+    if (status != GXOS_VM_STATUS_OK) return status;
+    arena->reservations[*slot_out].requested_bytes = requested_bytes;
+    arena->reservations[*slot_out].owner = owner;
+    arena->reservations[*slot_out].state = GXOS_VM_RESERVATION_STATE_RESERVED;
+    return GXOS_VM_STATUS_OK;
+}
+
+GXOS_VM_STATUS gxos_vm_arena_reserve_any(
+    GXOS_VM_ARENA *arena,
+    uint64_t requested_bytes,
+    uint32_t kind,
+    uint32_t owner,
+    uint64_t generation,
+    uint64_t *base_out,
+    uint32_t *slot_out)
+{
+    uint64_t reserved_bytes;
+    uint64_t arena_end;
+    uint64_t candidate;
+    uint32_t index;
+    if (arena == 0 || base_out == 0 || slot_out == 0 ||
+        requested_bytes == 0 || !arena->valid || generation == 0) {
+        return GXOS_VM_STATUS_INVALID_ARGUMENT;
+    }
+    reserved_bytes = page_round_bytes(requested_bytes);
+    if (reserved_bytes == 0) return GXOS_VM_STATUS_OVERFLOW;
+    if (!range_end(arena->base, arena->length, &arena_end) ||
+        !align_up_u64(arena->base, GXOS_VM_RESERVATION_GRANULARITY,
+                      &candidate)) {
+        return GXOS_VM_STATUS_OVERFLOW;
+    }
+    while (candidate <= arena_end &&
+           reserved_bytes <= arena_end - candidate) {
+        uint64_t next_candidate = candidate;
+        int conflict = 0;
+        for (index = 0; index != GXOS_VM_MAX_RESERVATIONS; ++index) {
+            const GXOS_VM_RESERVATION *reservation =
+                &arena->reservations[index];
+            uint64_t reservation_end;
+            if (!reservation->live) continue;
+            if (!range_end(reservation->base, reservation->bytes,
+                           &reservation_end)) {
+                return GXOS_VM_STATUS_INVALID_STATE;
+            }
+            if (ranges_overlap(candidate, reserved_bytes, reservation->base,
+                               reservation->bytes)) {
+                conflict = 1;
+                if (reservation_end > next_candidate) {
+                    if (!align_up_u64(reservation_end,
+                                      GXOS_VM_RESERVATION_GRANULARITY,
+                                      &next_candidate)) {
+                        return GXOS_VM_STATUS_OVERFLOW;
+                    }
+                }
+            }
+        }
+        if (!conflict) {
+            GXOS_VM_STATUS status = gxos_vm_arena_reserve_fixed(
+                arena, candidate, requested_bytes, kind, owner, generation,
+                slot_out);
+            if (status == GXOS_VM_STATUS_OK) *base_out = candidate;
+            return status;
+        }
+        if (next_candidate <= candidate) return GXOS_VM_STATUS_OVERFLOW;
+        candidate = next_candidate;
+    }
+    return GXOS_VM_STATUS_OUTSIDE_ARENA;
+}
+
+int gxos_vm_arena_find_reservation(
+    const GXOS_VM_ARENA *arena,
+    uint64_t address,
+    uint32_t *slot_out)
+{
+    uint32_t index;
+    if (arena == 0 || slot_out == 0) return 0;
+    for (index = 0; index != GXOS_VM_MAX_RESERVATIONS; ++index) {
+        const GXOS_VM_RESERVATION *reservation = &arena->reservations[index];
+        if (reservation->live && address >= reservation->base &&
+            address - reservation->base < reservation->bytes) {
+            *slot_out = index;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 GXOS_VM_STATUS gxos_vm_arena_commit(GXOS_VM_ARENA *arena,
@@ -612,14 +745,148 @@ GXOS_VM_STATUS gxos_vm_arena_commit(GXOS_VM_ARENA *arena,
             commitment->reservation_slot = reservation_slot;
             commitment->base = base;
             commitment->bytes = bytes;
+            commitment->physical_base = 0;
+            commitment->page_count = bytes / GXOS_VM_PAGE_SIZE;
+            if (bytes % GXOS_VM_PAGE_SIZE != 0) ++commitment->page_count;
+            commitment->state = GXOS_VM_RESERVATION_STATE_COMMITTED;
             commitment->generation = generation;
             arena->commitment_count++;
             arena->total_committed_bytes += bytes;
             arena->reservations[reservation_slot].committed_bytes += bytes;
+            arena->reservations[reservation_slot].state =
+                GXOS_VM_RESERVATION_STATE_COMMITTED;
             return GXOS_VM_STATUS_OK;
         }
     }
     return GXOS_VM_STATUS_CAPACITY;
+}
+
+GXOS_VM_STATUS gxos_vm_arena_find_commitment(
+    const GXOS_VM_ARENA *arena,
+    uint64_t address,
+    uint32_t *slot_out)
+{
+    uint32_t index;
+    if (arena == 0 || slot_out == 0) return GXOS_VM_STATUS_INVALID_ARGUMENT;
+    for (index = 0; index != GXOS_VM_MAX_COMMITMENTS; ++index) {
+        const GXOS_VM_COMMITMENT *commitment = &arena->commitments[index];
+        if (commitment->live && address >= commitment->base &&
+            address - commitment->base < commitment->bytes) {
+            *slot_out = index;
+            return GXOS_VM_STATUS_OK;
+        }
+    }
+    return GXOS_VM_STATUS_NOT_FOUND;
+}
+
+GXOS_VM_STATUS gxos_vm_arena_commit_page(
+    GXOS_VM_ARENA *arena,
+    uint64_t virtual_page,
+    uint64_t physical_page,
+    uint64_t generation,
+    uint32_t *already_committed_out)
+{
+    uint32_t reservation_slot;
+    uint32_t index;
+    uint64_t new_total;
+    if (already_committed_out != 0) *already_committed_out = 0;
+    if (arena == 0 || generation == 0 || physical_page == 0) {
+        return GXOS_VM_STATUS_INVALID_ARGUMENT;
+    }
+    if (virtual_page % GXOS_VM_PAGE_SIZE != 0 ||
+        physical_page % GXOS_VM_PAGE_SIZE != 0) {
+        return GXOS_VM_STATUS_ALIGNMENT;
+    }
+    if (!gxos_vm_arena_find_reservation(arena, virtual_page,
+                                        &reservation_slot)) {
+        return GXOS_VM_STATUS_COMMIT_OUTSIDE_RESERVATION;
+    }
+    if (!gxos_vm_arena_contains(arena, virtual_page, GXOS_VM_PAGE_SIZE) ||
+        !range_contains(arena->reservations[reservation_slot].base,
+                        arena->reservations[reservation_slot].bytes,
+                        virtual_page, GXOS_VM_PAGE_SIZE)) {
+        return GXOS_VM_STATUS_COMMIT_OUTSIDE_RESERVATION;
+    }
+    for (index = 0; index != GXOS_VM_MAX_COMMITMENTS; ++index) {
+        GXOS_VM_COMMITMENT *commitment = &arena->commitments[index];
+        if (commitment->live && commitment->base == virtual_page &&
+            commitment->bytes == GXOS_VM_PAGE_SIZE) {
+            if (commitment->physical_base != physical_page) {
+                return GXOS_VM_STATUS_COMMIT_OVERLAP;
+            }
+            if (already_committed_out != 0) *already_committed_out = 1;
+            return GXOS_VM_STATUS_OK;
+        }
+    }
+    if (arena->commitment_count >= GXOS_VM_MAX_COMMITMENTS ||
+        !add_u64(arena->total_committed_bytes, GXOS_VM_PAGE_SIZE,
+                 &new_total) ||
+        !add_u64(arena->reservations[reservation_slot].committed_bytes,
+                 GXOS_VM_PAGE_SIZE, &new_total)) {
+        return arena->commitment_count >= GXOS_VM_MAX_COMMITMENTS
+            ? GXOS_VM_STATUS_CAPACITY : GXOS_VM_STATUS_OVERFLOW;
+    }
+    for (index = 0; index != GXOS_VM_MAX_COMMITMENTS; ++index) {
+        GXOS_VM_COMMITMENT *commitment = &arena->commitments[index];
+        if (!commitment->live) {
+            zero_bytes(commitment, sizeof(*commitment));
+            commitment->live = 1;
+            commitment->reservation_slot = reservation_slot;
+            commitment->base = virtual_page;
+            commitment->bytes = GXOS_VM_PAGE_SIZE;
+            commitment->physical_base = physical_page;
+            commitment->page_count = 1;
+            commitment->state = GXOS_VM_RESERVATION_STATE_COMMITTED;
+            commitment->generation = generation;
+            arena->commitment_count++;
+            arena->total_committed_bytes += GXOS_VM_PAGE_SIZE;
+            arena->reservations[reservation_slot].committed_bytes +=
+                GXOS_VM_PAGE_SIZE;
+            arena->reservations[reservation_slot].state =
+                GXOS_VM_RESERVATION_STATE_COMMITTED;
+            return GXOS_VM_STATUS_OK;
+        }
+    }
+    return GXOS_VM_STATUS_CAPACITY;
+}
+
+GXOS_VM_STATUS gxos_vm_arena_decommit_page(
+    GXOS_VM_ARENA *arena,
+    uint64_t virtual_page,
+    uint64_t *physical_page_out)
+{
+    uint32_t index;
+    if (physical_page_out != 0) *physical_page_out = 0;
+    if (arena == 0 || virtual_page % GXOS_VM_PAGE_SIZE != 0) {
+        return GXOS_VM_STATUS_INVALID_ARGUMENT;
+    }
+    for (index = 0; index != GXOS_VM_MAX_COMMITMENTS; ++index) {
+        GXOS_VM_COMMITMENT *commitment = &arena->commitments[index];
+        GXOS_VM_RESERVATION *reservation;
+        if (!commitment->live || commitment->base != virtual_page ||
+            commitment->bytes != GXOS_VM_PAGE_SIZE) continue;
+        if (commitment->reservation_slot >= GXOS_VM_MAX_RESERVATIONS) {
+            return GXOS_VM_STATUS_INVALID_STATE;
+        }
+        reservation = &arena->reservations[commitment->reservation_slot];
+        if (!reservation->live || arena->commitment_count == 0 ||
+            arena->total_committed_bytes < GXOS_VM_PAGE_SIZE ||
+            reservation->committed_bytes < GXOS_VM_PAGE_SIZE) {
+            return GXOS_VM_STATUS_INVALID_STATE;
+        }
+        if (physical_page_out != 0) {
+            *physical_page_out = commitment->physical_base;
+        }
+        arena->commitment_count--;
+        arena->total_committed_bytes -= GXOS_VM_PAGE_SIZE;
+        reservation->committed_bytes -= GXOS_VM_PAGE_SIZE;
+        if (reservation->committed_bytes == 0) {
+            reservation->state = GXOS_VM_RESERVATION_STATE_RESERVED;
+        }
+        zero_bytes(commitment, sizeof(*commitment));
+        return GXOS_VM_STATUS_OK;
+    }
+    return GXOS_VM_STATUS_NOT_FOUND;
 }
 
 GXOS_VM_STATUS gxos_vm_arena_decommit(GXOS_VM_ARENA *arena,
@@ -644,6 +911,9 @@ GXOS_VM_STATUS gxos_vm_arena_decommit(GXOS_VM_ARENA *arena,
             arena->commitment_count--;
             arena->total_committed_bytes -= bytes;
             reservation->committed_bytes -= bytes;
+            if (reservation->committed_bytes == 0) {
+                reservation->state = GXOS_VM_RESERVATION_STATE_RESERVED;
+            }
             zero_bytes(commitment, sizeof(*commitment));
             return GXOS_VM_STATUS_OK;
         }
@@ -693,6 +963,14 @@ int gxos_vm_arena_validate(const GXOS_VM_ARENA *arena)
         if (!gxos_vm_arena_contains(arena, reservation->base,
                                     reservation->bytes) ||
             reservation->generation == 0 ||
+            reservation->requested_bytes == 0 ||
+            reservation->requested_bytes > reservation->bytes ||
+            reservation->state < GXOS_VM_RESERVATION_STATE_RESERVED ||
+            reservation->state > GXOS_VM_RESERVATION_STATE_COMMITTED ||
+            (reservation->committed_bytes == 0 &&
+             reservation->state != GXOS_VM_RESERVATION_STATE_RESERVED) ||
+            (reservation->committed_bytes != 0 &&
+             reservation->state != GXOS_VM_RESERVATION_STATE_COMMITTED) ||
             reservation->committed_bytes > reservation->bytes ||
             !add_u64(reserved, reservation->bytes, &reserved)) {
             return 0;
@@ -713,6 +991,8 @@ int gxos_vm_arena_validate(const GXOS_VM_ARENA *arena)
         if (commitment->reservation_slot >= GXOS_VM_MAX_RESERVATIONS ||
             !arena->reservations[commitment->reservation_slot].live ||
             commitment->generation == 0 ||
+            commitment->state != GXOS_VM_RESERVATION_STATE_COMMITTED ||
+            (commitment->physical_base != 0 && commitment->page_count == 0) ||
             !range_contains(
                 arena->reservations[commitment->reservation_slot].base,
                 arena->reservations[commitment->reservation_slot].bytes,

@@ -21,6 +21,7 @@
 #include "platform_get_proc_address.h"
 #include "crt_malloc.h"
 #include "memory_accounting.h"
+#include "vm_substrate.h"
 #include "global_memory_status_ex.h"
 #include "exception_context.h"
 #include "vectored_handler.h"
@@ -169,6 +170,15 @@ typedef struct {
     struct EFI_CONFIGURATION_TABLE *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
+typedef struct {
+    EFI_BOOT_SERVICES *boot_services;
+    GXOS_PHYSICAL_LEDGER *ledger;
+    uint64_t generation;
+    GXOS_MEMORY_ALLOCATION_CLASS allocation_class;
+    GXOS_MEMORY_OWNER owner;
+    uint64_t commit_impact_bytes;
+} GXOS_VM_UEFI_PAGE_CONTEXT;
+
 typedef struct EFI_CONFIGURATION_TABLE {
     EFI_GUID VendorGuid;
     void *VendorTable;
@@ -288,6 +298,14 @@ static GXOS_PHYSICAL_SNAPSHOT g_memory_physical_snapshot;
 static GXOS_COMMIT_MODEL g_memory_commit_model;
 static GXOS_MEMORY_SNAPSHOT g_memory_snapshot;
 static volatile uint64_t g_memory_accounting_generation;
+static GXOS_VM_PAGING g_vm_paging;
+static GXOS_X64_PAGING_AUDIT g_vm_paging_audit;
+static uint32_t g_vm_paging_audit_complete;
+static uint32_t g_vm_paging_initialized;
+static uint64_t g_vm_old_cr3;
+static uint64_t g_vm_new_cr3;
+static GXOS_VM_UEFI_PAGE_CONTEXT g_vm_table_page_context;
+static GXOS_VM_UEFI_PAGE_CONTEXT g_vm_data_page_context;
 static GXOS_MEMORY_STATUS_EX_MEMORY_REGION
     g_memory_status_ex_regions[GXOS_MEMORY_STATUS_EX_MAX_MEMORY_REGIONS];
 static uint32_t g_memory_status_ex_region_count;
@@ -6903,12 +6921,6 @@ static uint64_t EFIAPI memory_free_pool(void *buffer)
     return g_memory_boot_services->FreePool(buffer);
 }
 
-static uint64_t memory_round_pages(uint64_t bytes)
-{
-    if (bytes == 0 || bytes > UINT64_MAX - (EFI_PAGE_SIZE - 1U)) return 0;
-    return (bytes + EFI_PAGE_SIZE - 1U) / EFI_PAGE_SIZE;
-}
-
 static void memory_accounting_note_mutation(void)
 {
     if (g_memory_accounting_generation == UINT64_MAX) {
@@ -6917,17 +6929,400 @@ static void memory_accounting_note_mutation(void)
     ++g_memory_accounting_generation;
 }
 
-static void memory_register_virtual_range(uint64_t base, uint64_t bytes,
-                                          uint32_t kind)
+static void *vm_uefi_physical_alias(void *context, uint64_t physical_address)
 {
-    uint32_t slot;
-    if (bytes == 0 || !gxos_vm_arena_contains(&g_memory_virtual_arena, base, bytes) ||
-        gxos_vm_arena_reserve(&g_memory_virtual_arena, base, bytes, kind,
-                              g_memory_map.generation, &slot) != GXOS_VM_STATUS_OK ||
-        gxos_vm_arena_commit(&g_memory_virtual_arena, base, bytes,
-                             g_memory_map.generation) != GXOS_VM_STATUS_OK) {
-        fail("memory-virtual-registration");
+    (void)context;
+    if (physical_address % EFI_PAGE_SIZE != 0 ||
+        physical_address > UINT64_MAX - EFI_PAGE_SIZE) {
+        return 0;
     }
+    /* Before the audit completes, the callback is only used to bootstrap
+       inspection of the firmware root.  Afterwards, require the audit's
+       measured direct/identity coverage before exposing a physical alias. */
+    if (g_vm_paging_audit_complete &&
+        (g_vm_paging_audit.direct_identity_bytes < EFI_PAGE_SIZE ||
+         physical_address > g_vm_paging_audit.direct_identity_bytes -
+             EFI_PAGE_SIZE)) {
+        return 0;
+    }
+    return (void *)(uintptr_t)physical_address;
+}
+
+static int vm_uefi_allocate_page(void *context,
+                                 uint64_t *physical_address_out,
+                                 void **alias_out)
+{
+    GXOS_VM_UEFI_PAGE_CONTEXT *page_context =
+        (GXOS_VM_UEFI_PAGE_CONTEXT *)context;
+    GXOS_PHYSICAL_ALLOCATION allocation;
+    EFI_PHYSICAL_ADDRESS physical = 0;
+    void *alias;
+    uint32_t ledger_slot;
+    if (physical_address_out == 0 || alias_out == 0 || page_context == 0 ||
+        page_context->boot_services == 0 || page_context->ledger == 0 ||
+        page_context->generation == 0 ||
+        page_context->boot_services->AllocatePages == 0 ||
+        page_context->boot_services->FreePages == 0) {
+        return 0;
+    }
+    if (EFI_ERROR(page_context->boot_services->AllocatePages(
+            EFI_ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, 1, &physical))) {
+        return 0;
+    }
+    if (physical == 0) {
+        (void)page_context->boot_services->FreePages(physical, 1);
+        return 0;
+    }
+    if (g_vm_paging_audit.cr3 != 0) {
+        GXOS_VM_MAPPING mapping;
+        if (gxos_vm_paging_query_root(
+                g_vm_paging_audit.cr3 & GXOS_X64_PAGING_PHYSICAL_MASK,
+                physical, vm_uefi_physical_alias, 0, &mapping) !=
+                GXOS_VM_PAGING_STATUS_OK || !mapping.present ||
+            mapping.physical_base != physical) {
+            (void)page_context->boot_services->FreePages(physical, 1);
+            return 0;
+        }
+    }
+    alias = vm_uefi_physical_alias(page_context, physical);
+    if (alias == 0) {
+        (void)page_context->boot_services->FreePages(physical, 1);
+        return 0;
+    }
+    zero_bytes(alias, EFI_PAGE_SIZE);
+    zero_bytes((uint8_t *)&allocation, sizeof(allocation));
+    allocation.base = physical;
+    allocation.bytes = EFI_PAGE_SIZE;
+    allocation.pages = 1;
+    allocation.allocation_class = page_context->allocation_class;
+    allocation.owner = page_context->owner;
+    allocation.physical_impact_bytes = EFI_PAGE_SIZE;
+    allocation.commit_impact_bytes = page_context->commit_impact_bytes;
+    allocation.virtual_reservation_impact_bytes = 0;
+    allocation.generation = page_context->generation;
+    if (gxos_physical_ledger_insert(page_context->ledger, &allocation,
+                                    &ledger_slot) != GXOS_LEDGER_STATUS_OK) {
+        (void)page_context->boot_services->FreePages(physical, 1);
+        return 0;
+    }
+    *physical_address_out = physical;
+    *alias_out = alias;
+    return 1;
+}
+
+static void vm_uefi_free_page(void *context, uint64_t physical_address,
+                              void *alias)
+{
+    GXOS_VM_UEFI_PAGE_CONTEXT *page_context =
+        (GXOS_VM_UEFI_PAGE_CONTEXT *)context;
+    uint32_t ledger_slot;
+    (void)alias;
+    if (page_context == 0 || page_context->boot_services == 0 ||
+        page_context->ledger == 0 ||
+        !gxos_physical_ledger_find(page_context->ledger, physical_address,
+                                   EFI_PAGE_SIZE, &ledger_slot)) {
+        fail("vm-page-free-ledger");
+    }
+    if (page_context->boot_services->FreePages == 0 ||
+        EFI_ERROR(page_context->boot_services->FreePages(physical_address, 1))) {
+        fail("vm-page-free-firmware");
+    }
+    if (gxos_physical_ledger_remove(page_context->ledger, ledger_slot) !=
+            GXOS_LEDGER_STATUS_OK) {
+        fail("vm-page-free-accounting");
+    }
+}
+
+static uint64_t vm_probe_checksum(uint64_t address)
+{
+    volatile const uint8_t *bytes = (volatile const uint8_t *)(uintptr_t)address;
+    uint64_t result = 0x9E3779B97F4A7C15ULL;
+    uint32_t index;
+    if (address == 0) return 0;
+    for (index = 0; index != 32U; ++index) {
+        result ^= (uint64_t)bytes[index] +
+            ((uint64_t)index << 32) + (result << 6) + (result >> 2);
+    }
+    return result;
+}
+
+static void vm_emit_paging_audit(const GXOS_X64_PAGING_AUDIT *audit)
+{
+    if (audit == 0) fail("vm-paging-audit-null");
+    serial_field_hex("GXOS_NET10:PAGING_CR0=0x", audit->cr0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_CR3=0x", audit->cr3);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_CR4=0x", audit->cr4);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_EFER=0x", audit->efer);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_ACTIVE_PML4_PHYSICAL=0x",
+                     audit->cr3 & GXOS_X64_PAGING_PHYSICAL_MASK);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_PAE_ENABLED=0x", audit->pae_enabled);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_LA57_ENABLED=0x", audit->la57_enabled);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_NXE_ENABLED=0x", audit->nx_enabled);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_DIRECT_IDENTITY_BYTES=0x",
+                     audit->direct_identity_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_DIRECT_4K_COUNT=0x",
+                     audit->page_4k_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_DIRECT_2M_COUNT=0x",
+                     audit->page_2m_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_DIRECT_1G_COUNT=0x",
+                     audit->page_1g_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PAGING_ORIGINAL_TOPOLOGY=LEADING_IDENTITY_WALK_WITH_PAGE_SIZE_COUNTS\r\n");
+}
+
+static void vm_verify_existing_mappings(
+    const uint64_t *addresses,
+    const GXOS_VM_MAPPING *before,
+    const uint64_t *checksums,
+    uint32_t count)
+{
+    uint32_t index;
+    for (index = 0; index != count; ++index) {
+        GXOS_VM_MAPPING after;
+        if (addresses[index] == 0 || before[index].present == 0 ||
+            gxos_vm_paging_query(&g_vm_paging, addresses[index], &after) !=
+                GXOS_VM_PAGING_STATUS_OK ||
+            after.physical_base != before[index].physical_base ||
+            after.page_size != before[index].page_size ||
+            vm_probe_checksum(addresses[index]) != checksums[index]) {
+            fail("vm-existing-mapping-changed");
+        }
+    }
+}
+
+static void vm_run_temporary_mapping_proof(EFI_BOOT_SERVICES *boot_services)
+{
+    uint64_t base;
+    uint64_t pre_physical = g_memory_ledger.physical_bytes;
+    uint64_t pre_reserved = g_memory_virtual_arena.total_reserved_bytes;
+    uint64_t pre_committed = g_memory_virtual_arena.total_committed_bytes;
+    uint32_t reservation_slot;
+    uint32_t new_page_count;
+    uint32_t index;
+    uint32_t table_pages_before = g_vm_paging.owned_table_page_count;
+    GXOS_VM_COMMIT_OPERATION operation;
+    GXOS_VM_MAPPING mapping;
+    if (gxos_vm_arena_reserve_any(
+            &g_memory_virtual_arena, 0x3000,
+            GXOS_MEMORY_ALLOCATION_VM_DATA, GXOS_MEMORY_OWNER_VM,
+            g_memory_map.generation, &base, &reservation_slot) !=
+            GXOS_VM_STATUS_OK) {
+        fail("vm-proof-reserve");
+    }
+    if (gxos_vm_paging_query(&g_vm_paging, base, &mapping) !=
+            GXOS_VM_PAGING_STATUS_NOT_PRESENT) {
+        fail("vm-proof-reservation-created-mapping");
+    }
+    zero_bytes((uint8_t *)&operation, sizeof(operation));
+    operation.arena = &g_memory_virtual_arena;
+    operation.paging = &g_vm_paging;
+    operation.data_allocator.context = &g_vm_data_page_context;
+    operation.data_allocator.allocate_page = vm_uefi_allocate_page;
+    operation.data_allocator.free_page = vm_uefi_free_page;
+    operation.data_allocator.physical_alias = vm_uefi_physical_alias;
+    operation.generation = g_memory_map.generation;
+    if (gxos_vm_commit_range(&operation, reservation_slot, base, 0x3000,
+                             1, 0, &new_page_count) !=
+            GXOS_VM_COMMIT_OPERATION_OK || new_page_count != 3U) {
+        fail("vm-proof-commit");
+    }
+    for (index = 0; index != 3U; ++index) {
+        uint64_t virtual_page = base + index * EFI_PAGE_SIZE;
+        uint32_t commitment_slot;
+        GXOS_VM_COMMITMENT *commitment;
+        volatile uint8_t *virtual_bytes =
+            (volatile uint8_t *)(uintptr_t)virtual_page;
+        volatile uint8_t *physical_bytes;
+        uint32_t offset;
+        if (gxos_vm_arena_find_commitment(
+                &g_memory_virtual_arena, virtual_page,
+                &commitment_slot) != GXOS_VM_STATUS_OK) {
+            fail("vm-proof-commitment-lookup");
+        }
+        commitment = &g_memory_virtual_arena.commitments[commitment_slot];
+        if (gxos_vm_paging_query(&g_vm_paging, virtual_page, &mapping) !=
+                GXOS_VM_PAGING_STATUS_OK ||
+            mapping.page_size != EFI_PAGE_SIZE ||
+            mapping.physical_base != commitment->physical_base) {
+            fail("vm-proof-mapping-query");
+        }
+        for (offset = 0; offset != EFI_PAGE_SIZE; ++offset) {
+            if (virtual_bytes[offset] != 0) fail("vm-proof-not-zero");
+        }
+        virtual_bytes[0] = (uint8_t)(0xA0U + index);
+        virtual_bytes[EFI_PAGE_SIZE - 1U] = (uint8_t)(0x50U + index);
+        physical_bytes = (volatile uint8_t *)vm_uefi_physical_alias(
+            &g_vm_data_page_context, commitment->physical_base);
+        if (physical_bytes == 0 || physical_bytes[0] != (uint8_t)(0xA0U + index) ||
+            physical_bytes[EFI_PAGE_SIZE - 1U] != (uint8_t)(0x50U + index)) {
+            fail("vm-proof-physical-alias");
+        }
+    }
+    serial_text("GXOS_NET10:PAGING_TEMPORARY_ZERO_FILL_PROOF=1\r\n");
+    serial_text("GXOS_NET10:PAGING_TEMPORARY_VIRTUAL_WRITE_PROOF=1\r\n");
+    serial_text("GXOS_NET10:PAGING_TEMPORARY_PHYSICAL_ALIAS_PROOF=1\r\n");
+    for (index = 0; index != 3U; ++index) {
+        uint64_t virtual_page = base + index * EFI_PAGE_SIZE;
+        uint32_t commitment_slot;
+        uint64_t physical_page;
+        GXOS_VM_COMMITMENT *commitment;
+        if (gxos_vm_arena_find_commitment(
+                &g_memory_virtual_arena, virtual_page,
+                &commitment_slot) != GXOS_VM_STATUS_OK) {
+            fail("vm-proof-cleanup-lookup");
+        }
+        commitment = &g_memory_virtual_arena.commitments[commitment_slot];
+        physical_page = commitment->physical_base;
+        if (gxos_vm_paging_unmap_page(&g_vm_paging, virtual_page, 0) !=
+                GXOS_VM_PAGING_STATUS_OK ||
+            gxos_vm_arena_decommit_page(&g_memory_virtual_arena, virtual_page,
+                                        0) != GXOS_VM_STATUS_OK) {
+            fail("vm-proof-cleanup-unmap");
+        }
+        vm_uefi_free_page(&g_vm_data_page_context, physical_page,
+                          vm_uefi_physical_alias(&g_vm_data_page_context,
+                                                 physical_page));
+    }
+    if (gxos_vm_arena_release(&g_memory_virtual_arena, reservation_slot) !=
+            GXOS_VM_STATUS_OK ||
+        g_memory_virtual_arena.total_reserved_bytes != pre_reserved ||
+        g_memory_virtual_arena.total_committed_bytes != pre_committed ||
+        g_memory_ledger.physical_bytes != pre_physical +
+            (uint64_t)(g_vm_paging.owned_table_page_count -
+                       table_pages_before) * EFI_PAGE_SIZE ||
+        g_vm_paging.owned_table_page_count != table_pages_before + 3U) {
+        fail("vm-proof-cleanup-accounting");
+    }
+    serial_text("GXOS_NET10:PAGING_TEMPORARY_CLEANUP_PROOF=1\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_PERSISTENT_TABLE_PAGE_COUNT=0x",
+                     g_vm_paging.owned_table_page_count);
+    serial_text("\r\n");
+    if (boot_services == 0 || boot_services->Stall == 0 ||
+        EFI_ERROR(boot_services->Stall(1))) {
+        fail("vm-boot-services-stall-after-cr3");
+    }
+    serial_text("GXOS_NET10:PAGING_BOOT_SERVICES_STALL_AFTER_CR3=1\r\n");
+}
+
+static void initialize_vm_paging(const PE_IMAGE *image,
+                                 EFI_BOOT_SERVICES *boot_services)
+{
+    uint64_t addresses[9];
+    uint64_t checksums[9];
+    GXOS_VM_MAPPING before[9];
+    EFI_PHYSICAL_ADDRESS firmware_probe = 0;
+    void *firmware_alias;
+    uint8_t firmware_pattern = 0x5AU;
+    uint32_t index;
+    uint64_t old_cr3;
+    uint64_t new_cr3;
+    if (image == 0 || boot_services == 0 ||
+        gxos_vm_paging_audit_current(&g_vm_paging_audit,
+                                     vm_uefi_physical_alias, 0) !=
+            GXOS_VM_PAGING_STATUS_OK ||
+        g_vm_paging_audit.direct_identity_bytes == 0) {
+        fail("vm-paging-current-audit");
+    }
+    g_vm_paging_audit_complete = 1;
+    vm_emit_paging_audit(&g_vm_paging_audit);
+    zero_bytes((uint8_t *)addresses, sizeof(addresses));
+    addresses[0] = g_loader_image_base;
+    addresses[1] = image->actual_base;
+    addresses[2] = g_import_stub_pages;
+    addresses[3] = g_tls_vector;
+    addresses[4] = g_tls_block;
+    addresses[5] = g_gs_area;
+    addresses[6] = g_teb_area;
+    addresses[7] = g_stack_lower;
+    addresses[8] = (uint64_t)(uintptr_t)&addresses;
+    for (index = 0; index != 9U; ++index) {
+        checksums[index] = vm_probe_checksum(addresses[index]);
+        if (addresses[index] == 0 ||
+            gxos_vm_paging_query_root(
+                g_vm_paging_audit.cr3 & GXOS_X64_PAGING_PHYSICAL_MASK,
+                addresses[index], vm_uefi_physical_alias, 0, &before[index]) !=
+                GXOS_VM_PAGING_STATUS_OK || before[index].present == 0) {
+            fail("vm-paging-existing-mapping-audit");
+        }
+        serial_field_hex("GXOS_NET10:PAGING_PREEXISTING_ADDRESS=0x",
+                         addresses[index]);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PAGING_PREEXISTING_PHYSICAL=0x",
+                         before[index].physical_base);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PAGING_PREEXISTING_PAGE_SIZE=0x",
+                         before[index].page_size);
+        serial_text("\r\n");
+    }
+    g_vm_table_page_context.boot_services = boot_services;
+    g_vm_table_page_context.ledger = &g_memory_ledger;
+    g_vm_table_page_context.generation = g_memory_map.generation;
+    g_vm_table_page_context.allocation_class =
+        GXOS_MEMORY_ALLOCATION_PAGE_TABLE;
+    g_vm_table_page_context.owner = GXOS_MEMORY_OWNER_PAGING;
+    g_vm_table_page_context.commit_impact_bytes = 0;
+    g_vm_data_page_context = g_vm_table_page_context;
+    g_vm_data_page_context.allocation_class = GXOS_MEMORY_ALLOCATION_VM_DATA;
+    g_vm_data_page_context.owner = GXOS_MEMORY_OWNER_VM;
+    g_vm_data_page_context.commit_impact_bytes = EFI_PAGE_SIZE;
+    {
+        GXOS_VM_PAGE_ALLOCATOR table_allocator;
+        zero_bytes((uint8_t *)&table_allocator, sizeof(table_allocator));
+        table_allocator.context = &g_vm_table_page_context;
+        table_allocator.allocate_page = vm_uefi_allocate_page;
+        table_allocator.free_page = vm_uefi_free_page;
+        table_allocator.physical_alias = vm_uefi_physical_alias;
+        if (gxos_vm_paging_create(
+                &g_vm_paging,
+                g_vm_paging_audit.cr3 & GXOS_X64_PAGING_PHYSICAL_MASK,
+                g_memory_virtual_arena.base, g_memory_virtual_arena.length,
+                g_vm_paging_audit.nx_enabled, &table_allocator) !=
+                GXOS_VM_PAGING_STATUS_OK) {
+            fail("vm-paging-private-root");
+        }
+    }
+    if (gxos_vm_paging_switch_to_owned_root(&g_vm_paging, &old_cr3,
+                                            &new_cr3) !=
+            GXOS_VM_PAGING_STATUS_OK || old_cr3 != g_vm_paging_audit.cr3 ||
+        new_cr3 != g_vm_paging.root_physical) {
+        fail("vm-paging-cr3-switch");
+    }
+    g_vm_old_cr3 = old_cr3;
+    g_vm_new_cr3 = new_cr3;
+    serial_field_hex("GXOS_NET10:PAGING_OLD_CR3=0x", g_vm_old_cr3);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PAGING_NEW_CR3=0x", g_vm_new_cr3);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PAGING_PRIVATE_ROOT_SWITCHED=1\r\n");
+    vm_verify_existing_mappings(addresses, before, checksums, 9);
+    serial_text("GXOS_NET10:PAGING_EXISTING_MAPPINGS_PROOF=1\r\n");
+    if (boot_services->AllocatePages == 0 || boot_services->FreePages == 0 ||
+        EFI_ERROR(boot_services->AllocatePages(
+            EFI_ALLOCATE_ANY_PAGES, EFI_LOADER_DATA, 1, &firmware_probe)) ||
+        firmware_probe == 0 ||
+        (firmware_alias = vm_uefi_physical_alias(0, firmware_probe)) == 0) {
+        fail("vm-boot-services-allocation-after-cr3");
+    }
+    *(volatile uint8_t *)firmware_alias = firmware_pattern;
+    if (*(volatile uint8_t *)firmware_alias != firmware_pattern ||
+        EFI_ERROR(boot_services->FreePages(firmware_probe, 1))) {
+        fail("vm-boot-services-free-after-cr3");
+    }
+    serial_text("GXOS_NET10:PAGING_BOOT_SERVICES_ALLOC_FREE_AFTER_CR3=1\r\n");
+    vm_run_temporary_mapping_proof(boot_services);
+    g_vm_paging_initialized = 1;
+    memory_accounting_note_mutation();
 }
 
 static void memory_remove_virtual_range(uint64_t base, uint64_t bytes)
@@ -6993,7 +7388,6 @@ static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_allocate_pool(
 {
     GXOS_PHYSICAL_ALLOCATION allocation;
     uint32_t ledger_slot;
-    uint64_t virtual_bytes;
     uint64_t status;
 
     if (g_memory_boot_services == 0 || buffer == 0 || size == 0) {
@@ -7004,40 +7398,14 @@ static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_allocate_pool(
     if (status != EFI_SUCCESS || *buffer == 0 || !g_memory_epoch_active) {
         return status;
     }
-    virtual_bytes = gxos_vm_arena_contains(
-        &g_memory_virtual_arena, (uint64_t)(uintptr_t)*buffer, size) ?
-        size : 0U;
     memory_make_allocation(&allocation, (uint64_t)(uintptr_t)*buffer, size, 0,
                            GXOS_MEMORY_ALLOCATION_PERSISTENT_POOL,
-                           GXOS_MEMORY_OWNER_CRT, virtual_bytes);
+                           GXOS_MEMORY_OWNER_CRT, 0);
     if (gxos_physical_ledger_insert(&g_memory_ledger, &allocation,
                                     &ledger_slot) != GXOS_LEDGER_STATUS_OK) {
         (void)g_memory_boot_services->FreePool(*buffer);
         *buffer = 0;
         return ((uint64_t)1 << 63) | 7U;
-    }
-    if (virtual_bytes != 0) {
-        uint32_t virtual_slot = GXOS_VM_MAX_RESERVATIONS;
-        GXOS_VM_STATUS virtual_status = gxos_vm_arena_reserve(
-            &g_memory_virtual_arena, allocation.base, size,
-            GXOS_MEMORY_ALLOCATION_PERSISTENT_POOL, allocation.generation,
-            &virtual_slot);
-        if (virtual_status == GXOS_VM_STATUS_OK) {
-            virtual_status = gxos_vm_arena_commit(
-                &g_memory_virtual_arena, allocation.base, size,
-                allocation.generation);
-        }
-        if (virtual_status != GXOS_VM_STATUS_OK) {
-            if (virtual_slot < GXOS_VM_MAX_RESERVATIONS &&
-                g_memory_virtual_arena.reservations[virtual_slot].live &&
-                g_memory_virtual_arena.reservations[virtual_slot].committed_bytes == 0) {
-                (void)gxos_vm_arena_release(&g_memory_virtual_arena, virtual_slot);
-            }
-            (void)gxos_physical_ledger_remove(&g_memory_ledger, ledger_slot);
-            (void)g_memory_boot_services->FreePool(*buffer);
-            *buffer = 0;
-            return ((uint64_t)1 << 63) | 7U;
-        }
     }
     memory_accounting_note_mutation();
     return EFI_SUCCESS;
@@ -7076,10 +7444,8 @@ static uint64_t EFIAPI memory_tracked_allocate_pages(
     GXOS_PHYSICAL_ALLOCATION allocation;
     uint64_t bytes;
     uint32_t ledger_slot;
-    uint32_t virtual_slot = GXOS_VM_MAX_RESERVATIONS;
     uint64_t status;
     GXOS_LEDGER_STATUS ledger_status;
-    GXOS_VM_STATUS virtual_status;
     (void)type;
     (void)memory_type;
     if (g_memory_boot_services == 0 || memory == 0 || pages == 0 ||
@@ -7092,11 +7458,6 @@ static uint64_t EFIAPI memory_tracked_allocate_pages(
         return status;
     }
     bytes = pages * EFI_PAGE_SIZE;
-    if (!gxos_vm_arena_contains(&g_memory_virtual_arena, *memory, bytes)) {
-        (void)g_memory_boot_services->FreePages(*memory, pages);
-        *memory = 0;
-        return ((uint64_t)1 << 63) | 7U;
-    }
     memory_make_allocation(&allocation, *memory, bytes, pages,
                            pages == 4U ? GXOS_MEMORY_ALLOCATION_SCHEDULER_STACK :
                                          GXOS_MEMORY_ALLOCATION_SCHEDULER_PAGE,
@@ -7108,24 +7469,6 @@ static uint64_t EFIAPI memory_tracked_allocate_pages(
         *memory = 0;
         return ((uint64_t)1 << 63) | 7U;
     }
-    virtual_status = gxos_vm_arena_reserve(
-        &g_memory_virtual_arena, *memory, bytes, allocation.allocation_class,
-        allocation.generation, &virtual_slot);
-    if (virtual_status == GXOS_VM_STATUS_OK) {
-        virtual_status = gxos_vm_arena_commit(
-            &g_memory_virtual_arena, *memory, bytes, allocation.generation);
-    }
-    if (virtual_status != GXOS_VM_STATUS_OK) {
-        if (virtual_slot < GXOS_VM_MAX_RESERVATIONS &&
-            g_memory_virtual_arena.reservations[virtual_slot].live &&
-            g_memory_virtual_arena.reservations[virtual_slot].committed_bytes == 0) {
-            (void)gxos_vm_arena_release(&g_memory_virtual_arena, virtual_slot);
-        }
-        (void)gxos_physical_ledger_remove(&g_memory_ledger, ledger_slot);
-        (void)g_memory_boot_services->FreePages(*memory, pages);
-        *memory = 0;
-        return ((uint64_t)1 << 63) | 7U;
-    }
     memory_accounting_note_mutation();
     return EFI_SUCCESS;
 }
@@ -7133,7 +7476,6 @@ static uint64_t EFIAPI memory_tracked_allocate_pages(
 static uint64_t EFIAPI memory_tracked_free_pages(
     EFI_PHYSICAL_ADDRESS memory, uint64_t pages)
 {
-    uint64_t bytes;
     uint32_t ledger_slot;
     GXOS_PHYSICAL_ALLOCATION *allocation;
     uint64_t status;
@@ -7142,12 +7484,10 @@ static uint64_t EFIAPI memory_tracked_free_pages(
                                    pages * EFI_PAGE_SIZE, &ledger_slot)) {
         return ((uint64_t)1 << 63) | 2U;
     }
-    bytes = pages * EFI_PAGE_SIZE;
     allocation = &g_memory_ledger.entries[ledger_slot];
     if (allocation->pages != pages) return ((uint64_t)1 << 63) | 2U;
     status = g_memory_boot_services->FreePages(memory, pages);
     if (status != EFI_SUCCESS) return status;
-    memory_remove_virtual_range(memory, bytes);
     if (gxos_physical_ledger_remove(&g_memory_ledger, ledger_slot) !=
         GXOS_LEDGER_STATUS_OK) fail("memory-page-ledger-remove");
     memory_accounting_note_mutation();
@@ -7157,8 +7497,6 @@ static uint64_t EFIAPI memory_tracked_free_pages(
 static void initialize_memory_accounting(const PE_IMAGE *image,
                                          EFI_BOOT_SERVICES *boot_services)
 {
-    uint64_t image_bytes;
-    uint64_t image_pages;
     uint32_t index;
     if (image == 0 || boot_services == 0) fail("memory-accounting-context");
     /*
@@ -7185,29 +7523,7 @@ static void initialize_memory_accounting(const PE_IMAGE *image,
             image->loaded_size) {
         fail("memory-virtual-arena");
     }
-    image_pages = memory_round_pages(image->loaded_size);
-    if (image_pages == 0 || image_pages > UINT64_MAX / EFI_PAGE_SIZE) {
-        fail("memory-image-pages");
-    }
-    image_bytes = image_pages * EFI_PAGE_SIZE;
-    memory_register_virtual_range(image->actual_base, image_bytes,
-                                  GXOS_MEMORY_ALLOCATION_IMAGE);
-    memory_register_virtual_range(g_loader_image_base,
-                                  memory_round_pages(g_loader_image_size) * EFI_PAGE_SIZE,
-                                  GXOS_MEMORY_ALLOCATION_OTHER);
-    memory_register_virtual_range(g_import_stub_pages, EFI_PAGE_SIZE,
-                                  GXOS_MEMORY_ALLOCATION_IMPORT_STUB);
-    memory_register_virtual_range(g_tls_vector, EFI_PAGE_SIZE,
-                                  GXOS_MEMORY_ALLOCATION_TLS_VECTOR);
-    memory_register_virtual_range(g_tls_block, EFI_PAGE_SIZE,
-                                  GXOS_MEMORY_ALLOCATION_TLS_BLOCK);
-    memory_register_virtual_range(g_gs_area, EFI_PAGE_SIZE,
-                                  GXOS_MEMORY_ALLOCATION_GS);
-    memory_register_virtual_range(g_teb_area, EFI_PAGE_SIZE,
-                                  GXOS_MEMORY_ALLOCATION_TEB);
     if (g_stack_lower >= g_stack_upper) fail("memory-main-stack-range");
-    memory_register_virtual_range(g_stack_lower, g_stack_upper - g_stack_lower,
-                                  GXOS_MEMORY_ALLOCATION_MAIN_STACK);
     if (image->memory_region_count == 0 ||
         image->memory_region_count + 1U >
             GXOS_MEMORY_STATUS_EX_MAX_MEMORY_REGIONS) {
@@ -7227,6 +7543,7 @@ static void initialize_memory_accounting(const PE_IMAGE *image,
     g_memory_status_ex_regions[image->memory_region_count].writable = 1;
     g_memory_status_ex_region_count = image->memory_region_count + 1U;
     g_memory_epoch_active = 1;
+    initialize_vm_paging(image, boot_services);
     serial_text("GXOS_NET10:FIRMWARE_MEASURED_MEMORY_MAP_VALID=1\r\n");
     serial_field_hex("GXOS_NET10:FIRMWARE_MEASURED_MEMORY_MAP_GENERATION=0x",
                      g_memory_map.generation);
@@ -7346,7 +7663,7 @@ static void emit_memory_accounting_diagnostics(void)
                          allocation->physical_impact_bytes);
         serial_text("\r\n");
     }
-    serial_text("GXOS_NET10:GUIDEXOS_POLICY_DERIVED_VIRTUAL_ARENA_DIRECT_IDENTITY=1\r\n");
+    serial_text("GXOS_NET10:GUIDEXOS_POLICY_DERIVED_VIRTUAL_ARENA_PRIVATE_PAGING_SUBTREE=1\r\n");
     serial_field_hex("GXOS_NET10:GUIDEXOS_POLICY_DERIVED_VIRTUAL_ARENA_BASE=0x",
                      g_memory_virtual_arena.base);
     serial_text("\r\n");
@@ -7393,6 +7710,14 @@ static void emit_memory_accounting_diagnostics(void)
     serial_field_hex("GXOS_NET10:GUIDEXOS_POLICY_DERIVED_SNAPSHOT_VIRTUAL_AVAILABLE=0x",
                      g_memory_snapshot.process_virtual_available_bytes);
     serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GUIDEXOS_PAGING_ROOT_PHYSICAL=0x",
+                     g_vm_paging.root_physical);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GUIDEXOS_PAGING_TABLE_PAGE_COUNT=0x",
+                     g_vm_paging.owned_table_page_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GUIDEXOS_PAGING_NX_POLICY=");
+    serial_text(g_vm_paging.nx_enabled ? "ENFORCED\r\n" : "UNAVAILABLE\r\n");
 }
 
 static void capture_memory_snapshot(void)

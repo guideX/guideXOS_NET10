@@ -20,9 +20,11 @@
 #define GXOS_MEMORY_MAP_MAX_DESCRIPTORS 2048U
 #define GXOS_MEMORY_MAP_GROWTH_SLACK_DESCRIPTORS 8U
 #define GXOS_MEMORY_MAP_MAX_RETRIES 4U
-#define GXOS_PHYSICAL_LEDGER_CAPACITY 128U
-#define GXOS_VM_MAX_RESERVATIONS 128U
-#define GXOS_VM_MAX_COMMITMENTS 128U
+#define GXOS_PHYSICAL_LEDGER_CAPACITY 4096U
+#define GXOS_VM_MAX_RESERVATIONS 256U
+#define GXOS_VM_MAX_COMMITMENTS 4096U
+#define GXOS_VM_RESERVATION_GRANULARITY ((uint64_t)0x10000U)
+#define GXOS_VM_PAGE_SIZE ((uint64_t)0x1000U)
 
 typedef uint64_t GXOS_EFI_STATUS;
 typedef uint64_t GXOS_EFI_UINTN;
@@ -175,6 +177,8 @@ typedef enum {
     GXOS_MEMORY_ALLOCATION_SCHEDULER_PAGE,
     GXOS_MEMORY_ALLOCATION_MEMORY_MAP,
     GXOS_MEMORY_ALLOCATION_PERSISTENT_POOL,
+    GXOS_MEMORY_ALLOCATION_PAGE_TABLE,
+    GXOS_MEMORY_ALLOCATION_VM_DATA,
     GXOS_MEMORY_ALLOCATION_OTHER,
     GXOS_MEMORY_ALLOCATION_COUNT
 } GXOS_MEMORY_ALLOCATION_CLASS;
@@ -187,6 +191,8 @@ typedef enum {
     GXOS_MEMORY_OWNER_SCHEDULER,
     GXOS_MEMORY_OWNER_CRT,
     GXOS_MEMORY_OWNER_MEMORY_ACCOUNTING,
+    GXOS_MEMORY_OWNER_PAGING,
+    GXOS_MEMORY_OWNER_VM,
     GXOS_MEMORY_OWNER_OTHER,
     GXOS_MEMORY_OWNER_COUNT
 } GXOS_MEMORY_OWNER;
@@ -253,15 +259,26 @@ typedef enum {
     GXOS_VM_STATUS_NOT_FOUND,
     GXOS_VM_STATUS_COMMIT_OVERLAP,
     GXOS_VM_STATUS_COMMIT_OUTSIDE_RESERVATION,
-    GXOS_VM_STATUS_COMMITTED_RESERVATION
+    GXOS_VM_STATUS_COMMITTED_RESERVATION,
+    GXOS_VM_STATUS_ALIGNMENT,
+    GXOS_VM_STATUS_INVALID_STATE
 } GXOS_VM_STATUS;
+
+enum {
+    GXOS_VM_RESERVATION_STATE_FREE = 0,
+    GXOS_VM_RESERVATION_STATE_RESERVED = 1,
+    GXOS_VM_RESERVATION_STATE_COMMITTED = 2
+};
 
 typedef struct {
     uint32_t live;
     uint64_t base;
     uint64_t bytes;
+    uint64_t requested_bytes;
     uint64_t committed_bytes;
     uint32_t kind;
+    uint32_t state;
+    uint32_t owner;
     uint64_t generation;
 } GXOS_VM_RESERVATION;
 
@@ -270,12 +287,15 @@ typedef struct {
     uint32_t reservation_slot;
     uint64_t base;
     uint64_t bytes;
+    uint64_t physical_base;
+    uint64_t page_count;
+    uint32_t state;
     uint64_t generation;
 } GXOS_VM_COMMITMENT;
 
-/* This is a guideXOS-owned, bounded identity-mapped arena, not Windows VM. */
-#define GXOS_VM_ARENA_BASE 0x0000000000010000ULL
-#define GXOS_VM_ARENA_LENGTH 0x000000003FFF0000ULL
+/* The live policy is a private, lower-canonical, one-GiB dynamic subtree. */
+#define GXOS_VM_ARENA_BASE 0x0000400000000000ULL
+#define GXOS_VM_ARENA_LENGTH 0x0000000040000000ULL
 
 typedef struct {
     uint64_t base;
@@ -303,10 +323,44 @@ GXOS_VM_STATUS gxos_vm_arena_reserve(GXOS_VM_ARENA *arena,
                                      uint32_t kind,
                                      uint64_t generation,
                                      uint32_t *slot_out);
+GXOS_VM_STATUS gxos_vm_arena_reserve_fixed(
+    GXOS_VM_ARENA *arena,
+    uint64_t base,
+    uint64_t requested_bytes,
+    uint32_t kind,
+    uint32_t owner,
+    uint64_t generation,
+    uint32_t *slot_out);
+GXOS_VM_STATUS gxos_vm_arena_reserve_any(
+    GXOS_VM_ARENA *arena,
+    uint64_t requested_bytes,
+    uint32_t kind,
+    uint32_t owner,
+    uint64_t generation,
+    uint64_t *base_out,
+    uint32_t *slot_out);
+int gxos_vm_arena_find_reservation(
+    const GXOS_VM_ARENA *arena,
+    uint64_t address,
+    uint32_t *slot_out);
 GXOS_VM_STATUS gxos_vm_arena_commit(GXOS_VM_ARENA *arena,
                                     uint64_t base,
                                     uint64_t bytes,
                                     uint64_t generation);
+GXOS_VM_STATUS gxos_vm_arena_commit_page(
+    GXOS_VM_ARENA *arena,
+    uint64_t virtual_page,
+    uint64_t physical_page,
+    uint64_t generation,
+    uint32_t *already_committed_out);
+GXOS_VM_STATUS gxos_vm_arena_find_commitment(
+    const GXOS_VM_ARENA *arena,
+    uint64_t address,
+    uint32_t *slot_out);
+GXOS_VM_STATUS gxos_vm_arena_decommit_page(
+    GXOS_VM_ARENA *arena,
+    uint64_t virtual_page,
+    uint64_t *physical_page_out);
 GXOS_VM_STATUS gxos_vm_arena_decommit(GXOS_VM_ARENA *arena,
                                       uint64_t base,
                                       uint64_t bytes);

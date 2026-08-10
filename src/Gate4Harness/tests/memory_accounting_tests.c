@@ -190,7 +190,10 @@ static void test_ledger(void)
         REQUIRE(gxos_physical_ledger_insert(&ledger, &value, &slot) ==
                 GXOS_LEDGER_STATUS_OK);
     }
-    value = allocation(0x900000, 4096, 2);
+    value = allocation(0x10000ULL +
+                           ((uint64_t)GXOS_PHYSICAL_LEDGER_CAPACITY + 1U) *
+                               0x2000ULL,
+                       4096, 2);
     REQUIRE(gxos_physical_ledger_insert(&ledger, &value, &slot) ==
             GXOS_LEDGER_STATUS_CAPACITY);
     REQUIRE(ledger.exhausted && gxos_physical_ledger_validate(&ledger));
