@@ -21,6 +21,7 @@
 #include "platform_get_proc_address.h"
 #include "crt_malloc.h"
 #include "memory_accounting.h"
+#include "global_memory_status_ex.h"
 #include "exception_context.h"
 #include "vectored_handler.h"
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
@@ -286,10 +287,26 @@ static GXOS_VM_ARENA g_memory_virtual_arena;
 static GXOS_PHYSICAL_SNAPSHOT g_memory_physical_snapshot;
 static GXOS_COMMIT_MODEL g_memory_commit_model;
 static GXOS_MEMORY_SNAPSHOT g_memory_snapshot;
+static volatile uint64_t g_memory_accounting_generation;
+static GXOS_MEMORY_STATUS_EX_MEMORY_REGION
+    g_memory_status_ex_regions[GXOS_MEMORY_STATUS_EX_MAX_MEMORY_REGIONS];
+static uint32_t g_memory_status_ex_region_count;
 static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_allocate_pool(
     uint32_t pool_type, uint64_t size, void **buffer);
 static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_free_pool(void *buffer);
 static void emit_memory_accounting_diagnostics(void);
+#ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
+static uint32_t g_memory_status_ex_invocation_count;
+static uint32_t g_memory_status_ex_success_count;
+static uint32_t g_memory_status_ex_failure_count;
+static uint32_t g_memory_status_ex_import_descriptor_index;
+static uint32_t g_memory_status_ex_import_symbol_index;
+static uint32_t g_memory_status_ex_importing_iat_rva;
+static GXOS_MEMORY_STATUS_EX_REPORT g_memory_status_ex_last_report;
+static void emit_memory_status_ex_summary(void);
+static int GXOS_MEMORY_STATUS_EX_MS_ABI platform_global_memory_status_ex(
+    GXOS_MEMORY_STATUS_EX *buffer);
+#endif
 #if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
     defined(GXOS_ENABLE_CREATE_THREAD) || \
@@ -3981,6 +3998,9 @@ void __attribute__((noreturn)) EFIAPI import_failfast(
 #ifdef GXOS_ENABLE_CRT_STRICMP
     emit_crt_stricmp_summary();
 #endif
+#ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
+    emit_memory_status_ex_summary();
+#endif
     emit_qpc_summary();
     halt_forever();
 }
@@ -6320,6 +6340,12 @@ int EFIAPI gxos_set_thread_priority_platform_impl(
 
 static void *platform_import_target(const char *module, const char *symbol)
 {
+#ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GlobalMemoryStatusEx")) {
+        return (void *)(uintptr_t)platform_global_memory_status_ex;
+    }
+#endif
 #ifdef GXOS_ENABLE_RESUME_THREAD
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "ResumeThread")) {
@@ -6725,6 +6751,16 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                     first_thunk_rva + index * 8U;
             }
 #endif
+#ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "GlobalMemoryStatusEx")) {
+                g_memory_status_ex_import_descriptor_index = descriptors - 1U;
+                g_memory_status_ex_import_symbol_index = index;
+                g_memory_status_ex_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
+#endif
             {
                 void *target = platform_import_target(module, g_import_records[symbols].symbol);
 #ifdef GXOS_NEGATIVE_UNRESOLVED_IMPORT
@@ -6873,6 +6909,14 @@ static uint64_t memory_round_pages(uint64_t bytes)
     return (bytes + EFI_PAGE_SIZE - 1U) / EFI_PAGE_SIZE;
 }
 
+static void memory_accounting_note_mutation(void)
+{
+    if (g_memory_accounting_generation == UINT64_MAX) {
+        fail("memory-accounting-generation-overflow");
+    }
+    ++g_memory_accounting_generation;
+}
+
 static void memory_register_virtual_range(uint64_t base, uint64_t bytes,
                                           uint32_t kind)
 {
@@ -6995,6 +7039,7 @@ static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_allocate_pool(
             return ((uint64_t)1 << 63) | 7U;
         }
     }
+    memory_accounting_note_mutation();
     return EFI_SUCCESS;
 }
 
@@ -7020,6 +7065,7 @@ static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_free_pool(void *buffer)
         GXOS_LEDGER_STATUS_OK) {
         fail("memory-pool-ledger-remove");
     }
+    memory_accounting_note_mutation();
     return EFI_SUCCESS;
 }
 
@@ -7080,6 +7126,7 @@ static uint64_t EFIAPI memory_tracked_allocate_pages(
         *memory = 0;
         return ((uint64_t)1 << 63) | 7U;
     }
+    memory_accounting_note_mutation();
     return EFI_SUCCESS;
 }
 
@@ -7103,6 +7150,7 @@ static uint64_t EFIAPI memory_tracked_free_pages(
     memory_remove_virtual_range(memory, bytes);
     if (gxos_physical_ledger_remove(&g_memory_ledger, ledger_slot) !=
         GXOS_LEDGER_STATUS_OK) fail("memory-page-ledger-remove");
+    memory_accounting_note_mutation();
     return EFI_SUCCESS;
 }
 
@@ -7160,6 +7208,24 @@ static void initialize_memory_accounting(const PE_IMAGE *image,
     if (g_stack_lower >= g_stack_upper) fail("memory-main-stack-range");
     memory_register_virtual_range(g_stack_lower, g_stack_upper - g_stack_lower,
                                   GXOS_MEMORY_ALLOCATION_MAIN_STACK);
+    if (image->memory_region_count == 0 ||
+        image->memory_region_count + 1U >
+            GXOS_MEMORY_STATUS_EX_MAX_MEMORY_REGIONS) {
+        fail("memory-status-ex-range-capacity");
+    }
+    for (index = 0; index != image->memory_region_count; ++index) {
+        g_memory_status_ex_regions[index].base = image->memory_regions[index].base;
+        g_memory_status_ex_regions[index].end = image->memory_regions[index].end;
+        g_memory_status_ex_regions[index].readable = image->memory_regions[index].readable;
+        g_memory_status_ex_regions[index].writable = image->memory_regions[index].writable;
+    }
+    g_memory_status_ex_regions[image->memory_region_count].base =
+        (uintptr_t)g_stack_lower;
+    g_memory_status_ex_regions[image->memory_region_count].end =
+        (uintptr_t)g_stack_upper;
+    g_memory_status_ex_regions[image->memory_region_count].readable = 1;
+    g_memory_status_ex_regions[image->memory_region_count].writable = 1;
+    g_memory_status_ex_region_count = image->memory_region_count + 1U;
     g_memory_epoch_active = 1;
     serial_text("GXOS_NET10:FIRMWARE_MEASURED_MEMORY_MAP_VALID=1\r\n");
     serial_field_hex("GXOS_NET10:FIRMWARE_MEASURED_MEMORY_MAP_GENERATION=0x",
@@ -7353,8 +7419,181 @@ static void capture_memory_snapshot(void)
             GXOS_SNAPSHOT_STATUS_OK) {
         fail("memory-startup-snapshot");
     }
+    g_memory_accounting_generation = g_memory_snapshot.generation;
     emit_memory_accounting_diagnostics();
 }
+
+#ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
+static void emit_memory_status_ex_field(const char *name, uint64_t value)
+{
+    serial_field_hex(name, value);
+    serial_text("\r\n");
+}
+
+static void emit_memory_status_ex_summary(void)
+{
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_INVOCATION_COUNT=0x",
+        g_memory_status_ex_invocation_count);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_SUCCESS_COUNT=0x",
+        g_memory_status_ex_success_count);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_FAILURE_COUNT=0x",
+        g_memory_status_ex_failure_count);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_LAST_GENERATION=0x",
+        g_memory_status_ex_last_report.view.generation);
+}
+
+static int GXOS_MEMORY_STATUS_EX_MS_ABI platform_global_memory_status_ex(
+    GXOS_MEMORY_STATUS_EX *buffer)
+{
+    GXOS_MEMORY_STATUS_EX_CONTEXT context;
+    GXOS_MEMORY_STATUS_EX_REPORT report;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = return_address >= 6U ? return_address - 6U : 0;
+    uint64_t caller_rva = call_site >= g_managed_image_base
+                              ? call_site - g_managed_image_base : 0;
+    uint32_t input_length = 0;
+    int result = 0;
+    uint32_t attempt;
+
+    ++g_memory_status_ex_invocation_count;
+    for (attempt = 0; attempt != GXOS_MEMORY_STATUS_EX_MAX_QUERY_RETRIES;
+         ++attempt) {
+        uint64_t generation = g_memory_accounting_generation;
+        context.classification = &g_memory_classification;
+        context.startup_snapshot = &g_memory_snapshot;
+        context.ledger = &g_memory_ledger;
+        context.virtual_arena = &g_memory_virtual_arena;
+        context.regions = g_memory_status_ex_regions;
+        context.region_count = g_memory_status_ex_region_count;
+        context.accounting_generation = generation;
+        context.accounting_generation_source =
+            &g_memory_accounting_generation;
+        result = gxos_global_memory_status_ex_checked(buffer, &context,
+                                                       &report);
+        if (report.status != GXOS_MEMORY_STATUS_EX_STATUS_ACCOUNTING_CHANGED) {
+            break;
+        }
+    }
+
+    g_memory_status_ex_last_report = report;
+    if (report.input_range_valid != 0 && report.input_length_read != 0) {
+        input_length = buffer->dwLength;
+    }
+
+    serial_text("GXOS_NET10:GLOBALMEMORYSTATUSEX_BEGIN\r\n");
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_INVOCATION_NUMBER=0x",
+        g_memory_status_ex_invocation_count);
+    serial_text("GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_SYMBOL=GlobalMemoryStatusEx\r\n");
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_DESCRIPTOR_INDEX=0x",
+        g_memory_status_ex_import_descriptor_index);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_SYMBOL_INDEX=0x",
+        g_memory_status_ex_import_symbol_index);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_IAT_RVA=0x",
+        g_memory_status_ex_importing_iat_rva);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_RUNTIME_IAT=0x",
+        g_managed_image_base + g_memory_status_ex_importing_iat_rva);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_RETURN_ADDRESS=0x",
+        return_address);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_RUNTIME_CALL_SITE=0x",
+        call_site);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_CALLER_RVA=0x", caller_rva);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_LPBUFFER=0x", (uintptr_t)buffer);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_DWLENGTH=0x", input_length);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_STRUCTURE_SIZE=0x",
+        sizeof(GXOS_MEMORY_STATUS_EX));
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_INPUT_RANGE_VALID=0x",
+        report.input_range_valid);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_WRITABLE_RANGE_BYTES=0x",
+        report.writable_range_bytes);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_ACCOUNTING_GENERATION=0x",
+        report.accounting_generation);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_TOTAL_PHYSICAL=0x",
+        report.view.total_physical_bytes);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_AVAILABLE_PHYSICAL=0x",
+        report.view.available_physical_bytes);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_MEMORY_LOAD=0x",
+        report.view.memory_load_percent);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_COMMIT_LIMIT=0x",
+        report.view.commit_limit_bytes);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_AVAILABLE_COMMIT=0x",
+        report.view.available_commit_bytes);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_VIRTUAL_TOTAL=0x",
+        report.view.process_virtual_total_bytes);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_VIRTUAL_AVAILABLE=0x",
+        report.view.process_virtual_available_bytes);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_RETURN_VALUE=0x", result ? 1U : 0U);
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_WRITTEN=0x",
+        report.output_written);
+    if (result != 0) {
+        emit_memory_status_ex_field(
+            "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_DWLENGTH=0x",
+            buffer->dwLength);
+        emit_memory_status_ex_field(
+            "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_MEMORY_LOAD=0x",
+            buffer->dwMemoryLoad);
+        emit_memory_status_ex_field(
+            "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_TOTAL_PHYS=0x",
+            buffer->ullTotalPhys);
+        emit_memory_status_ex_field(
+            "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_AVAIL_PHYS=0x",
+            buffer->ullAvailPhys);
+        emit_memory_status_ex_field(
+            "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_TOTAL_PAGEFILE=0x",
+            buffer->ullTotalPageFile);
+        emit_memory_status_ex_field(
+            "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_AVAIL_PAGEFILE=0x",
+            buffer->ullAvailPageFile);
+        emit_memory_status_ex_field(
+            "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_TOTAL_VIRTUAL=0x",
+            buffer->ullTotalVirtual);
+        emit_memory_status_ex_field(
+            "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_AVAIL_VIRTUAL=0x",
+            buffer->ullAvailVirtual);
+        emit_memory_status_ex_field(
+            "GXOS_NET10:GLOBALMEMORYSTATUSEX_OUTPUT_AVAIL_EXTENDED_VIRTUAL=0x",
+            buffer->ullAvailExtendedVirtual);
+    }
+    emit_memory_status_ex_field(
+        "GXOS_NET10:GLOBALMEMORYSTATUSEX_STATUS=0x", report.status);
+    if (result != 0) {
+        ++g_memory_status_ex_success_count;
+        serial_text("GXOS_NET10:GLOBALMEMORYSTATUSEX_OK\r\n");
+    } else {
+        ++g_memory_status_ex_failure_count;
+        g_platform_last_error = GXOS_MEMORY_STATUS_EX_ERROR_INVALID_PARAMETER;
+    }
+    serial_text("GXOS_NET10:GLOBALMEMORYSTATUSEX_RETURNED\r\n");
+    return result;
+}
+#endif
 
 #ifdef GXOS_ENABLE_SYSTEM_INFO
 static const GXOS_SYSTEM_INFO_MEMORY_REGION *platform_system_info_region(
@@ -9327,6 +9566,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
     resolve_imports(&image, boot_services, &import_descriptors, &import_symbols,
                     &import_functional, &import_failfast, &unresolved_imports);
+#ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
+    if (g_memory_status_ex_import_descriptor_index != 2U ||
+        g_memory_status_ex_import_symbol_index != 0x44U ||
+        g_memory_status_ex_importing_iat_rva != 0x7D258U) {
+        fail("globalmemorystatusex-import-contract");
+    }
+    serial_text("GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_SYMBOL=GlobalMemoryStatusEx\r\n");
+    serial_field_hex("GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_memory_status_ex_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_SYMBOL_INDEX=0x",
+                     g_memory_status_ex_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_IAT_RVA=0x",
+                     g_memory_status_ex_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GLOBALMEMORYSTATUSEX_RUNTIME_IAT=0x",
+                     image.actual_base + g_memory_status_ex_importing_iat_rva);
+    serial_text("\r\n");
+#endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
     if (g_create_event_w_import_descriptor_index != 2U ||
         g_create_event_w_import_symbol_index != 42U ||

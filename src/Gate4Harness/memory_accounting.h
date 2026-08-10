@@ -389,4 +389,19 @@ GXOS_SNAPSHOT_STATUS gxos_memory_snapshot_create(
     const GXOS_COMMIT_MODEL *commit,
     uint64_t generation);
 
+/*
+ * Derive a current view without refreshing firmware state.  The retained
+ * classification is the firmware baseline; startup_snapshot is the
+ * immutable generation-2 validation epoch; ledger and virtual_arena are the
+ * current post-epoch state.  The caller supplies one accounting generation
+ * sampled around the operation.
+ */
+GXOS_SNAPSHOT_STATUS gxos_memory_snapshot_query_current(
+    GXOS_MEMORY_SNAPSHOT *view,
+    const GXOS_MEMORY_CLASSIFICATION *classification,
+    const GXOS_MEMORY_SNAPSHOT *startup_snapshot,
+    const GXOS_PHYSICAL_LEDGER *ledger,
+    const GXOS_VM_ARENA *virtual_arena,
+    uint64_t generation);
+
 #endif

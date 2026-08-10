@@ -2,7 +2,7 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'IsProcessInJob', 'IsProcessInJobDisabled', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled', 'CreateEventW', 'CreateEventWDisabled', 'CreateMemoryResourceNotification', 'CreateMemoryResourceNotificationDisabled', 'CreateThread', 'CreateThreadDisabled', 'SetThreadPriority', 'SetThreadPriorityDisabled', 'ResumeThread', 'ResumeThreadDisabled', 'SyntheticScheduler')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'IsProcessInJob', 'IsProcessInJobDisabled', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled', 'CreateEventW', 'CreateEventWDisabled', 'CreateMemoryResourceNotification', 'CreateMemoryResourceNotificationDisabled', 'CreateThread', 'CreateThreadDisabled', 'SetThreadPriority', 'SetThreadPriorityDisabled', 'ResumeThread', 'ResumeThreadDisabled', 'GlobalMemoryStatusEx', 'GlobalMemoryStatusExDisabled', 'SyntheticScheduler')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -51,7 +51,8 @@ if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
         $Scenario -eq 'CreateThread' -or $Scenario -eq 'CreateThreadDisabled' -or
         $Scenario -eq 'SetThreadPriority' -or $Scenario -eq 'SetThreadPriorityDisabled' -or
         $Scenario -eq 'ResumeThread' -or $Scenario -eq 'ResumeThreadDisabled' -or
-        $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled') {
+        $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled' -or
+        $Scenario -eq 'GlobalMemoryStatusEx' -or $Scenario -eq 'GlobalMemoryStatusExDisabled') {
         $managedArtifact = Join-Path $root 'artifacts\veh-final3-normal-gate\ESP\GXOS\gxos-managed-entry-probe.dll'
     } else {
         $managedArtifact = Join-Path $root 'artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll'
@@ -92,7 +93,8 @@ if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
     $Scenario -eq 'CreateThread' -or $Scenario -eq 'CreateThreadDisabled' -or
     $Scenario -eq 'SetThreadPriority' -or $Scenario -eq 'SetThreadPriorityDisabled' -or
     $Scenario -eq 'ResumeThread' -or $Scenario -eq 'ResumeThreadDisabled' -or
-    $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled') {
+    $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled' -or
+    $Scenario -eq 'GlobalMemoryStatusEx' -or $Scenario -eq 'GlobalMemoryStatusExDisabled') {
     $payloadHash = (Get-FileHash -LiteralPath $managedArtifact -Algorithm SHA256).Hash.ToUpperInvariant()
     if ($payloadHash -ne '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837') {
         throw "The thread payload integration requires the exact veh-final3-normal-gate payload. Hash=$payloadHash"
@@ -132,7 +134,8 @@ $gccArguments = @(
     $importFailfastEntryAssembly,
     (Join-Path $root 'src\Gate4Harness\platform_get_module_handle.c'),
     (Join-Path $root 'src\Gate4Harness\platform_get_module_handle_ex.c'),
-    (Join-Path $root 'src\Gate4Harness\platform_get_proc_address.c')
+    (Join-Path $root 'src\Gate4Harness\platform_get_proc_address.c'),
+    (Join-Path $root 'src\Gate4Harness\global_memory_status_ex.c')
 )
 switch ($Scenario) {
     'InvalidBootInfo' { $gccArguments += '-DGXOS_NEGATIVE_INVALID_BOOT_INFO' }
@@ -897,6 +900,47 @@ switch ($Scenario) {
         $gccArguments += '-DGXOS_ENABLE_CRT_MALLOC'
     }
 }
+if ($Scenario -eq 'GlobalMemoryStatusEx' -or
+    $Scenario -eq 'GlobalMemoryStatusExDisabled') {
+    $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+    $gccArguments += '-DGXOS_ENABLE_SLIST'
+    $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+    $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+    $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+    $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+    $gccArguments += '-DGXOS_ENABLE_GETENV'
+    $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+    $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+    $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+    $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+    $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+    $gccArguments += '-DGXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT'
+    $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
+    $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE_EX'
+    $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
+    $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT_REGISTER'
+    $gccArguments += '-DGXOS_ENABLE_CRT_MALLOC'
+    $gccArguments += '-DGXOS_ENABLE_VECTORED_EXCEPTION_HANDLER'
+    $gccArguments += '-DGXOS_ENABLE_CREATE_EVENT_W'
+    $gccArguments += $schedulerSource
+    $gccArguments += $schedulerAssembly
+    $gccArguments += $createEventSource
+    $gccArguments += '-DGXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION'
+    $gccArguments += $createMemoryResourceNotificationSource
+    $gccArguments += '-DGXOS_ENABLE_CREATE_THREAD'
+    $gccArguments += $createThreadSource
+    $gccArguments += $createThreadEntryAssembly
+    $gccArguments += '-DGXOS_ENABLE_SET_THREAD_PRIORITY'
+    $gccArguments += $setThreadPrioritySource
+    $gccArguments += $setThreadPriorityEntryAssembly
+    $gccArguments += '-DGXOS_ENABLE_RESUME_THREAD'
+    $gccArguments += (Join-Path $root 'src\Gate4Harness\resume_thread_entry.S')
+    $gccArguments += '-DGXOS_ENABLE_IS_PROCESS_IN_JOB'
+    $gccArguments += $isProcessInJobEntryAssembly
+    if ($Scenario -eq 'GlobalMemoryStatusEx') {
+        $gccArguments += '-DGXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX'
+    }
+}
 if ($Scenario -eq 'Malloc' -or $Scenario -eq 'VectoredExceptionHandler' -or
     $Scenario -eq 'VectoredExceptionHandlerDisabled' -or
     $Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
@@ -905,7 +949,8 @@ if ($Scenario -eq 'Malloc' -or $Scenario -eq 'VectoredExceptionHandler' -or
     $Scenario -eq 'CreateThread' -or $Scenario -eq 'CreateThreadDisabled' -or
     $Scenario -eq 'SetThreadPriority' -or $Scenario -eq 'SetThreadPriorityDisabled' -or
     $Scenario -eq 'ResumeThread' -or $Scenario -eq 'ResumeThreadDisabled' -or
-    $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled') {
+    $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled' -or
+    $Scenario -eq 'GlobalMemoryStatusEx' -or $Scenario -eq 'GlobalMemoryStatusExDisabled') {
     $gccArguments += (Join-Path $root 'src\Gate4Harness\crt_malloc.c')
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }

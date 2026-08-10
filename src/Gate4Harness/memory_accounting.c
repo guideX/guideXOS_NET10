@@ -893,3 +893,71 @@ GXOS_SNAPSHOT_STATUS gxos_memory_snapshot_create(
     snapshot->valid = 1;
     return GXOS_SNAPSHOT_STATUS_OK;
 }
+
+static int memory_snapshot_is_coherent(const GXOS_MEMORY_SNAPSHOT *snapshot)
+{
+    uint64_t used;
+    if (snapshot == 0 || !snapshot->valid || snapshot->generation == 0 ||
+        snapshot->total_physical_bytes == 0 ||
+        snapshot->available_physical_bytes > snapshot->total_physical_bytes ||
+        snapshot->memory_load_percent > 100U ||
+        snapshot->available_commit_bytes > snapshot->commit_limit_bytes ||
+        snapshot->process_committed_virtual_bytes >
+            snapshot->commit_limit_bytes ||
+        snapshot->process_virtual_available_bytes >
+            snapshot->process_virtual_total_bytes ||
+        snapshot->process_reserved_virtual_bytes >
+            snapshot->process_virtual_total_bytes ||
+        snapshot->process_committed_virtual_bytes >
+            snapshot->process_reserved_virtual_bytes) {
+        return 0;
+    }
+    used = snapshot->total_physical_bytes -
+        snapshot->available_physical_bytes;
+    return snapshot->accounted_physical_usage_bytes == used &&
+           snapshot->available_commit_bytes ==
+               snapshot->commit_limit_bytes -
+                   snapshot->process_committed_virtual_bytes &&
+           snapshot->memory_load_percent == percentage_100(
+               used, snapshot->total_physical_bytes);
+}
+
+GXOS_SNAPSHOT_STATUS gxos_memory_snapshot_query_current(
+    GXOS_MEMORY_SNAPSHOT *view,
+    const GXOS_MEMORY_CLASSIFICATION *classification,
+    const GXOS_MEMORY_SNAPSHOT *startup_snapshot,
+    const GXOS_PHYSICAL_LEDGER *ledger,
+    const GXOS_VM_ARENA *virtual_arena,
+    uint64_t generation)
+{
+    GXOS_PHYSICAL_SNAPSHOT physical;
+    GXOS_COMMIT_MODEL commit;
+    GXOS_COMMIT_STATUS commit_status;
+    GXOS_SNAPSHOT_STATUS status;
+
+    if (view == 0 || classification == 0 || startup_snapshot == 0 ||
+        ledger == 0 || virtual_arena == 0 || generation == 0 ||
+        generation < startup_snapshot->generation ||
+        !classification->valid || classification->total_ram_like_bytes == 0 ||
+        !memory_snapshot_is_coherent(startup_snapshot) ||
+        startup_snapshot->total_physical_bytes !=
+            classification->total_ram_like_bytes) {
+        return GXOS_SNAPSHOT_STATUS_INVALID_ARGUMENT;
+    }
+    zero_bytes(view, sizeof(*view));
+    status = gxos_physical_snapshot_create(&physical, classification, ledger,
+                                           generation);
+    if (status != GXOS_SNAPSHOT_STATUS_OK) return status;
+    commit_status = gxos_commit_model_create_no_pagefile(
+        &commit, physical.total_ram_like_bytes,
+        physical.available_physical_bytes,
+        virtual_arena->total_committed_bytes, generation);
+    if (commit_status == GXOS_COMMIT_STATUS_OVERFLOW) {
+        return GXOS_SNAPSHOT_STATUS_OVERFLOW;
+    }
+    if (commit_status != GXOS_COMMIT_STATUS_OK) {
+        return GXOS_SNAPSHOT_STATUS_INVALID_COMMIT;
+    }
+    return gxos_memory_snapshot_create(view, &physical, virtual_arena,
+                                       &commit, generation);
+}
