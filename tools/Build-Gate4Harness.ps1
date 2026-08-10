@@ -22,6 +22,7 @@ $payloadDirectory = Join-Path $espDirectory 'GXOS'
 $buildLog = Join-Path $outputDirectory 'harness-build.stdout.log'
 $buildErrorLog = Join-Path $outputDirectory 'harness-build.stderr.log'
 $source = Join-Path $root 'src\Gate4Harness\gate4_loader.c'
+$memoryAccountingSource = Join-Path $root 'src\Gate4Harness\memory_accounting.c'
 $timeSource = Join-Path $root 'src\Gate4Harness\platform_time.c'
 $performanceSource = Join-Path $root 'src\Gate4Harness\platform_performance.c'
 $exceptionSource = Join-Path $root 'src\Gate4Harness\exception_context.c'
@@ -60,6 +61,7 @@ if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
 }
 
 if (-not (Test-Path -LiteralPath $source)) { throw "Harness source not found: $source" }
+if (-not (Test-Path -LiteralPath $memoryAccountingSource)) { throw "Memory accounting source not found: $memoryAccountingSource" }
 if (-not (Test-Path -LiteralPath $timeSource)) { throw "Platform time source not found: $timeSource" }
 if (-not (Test-Path -LiteralPath $performanceSource)) { throw "Platform performance source not found: $performanceSource" }
 if (-not (Test-Path -LiteralPath $exceptionSource)) { throw "Exception context source not found: $exceptionSource" }
@@ -111,7 +113,7 @@ $gccArguments = @(
     '-fno-ident', '-mno-red-zone', '-O2', '-Wall', '-Wextra', '-Werror',
     '-nostdlib', '-Wl,--entry,efi_main', '-Wl,--subsystem,10',
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
-    '-o', $efi, $source, $timeSource, $performanceSource,
+    '-o', $efi, $source, $memoryAccountingSource, $timeSource, $performanceSource,
     $exceptionSource, $exceptionAssembly, $vectoredHandlerSource,
     (Join-Path $root 'src\Gate4Harness\crt_onexit.c'),
     (Join-Path $root 'src\Gate4Harness\crt_initterm_e.c'),
