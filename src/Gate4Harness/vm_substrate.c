@@ -638,7 +638,7 @@ GXOS_VM_COMMIT_OPERATION_STATUS gxos_vm_commit_range(
     if (page_count == 0 || page_count > GXOS_VM_MAX_COMMITMENTS) {
         return GXOS_VM_COMMIT_OPERATION_CAPACITY;
     }
-    zero_bytes(created, sizeof(created));
+    zero_bytes(created, sizeof(g_vm_created_pages));
     for (index = 0; index != page_count; ++index) {
         uint64_t virtual_page = start_page + index * GXOS_VM_PAGE_SIZE;
         uint32_t existing_slot;

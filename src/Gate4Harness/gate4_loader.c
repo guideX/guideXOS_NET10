@@ -22,6 +22,7 @@
 #include "crt_malloc.h"
 #include "memory_accounting.h"
 #include "vm_substrate.h"
+#include "virtual_memory.h"
 #include "global_memory_status_ex.h"
 #include "exception_context.h"
 #include "vectored_handler.h"
@@ -306,6 +307,26 @@ static uint64_t g_vm_old_cr3;
 static uint64_t g_vm_new_cr3;
 static GXOS_VM_UEFI_PAGE_CONTEXT g_vm_table_page_context;
 static GXOS_VM_UEFI_PAGE_CONTEXT g_vm_data_page_context;
+#ifdef GXOS_ENABLE_VIRTUAL_MEMORY
+static GXOS_VM_PUBLIC_CONTEXT g_virtual_memory_context;
+static uint32_t g_virtual_alloc_invocation_count;
+static uint32_t g_virtual_free_invocation_count;
+static uint32_t g_virtual_alloc_import_descriptor_index;
+static uint32_t g_virtual_alloc_import_symbol_index;
+static uint32_t g_virtual_alloc_importing_iat_rva;
+static uint32_t g_virtual_free_import_descriptor_index;
+static uint32_t g_virtual_free_import_symbol_index;
+static uint32_t g_virtual_free_importing_iat_rva;
+static uint32_t g_virtual_alloc_first_reservation_reported;
+static uint32_t g_virtual_alloc_first_commit_reported;
+static uint32_t g_virtual_alloc_write_watch_rejected;
+static uint32_t g_virtual_alloc_fallback_observed;
+static uint64_t g_virtual_free_committed_pages[GXOS_VM_MAX_COMMITMENTS];
+static void *GXOS_VM_PUBLIC_MS_ABI platform_virtual_alloc(
+    void *address, uint64_t size, uint32_t allocation_type, uint32_t protection);
+static int GXOS_VM_PUBLIC_MS_ABI platform_virtual_free(
+    void *address, uint64_t size, uint32_t free_type);
+#endif
 static GXOS_MEMORY_STATUS_EX_MEMORY_REGION
     g_memory_status_ex_regions[GXOS_MEMORY_STATUS_EX_MAX_MEMORY_REGIONS];
 static uint32_t g_memory_status_ex_region_count;
@@ -6358,6 +6379,16 @@ int EFIAPI gxos_set_thread_priority_platform_impl(
 
 static void *platform_import_target(const char *module, const char *symbol)
 {
+#ifdef GXOS_ENABLE_VIRTUAL_MEMORY
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "VirtualAlloc")) {
+        return (void *)(uintptr_t)platform_virtual_alloc;
+    }
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "VirtualFree")) {
+        return (void *)(uintptr_t)platform_virtual_free;
+    }
+#endif
 #ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "GlobalMemoryStatusEx")) {
@@ -6776,6 +6807,22 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 g_memory_status_ex_import_descriptor_index = descriptors - 1U;
                 g_memory_status_ex_import_symbol_index = index;
                 g_memory_status_ex_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_VIRTUAL_MEMORY
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "VirtualAlloc")) {
+                g_virtual_alloc_import_descriptor_index = descriptors - 1U;
+                g_virtual_alloc_import_symbol_index = index;
+                g_virtual_alloc_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "VirtualFree")) {
+                g_virtual_free_import_descriptor_index = descriptors - 1U;
+                g_virtual_free_import_symbol_index = index;
+                g_virtual_free_importing_iat_rva =
                     first_thunk_rva + index * 8U;
             }
 #endif
@@ -7544,6 +7591,21 @@ static void initialize_memory_accounting(const PE_IMAGE *image,
     g_memory_status_ex_region_count = image->memory_region_count + 1U;
     g_memory_epoch_active = 1;
     initialize_vm_paging(image, boot_services);
+#ifdef GXOS_ENABLE_VIRTUAL_MEMORY
+    zero_bytes((uint8_t *)&g_virtual_memory_context,
+               sizeof(g_virtual_memory_context));
+    g_virtual_memory_context.arena = &g_memory_virtual_arena;
+    g_virtual_memory_context.paging = &g_vm_paging;
+    g_virtual_memory_context.data_allocator.context = &g_vm_data_page_context;
+    g_virtual_memory_context.data_allocator.allocate_page =
+        vm_uefi_allocate_page;
+    g_virtual_memory_context.data_allocator.free_page = vm_uefi_free_page;
+    g_virtual_memory_context.data_allocator.physical_alias =
+        vm_uefi_physical_alias;
+    g_virtual_memory_context.generation = g_memory_map.generation;
+    g_virtual_memory_context.last_error = &g_platform_last_error;
+    serial_text("GXOS_NET10:VIRTUAL_MEMORY_CONTEXT_INITIALIZED=1\r\n");
+#endif
     serial_text("GXOS_NET10:FIRMWARE_MEASURED_MEMORY_MAP_VALID=1\r\n");
     serial_field_hex("GXOS_NET10:FIRMWARE_MEASURED_MEMORY_MAP_GENERATION=0x",
                      g_memory_map.generation);
@@ -7917,6 +7979,436 @@ static int GXOS_MEMORY_STATUS_EX_MS_ABI platform_global_memory_status_ex(
     }
     serial_text("GXOS_NET10:GLOBALMEMORYSTATUSEX_RETURNED\r\n");
     return result;
+}
+#endif
+
+#ifdef GXOS_ENABLE_VIRTUAL_MEMORY
+static void virtual_memory_emit_field(const char *name, uint64_t value)
+{
+    serial_field_hex(name, value);
+    serial_text("\r\n");
+}
+
+static uint32_t virtual_memory_data_page_count(void)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != GXOS_PHYSICAL_LEDGER_CAPACITY; ++index) {
+        const GXOS_PHYSICAL_ALLOCATION *allocation =
+            &g_memory_ledger.entries[index];
+        if (allocation->live &&
+            allocation->allocation_class == GXOS_MEMORY_ALLOCATION_VM_DATA &&
+            allocation->owner == GXOS_MEMORY_OWNER_VM) {
+            if (count == UINT32_MAX) fail("virtual-memory-data-count");
+            ++count;
+        }
+    }
+    return count;
+}
+
+static void virtual_memory_verify_commit(
+    const GXOS_VM_PUBLIC_RESULT *result,
+    uint32_t *zero_fill_proof,
+    uint32_t *backing_proof,
+    uint32_t *mapping_proof,
+    uint32_t *nx_proof)
+{
+    uint64_t end;
+    uint64_t page;
+    uint64_t page_count;
+    uint32_t commitment_count = 0;
+    uint32_t mapping_count = 0;
+    uint32_t backing_count = 0;
+    uint32_t nx_count = 0;
+    if (zero_fill_proof == 0 || backing_proof == 0 || mapping_proof == 0 ||
+        nx_proof == 0) {
+        fail("virtual-memory-proof-output");
+    }
+    *zero_fill_proof = 0;
+    *backing_proof = 0;
+    *mapping_proof = 0;
+    *nx_proof = 0;
+    if (result == 0 || result->committed == 0 || result->rounded_bytes == 0 ||
+        result->effective_base > UINT64_MAX - result->rounded_bytes) {
+        return;
+    }
+    end = result->effective_base + result->rounded_bytes;
+    page_count = result->rounded_bytes / GXOS_VM_PAGE_SIZE;
+    for (page = result->effective_base; page < end;
+         page += GXOS_VM_PAGE_SIZE) {
+        uint32_t commitment_slot;
+        GXOS_VM_MAPPING mapping;
+        const GXOS_VM_COMMITMENT *commitment;
+        void *alias;
+        uint64_t offset;
+        if (gxos_vm_arena_find_commitment(&g_memory_virtual_arena, page,
+                                          &commitment_slot) !=
+                GXOS_VM_STATUS_OK) {
+            fail("virtual-memory-commitment-proof");
+        }
+        commitment = &g_memory_virtual_arena.commitments[commitment_slot];
+        if (commitment->base != page || commitment->bytes != GXOS_VM_PAGE_SIZE ||
+            commitment->physical_base == 0) {
+            fail("virtual-memory-commitment-record-proof");
+        }
+        ++commitment_count;
+        if (gxos_vm_paging_query(&g_vm_paging, page, &mapping) !=
+                GXOS_VM_PAGING_STATUS_OK || !mapping.present ||
+            mapping.page_size != GXOS_VM_PAGE_SIZE ||
+            mapping.physical_base != commitment->physical_base) {
+            fail("virtual-memory-mapping-proof");
+        }
+        ++mapping_count;
+        if ((mapping.entry_flags & GXOS_X64_PAGING_ENTRY_WRITABLE) == 0) {
+            fail("virtual-memory-writable-proof");
+        }
+        alias = vm_uefi_physical_alias(&g_vm_data_page_context,
+                                       commitment->physical_base);
+        if (alias == 0) fail("virtual-memory-backing-alias-proof");
+        ++backing_count;
+        if (g_vm_paging.nx_enabled &&
+            (mapping.entry_flags & GXOS_X64_PAGING_ENTRY_NO_EXECUTE) == 0) {
+            fail("virtual-memory-nx-proof");
+        }
+        if (!g_vm_paging.nx_enabled ||
+            (mapping.entry_flags & GXOS_X64_PAGING_ENTRY_NO_EXECUTE) != 0) {
+            ++nx_count;
+        }
+        if (result->new_page_count == page_count) {
+            for (offset = 0; offset != GXOS_VM_PAGE_SIZE; ++offset) {
+                if (((volatile const uint8_t *)alias)[offset] != 0) {
+                    fail("virtual-memory-zero-fill-proof");
+                }
+            }
+        }
+    }
+    if (commitment_count != page_count || mapping_count != page_count ||
+        backing_count != page_count || nx_count != page_count) {
+        fail("virtual-memory-commit-proof-count");
+    }
+    *backing_proof = 1;
+    *mapping_proof = 1;
+    *nx_proof = 1;
+    if (result->new_page_count == page_count) {
+        volatile const uint8_t *mapped =
+            (volatile const uint8_t *)(uintptr_t)result->effective_base;
+        uint64_t bytes = result->rounded_bytes < 32U
+            ? result->rounded_bytes : 32U;
+        uint64_t offset;
+        for (offset = 0; offset != bytes; ++offset) {
+            if (mapped[offset] != 0) fail("virtual-memory-visible-zero-proof");
+        }
+        *zero_fill_proof = 1;
+    }
+}
+
+static void virtual_memory_emit_alloc_observation(
+    uint32_t sequence,
+    uintptr_t return_address,
+    uintptr_t call_site,
+    uint64_t address,
+    uint64_t size,
+    uint32_t allocation_type,
+    uint32_t protection,
+    GXOS_VM_PUBLIC_STATUS status,
+    void *returned,
+    const GXOS_VM_PUBLIC_RESULT *result,
+    uint64_t available_virtual_before,
+    uint64_t available_virtual_after,
+    uint64_t physical_before,
+    uint64_t physical_after,
+    uint64_t committed_before,
+    uint64_t committed_after,
+    uint32_t data_pages_before,
+    uint32_t data_pages_after,
+    uint32_t table_pages_before,
+    uint32_t table_pages_after,
+    uint64_t generation_before,
+    uint64_t generation_after,
+    uint32_t zero_fill_proof,
+    uint32_t backing_proof,
+    uint32_t mapping_proof,
+    uint32_t nx_proof)
+{
+    uint64_t caller_rva = call_site >= g_managed_image_base
+        ? call_site - g_managed_image_base : 0;
+    uint32_t state_unchanged = available_virtual_before ==
+            available_virtual_after && physical_before == physical_after &&
+            committed_before == committed_after && data_pages_before ==
+            data_pages_after && generation_before == generation_after &&
+            table_pages_before == table_pages_after;
+    serial_text("GXOS_NET10:VIRTUALALLOC_BEGIN\r\n");
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_CALL_SEQUENCE=0x",
+                              sequence);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_RETURN_ADDRESS=0x",
+                              return_address);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_CALL_SITE=0x",
+                              call_site);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_CALLER_RVA=0x",
+                              caller_rva);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_ADDRESS=0x", address);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_SIZE=0x", size);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_ALLOCATION_TYPE=0x",
+                              allocation_type);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_PROTECTION=0x",
+                              protection);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_STATUS=0x", status);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_SUPPORTED=0x",
+                              status == GXOS_VM_PUBLIC_STATUS_OK);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_RETURN=0x",
+                              (uintptr_t)returned);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_RESERVED=0x",
+                              result->reserved);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_COMMITTED=0x",
+                              result->committed);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_RESERVATION_SLOT=0x",
+                              result->reservation_slot);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_RESERVATION_BASE=0x",
+                              result->reservation_base);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_ROUNDED_SIZE=0x",
+                              result->rounded_bytes);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_NEW_PAGES=0x",
+                              result->new_page_count);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_EXISTING_PAGES=0x",
+                              result->existing_page_count);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_AVAILABLE_VIRTUAL_BEFORE=0x",
+                              available_virtual_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_AVAILABLE_VIRTUAL_AFTER=0x",
+                              available_virtual_after);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_PHYSICAL_LEDGER_BEFORE=0x",
+                              physical_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_PHYSICAL_LEDGER_AFTER=0x",
+                              physical_after);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_COMMITTED_BEFORE=0x",
+                              committed_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_COMMITTED_AFTER=0x",
+                              committed_after);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_DATA_PAGES_BEFORE=0x",
+                              data_pages_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_DATA_PAGES_AFTER=0x",
+                              data_pages_after);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_TABLE_PAGES_BEFORE=0x",
+                              table_pages_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_TABLE_PAGES_AFTER=0x",
+                              table_pages_after);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_GENERATION_BEFORE=0x",
+                              generation_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_GENERATION_AFTER=0x",
+                              generation_after);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_ZERO_FILL_PROOF=0x",
+                              zero_fill_proof);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_BACKING_PROOF=0x",
+                              backing_proof);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_MAPPING_PROOF=0x",
+                              mapping_proof);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_NX_PROOF=0x", nx_proof);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_FAILURE_STATE_UNCHANGED=0x",
+                              status == GXOS_VM_PUBLIC_STATUS_OK ? 1U :
+                                  state_unchanged);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_LAST_ERROR=0x",
+                              g_platform_last_error);
+    serial_text("GXOS_NET10:VIRTUALALLOC_RETURNED\r\n");
+}
+
+static void *GXOS_VM_PUBLIC_MS_ABI platform_virtual_alloc(
+    void *address, uint64_t size, uint32_t allocation_type, uint32_t protection)
+{
+    GXOS_VM_PUBLIC_RESULT result;
+    GXOS_VM_PUBLIC_STATUS status;
+    void *returned = 0;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = return_address >= 6U ? return_address - 6U : 0;
+    uint64_t available_virtual_before =
+        gxos_vm_arena_available(&g_memory_virtual_arena);
+    uint64_t physical_before = g_memory_ledger.physical_bytes;
+    uint64_t committed_before = g_memory_virtual_arena.total_committed_bytes;
+    uint64_t generation_before = g_memory_accounting_generation;
+    uint32_t data_pages_before = virtual_memory_data_page_count();
+    uint32_t table_pages_before = g_vm_paging.owned_table_page_count;
+    uint32_t zero_fill_proof = 0;
+    uint32_t backing_proof = 0;
+    uint32_t mapping_proof = 0;
+    uint32_t nx_proof = 0;
+
+    ++g_virtual_alloc_invocation_count;
+    status = gxos_vm_public_virtual_alloc(&g_virtual_memory_context, address,
+                                          size, allocation_type, protection,
+                                          &result, &returned);
+    if (status == GXOS_VM_PUBLIC_STATUS_OK) {
+        if (result.committed != 0) {
+            virtual_memory_verify_commit(&result, &zero_fill_proof,
+                                         &backing_proof, &mapping_proof,
+                                         &nx_proof);
+        } else if (result.reserved != 0) {
+            GXOS_VM_MAPPING mapping;
+            if (gxos_vm_paging_query(&g_vm_paging, result.reservation_base,
+                                     &mapping) == GXOS_VM_PAGING_STATUS_OK &&
+                mapping.present) {
+                fail("virtual-memory-reserve-leaf-mapping");
+            }
+            backing_proof = 1;
+            mapping_proof = 1;
+        }
+        memory_accounting_note_mutation();
+    }
+    virtual_memory_emit_alloc_observation(
+        g_virtual_alloc_invocation_count, return_address, call_site,
+        (uint64_t)(uintptr_t)address, size, allocation_type, protection,
+        status, returned, &result, available_virtual_before,
+        gxos_vm_arena_available(&g_memory_virtual_arena), physical_before,
+        g_memory_ledger.physical_bytes, committed_before,
+        g_memory_virtual_arena.total_committed_bytes, data_pages_before,
+        virtual_memory_data_page_count(), table_pages_before,
+        g_vm_paging.owned_table_page_count, generation_before,
+        g_memory_accounting_generation, zero_fill_proof, backing_proof,
+        mapping_proof, nx_proof);
+    if (g_virtual_alloc_invocation_count == 1U &&
+        (allocation_type & GXOS_VM_PUBLIC_MEM_WRITE_WATCH) != 0U &&
+        status == GXOS_VM_PUBLIC_STATUS_UNSUPPORTED && returned == 0) {
+        g_virtual_alloc_write_watch_rejected = 1;
+        serial_text("GXOS_NET10:VIRTUALALLOC_WRITE_WATCH_REJECTED=1\r\n");
+        serial_text("GXOS_NET10:VIRTUALALLOC_FALLBACK_RETURNED_NULL=1\r\n");
+        virtual_memory_emit_field(
+            "GXOS_NET10:VIRTUALALLOC_FALLBACK_CONTINUATION_RVA=0x",
+            call_site >= g_managed_image_base
+                ? call_site + 6U - g_managed_image_base : 0);
+        serial_text("GXOS_NET10:VIRTUALALLOC_WRITE_WATCH_STATE_UNCHANGED=1\r\n");
+    }
+    if (g_virtual_alloc_write_watch_rejected != 0 &&
+        g_virtual_alloc_fallback_observed == 0 &&
+        g_virtual_alloc_invocation_count > 1U) {
+        g_virtual_alloc_fallback_observed = 1;
+        virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_FALLBACK_OBSERVED_CALL=0x",
+                                  g_virtual_alloc_invocation_count);
+        virtual_memory_emit_field("GXOS_NET10:VIRTUALALLOC_FALLBACK_OBSERVED_CALLER_RVA=0x",
+                                  call_site >= g_managed_image_base
+                                      ? call_site - g_managed_image_base : 0);
+        serial_text("GXOS_NET10:VIRTUALALLOC_FALLBACK_OBSERVED=1\r\n");
+    }
+    if (status == GXOS_VM_PUBLIC_STATUS_OK && result.reserved != 0 &&
+        result.committed == 0 && g_virtual_alloc_first_reservation_reported == 0) {
+        g_virtual_alloc_first_reservation_reported = 1;
+        serial_text("GXOS_NET10:VIRTUALALLOC_FIRST_REAL_RESERVATION=1\r\n");
+    }
+    if (status == GXOS_VM_PUBLIC_STATUS_OK && result.committed != 0 &&
+        g_virtual_alloc_first_commit_reported == 0) {
+        g_virtual_alloc_first_commit_reported = 1;
+        serial_text("GXOS_NET10:VIRTUALALLOC_FIRST_REAL_COMMIT=1\r\n");
+    }
+    return returned;
+}
+
+static int GXOS_VM_PUBLIC_MS_ABI platform_virtual_free(
+    void *address, uint64_t size, uint32_t free_type)
+{
+    GXOS_VM_PUBLIC_RESULT result;
+    GXOS_VM_PUBLIC_STATUS status;
+    int success = 0;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = return_address >= 6U ? return_address - 6U : 0;
+    uint64_t available_virtual_before =
+        gxos_vm_arena_available(&g_memory_virtual_arena);
+    uint64_t physical_before = g_memory_ledger.physical_bytes;
+    uint64_t committed_before = g_memory_virtual_arena.total_committed_bytes;
+    uint64_t generation_before = g_memory_accounting_generation;
+    uint32_t data_pages_before = virtual_memory_data_page_count();
+    uint32_t table_pages_before = g_vm_paging.owned_table_page_count;
+    uint32_t committed_page_count = 0;
+    uint32_t index;
+    uint32_t mappings_removed = 1;
+    uint64_t caller_rva = call_site >= g_managed_image_base
+        ? call_site - g_managed_image_base : 0;
+
+    for (index = 0; index != GXOS_VM_MAX_COMMITMENTS; ++index) {
+        const GXOS_VM_COMMITMENT *commitment =
+            &g_memory_virtual_arena.commitments[index];
+        uint32_t reservation_slot;
+        if (!commitment->live ||
+            !gxos_vm_arena_find_reservation(&g_memory_virtual_arena,
+                                            commitment->base,
+                                            &reservation_slot) ||
+            reservation_slot >= GXOS_VM_MAX_RESERVATIONS ||
+            !gxos_vm_arena_find_reservation(&g_memory_virtual_arena,
+                                            (uint64_t)(uintptr_t)address,
+                                            &reservation_slot) ||
+            commitment->reservation_slot != reservation_slot) continue;
+        if (committed_page_count == GXOS_VM_MAX_COMMITMENTS) {
+            fail("virtual-memory-free-page-list");
+        }
+        g_virtual_free_committed_pages[committed_page_count++] = commitment->base;
+    }
+    ++g_virtual_free_invocation_count;
+    status = gxos_vm_public_virtual_free(&g_virtual_memory_context, address,
+                                         size, free_type, &result, &success);
+    if (status == GXOS_VM_PUBLIC_STATUS_OK && success != 0) {
+        memory_accounting_note_mutation();
+        for (index = 0; index != committed_page_count; ++index) {
+            GXOS_VM_MAPPING mapping;
+            if (gxos_vm_paging_query(&g_vm_paging,
+                                     g_virtual_free_committed_pages[index],
+                                     &mapping) == GXOS_VM_PAGING_STATUS_OK &&
+                mapping.present) {
+                mappings_removed = 0;
+            }
+        }
+    }
+    serial_text("GXOS_NET10:VIRTUALFREE_BEGIN\r\n");
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_CALL_SEQUENCE=0x",
+                              g_virtual_free_invocation_count);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_CALLER_RVA=0x",
+                              caller_rva);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_POINTER=0x",
+                              (uint64_t)(uintptr_t)address);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_SIZE=0x", size);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_FLAGS=0x", free_type);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_STATUS=0x", status);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_SUPPORTED=0x",
+                              status == GXOS_VM_PUBLIC_STATUS_OK && success);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_RESULT=0x", success);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_RESERVATION_BASE=0x",
+                              result.reservation_base);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_RELEASED_PAGES=0x",
+                              result.existing_page_count);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_AVAILABLE_VIRTUAL_BEFORE=0x",
+                              available_virtual_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_AVAILABLE_VIRTUAL_AFTER=0x",
+                              gxos_vm_arena_available(&g_memory_virtual_arena));
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_PHYSICAL_LEDGER_BEFORE=0x",
+                              physical_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_PHYSICAL_LEDGER_AFTER=0x",
+                              g_memory_ledger.physical_bytes);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_COMMITTED_BEFORE=0x",
+                              committed_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_COMMITTED_AFTER=0x",
+                              g_memory_virtual_arena.total_committed_bytes);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_DATA_PAGES_BEFORE=0x",
+                              data_pages_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_DATA_PAGES_AFTER=0x",
+                              virtual_memory_data_page_count());
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_TABLE_PAGES_BEFORE=0x",
+                              table_pages_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_TABLE_PAGES_AFTER=0x",
+                              g_vm_paging.owned_table_page_count);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_GENERATION_BEFORE=0x",
+                              generation_before);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_GENERATION_AFTER=0x",
+                              g_memory_accounting_generation);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_MAPPING_REMOVED=0x",
+                              status == GXOS_VM_PUBLIC_STATUS_OK && mappings_removed);
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_FAILURE_STATE_UNCHANGED=0x",
+                              status == GXOS_VM_PUBLIC_STATUS_OK && success
+                                  ? 1U
+                                  : (available_virtual_before ==
+                                         gxos_vm_arena_available(&g_memory_virtual_arena) &&
+                                     physical_before == g_memory_ledger.physical_bytes &&
+                                     committed_before ==
+                                         g_memory_virtual_arena.total_committed_bytes &&
+                                     generation_before ==
+                                         g_memory_accounting_generation));
+    virtual_memory_emit_field("GXOS_NET10:VIRTUALFREE_LAST_ERROR=0x",
+                              g_platform_last_error);
+    serial_text("GXOS_NET10:VIRTUALFREE_RETURNED\r\n");
+    return success;
 }
 #endif
 
@@ -9910,6 +10402,44 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GLOBALMEMORYSTATUSEX_RUNTIME_IAT=0x",
                      image.actual_base + g_memory_status_ex_importing_iat_rva);
+    serial_text("\r\n");
+#endif
+#ifdef GXOS_ENABLE_VIRTUAL_MEMORY
+    if (g_virtual_alloc_import_descriptor_index != 2U ||
+        g_virtual_alloc_import_symbol_index != 0x18U ||
+        g_virtual_alloc_importing_iat_rva != 0x7D0F8U ||
+        g_virtual_free_import_descriptor_index != 2U ||
+        g_virtual_free_import_symbol_index != 0x19U ||
+        g_virtual_free_importing_iat_rva != 0x7D100U) {
+        fail("virtual-memory-import-contract");
+    }
+    serial_text("GXOS_NET10:VIRTUALALLOC_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:VIRTUALALLOC_IMPORT_SYMBOL=VirtualAlloc\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALALLOC_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_virtual_alloc_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALALLOC_IMPORT_SYMBOL_INDEX=0x",
+                     g_virtual_alloc_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALALLOC_IMPORT_IAT_RVA=0x",
+                     g_virtual_alloc_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALALLOC_RUNTIME_IAT=0x",
+                     image.actual_base + g_virtual_alloc_importing_iat_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:VIRTUALFREE_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:VIRTUALFREE_IMPORT_SYMBOL=VirtualFree\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALFREE_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_virtual_free_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALFREE_IMPORT_SYMBOL_INDEX=0x",
+                     g_virtual_free_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALFREE_IMPORT_IAT_RVA=0x",
+                     g_virtual_free_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALFREE_RUNTIME_IAT=0x",
+                     image.actual_base + g_virtual_free_importing_iat_rva);
     serial_text("\r\n");
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
