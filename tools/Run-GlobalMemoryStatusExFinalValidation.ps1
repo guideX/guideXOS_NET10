@@ -128,7 +128,7 @@ try {
         Require ((Get-Hex $text 'GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_DESCRIPTOR_INDEX=') -eq 2) "run $sequence descriptor"
         Require ((Get-Hex $text 'GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_SYMBOL_INDEX=') -eq 0x44) "run $sequence symbol index"
         Require ((Get-Hex $text 'GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_IAT_RVA=') -eq 0x7D258) "run $sequence IAT RVA"
-        $blocks = Get-Blocks $text
+        $blocks = @(Get-Blocks $text)
         Require ($blocks.Count -eq 3) "run $sequence natural GlobalMemoryStatusEx count"
         $callers = @()
         $generations = @()
