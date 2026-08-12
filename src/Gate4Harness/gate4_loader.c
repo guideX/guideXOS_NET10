@@ -11,6 +11,7 @@
 #include "platform_environment.h"
 #include "platform_slist.h"
 #include "platform_system_info.h"
+#include "platform_processor_topology.h"
 #include "platform_numa.h"
 #include "platform_process_group_affinity.h"
 #include "platform_process_affinity.h"
@@ -723,6 +724,17 @@ static uint64_t g_system_info_successes;
 static uint64_t g_system_info_failures;
 static uint32_t g_system_info_field_consumption_emitted;
 static void EFIAPI platform_get_system_info(GXOS_SYSTEM_INFO *destination);
+#endif
+#ifdef GXOS_ENABLE_PROCESSOR_TOPOLOGY
+static GXOS_PROCESSOR_TOPOLOGY_SNAPSHOT g_processor_topology_snapshot;
+static uint64_t g_processor_topology_calls;
+static uint32_t g_processor_topology_import_descriptor_index;
+static uint32_t g_processor_topology_import_symbol_index;
+static uint32_t g_processor_topology_importing_iat_rva;
+static int GXOS_PROCESSOR_TOPOLOGY_MS_ABI
+platform_get_logical_processor_information(
+    GXOS_LOGICAL_PROCESSOR_INFORMATION *buffer,
+    uint32_t *returned_length);
 #endif
 #ifdef GXOS_ENABLE_NUMA_HIGHEST_NODE
 static GXOS_NUMA_FACTS g_numa_facts;
@@ -6513,6 +6525,12 @@ static void *platform_import_target(const char *module, const char *symbol)
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "GetSystemInfo")) return (void *)(uintptr_t)platform_get_system_info;
 #endif
+#ifdef GXOS_ENABLE_PROCESSOR_TOPOLOGY
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetLogicalProcessorInformation")) {
+        return (void *)(uintptr_t)platform_get_logical_processor_information;
+    }
+#endif
 #ifdef GXOS_ENABLE_NUMA_HIGHEST_NODE
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "GetNumaHighestNodeNumber")) {
@@ -6807,6 +6825,16 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 g_memory_status_ex_import_descriptor_index = descriptors - 1U;
                 g_memory_status_ex_import_symbol_index = index;
                 g_memory_status_ex_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
+#endif
+#ifdef GXOS_ENABLE_PROCESSOR_TOPOLOGY
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "GetLogicalProcessorInformation")) {
+                g_processor_topology_import_descriptor_index = descriptors - 1U;
+                g_processor_topology_import_symbol_index = index;
+                g_processor_topology_importing_iat_rva =
                     first_thunk_rva + index * 8U;
             }
 #endif
@@ -8412,6 +8440,154 @@ static int GXOS_VM_PUBLIC_MS_ABI platform_virtual_free(
 }
 #endif
 
+#ifdef GXOS_ENABLE_PROCESSOR_TOPOLOGY
+static int GXOS_PROCESSOR_TOPOLOGY_MS_ABI
+platform_get_logical_processor_information(
+    GXOS_LOGICAL_PROCESSOR_INFORMATION *buffer,
+    uint32_t *returned_length)
+{
+    GXOS_MEMORY_STATUS_EX_CONTEXT memory = {0};
+    const GXOS_PROCESSOR_TOPOLOGY_SNAPSHOT *snapshot =
+        &g_processor_topology_snapshot;
+    GXOS_PROCESSOR_TOPOLOGY_REPORT report;
+    GXOS_PROCESSOR_TOPOLOGY_STATUS status;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = return_address >= 6U ? return_address - 6U : 0;
+    uint64_t last_error_before = g_platform_last_error;
+    uint64_t last_error_after;
+    uint32_t index;
+    int result;
+
+    ++g_processor_topology_calls;
+    memory.ledger = &g_memory_ledger;
+    memory.virtual_arena = &g_memory_virtual_arena;
+    memory.regions = g_memory_status_ex_regions;
+    memory.region_count = g_memory_status_ex_region_count;
+    status = gxos_get_logical_processor_information_checked(
+        buffer, returned_length, snapshot, &memory, &report);
+    result = status == GXOS_PROCESSOR_TOPOLOGY_STATUS_OK;
+    if (!result) {
+        (void)gxos_processor_topology_status_last_error(
+            status, &g_platform_last_error);
+    }
+    last_error_after = g_platform_last_error;
+
+    serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_CALL_INDEX=0x",
+                     g_processor_topology_calls - 1U);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_SYMBOL=GetLogicalProcessorInformation\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_processor_topology_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_SYMBOL_INDEX=0x",
+                     g_processor_topology_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_IAT_RVA=0x",
+                     g_processor_topology_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_processor_topology_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_BUFFER=0x",
+                     (uintptr_t)buffer);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RETURNED_LENGTH_POINTER=0x",
+                     (uintptr_t)returned_length);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_INPUT_LENGTH=0x",
+                     report.input_length_read ? report.input_length : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_REQUIRED_LENGTH=0x",
+                     report.required_length);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RETURNED_LENGTH_AFTER=0x",
+                     report.input_length_read ? *returned_length : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RETURNED_LENGTH_CANONICAL=0x",
+                     report.returned_length_pointer_canonical);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RETURNED_LENGTH_READABLE=0x",
+                     report.returned_length_pointer_readable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RETURNED_LENGTH_WRITABLE=0x",
+                     report.returned_length_pointer_writable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_BUFFER_CANONICAL=0x",
+                     report.buffer_pointer_canonical);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_BUFFER_RANGE_VALID=0x",
+                     report.buffer_range_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_STATUS=0x", status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RECORD_COUNT=0x",
+                     report.record_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_CACHE_RECORD_COUNT=0x",
+                     report.cache_record_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_SNAPSHOT_VALID=0x",
+                     snapshot->valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_SNAPSHOT_GENERATION=0x",
+                     snapshot->generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_LOGICAL_PROCESSOR_COUNT=0x",
+                     snapshot->logical_processor_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_ACTIVE_PROCESSOR_MASK=0x",
+                     snapshot->active_processor_mask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_OUTPUT_WRITTEN=0x",
+                     report.output_written);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RETURN_VALUE=0x",
+                     result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_LAST_ERROR_BEFORE=0x",
+                     last_error_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_LAST_ERROR_AFTER=0x",
+                     last_error_after);
+    serial_text("\r\n");
+    if (result != 0) {
+        for (index = 0; index != report.record_count; ++index) {
+            const GXOS_LOGICAL_PROCESSOR_INFORMATION *record = &buffer[index];
+            serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RECORD_MASK=0x",
+                             record->processor_mask);
+            serial_text("\r\n");
+            serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RECORD_RELATIONSHIP=0x",
+                             record->relationship);
+            serial_text("\r\n");
+            if (record->relationship == GXOS_RELATION_PROCESSOR_CORE) {
+                serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RECORD_CORE_FLAGS=0x",
+                                 record->relationship_info.processor_core.flags);
+                serial_text("\r\n");
+            } else if (record->relationship == GXOS_RELATION_NUMA_NODE) {
+                serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RECORD_NODE_NUMBER=0x",
+                                 record->relationship_info.numa_node.node_number);
+                serial_text("\r\n");
+            } else if (record->relationship == GXOS_RELATION_CACHE) {
+                serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RECORD_CACHE_SIZE=0x",
+                                 record->relationship_info.cache.size);
+                serial_text("\r\n");
+            }
+        }
+    }
+    serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_RETURNED\r\n");
+    return result;
+}
+#endif
+
 #ifdef GXOS_ENABLE_SYSTEM_INFO
 static const GXOS_SYSTEM_INFO_MEMORY_REGION *platform_system_info_region(
     uintptr_t address)
@@ -8559,6 +8735,40 @@ static void configure_platform_system_info(const PE_IMAGE *image)
 #endif
     serial_text("GXOS_NET10:QUERYJOBOBJECT_NESTED_JOBS_SUPPORTED=0\r\n");
     serial_text("GXOS_NET10:QUERYJOBOBJECT_CPU_RATE_CONTROL_ENFORCED=0\r\n");
+#endif
+#ifdef GXOS_ENABLE_PROCESSOR_TOPOLOGY
+    {
+        GXOS_PROCESSOR_TOPOLOGY_STATUS topology_status;
+        topology_status = gxos_processor_topology_make_single_cpu(
+            &g_processor_topology_snapshot, g_memory_map.generation);
+        if (topology_status != GXOS_PROCESSOR_TOPOLOGY_STATUS_OK ||
+            g_processor_topology_snapshot.logical_processor_count !=
+                g_system_info_facts.number_of_processors ||
+            g_processor_topology_snapshot.active_processor_mask !=
+                (uint64_t)g_system_info_facts.active_processor_mask ||
+            g_processor_topology_snapshot.core_count != 1U ||
+            g_processor_topology_snapshot.numa_node_count != 1U ||
+            g_processor_topology_snapshot.package_count != 1U ||
+            g_processor_topology_snapshot.cache_count != 0U) {
+            fail("processor-topology-consistency");
+        }
+        serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_SNAPSHOT_VALID=1\r\n");
+        serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_SNAPSHOT_GENERATION=0x",
+                         g_processor_topology_snapshot.generation);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_LOGICAL_PROCESSOR_COUNT=0x",
+                         g_processor_topology_snapshot.logical_processor_count);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_ACTIVE_PROCESSOR_MASK=0x",
+                         g_processor_topology_snapshot.active_processor_mask);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_LOGICAL_PROCESSOR_NUMBERS=0\r\n");
+        serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_CORE_RELATIONSHIPS=1\r\n");
+        serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_NUMA_RELATIONSHIPS=1\r\n");
+        serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_PACKAGE_RELATIONSHIPS=1\r\n");
+        serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_CACHE_RELATIONSHIPS=0\r\n");
+        serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_CROSS_API_CONSISTENCY=1\r\n");
+    }
 #endif
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_SOURCE=UEFI_PAGE_AND_LOADED_IMAGE\r\n");
     serial_text("GXOS_NET10:GETSYSTEMINFO_FACTS_POLICY=IMAGE_BACKED_RANGE_SINGLE_BOOTSTRAP_PROCESSOR\r\n");
@@ -10402,6 +10612,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GLOBALMEMORYSTATUSEX_RUNTIME_IAT=0x",
                      image.actual_base + g_memory_status_ex_importing_iat_rva);
+    serial_text("\r\n");
+#endif
+#ifdef GXOS_ENABLE_PROCESSOR_TOPOLOGY
+    if (g_processor_topology_import_descriptor_index != 2U ||
+        g_processor_topology_import_symbol_index != 0x46U ||
+        g_processor_topology_importing_iat_rva != 0x7D268U) {
+        fail("processor-topology-import-contract");
+    }
+    serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_SYMBOL=GetLogicalProcessorInformation\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_processor_topology_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_SYMBOL_INDEX=0x",
+                     g_processor_topology_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_IAT_RVA=0x",
+                     g_processor_topology_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PROCESSOR_TOPOLOGY_RUNTIME_IAT=0x",
+                     image.actual_base + g_processor_topology_importing_iat_rva);
     serial_text("\r\n");
 #endif
 #ifdef GXOS_ENABLE_VIRTUAL_MEMORY

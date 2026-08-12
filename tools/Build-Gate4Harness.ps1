@@ -25,6 +25,7 @@ $source = Join-Path $root 'src\Gate4Harness\gate4_loader.c'
 $memoryAccountingSource = Join-Path $root 'src\Gate4Harness\memory_accounting.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
+$processorTopologySource = Join-Path $root 'src\Gate4Harness\platform_processor_topology.c'
 $timeSource = Join-Path $root 'src\Gate4Harness\platform_time.c'
 $performanceSource = Join-Path $root 'src\Gate4Harness\platform_performance.c'
 $exceptionSource = Join-Path $root 'src\Gate4Harness\exception_context.c'
@@ -142,7 +143,8 @@ $gccArguments = @(
     (Join-Path $root 'src\Gate4Harness\platform_get_module_handle.c'),
     (Join-Path $root 'src\Gate4Harness\platform_get_module_handle_ex.c'),
     (Join-Path $root 'src\Gate4Harness\platform_get_proc_address.c'),
-    (Join-Path $root 'src\Gate4Harness\global_memory_status_ex.c')
+    (Join-Path $root 'src\Gate4Harness\global_memory_status_ex.c'),
+    $processorTopologySource
 )
 switch ($Scenario) {
     'InvalidBootInfo' { $gccArguments += '-DGXOS_NEGATIVE_INVALID_BOOT_INFO' }
@@ -962,7 +964,10 @@ if ($Scenario -eq 'Malloc' -or $Scenario -eq 'VectoredExceptionHandler' -or
     $Scenario -eq 'VirtualMemory') {
     $gccArguments += (Join-Path $root 'src\Gate4Harness\crt_malloc.c')
 }
-if ($Scenario -eq 'VirtualMemory') { $gccArguments += '-DGXOS_ENABLE_VIRTUAL_MEMORY' }
+if ($Scenario -eq 'VirtualMemory') {
+    $gccArguments += '-DGXOS_ENABLE_VIRTUAL_MEMORY'
+    $gccArguments += '-DGXOS_ENABLE_PROCESSOR_TOPOLOGY'
+}
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
 if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }
 if ($Scenario -eq 'SyntheticScheduler') {
