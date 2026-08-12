@@ -61,7 +61,7 @@ GXOS_SCHEDULER_HANDLE GXOS_SCHEDULER_MS_ABI gxos_create_thread_contract(
         !context->scheduler->active || thread_attributes != 0 ||
         stack_size != 0 || start_routine == 0 ||
         !gxos_create_thread_start_is_executable(context, start_routine) ||
-        creation_flags != GXOS_CREATE_THREAD_CREATE_SUSPENDED ||
+        (uint32_t)creation_flags != GXOS_CREATE_THREAD_CREATE_SUSPENDED ||
         thread_id != 0) {
         set_failure_error(context, GXOS_CREATE_THREAD_ERROR_INVALID_PARAMETER);
         return 0;

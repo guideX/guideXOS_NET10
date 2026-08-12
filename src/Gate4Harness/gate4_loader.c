@@ -595,6 +595,9 @@ static void GXOS_SCHEDULER_MS_ABI scheduler_log_u32(const char *name,
 static GXOS_CRT_MALLOC_CONTEXT g_crt_malloc_context;
 static uint32_t g_crt_malloc_import_descriptor_index;
 static uint32_t g_crt_malloc_importing_iat_rva;
+static uint32_t g_crt_free_import_descriptor_index;
+static uint32_t g_crt_free_import_symbol_index;
+static uint32_t g_crt_free_importing_iat_rva;
 #endif
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
 static GXOS_MAIN_MODULE_FACTS g_main_module_facts;
@@ -5062,6 +5065,174 @@ static void *GXOS_CRT_MALLOC_MS_ABI platform_crt_malloc(uintptr_t size)
         (uintptr_t)__builtin_return_address(0));
 }
 
+static void GXOS_CRT_MALLOC_MS_ABI platform_crt_free(void *pointer)
+{
+    uint32_t ledger_live_before = g_memory_ledger.live_count;
+    uint64_t physical_before = g_memory_ledger.physical_bytes;
+    uint64_t commit_before = g_memory_ledger.commit_bytes;
+    uint64_t virtual_before = g_memory_ledger.virtual_reservation_bytes;
+    uint64_t accounting_generation_before = g_memory_accounting_generation;
+    uint32_t ledger_valid_before = gxos_physical_ledger_validate(
+        &g_memory_ledger);
+    uint32_t vm_valid_before = gxos_vm_arena_validate(
+        &g_memory_virtual_arena);
+    const GXOS_CRT_FREE_DIAGNOSTIC *diagnostic;
+    uint64_t call_site_rva;
+    uintptr_t runtime_return_address =
+        (uintptr_t)__builtin_return_address(0);
+    uint32_t ledger_valid_after;
+    uint32_t vm_valid_after;
+
+    if (!ledger_valid_before || !vm_valid_before) {
+        fail("crt-free-memory-accounting-before");
+    }
+    gxos_crt_free_entry(
+        &g_crt_malloc_context,
+        pointer,
+        runtime_return_address);
+    diagnostic = gxos_crt_malloc_get_free_diagnostic(
+        &g_crt_malloc_context,
+        g_crt_malloc_context.free_diagnostic_count - 1U);
+    if (diagnostic == 0) fail("crt-free-diagnostic");
+    call_site_rva = diagnostic->runtime_call_site >= g_managed_image_base
+        ? diagnostic->runtime_call_site - g_managed_image_base : 0;
+    ledger_valid_after = gxos_physical_ledger_validate(&g_memory_ledger);
+    vm_valid_after = gxos_vm_arena_validate(&g_memory_virtual_arena);
+    if (!ledger_valid_after || !vm_valid_after) {
+        fail("crt-free-memory-accounting-after");
+    }
+    serial_text("GXOS_NET10:CRT_FREE_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_INVOCATION_NUMBER=0x",
+                     diagnostic->invocation_number);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_FREE_IMPORT_DLL=");
+    serial_text(GXOS_CRT_HEAP_API_SET_DLL);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_FREE_IMPORT_SYMBOL=");
+    serial_text(GXOS_CRT_HEAP_FREE_SYMBOL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_crt_free_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_IMPORT_SYMBOL_INDEX=0x",
+                     g_crt_free_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_IMPORT_IAT_RVA=0x",
+                     g_crt_free_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_crt_free_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_RUNTIME_CALL_SITE=0x",
+                     diagnostic->runtime_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_CALL_SITE_RVA=0x", call_site_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_POINTER=0x", diagnostic->pointer);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_LIVE_COUNT_BEFORE=0x",
+                     diagnostic->live_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_LIVE_COUNT_AFTER=0x",
+                     diagnostic->live_count_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_REGISTRY_SLOT=0x",
+                     diagnostic->registry_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_RECORD_STATE_BEFORE=0x",
+                     diagnostic->record_state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_RECORD_STATE_AFTER=0x",
+                     diagnostic->record_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_ALLOCATION_SEQUENCE=0x",
+                     diagnostic->allocation_sequence);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_REQUESTED_SIZE=0x",
+                     diagnostic->requested_size);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_BACKING_SIZE=0x",
+                     diagnostic->backing_size);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_OWNER=0x", diagnostic->owner);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_ALLOCATION_CLASS=0x",
+                     diagnostic->allocation_class);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_TOTAL_REQUESTED_BYTES_BEFORE=0x",
+                     diagnostic->total_requested_bytes_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_TOTAL_REQUESTED_BYTES_AFTER=0x",
+                     diagnostic->total_requested_bytes_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_LARGEST_REQUEST_BEFORE=0x",
+                     diagnostic->largest_request_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_LARGEST_REQUEST_AFTER=0x",
+                     diagnostic->largest_request_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_BACKING_RELEASE_ATTEMPTED=0x",
+                     diagnostic->backing_release_attempted);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_BACKING_RELEASE_STATUS=0x",
+                     diagnostic->backing_release_status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_BACKING_RELEASED=0x",
+                     diagnostic->backing_released);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_ACCOUNTING_GENERATION_BEFORE=0x",
+                     diagnostic->accounting_generation_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_ACCOUNTING_GENERATION_AFTER=0x",
+                     diagnostic->accounting_generation_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_LEDGER_VALID_BEFORE=0x",
+                     ledger_valid_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_LEDGER_VALID_AFTER=0x",
+                     ledger_valid_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_LEDGER_LIVE_COUNT_BEFORE=0x",
+                     ledger_live_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_LEDGER_LIVE_COUNT_AFTER=0x",
+                     g_memory_ledger.live_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_PHYSICAL_BYTES_BEFORE=0x",
+                     physical_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_PHYSICAL_BYTES_AFTER=0x",
+                     g_memory_ledger.physical_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_COMMIT_BYTES_BEFORE=0x",
+                     commit_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_COMMIT_BYTES_AFTER=0x",
+                     g_memory_ledger.commit_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_VIRTUAL_RESERVATION_BYTES_BEFORE=0x",
+                     virtual_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_VIRTUAL_RESERVATION_BYTES_AFTER=0x",
+                     g_memory_ledger.virtual_reservation_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_MEMORY_ACCOUNTING_GENERATION_BEFORE=0x",
+                     accounting_generation_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_MEMORY_ACCOUNTING_GENERATION_AFTER=0x",
+                     g_memory_accounting_generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_VM_ARENA_COMMITTED_BYTES=0x",
+                     g_memory_virtual_arena.total_committed_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_VM_ARENA_RESERVED_BYTES=0x",
+                     g_memory_virtual_arena.total_reserved_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_FAILURE=0x", diagnostic->failure);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_FREE_RETURNED\r\n");
+}
+
 static void configure_platform_crt_malloc(
     const PE_IMAGE *image,
     EFI_BOOT_SERVICES *boot_services)
@@ -5130,6 +5301,34 @@ static void configure_platform_crt_malloc(
     serial_field_hex("GXOS_NET10:MALLOC_RUNTIME_IAT=0x",
                      (uint64_t)image->actual_base +
                          g_crt_malloc_importing_iat_rva);
+    serial_text("\r\n");
+    if (g_crt_free_import_descriptor_index != 9U ||
+        g_crt_free_import_symbol_index != 0U ||
+        g_crt_free_importing_iat_rva != 0x7D318U) {
+        fail("crt-free-import-contract");
+    }
+    serial_text("GXOS_NET10:CRT_FREE_IMPORT_DLL=");
+    serial_text(GXOS_CRT_HEAP_API_SET_DLL);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:CRT_FREE_IMPORT_SYMBOL=");
+    serial_text(GXOS_CRT_HEAP_FREE_SYMBOL);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_crt_free_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_IMPORT_SYMBOL_INDEX=0x",
+                     g_crt_free_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_IMPORT_IAT_RVA=0x",
+                     g_crt_free_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_PREFERRED_IAT=0x",
+                     (uint64_t)image->preferred_base +
+                         g_crt_free_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:CRT_FREE_RUNTIME_IAT=0x",
+                     (uint64_t)image->actual_base +
+                         g_crt_free_importing_iat_rva);
     serial_text("\r\n");
     serial_text("GXOS_NET10:MALLOC_ALLOCATION_PRIMITIVE=AllocatePool(EFI_LOADER_DATA,requestedSize,&pointer)\r\n");
     serial_field_hex("GXOS_NET10:MALLOC_MAX_REQUEST=0x",
@@ -6511,6 +6710,12 @@ static void *platform_import_target(const char *module, const char *symbol)
     if (equal_text(module, "api-ms-win-crt-string-l1-1-0.dll") &&
         equal_text(symbol, "strlen")) return (void *)(uintptr_t)platform_strlen;
 #endif
+#ifdef GXOS_ENABLE_CRT_MALLOC
+    if (equal_text(module, GXOS_CRT_HEAP_API_SET_DLL) &&
+        equal_text(symbol, GXOS_CRT_HEAP_FREE_SYMBOL)) {
+        return (void *)(uintptr_t)platform_crt_free;
+    }
+#endif
 #ifdef GXOS_ENABLE_GETENV
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "GetEnvironmentVariableW")) {
@@ -6802,10 +7007,18 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
             }
 #endif
 #ifdef GXOS_ENABLE_CRT_MALLOC
-            if (equal_text(module, "api-ms-win-crt-heap-l1-1-0.dll") &&
-                equal_text(g_import_records[symbols].symbol, "malloc")) {
+            if (equal_text(module, GXOS_CRT_HEAP_API_SET_DLL) &&
+                equal_text(g_import_records[symbols].symbol,
+                           GXOS_CRT_HEAP_MALLOC_SYMBOL)) {
                 g_crt_malloc_import_descriptor_index = descriptors - 1U;
                 g_crt_malloc_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+            if (equal_text(module, GXOS_CRT_HEAP_API_SET_DLL) &&
+                equal_text(g_import_records[symbols].symbol,
+                           GXOS_CRT_HEAP_FREE_SYMBOL)) {
+                g_crt_free_import_descriptor_index = descriptors - 1U;
+                g_crt_free_import_symbol_index = index;
+                g_crt_free_importing_iat_rva = first_thunk_rva + index * 8U;
             }
 #endif
 #ifdef GXOS_ENABLE_IS_PROCESS_IN_JOB
@@ -7496,7 +7709,7 @@ static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_free_pool(void *buffer)
     }
     if (!g_memory_epoch_active ||
         !memory_find_ledger_base((uint64_t)(uintptr_t)buffer, &ledger_slot)) {
-        return g_memory_boot_services->FreePool(buffer);
+        return ((uint64_t)1 << 63) | 7U;
     }
     allocation = &g_memory_ledger.entries[ledger_slot];
     status = g_memory_boot_services->FreePool(buffer);
