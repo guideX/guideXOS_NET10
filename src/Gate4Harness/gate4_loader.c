@@ -39,6 +39,7 @@
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
 #include "event_api.h"
+#include "com_api.h"
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
 #include "create_event_w.h"
@@ -377,6 +378,32 @@ static void *EFIAPI platform_create_event_w(void *event_attributes,
                                              const uint16_t *name);
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+static uint32_t g_co_get_apartment_type_import_descriptor_index;
+static uint32_t g_co_get_apartment_type_import_symbol_index;
+static uint32_t g_co_get_apartment_type_importing_iat_rva;
+static uint32_t g_co_initialize_ex_import_descriptor_index;
+static uint32_t g_co_initialize_ex_import_symbol_index;
+static uint32_t g_co_initialize_ex_importing_iat_rva;
+static uint32_t g_co_uninitialize_import_descriptor_index;
+static uint32_t g_co_uninitialize_import_symbol_index;
+static uint32_t g_co_uninitialize_importing_iat_rva;
+static uint32_t g_co_wait_for_multiple_handles_import_descriptor_index;
+static uint32_t g_co_wait_for_multiple_handles_import_symbol_index;
+static uint32_t g_co_wait_for_multiple_handles_importing_iat_rva;
+static uint32_t g_co_initialize_ex_invocation_count;
+static uint64_t g_co_initialize_ex_last_call_site;
+static uint32_t g_co_initialize_ex_last_thread_identity;
+static uint64_t g_co_initialize_ex_last_reserved;
+static uint32_t g_co_initialize_ex_last_flags;
+static int32_t g_co_initialize_ex_last_hresult;
+static uint32_t g_co_initialize_ex_last_state_before_initialized;
+static uint32_t g_co_initialize_ex_last_state_before_model;
+static uint32_t g_co_initialize_ex_last_state_before_flags;
+static uint32_t g_co_initialize_ex_last_state_before_count;
+static uint32_t g_co_initialize_ex_last_state_after_initialized;
+static uint32_t g_co_initialize_ex_last_state_after_model;
+static uint32_t g_co_initialize_ex_last_state_after_flags;
+static uint32_t g_co_initialize_ex_last_state_after_count;
 static uint32_t g_set_event_invocation_count;
 static uint32_t g_set_event_success_count;
 static uint32_t g_set_event_failure_count;
@@ -413,6 +440,9 @@ static uint32_t g_wait_resume_object_internal_refs;
 static uint32_t g_wait_resume_event_signaled;
 static uint32_t g_wait_resume_result;
 static GXOS_EVENT_API_CONTEXT g_event_api_context;
+static int32_t EFIAPI platform_co_initialize_ex(void *pv_reserved,
+                                                 uint32_t coinit);
+static void EFIAPI platform_co_uninitialize(void);
 static int EFIAPI platform_set_event(void *event_handle);
 static uint32_t EFIAPI platform_wait_for_multiple_objects_ex(
     uint32_t count,
@@ -6567,6 +6597,94 @@ static int platform_wait_read_handle(const void *source,
     return 1;
 }
 
+static int32_t EFIAPI platform_co_initialize_ex(void *pv_reserved,
+                                                 uint32_t coinit)
+{
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = import_call_site(return_address);
+    int32_t result;
+
+    g_co_initialize_ex_last_call_site = call_site;
+    g_co_initialize_ex_last_thread_identity =
+        thread == 0 ? 0 : thread->identity;
+    g_co_initialize_ex_last_reserved = (uint64_t)(uintptr_t)pv_reserved;
+    g_co_initialize_ex_last_flags = coinit;
+    g_co_initialize_ex_last_state_before_initialized = 0;
+    g_co_initialize_ex_last_state_before_model = 0;
+    g_co_initialize_ex_last_state_before_flags = 0;
+    g_co_initialize_ex_last_state_before_count = 0;
+    result = gxos_com_initialize_ex(pv_reserved, coinit);
+    g_co_initialize_ex_last_hresult = result;
+    g_co_initialize_ex_last_state_after_initialized = 0;
+    g_co_initialize_ex_last_state_after_model = 0;
+    g_co_initialize_ex_last_state_after_flags = 0;
+    g_co_initialize_ex_last_state_after_count = 0;
+    ++g_co_initialize_ex_invocation_count;
+
+    serial_text("GXOS_NET10:COINITIALIZEEX_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_INVOCATION=0x",
+                     g_co_initialize_ex_invocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_PAYLOAD_BASE=0x",
+                     g_managed_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_co_initialize_ex_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_THREAD_IDENTITY=0x",
+                     g_co_initialize_ex_last_thread_identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_RCX=0x",
+                     g_co_initialize_ex_last_reserved);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_RDX_DWCOINIT=0x",
+                     coinit);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_STATE_BEFORE_INITIALIZED=0x",
+                     g_co_initialize_ex_last_state_before_initialized);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_STATE_BEFORE_MODEL=0x",
+                     g_co_initialize_ex_last_state_before_model);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_STATE_BEFORE_FLAGS=0x",
+                     g_co_initialize_ex_last_state_before_flags);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_STATE_BEFORE_COUNT=0x",
+                     g_co_initialize_ex_last_state_before_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_HRESULT=0x",
+                     (uint32_t)result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_STATE_AFTER_INITIALIZED=0x",
+                     g_co_initialize_ex_last_state_after_initialized);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_STATE_AFTER_MODEL=0x",
+                     g_co_initialize_ex_last_state_after_model);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_STATE_AFTER_FLAGS=0x",
+                     g_co_initialize_ex_last_state_after_flags);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COINITIALIZEEX_STATE_AFTER_COUNT=0x",
+                     g_co_initialize_ex_last_state_after_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:COINITIALIZEEX_GETLASTERROR_INVOLVED=0\r\n");
+    serial_text("GXOS_NET10:COINITIALIZEEX_RETURNED\r\n");
+    return result;
+}
+
+static void EFIAPI platform_co_uninitialize(void)
+{
+    gxos_com_uninitialize();
+}
+
 static void capture_wait_event_state(GXOS_SCHEDULER_HANDLE handle,
                                      uint32_t *signaled,
                                      uint32_t *waiter_count,
@@ -7122,6 +7240,14 @@ static void *platform_import_target(const char *module, const char *symbol)
     }
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (equal_text(module, "ole32.dll") &&
+        equal_text(symbol, "CoInitializeEx")) {
+        return (void *)(uintptr_t)platform_co_initialize_ex;
+    }
+    if (equal_text(module, "ole32.dll") &&
+        equal_text(symbol, "CoUninitialize")) {
+        return (void *)(uintptr_t)platform_co_uninitialize;
+    }
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "SetEvent")) {
         return (void *)(uintptr_t)platform_set_event;
@@ -7459,6 +7585,42 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
             }
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+            if (equal_text(module, "ole32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "CoGetApartmentType")) {
+                g_co_get_apartment_type_import_descriptor_index =
+                    descriptors - 1U;
+                g_co_get_apartment_type_import_symbol_index = index;
+                g_co_get_apartment_type_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
+            if (equal_text(module, "ole32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "CoInitializeEx")) {
+                g_co_initialize_ex_import_descriptor_index =
+                    descriptors - 1U;
+                g_co_initialize_ex_import_symbol_index = index;
+                g_co_initialize_ex_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
+            if (equal_text(module, "ole32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "CoUninitialize")) {
+                g_co_uninitialize_import_descriptor_index =
+                    descriptors - 1U;
+                g_co_uninitialize_import_symbol_index = index;
+                g_co_uninitialize_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
+            if (equal_text(module, "ole32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "CoWaitForMultipleHandles")) {
+                g_co_wait_for_multiple_handles_import_descriptor_index =
+                    descriptors - 1U;
+                g_co_wait_for_multiple_handles_import_symbol_index = index;
+                g_co_wait_for_multiple_handles_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
             if (equal_text(module, "KERNEL32.dll") &&
                 equal_text(g_import_records[symbols].symbol, "SetEvent")) {
                 g_set_event_import_descriptor_index = descriptors - 1U;
@@ -11409,6 +11571,71 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (g_co_get_apartment_type_import_descriptor_index != 3U ||
+        g_co_get_apartment_type_import_symbol_index != 0U ||
+        g_co_get_apartment_type_importing_iat_rva != 0x7D408U ||
+        g_co_initialize_ex_import_descriptor_index != 3U ||
+        g_co_initialize_ex_import_symbol_index != 1U ||
+        g_co_initialize_ex_importing_iat_rva != 0x7D410U ||
+        g_co_uninitialize_import_descriptor_index != 3U ||
+        g_co_uninitialize_import_symbol_index != 2U ||
+        g_co_uninitialize_importing_iat_rva != 0x7D418U ||
+        g_co_wait_for_multiple_handles_import_descriptor_index != 3U ||
+        g_co_wait_for_multiple_handles_import_symbol_index != 3U ||
+        g_co_wait_for_multiple_handles_importing_iat_rva != 0x7D420U) {
+        fail("nativeaot-com-import-contract");
+    }
+    serial_text("GXOS_NET10:COM_CENSUS_COGETAPARTMENTTYPE_IMPORT_DLL=ole32.dll\r\n");
+    serial_text("GXOS_NET10:COM_CENSUS_COGETAPARTMENTTYPE_IMPORT_SYMBOL=CoGetApartmentType\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COGETAPARTMENTTYPE_DESCRIPTOR_INDEX=0x",
+                     g_co_get_apartment_type_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COGETAPARTMENTTYPE_SYMBOL_INDEX=0x",
+                     g_co_get_apartment_type_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COGETAPARTMENTTYPE_IAT_RVA=0x",
+                     g_co_get_apartment_type_importing_iat_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:COM_CENSUS_COINITIALIZEEX_IMPORT_DLL=ole32.dll\r\n");
+    serial_text("GXOS_NET10:COM_CENSUS_COINITIALIZEEX_IMPORT_SYMBOL=CoInitializeEx\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COINITIALIZEEX_DESCRIPTOR_INDEX=0x",
+                     g_co_initialize_ex_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COINITIALIZEEX_SYMBOL_INDEX=0x",
+                     g_co_initialize_ex_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COINITIALIZEEX_IAT_RVA=0x",
+                     g_co_initialize_ex_importing_iat_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:COM_CENSUS_COUNINITIALIZE_IMPORT_DLL=ole32.dll\r\n");
+    serial_text("GXOS_NET10:COM_CENSUS_COUNINITIALIZE_IMPORT_SYMBOL=CoUninitialize\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COUNINITIALIZE_DESCRIPTOR_INDEX=0x",
+                     g_co_uninitialize_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COUNINITIALIZE_SYMBOL_INDEX=0x",
+                     g_co_uninitialize_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COUNINITIALIZE_IAT_RVA=0x",
+                     g_co_uninitialize_importing_iat_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:COM_CENSUS_COWAITFORMULTIPLEHANDLES_IMPORT_DLL=ole32.dll\r\n");
+    serial_text("GXOS_NET10:COM_CENSUS_COWAITFORMULTIPLEHANDLES_IMPORT_SYMBOL=CoWaitForMultipleHandles\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COWAITFORMULTIPLEHANDLES_DESCRIPTOR_INDEX=0x",
+                     g_co_wait_for_multiple_handles_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COWAITFORMULTIPLEHANDLES_SYMBOL_INDEX=0x",
+                     g_co_wait_for_multiple_handles_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COM_CENSUS_COWAITFORMULTIPLEHANDLES_IAT_RVA=0x",
+                     g_co_wait_for_multiple_handles_importing_iat_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:COM_COINITIALIZEEX_IMPLEMENTATION=OUTCOME_B_UNSUPPORTED_FALLBACK\r\n");
+    serial_field_hex("GXOS_NET10:COM_COINITIALIZEEX_NATURAL_DWCOINIT=0x", 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:COM_COINITIALIZEEX_KNOWN_FLAGS=0x",
+                     GXOS_COM_KNOWN_COINIT_FLAGS);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:COM_COINITIALIZEEX_GETLASTERROR_INVOLVED=0\r\n");
     if (g_set_event_import_descriptor_index != 2U ||
         g_set_event_importing_iat_rva != 0x7D0E0U ||
         g_wait_import_descriptor_index != 2U ||
