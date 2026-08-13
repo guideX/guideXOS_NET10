@@ -399,6 +399,8 @@ int main(void)
     g_scheduler.current = g_scheduler.boot_thread;
     g_scheduler.boot_thread->state = GXOS_SCHEDULER_THREAD_RUNNING;
     worker->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
+    CHECK(gxos_scheduler_finish_wait(manual_event) ==
+          GXOS_SCHEDULER_WAIT_SIGNALED);
     CHECK(gxos_scheduler_try_destroy_event(stale_handle));
     CHECK(gxos_scheduler_close_handle(worker_handle));
     CHECK(gxos_scheduler_discard_created_thread(worker));

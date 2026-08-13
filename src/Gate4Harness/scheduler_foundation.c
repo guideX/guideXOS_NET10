@@ -353,35 +353,162 @@ static void choose_next(GXOS_SCHEDULER_TCB *next,
     plan->new_context = next->saved_context;
 }
 
-static int add_waiter(GXOS_SCHEDULER_EVENT *event, GXOS_SCHEDULER_TCB *thread)
+static int add_waiter(GXOS_SCHEDULER_WAITABLE *waitable,
+                      GXOS_SCHEDULER_WAIT_RECORD *record)
 {
-    if (event->waiter_count >= GXOS_SCHEDULER_MAX_WAITERS) return 0;
-    event->waiters[event->waiter_count++] = thread;
+    uint32_t index;
+    if (waitable == 0 || record == 0 ||
+        waitable->waiter_count >= GXOS_SCHEDULER_MAX_WAITERS ||
+        record->waiter_linked) {
+        return 0;
+    }
+    for (index = 0; index != waitable->waiter_count; ++index) {
+        if (waitable->waiters[index] == record ||
+            (waitable->waiters[index] != 0 &&
+             waitable->waiters[index]->thread == record->thread)) {
+            return 0;
+        }
+    }
+    record->waiter_index = waitable->waiter_count;
+    record->waiter_linked = 1;
+    waitable->waiters[waitable->waiter_count++] = record;
     return 1;
 }
 
-static void remove_waiter(GXOS_SCHEDULER_EVENT *event, uint32_t index)
+static void remove_waiter(GXOS_SCHEDULER_WAITABLE *waitable, uint32_t index)
 {
+    GXOS_SCHEDULER_WAIT_RECORD *record;
     uint32_t tail;
-    if (index >= event->waiter_count) return;
-    tail = event->waiter_count - 1U;
-    event->waiters[index] = event->waiters[tail];
-    event->waiters[tail] = 0;
-    event->waiter_count = tail;
+    if (waitable == 0 || index >= waitable->waiter_count) return;
+    record = waitable->waiters[index];
+    tail = waitable->waiter_count - 1U;
+    waitable->waiters[index] = waitable->waiters[tail];
+    if (waitable->waiters[index] != 0) {
+        waitable->waiters[index]->waiter_index = index;
+    }
+    waitable->waiters[tail] = 0;
+    waitable->waiter_count = tail;
+    if (record != 0) {
+        record->waiter_linked = 0;
+        record->waiter_index = UINT32_MAX;
+    }
 }
 
-static void wake_waiter(GXOS_SCHEDULER_EVENT *event, uint32_t index)
+static void wake_waiter(GXOS_SCHEDULER_WAITABLE *waitable, uint32_t index)
 {
-    GXOS_SCHEDULER_TCB *thread = event->waiters[index];
-    remove_waiter(event, index);
+    GXOS_SCHEDULER_WAIT_RECORD *record;
+    GXOS_SCHEDULER_TCB *thread;
+    if (waitable == 0 || index >= waitable->waiter_count) return;
+    record = waitable->waiters[index];
+    if (record == 0 || !record->valid || !record->active ||
+        !record->waiter_linked || record->thread == 0) {
+        remove_waiter(waitable, index);
+        return;
+    }
+    thread = record->thread;
+    remove_waiter(waitable, index);
+    record->completed = 1;
+    record->completion_result = GXOS_WAIT_OBJECT_0;
     thread->blocked_object = 0;
     thread->blocked_result = GXOS_SCHEDULER_WAIT_SIGNALED;
     thread->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
     if (!enqueue_runnable(thread)) {
+        /* A blocked thread frees its running slot, so this is defensive only;
+           retain completion state if a future queue policy rejects it. */
         thread->state = GXOS_SCHEDULER_THREAD_BLOCKED;
-        thread->blocked_object = 0;
-        thread->blocked_result = GXOS_SCHEDULER_WAIT_FAILURE;
     }
+}
+
+static GXOS_SCHEDULER_WAIT_RECORD *find_free_wait_record(void)
+{
+    uint32_t index;
+    if (g_scheduler == 0) return 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_WAIT_RECORDS; ++index) {
+        if (!g_scheduler->wait_records[index].valid) {
+            return &g_scheduler->wait_records[index];
+        }
+    }
+    return 0;
+}
+
+static GXOS_SCHEDULER_WAIT_RECORD *allocate_wait_record(void)
+{
+    GXOS_SCHEDULER_WAIT_RECORD *record = find_free_wait_record();
+    uint32_t generation;
+    if (record == 0) return 0;
+    generation = g_scheduler->next_wait_generation++;
+    if (generation == 0) {
+        generation = g_scheduler->next_wait_generation++;
+        if (generation == 0) generation = 1;
+    }
+    zero_bytes(record, sizeof(*record));
+    record->valid = 1;
+    record->generation = generation;
+    record->waiter_index = UINT32_MAX;
+    return record;
+}
+
+static int pin_object(GXOS_SCHEDULER_OBJECT *object)
+{
+    if (object == 0 || !object->live || object->internal_refs == 0) {
+        return 0;
+    }
+    ++object->internal_refs;
+    return 1;
+}
+
+static void unpin_wait_record(GXOS_SCHEDULER_WAIT_RECORD *record)
+{
+    if (record == 0 || !record->pin_held) return;
+    if (record->object != 0 && record->object->internal_refs != 0) {
+        --record->object->internal_refs;
+    }
+    record->pin_held = 0;
+}
+
+static void release_wait_record(GXOS_SCHEDULER_WAIT_RECORD *record)
+{
+    if (record == 0 || !record->valid) return;
+    if (record->active && g_scheduler != 0 &&
+        g_scheduler->active_wait_count != 0) {
+        --g_scheduler->active_wait_count;
+    }
+    record->active = 0;
+    unpin_wait_record(record);
+    zero_bytes(record, sizeof(*record));
+}
+
+static int decode_event_identity(GXOS_SCHEDULER_HANDLE handle,
+                                 uint16_t *slot,
+                                 uint16_t *generation)
+{
+    return decode_handle(handle, GXOS_SCHEDULER_OBJECT_EVENT, slot, generation);
+}
+
+static int validate_open_event_handle(GXOS_SCHEDULER_HANDLE handle,
+                                      GXOS_SCHEDULER_OBJECT **object_out,
+                                      GXOS_SCHEDULER_EVENT **event_out)
+{
+    GXOS_SCHEDULER_OBJECT *object;
+    GXOS_SCHEDULER_EVENT *event;
+    uint16_t slot;
+    uint16_t generation;
+    if (!decode_event_identity(handle, &slot, &generation)) return 0;
+    object = &g_scheduler->objects[slot];
+    if (!object->live || object->type != GXOS_SCHEDULER_OBJECT_EVENT ||
+        object->generation != generation || object->close_state ||
+        object->public_handle_refs == 0 || object->internal_refs == 0 ||
+        object->target == 0) {
+        return 0;
+    }
+    event = (GXOS_SCHEDULER_EVENT *)object->target;
+    if (!event->live || event->object_slot != slot ||
+        event->generation != generation) {
+        return 0;
+    }
+    if (object_out != 0) *object_out = object;
+    if (event_out != 0) *event_out = event;
+    return 1;
 }
 
 int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
@@ -407,6 +534,7 @@ int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
     scheduler->log_hex = log_hex;
     scheduler->log_u32 = log_u32;
     scheduler->next_identity = 1;
+    scheduler->next_wait_generation = 1;
     scheduler->saved_boot_gs_base = read_msr(0xC0000101U);
     scheduler->saved_boot_flags = read_flags();
     __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp));
@@ -801,47 +929,125 @@ int gxos_scheduler_reset_event(GXOS_SCHEDULER_HANDLE handle)
     return 1;
 }
 
-int gxos_scheduler_prepare_wait(GXOS_SCHEDULER_HANDLE handle,
-                                GXOS_SCHEDULER_SWITCH_PLAN *plan)
+int gxos_scheduler_prepare_wait_record(
+    GXOS_SCHEDULER_HANDLE handle,
+    GXOS_SCHEDULER_SWITCH_PLAN *plan,
+    GXOS_SCHEDULER_WAIT_RECORD **record_out)
 {
-    GXOS_SCHEDULER_WAITABLE *waitable =
-        gxos_scheduler_waitable_from_handle(handle);
+    GXOS_SCHEDULER_OBJECT *object;
+    GXOS_SCHEDULER_EVENT *event;
     GXOS_SCHEDULER_TCB *current;
     GXOS_SCHEDULER_TCB *next;
-    if (waitable == 0 || plan == 0) return GXOS_SCHEDULER_WAIT_FAILURE;
-    current = g_scheduler->current;
-    if (!waitable->live || current == 0 ||
-        current->state != GXOS_SCHEDULER_THREAD_RUNNING) {
+    GXOS_SCHEDULER_WAIT_RECORD *record;
+    GXOS_SCHEDULER_WAITABLE *legacy_waitable;
+    if (record_out != 0) *record_out = 0;
+    if (g_scheduler == 0 || plan == 0 || !g_scheduler->active) {
         return GXOS_SCHEDULER_WAIT_FAILURE;
     }
-    if (waitable->signaled) {
-        if (!waitable->manual_reset) waitable->signaled = 0;
+    current = g_scheduler->current;
+    if (current == 0 || current->state != GXOS_SCHEDULER_THREAD_RUNNING ||
+        current->wait_record != 0) {
+        return GXOS_SCHEDULER_WAIT_FAILURE;
+    }
+    if (!validate_open_event_handle(handle, &object, &event)) {
+        /* Preserve the pre-existing internal notification probe's immediate
+           signaled behavior without making notifications publicly waitable. */
+        legacy_waitable = gxos_scheduler_waitable_from_handle(handle);
+        if (legacy_waitable != 0 && legacy_waitable->live &&
+            legacy_waitable->signaled) {
+            if (!legacy_waitable->manual_reset) legacy_waitable->signaled = 0;
+            current->blocked_result = GXOS_SCHEDULER_WAIT_SIGNALED;
+            return GXOS_SCHEDULER_WAIT_SIGNALED;
+        }
+        return GXOS_SCHEDULER_WAIT_FAILURE;
+    }
+    if (event->signaled) {
+        if (!event->manual_reset) event->signaled = 0;
         current->blocked_result = GXOS_SCHEDULER_WAIT_SIGNALED;
         return GXOS_SCHEDULER_WAIT_SIGNALED;
     }
-    if (!add_waiter(waitable, current)) return GXOS_SCHEDULER_WAIT_FAILURE;
+    if (!pin_object(object)) return GXOS_SCHEDULER_WAIT_FAILURE;
+    record = allocate_wait_record();
+    if (record == 0) {
+        --object->internal_refs;
+        return GXOS_SCHEDULER_WAIT_FAILURE;
+    }
+    record->wait_kind = GXOS_SCHEDULER_WAIT_KIND_EVENT;
+    record->waiting_identity = current->identity;
+    record->waiting_thread_slot = (uint16_t)(current - g_scheduler->threads);
+    record->waiting_thread_generation = current->generation;
+    record->object_slot = object->slot;
+    record->object_generation = object->generation;
+    record->thread = current;
+    record->object = object;
+    record->waitable = event;
+    record->pin_held = 1;
+    record->completion_result = GXOS_WAIT_FAILED;
+
+    /* The event can be signaled between the first check and registration. */
+    if (event->signaled || !add_waiter(event, record)) {
+        if (record->waiter_linked) remove_waiter(event, record->waiter_index);
+        release_wait_record(record);
+        if (event->signaled) {
+            current->blocked_result = GXOS_SCHEDULER_WAIT_SIGNALED;
+            return GXOS_SCHEDULER_WAIT_SIGNALED;
+        }
+        return GXOS_SCHEDULER_WAIT_FAILURE;
+    }
+    record->active = 1;
+    ++g_scheduler->active_wait_count;
+    current->wait_record = record;
     current->blocked_object = handle;
     current->blocked_result = GXOS_SCHEDULER_WAIT_FAILURE;
     current->state = GXOS_SCHEDULER_THREAD_BLOCKED;
     next = pick_next_runnable(current);
     if (next == 0) {
         current->state = GXOS_SCHEDULER_THREAD_RUNNING;
+        current->wait_record = 0;
         current->blocked_object = 0;
-        remove_waiter(waitable, waitable->waiter_count - 1U);
+        current->blocked_result = GXOS_SCHEDULER_WAIT_FAILURE;
+        remove_waiter(event, record->waiter_index);
+        release_wait_record(record);
         return GXOS_SCHEDULER_WAIT_FAILURE;
     }
     choose_next(next, plan);
+    if (record_out != 0) *record_out = record;
     return GXOS_SCHEDULER_WAIT_BLOCKED;
+}
+
+int gxos_scheduler_prepare_wait(GXOS_SCHEDULER_HANDLE handle,
+                                GXOS_SCHEDULER_SWITCH_PLAN *plan)
+{
+    return gxos_scheduler_prepare_wait_record(handle, plan, 0);
 }
 
 int gxos_scheduler_finish_wait(GXOS_SCHEDULER_HANDLE handle)
 {
     GXOS_SCHEDULER_TCB *current = g_scheduler == 0 ? 0 : g_scheduler->current;
-    if (current == 0 || current->blocked_result != GXOS_SCHEDULER_WAIT_SIGNALED ||
-        (handle != 0 && current->blocked_object != 0 &&
-         current->blocked_object != handle)) return GXOS_SCHEDULER_WAIT_FAILURE;
+    GXOS_SCHEDULER_WAIT_RECORD *record;
+    uint16_t slot;
+    uint16_t generation;
+    if (current == 0 ||
+        current->blocked_result != GXOS_SCHEDULER_WAIT_SIGNALED) {
+        return GXOS_SCHEDULER_WAIT_FAILURE;
+    }
+    record = current->wait_record;
+    if (record == 0) {
+        current->blocked_object = 0;
+        current->blocked_result = GXOS_SCHEDULER_WAIT_FAILURE;
+        return GXOS_SCHEDULER_WAIT_SIGNALED;
+    }
+    if (!record->valid || !record->active || !record->completed ||
+        record->thread != current || record->completion_result != GXOS_WAIT_OBJECT_0 ||
+        (handle != 0 && (!decode_event_identity(handle, &slot, &generation) ||
+                         slot != record->object_slot ||
+                         generation != record->object_generation))) {
+        return GXOS_SCHEDULER_WAIT_FAILURE;
+    }
+    current->wait_record = 0;
     current->blocked_object = 0;
     current->blocked_result = GXOS_SCHEDULER_WAIT_FAILURE;
+    release_wait_record(record);
     return GXOS_SCHEDULER_WAIT_SIGNALED;
 }
 
@@ -916,7 +1122,8 @@ int gxos_scheduler_try_destroy_event(GXOS_SCHEDULER_HANDLE handle)
     GXOS_SCHEDULER_EVENT *event;
     if (object == 0) return 0;
     event = (GXOS_SCHEDULER_EVENT *)object->target;
-    if (event == 0 || event->waiter_count != 0 || object->public_handle_refs != 0) {
+    if (event == 0 || event->waiter_count != 0 ||
+        object->public_handle_refs != 0 || object->internal_refs > 1U) {
         return 0;
     }
     event->live = 0;
@@ -1090,6 +1297,32 @@ GXOS_SCHEDULER_WAITABLE *gxos_scheduler_waitable_from_handle(
         return notification == 0 ? 0 : &notification->waitable;
     }
     return 0;
+}
+
+GXOS_SCHEDULER_WAIT_RECORD *gxos_scheduler_active_wait_record(void)
+{
+    GXOS_SCHEDULER_TCB *current = g_scheduler == 0 ? 0 : g_scheduler->current;
+    return current == 0 ? 0 : current->wait_record;
+}
+
+uint32_t gxos_scheduler_active_wait_count(void)
+{
+    return g_scheduler == 0 ? 0 : g_scheduler->active_wait_count;
+}
+
+uint32_t gxos_scheduler_blocked_count(void)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    if (g_scheduler == 0) return 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        if (g_scheduler->threads[index].live &&
+            g_scheduler->threads[index].state ==
+                GXOS_SCHEDULER_THREAD_BLOCKED) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 uint64_t gxos_scheduler_current_gs_base(void)
