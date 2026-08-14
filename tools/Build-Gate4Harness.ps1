@@ -37,6 +37,8 @@ $schedulerProofSource = Join-Path $root 'src\Gate4Harness\scheduler_proof.c'
 $createEventSource = Join-Path $root 'src\Gate4Harness\create_event_w.c'
 $eventApiSource = Join-Path $root 'src\Gate4Harness\event_api.c'
 $standardHandleSource = Join-Path $root 'src\Gate4Harness\standard_handle.c'
+$writeFileSource = Join-Path $root 'src\Gate4Harness\write_file.c'
+$writeFileEntryAssembly = Join-Path $root 'src\Gate4Harness\write_file_entry.S'
 $comApiSource = Join-Path $root 'src\Gate4Harness\com_api.c'
 $createMemoryResourceNotificationSource = Join-Path $root 'src\Gate4Harness\create_memory_resource_notification.c'
 $createThreadSource = Join-Path $root 'src\Gate4Harness\create_thread.c'
@@ -83,6 +85,10 @@ if (-not (Test-Path -LiteralPath $schedulerProofSource)) { throw "Scheduler proo
 if (-not (Test-Path -LiteralPath $createEventSource)) { throw "CreateEventW source not found: $createEventSource" }
 if (-not (Test-Path -LiteralPath $comApiSource)) { throw "COM API source not found: $comApiSource" }
 if (-not (Test-Path -LiteralPath $standardHandleSource)) { throw "Standard handle source not found: $standardHandleSource" }
+if (-not (Test-Path -LiteralPath $writeFileSource) -or
+    -not (Test-Path -LiteralPath $writeFileEntryAssembly)) {
+    throw "WriteFile sources not found: $writeFileSource / $writeFileEntryAssembly"
+}
 if (-not (Test-Path -LiteralPath $createMemoryResourceNotificationSource)) {
     throw "CreateMemoryResourceNotification source not found: $createMemoryResourceNotificationSource"
 }
@@ -979,6 +985,8 @@ if ($Scenario -eq 'NativeAotEventWait') {
     $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_EVENT_WAIT'
     $gccArguments += $eventApiSource
     $gccArguments += $standardHandleSource
+    $gccArguments += $writeFileSource
+    $gccArguments += $writeFileEntryAssembly
     $gccArguments += $comApiSource
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }

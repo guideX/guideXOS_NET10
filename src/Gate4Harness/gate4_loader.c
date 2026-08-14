@@ -41,6 +41,7 @@
 #include "event_api.h"
 #include "com_api.h"
 #include "standard_handle.h"
+#include "write_file.h"
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
 #include "create_event_w.h"
@@ -402,6 +403,14 @@ static uint32_t g_get_std_handle_last_selector;
 static uint64_t g_get_std_handle_last_returned_handle;
 static uint64_t g_get_std_handle_last_call_site;
 static GXOS_STANDARD_HANDLE_CONTEXT g_standard_handle_context;
+static uint32_t g_write_file_import_descriptor_index;
+static uint32_t g_write_file_import_symbol_index;
+static uint32_t g_write_file_importing_iat_rva;
+static uint32_t g_write_file_invocation_count;
+static uint32_t g_write_file_success_count;
+static uint32_t g_write_file_failure_count;
+static GXOS_WRITE_FILE_CONTEXT g_write_file_context;
+static GXOS_WRITE_FILE_REPORT g_write_file_last_report;
 static uint32_t g_co_initialize_ex_invocation_count;
 static uint64_t g_co_initialize_ex_last_call_site;
 static uint32_t g_co_initialize_ex_last_thread_identity;
@@ -1593,6 +1602,185 @@ static void *EFIAPI platform_get_std_handle(uint32_t selector)
     serial_text("GXOS_NET10:GETSTDHANDLE_RETURN_VALUE_CONSUMER=KERNEL32.dll!WriteFile\r\n");
     serial_text("GXOS_NET10:GETSTDHANDLE_RETURNED\r\n");
     return (void *)(uintptr_t)handle;
+}
+#endif
+
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+static void serial_write_file_capture(const uint8_t *bytes, uint32_t count)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint32_t index;
+    for (index = 0; index != count; ++index) {
+        serial_char('\\');
+        serial_char('x');
+        serial_char((uint8_t)digits[bytes[index] >> 4]);
+        serial_char((uint8_t)digits[bytes[index] & 0x0FU]);
+    }
+}
+
+static int GXOS_WRITE_FILE_MS_ABI platform_write_file_serial_backend(
+    void *context, const uint8_t *bytes, uint32_t length,
+    uint32_t *bytes_written)
+{
+    (void)context;
+    if (bytes_written == 0 || (length != 0 && bytes == 0)) return 0;
+    serial_write(bytes, length);
+    *bytes_written = length;
+    return 1;
+}
+
+static void GXOS_WRITE_FILE_MS_ABI emit_write_file_pre_output(
+    const GXOS_WRITE_FILE_REPORT *report)
+{
+    uintptr_t call_site = import_call_site(report->caller_return_address);
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+
+    serial_text("GXOS_NET10:WRITEFILE_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_INVOCATION=0x",
+                     g_write_file_invocation_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:WRITEFILE_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:WRITEFILE_IMPORT_SYMBOL=WriteFile\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_DESCRIPTOR_INDEX=0x",
+                     g_write_file_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_SYMBOL_INDEX=0x",
+                     g_write_file_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_IAT_RVA=0x",
+                     g_write_file_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_write_file_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_THREAD_IDENTITY=0x",
+                     report->thread_identity);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:WRITEFILE_SCHEDULER_THREAD=");
+    serial_text(thread == 0 ? "NONE" :
+                (thread == g_create_event_scheduler.boot_thread
+                     ? "main" : "worker"));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_RCX_HFILE=0x", report->h_file);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_RDX_LPBUFFER=0x", report->buffer);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_R8_NBYTES=0x",
+                     report->bytes_to_write);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_R9_LPBYTESWRITTEN=0x",
+                     report->bytes_written);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_STACK_LPOVERLAPPED=0x",
+                     report->overlapped);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_OBJECT_TYPE=0x",
+                     report->object_type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_OBJECT_SLOT=0x",
+                     report->object_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_OBJECT_GENERATION=0x",
+                     report->object_generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_PUBLIC_REFS_BEFORE=0x",
+                     report->public_handle_refs_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_INTERNAL_REFS_BEFORE=0x",
+                     report->internal_refs_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_STREAM_BACKEND=0x",
+                     report->stream_backend);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_STREAM_CAPABILITIES=0x",
+                     report->stream_capabilities);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_PRIOR_LAST_ERROR=0x",
+                     report->prior_last_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_BUFFER_RANGE_VALID=0x",
+                     report->buffer_range_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_BYTESWRITTEN_RANGE_VALID=0x",
+                     report->bytes_written_range_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_FIRST_CAPTURE_LENGTH=0x",
+                     report->first_capture_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:WRITEFILE_FIRST_CAPTURE=");
+    serial_write_file_capture(report->first_capture, report->first_capture_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_LAST_CAPTURE_LENGTH=0x",
+                     report->last_capture_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:WRITEFILE_LAST_CAPTURE=");
+    serial_write_file_capture(report->last_capture, report->last_capture_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:WRITEFILE_PROCESS_BYTES_BEGIN\r\n");
+}
+
+uint32_t GXOS_WRITE_FILE_MS_ABI gxos_write_file_import(
+    const GXOS_WRITE_FILE_CALL *call)
+{
+    GXOS_SCHEDULER_TCB *thread;
+    ++g_write_file_invocation_count;
+    gxos_write_file_contract(&g_write_file_context, call,
+                             &g_write_file_last_report);
+    if (g_write_file_last_report.result_bool) {
+        ++g_write_file_success_count;
+    } else {
+        ++g_write_file_failure_count;
+    }
+    thread = gxos_scheduler_current_thread();
+    serial_text("GXOS_NET10:WRITEFILE_PROCESS_BYTES_END\r\n");
+    serial_text("GXOS_NET10:WRITEFILE_RESULT_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_RESULT_BOOL=0x",
+                     g_write_file_last_report.result_bool);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_STATUS=0x",
+                     g_write_file_last_report.status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_ERROR=0x",
+                     g_write_file_last_report.win32_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_BACKEND_SUCCEEDED=0x",
+                     g_write_file_last_report.backend_succeeded);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_BACKEND_COUNT=0x",
+                     g_write_file_last_report.bytes_written_result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_OUTPUT_STARTED=0x",
+                     g_write_file_last_report.output_started);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_BYTESWRITTEN_RESULT=0x",
+                     g_write_file_last_report.bytes_written_result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_LAST_ERROR_AFTER=0x",
+                     g_write_file_last_report.last_error_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_PUBLIC_REFS_AFTER=0x",
+                     g_write_file_last_report.public_handle_refs_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_INTERNAL_REFS_AFTER=0x",
+                     g_write_file_last_report.internal_refs_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_CURRENT_THREAD_IDENTITY=0x",
+                     thread == 0 ? 0 : thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_CURRENT_THREAD_STATE=0x",
+                     thread == 0 ? 0 : thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WRITEFILE_ACTIVE_WAIT_COUNT=0x",
+                     g_create_event_scheduler.active_wait_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:WRITEFILE_RETURNED\r\n");
+    return g_write_file_last_report.result_bool;
 }
 #endif
 
@@ -7611,6 +7799,10 @@ static void *platform_import_target(const char *module, const char *symbol)
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
     if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "WriteFile")) {
+        return (void *)(uintptr_t)gxos_write_file_entry;
+    }
+    if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "GetStdHandle")) {
         return (void *)(uintptr_t)platform_get_std_handle;
     }
@@ -7963,6 +8155,13 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
             }
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "WriteFile")) {
+                g_write_file_import_descriptor_index = descriptors - 1U;
+                g_write_file_import_symbol_index = index;
+                g_write_file_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
             if (equal_text(module, "KERNEL32.dll") &&
                 equal_text(g_import_records[symbols].symbol, "GetStdHandle")) {
                 g_get_std_handle_import_descriptor_index = descriptors - 1U;
@@ -11962,6 +12161,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (g_write_file_import_descriptor_index != 2U ||
+        g_write_file_import_symbol_index != 0x1CU ||
+        g_write_file_importing_iat_rva != 0x7D118U) {
+        fail("nativeaot-writefile-import-contract");
+    }
     if (g_co_get_apartment_type_import_descriptor_index != 3U ||
         g_co_get_apartment_type_import_symbol_index != 0U ||
         g_co_get_apartment_type_importing_iat_rva != 0x7D408U ||
@@ -12387,6 +12591,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         GXOS_SCHEDULER_STANDARD_STREAM_BACKEND_SERIAL_COM1;
     g_standard_handle_context.output_capabilities =
         GXOS_SCHEDULER_STANDARD_STREAM_CAPABILITY_WRITE;
+    g_write_file_context.scheduler = &g_create_event_scheduler;
+    g_write_file_context.last_error = &g_platform_last_error;
+    g_write_file_context.regions = image.memory_regions;
+    g_write_file_context.region_count = image.memory_region_count;
+    g_write_file_context.stack_lower = (uintptr_t)g_stack_lower;
+    g_write_file_context.stack_upper = (uintptr_t)g_stack_upper;
+    g_write_file_context.backend_write = platform_write_file_serial_backend;
+    g_write_file_context.backend_context = 0;
+    g_write_file_context.pre_output = emit_write_file_pre_output;
 #endif
     serial_text("GXOS_NET10:CREATEEVENTW_SCHEDULER_INITIALIZED=1\r\n");
     serial_text("GXOS_NET10:CREATEEVENTW_SCHEDULER_BOOT_ENVIRONMENT=PAYLOAD_TLS\r\n");
