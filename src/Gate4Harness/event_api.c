@@ -5,7 +5,7 @@ static void set_scheduler_error(uint32_t error)
     gxos_scheduler_set_last_error(error);
 }
 
-static GXOS_SCHEDULER_EVENT *open_manual_event(
+static GXOS_SCHEDULER_EVENT *open_event(
     GXOS_SCHEDULER_HANDLE handle)
 {
     GXOS_SCHEDULER_OBJECT *object = gxos_scheduler_object_from_handle(handle);
@@ -16,7 +16,7 @@ static GXOS_SCHEDULER_EVENT *open_manual_event(
         return 0;
     }
     event = (GXOS_SCHEDULER_EVENT *)object->target;
-    if (!event->live || !event->manual_reset ||
+    if (!event->live ||
         event->object_slot != object->slot ||
         event->generation != object->generation) {
         return 0;
@@ -28,11 +28,26 @@ int gxos_set_event_contract(const GXOS_EVENT_API_CONTEXT *context,
                             GXOS_SCHEDULER_HANDLE handle)
 {
     if (context == 0 || context->scheduler == 0 ||
-        !context->scheduler->active || open_manual_event(handle) == 0) {
+        !context->scheduler->active || open_event(handle) == 0) {
         set_scheduler_error(GXOS_EVENT_ERROR_INVALID_HANDLE);
         return 0;
     }
     if (!gxos_scheduler_signal_event(handle)) {
+        set_scheduler_error(GXOS_EVENT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    return 1;
+}
+
+int gxos_reset_event_contract(const GXOS_EVENT_API_CONTEXT *context,
+                              GXOS_SCHEDULER_HANDLE handle)
+{
+    if (context == 0 || context->scheduler == 0 ||
+        !context->scheduler->active || open_event(handle) == 0) {
+        set_scheduler_error(GXOS_EVENT_ERROR_INVALID_HANDLE);
+        return 0;
+    }
+    if (!gxos_scheduler_reset_event(handle)) {
         set_scheduler_error(GXOS_EVENT_ERROR_INVALID_HANDLE);
         return 0;
     }
@@ -63,7 +78,7 @@ uint32_t gxos_wait_for_multiple_objects_ex_contract(
         set_scheduler_error(GXOS_EVENT_ERROR_INVALID_PARAMETER);
         return GXOS_WAIT_FAILED;
     }
-    event = open_manual_event(handle);
+    event = open_event(handle);
     if (event == 0) {
         set_scheduler_error(GXOS_EVENT_ERROR_INVALID_HANDLE);
         return GXOS_WAIT_FAILED;

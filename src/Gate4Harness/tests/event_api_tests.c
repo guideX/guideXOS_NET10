@@ -139,6 +139,17 @@ int main(void)
     GXOS_SCHEDULER_SWITCH_PLAN plan;
     GXOS_SCHEDULER_WAIT_RECORD *record = 0;
     GXOS_SCHEDULER_WAIT_RECORD *duplicate = 0;
+    GXOS_SCHEDULER_HANDLE reset_manual;
+    GXOS_SCHEDULER_HANDLE reset_auto;
+    GXOS_SCHEDULER_HANDLE reset_pending;
+    GXOS_SCHEDULER_HANDLE stale_reset;
+    GXOS_SCHEDULER_HANDLE reset_worker_handle;
+    GXOS_SCHEDULER_TCB *reset_worker;
+    GXOS_SCHEDULER_WAIT_RECORD *reset_record;
+    GXOS_SCHEDULER_OBJECT *reset_object;
+    GXOS_SCHEDULER_EVENT *reset_event;
+    uint32_t reset_internal_refs;
+    uint32_t reset_public_handle_refs;
     uint32_t index;
     uint32_t before_refs;
 
@@ -285,6 +296,148 @@ int main(void)
     CHECK(object->internal_refs == 1);
     CHECK(gxos_scheduler_close_handle(blocked));
     CHECK(gxos_scheduler_try_destroy_event(blocked));
+
+    /* ResetEvent is a public adapter over both event modes and is idempotent. */
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 1, &reset_manual));
+    reset_object = gxos_scheduler_object_from_handle(reset_manual);
+    reset_event = gxos_scheduler_event_from_handle(reset_manual);
+    reset_internal_refs = reset_object->internal_refs;
+    reset_public_handle_refs = reset_object->public_handle_refs;
+    CHECK(gxos_reset_event_contract(&context, reset_manual));
+    CHECK(!reset_event->signaled && reset_event->manual_reset);
+    CHECK(reset_event->waiter_count == 0);
+    CHECK(reset_object->internal_refs == reset_internal_refs &&
+          reset_object->public_handle_refs == reset_public_handle_refs);
+    CHECK(gxos_reset_event_contract(&context, reset_manual));
+    CHECK(!reset_event->signaled);
+    CHECK(gxos_set_event_contract(&context, reset_manual));
+    CHECK(reset_event->signaled);
+    CHECK(gxos_reset_event_contract(&context, reset_manual));
+    CHECK(!reset_event->signaled);
+
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 0, 1, &reset_auto));
+    reset_object = gxos_scheduler_object_from_handle(reset_auto);
+    reset_event = gxos_scheduler_event_from_handle(reset_auto);
+    reset_internal_refs = reset_object->internal_refs;
+    reset_public_handle_refs = reset_object->public_handle_refs;
+    CHECK(gxos_reset_event_contract(&context, reset_auto));
+    CHECK(!reset_event->signaled && !reset_event->manual_reset);
+    CHECK(reset_object->internal_refs == reset_internal_refs &&
+          reset_object->public_handle_refs == reset_public_handle_refs);
+    CHECK(gxos_reset_event_contract(&context, reset_auto));
+    CHECK(!reset_event->signaled);
+    CHECK(gxos_set_event_contract(&context, reset_auto));
+    CHECK(reset_event->signaled);
+    CHECK(gxos_reset_event_contract(&context, reset_auto));
+    CHECK(!reset_event->signaled);
+    for (index = 0; index != 4U; ++index) {
+        CHECK(gxos_set_event_contract(&context, reset_auto));
+        CHECK(reset_event->signaled);
+        CHECK(gxos_reset_event_contract(&context, reset_auto));
+        CHECK(!reset_event->signaled);
+        CHECK(gxos_reset_event_contract(&context, reset_auto));
+        CHECK(!reset_event->signaled);
+    }
+
+    /* A pending waiter remains linked and blocked while ResetEvent runs. */
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 0, &reset_pending));
+    CHECK(gxos_scheduler_create_suspended_thread(
+              &g_scheduler, model_entry, 0, &reset_worker_handle,
+              &reset_worker));
+    CHECK(gxos_scheduler_resume_thread(reset_worker_handle, 0));
+    reset_object = gxos_scheduler_object_from_handle(reset_pending);
+    reset_event = gxos_scheduler_event_from_handle(reset_pending);
+    reset_internal_refs = reset_object->internal_refs;
+    reset_public_handle_refs = reset_object->public_handle_refs;
+    reset_record = 0;
+    CHECK(gxos_scheduler_prepare_wait_record(
+              reset_pending, &plan, &reset_record) ==
+          GXOS_SCHEDULER_WAIT_BLOCKED);
+    CHECK(reset_record != 0 && reset_record->active &&
+          reset_record->waiter_linked && !reset_record->completed);
+    CHECK(reset_event->waiter_count == 1 &&
+          reset_object->internal_refs == reset_internal_refs + 1U &&
+          reset_object->public_handle_refs == reset_public_handle_refs);
+    CHECK(g_scheduler.boot_thread->state == GXOS_SCHEDULER_THREAD_BLOCKED);
+    CHECK(gxos_scheduler_active_wait_count() == 1);
+    CHECK(gxos_reset_event_contract(&context, reset_pending));
+    CHECK(!reset_event->signaled && reset_event->waiter_count == 1);
+    CHECK(reset_record->active && reset_record->waiter_linked &&
+          !reset_record->completed);
+    CHECK(g_scheduler.boot_thread->state == GXOS_SCHEDULER_THREAD_BLOCKED);
+    CHECK(gxos_scheduler_active_wait_count() == 1);
+    CHECK(reset_object->internal_refs == reset_internal_refs + 1U &&
+          reset_object->public_handle_refs == reset_public_handle_refs);
+
+    /* Completion is not revoked if ResetEvent follows SetEvent. */
+    CHECK(gxos_scheduler_signal_event(reset_pending));
+    CHECK(reset_record->completed &&
+          reset_record->completion_result == GXOS_WAIT_OBJECT_0);
+    g_scheduler.current = g_scheduler.boot_thread;
+    g_scheduler.boot_thread->state = GXOS_SCHEDULER_THREAD_RUNNING;
+    g_scheduler.boot_thread->runnable_queued = 0;
+    g_scheduler.runnable_count = 0;
+    reset_worker->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
+    CHECK(gxos_reset_event_contract(&context, reset_pending));
+    CHECK(!reset_event->signaled && reset_event->waiter_count == 0);
+    CHECK(reset_record->active && reset_record->completed &&
+          reset_record->completion_result == GXOS_WAIT_OBJECT_0);
+    CHECK(gxos_scheduler_active_wait_count() == 1);
+    CHECK(reset_object->internal_refs == reset_internal_refs + 1U &&
+          reset_object->public_handle_refs == reset_public_handle_refs);
+    CHECK(gxos_scheduler_finish_wait(reset_pending) ==
+          GXOS_SCHEDULER_WAIT_SIGNALED);
+    CHECK(reset_event->waiter_count == 0 &&
+          gxos_scheduler_active_wait_count() == 0 &&
+          reset_object->internal_refs == reset_internal_refs);
+    CHECK(gxos_scheduler_close_handle(reset_pending));
+    CHECK(gxos_scheduler_try_destroy_event(reset_pending));
+    CHECK(gxos_scheduler_close_handle(reset_worker_handle));
+    CHECK(gxos_scheduler_discard_created_thread(reset_worker));
+    stale_reset = reset_pending;
+
+    /* Invalid, closed, stale, non-event, and NULL handles do not mutate state. */
+    CHECK(!gxos_reset_event_contract(&context, (GXOS_SCHEDULER_HANDLE)0));
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_HANDLE);
+    CHECK(!gxos_reset_event_contract(&context,
+                                     (GXOS_SCHEDULER_HANDLE)0x1234));
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_HANDLE);
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 1, &reset_pending));
+    reset_object = gxos_scheduler_object_from_handle(reset_pending);
+    reset_event = gxos_scheduler_event_from_handle(reset_pending);
+    reset_internal_refs = reset_object->internal_refs;
+    reset_public_handle_refs = reset_object->public_handle_refs;
+    CHECK(gxos_scheduler_close_handle(reset_pending));
+    CHECK(!gxos_reset_event_contract(&context, reset_pending));
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_HANDLE);
+    CHECK(reset_event->signaled && reset_event->waiter_count == 0 &&
+          reset_object->internal_refs == reset_internal_refs &&
+          reset_object->public_handle_refs == 0);
+    CHECK(gxos_scheduler_try_destroy_event(reset_pending));
+    CHECK(!gxos_reset_event_contract(&context, reset_pending));
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_HANDLE);
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 0, &reset_pending));
+    CHECK(reset_pending != stale_reset);
+    CHECK(!gxos_reset_event_contract(&context, stale_reset));
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_HANDLE);
+    CHECK(gxos_scheduler_create_suspended_thread(
+              &g_scheduler, model_entry, 0, &reset_worker_handle,
+              &reset_worker));
+    reset_object = gxos_scheduler_object_from_handle(reset_worker_handle);
+    CHECK(!gxos_reset_event_contract(&context, reset_worker_handle));
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_HANDLE);
+    CHECK(reset_worker->state == GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED &&
+          reset_object->public_handle_refs == 1 &&
+          reset_object->internal_refs == 1);
+    CHECK(gxos_scheduler_close_handle(reset_worker_handle));
+    CHECK(gxos_scheduler_discard_created_thread(reset_worker));
+    CHECK(gxos_scheduler_close_handle(reset_pending));
+    CHECK(gxos_scheduler_try_destroy_event(reset_pending));
+
+    CHECK(gxos_scheduler_close_handle(reset_manual));
+    CHECK(gxos_scheduler_try_destroy_event(reset_manual));
+    CHECK(gxos_scheduler_close_handle(reset_auto));
+    CHECK(gxos_scheduler_try_destroy_event(reset_auto));
     CHECK(gxos_scheduler_close_handle(immediate));
     CHECK(gxos_scheduler_try_destroy_event(immediate));
 

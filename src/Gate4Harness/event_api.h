@@ -18,6 +18,9 @@ typedef struct {
 int gxos_set_event_contract(const GXOS_EVENT_API_CONTEXT *context,
                             GXOS_SCHEDULER_HANDLE handle);
 
+int gxos_reset_event_contract(const GXOS_EVENT_API_CONTEXT *context,
+                              GXOS_SCHEDULER_HANDLE handle);
+
 uint32_t gxos_wait_for_multiple_objects_ex_contract(
     const GXOS_EVENT_API_CONTEXT *context,
     uint32_t count,

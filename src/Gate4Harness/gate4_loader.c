@@ -410,6 +410,31 @@ static uint32_t g_set_event_failure_count;
 static uint32_t g_set_event_import_descriptor_index;
 static uint32_t g_set_event_import_symbol_index;
 static uint32_t g_set_event_importing_iat_rva;
+static uint32_t g_reset_event_invocation_count;
+static uint32_t g_reset_event_success_count;
+static uint32_t g_reset_event_failure_count;
+static uint32_t g_reset_event_import_descriptor_index;
+static uint32_t g_reset_event_import_symbol_index;
+static uint32_t g_reset_event_importing_iat_rva;
+static uint32_t g_reset_event_last_thread_identity;
+static uint32_t g_reset_event_target_slot;
+static uint32_t g_reset_event_target_generation;
+static uint32_t g_reset_event_manual_reset_before;
+static uint32_t g_reset_event_signaled_before;
+static uint32_t g_reset_event_waiter_count_before;
+static uint32_t g_reset_event_public_handle_refs_before;
+static uint32_t g_reset_event_internal_refs_before;
+static uint32_t g_reset_event_main_state_before;
+static uint32_t g_reset_event_worker_state_before;
+static uint32_t g_reset_event_active_wait_count_before;
+static uint32_t g_reset_event_manual_reset_after;
+static uint32_t g_reset_event_signaled_after;
+static uint32_t g_reset_event_waiter_count_after;
+static uint32_t g_reset_event_public_handle_refs_after;
+static uint32_t g_reset_event_internal_refs_after;
+static uint32_t g_reset_event_main_state_after;
+static uint32_t g_reset_event_worker_state_after;
+static uint32_t g_reset_event_active_wait_count_after;
 static uint32_t g_wait_import_descriptor_index;
 static uint32_t g_wait_import_symbol_index;
 static uint32_t g_wait_importing_iat_rva;
@@ -444,6 +469,7 @@ static int32_t EFIAPI platform_co_initialize_ex(void *pv_reserved,
                                                  uint32_t coinit);
 static void EFIAPI platform_co_uninitialize(void);
 static int EFIAPI platform_set_event(void *event_handle);
+static int EFIAPI platform_reset_event(void *event_handle);
 static uint32_t EFIAPI platform_wait_for_multiple_objects_ex(
     uint32_t count,
     const void *handles,
@@ -6691,7 +6717,8 @@ static void capture_wait_event_state(GXOS_SCHEDULER_HANDLE handle,
                                      uint32_t *manual_reset,
                                      uint32_t *slot,
                                      uint32_t *generation,
-                                     uint32_t *internal_refs)
+                                     uint32_t *internal_refs,
+                                     uint32_t *public_handle_refs)
 {
     GXOS_SCHEDULER_OBJECT *object =
         gxos_scheduler_object_from_handle(handle);
@@ -6708,6 +6735,9 @@ static void capture_wait_event_state(GXOS_SCHEDULER_HANDLE handle,
     if (generation != 0) *generation = object == 0 ? 0 : object->generation;
     if (internal_refs != 0) {
         *internal_refs = object == 0 ? 0 : object->internal_refs;
+    }
+    if (public_handle_refs != 0) {
+        *public_handle_refs = object == 0 ? 0 : object->public_handle_refs;
     }
 }
 
@@ -6733,7 +6763,7 @@ static int EFIAPI platform_set_event(void *event_handle)
                              &g_set_event_waiter_count_before,
                              &g_set_event_manual_reset,
                              &g_set_event_target_slot,
-                             &g_set_event_target_generation, 0);
+                             &g_set_event_target_generation, 0, 0);
     g_set_event_main_wait_record = record != 0 && record->active;
     serial_text("GXOS_NET10:SETEVENT_BEGIN\r\n");
     serial_field_hex("GXOS_NET10:SETEVENT_INVOCATION=0x", invocation);
@@ -6788,7 +6818,7 @@ static int EFIAPI platform_set_event(void *event_handle)
     }
     capture_wait_event_state(handle, &signaled_after, &waiter_count_after,
                              &manual_reset_after, &target_slot_after,
-                             &target_generation_after, &internal_refs_after);
+                             &target_generation_after, &internal_refs_after, 0);
     g_wait_record_address = record == 0 ? 0 : (uintptr_t)record;
     g_wait_record_generation = record == 0 ? 0 : record->generation;
     g_wait_record_object_slot = record == 0 ? UINT32_MAX : record->object_slot;
@@ -6831,6 +6861,131 @@ static int EFIAPI platform_set_event(void *event_handle)
     serial_text("\r\n");
     serial_text("GXOS_NET10:SETEVENT_RETURNED\r\n");
     return result;
+}
+
+static int EFIAPI platform_reset_event(void *event_handle)
+{
+    GXOS_SCHEDULER_HANDLE handle = (GXOS_SCHEDULER_HANDLE)(uintptr_t)event_handle;
+    GXOS_SCHEDULER_TCB *caller = gxos_scheduler_current_thread();
+    GXOS_SCHEDULER_TCB *main_thread = g_create_event_scheduler.boot_thread;
+    GXOS_SCHEDULER_TCB *worker = gxos_scheduler_thread_from_handle(
+        g_create_thread_handle);
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = import_call_site(return_address);
+    uint32_t invocation = ++g_reset_event_invocation_count;
+    uint32_t result;
+
+    g_reset_event_last_thread_identity = caller == 0 ? 0 : caller->identity;
+    capture_wait_event_state(handle, &g_reset_event_signaled_before,
+                             &g_reset_event_waiter_count_before,
+                             &g_reset_event_manual_reset_before,
+                             &g_reset_event_target_slot,
+                             &g_reset_event_target_generation,
+                             &g_reset_event_internal_refs_before,
+                             &g_reset_event_public_handle_refs_before);
+    g_reset_event_main_state_before =
+        main_thread == 0 ? 0 : main_thread->state;
+    g_reset_event_worker_state_before = worker == 0 ? 0 : worker->state;
+    g_reset_event_active_wait_count_before =
+        gxos_scheduler_active_wait_count();
+
+    serial_text("GXOS_NET10:RESETEVENT_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_INVOCATION=0x", invocation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_PAYLOAD_BASE=0x",
+                     g_managed_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_reset_event_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_RUNTIME_CALL_SITE=0x", call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_CALLER_THREAD_IDENTITY=0x",
+                     g_reset_event_last_thread_identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_HANDLE=0x", handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_TARGET_OBJECT_SLOT=0x",
+                     g_reset_event_target_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_TARGET_GENERATION=0x",
+                     g_reset_event_target_generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_MANUAL_RESET_BEFORE=0x",
+                     g_reset_event_manual_reset_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_SIGNALED_BEFORE=0x",
+                     g_reset_event_signaled_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_WAITER_COUNT_BEFORE=0x",
+                     g_reset_event_waiter_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_PUBLIC_HANDLE_REFS_BEFORE=0x",
+                     g_reset_event_public_handle_refs_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_INTERNAL_REFS_BEFORE=0x",
+                     g_reset_event_internal_refs_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_MAIN_STATE_BEFORE=0x",
+                     g_reset_event_main_state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_WORKER_STATE_BEFORE=0x",
+                     g_reset_event_worker_state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_ACTIVE_WAIT_COUNT_BEFORE=0x",
+                     g_reset_event_active_wait_count_before);
+    serial_text("\r\n");
+
+    result = gxos_reset_event_contract(&g_event_api_context, handle);
+    if (result) ++g_reset_event_success_count;
+    else {
+        ++g_reset_event_failure_count;
+        g_platform_last_error = gxos_scheduler_get_last_error();
+        if (g_platform_last_error == 0) g_platform_last_error = 6U;
+    }
+    capture_wait_event_state(handle, &g_reset_event_signaled_after,
+                             &g_reset_event_waiter_count_after,
+                             &g_reset_event_manual_reset_after, 0, 0,
+                             &g_reset_event_internal_refs_after,
+                             &g_reset_event_public_handle_refs_after);
+    g_reset_event_main_state_after =
+        main_thread == 0 ? 0 : main_thread->state;
+    g_reset_event_worker_state_after = worker == 0 ? 0 : worker->state;
+    g_reset_event_active_wait_count_after =
+        gxos_scheduler_active_wait_count();
+
+    serial_field_hex("GXOS_NET10:RESETEVENT_RETURN_VALUE=0x", result != 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_MANUAL_RESET_AFTER=0x",
+                     g_reset_event_manual_reset_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_SIGNALED_AFTER=0x",
+                     g_reset_event_signaled_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_WAITER_COUNT_AFTER=0x",
+                     g_reset_event_waiter_count_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_PUBLIC_HANDLE_REFS_AFTER=0x",
+                     g_reset_event_public_handle_refs_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_INTERNAL_REFS_AFTER=0x",
+                     g_reset_event_internal_refs_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_MAIN_STATE_AFTER=0x",
+                     g_reset_event_main_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_WORKER_STATE_AFTER=0x",
+                     g_reset_event_worker_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_ACTIVE_WAIT_COUNT_AFTER=0x",
+                     g_reset_event_active_wait_count_after);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:RESETEVENT_RETURNED\r\n");
+    return (int)result;
 }
 
 static uint32_t EFIAPI platform_wait_for_multiple_objects_ex(
@@ -7253,6 +7408,10 @@ static void *platform_import_target(const char *module, const char *symbol)
         return (void *)(uintptr_t)platform_set_event;
     }
     if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "ResetEvent")) {
+        return (void *)(uintptr_t)platform_reset_event;
+    }
+    if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "WaitForMultipleObjectsEx")) {
         return (void *)(uintptr_t)platform_wait_for_multiple_objects_ex;
     }
@@ -7626,6 +7785,12 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 g_set_event_import_descriptor_index = descriptors - 1U;
                 g_set_event_import_symbol_index = index;
                 g_set_event_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "ResetEvent")) {
+                g_reset_event_import_descriptor_index = descriptors - 1U;
+                g_reset_event_import_symbol_index = index;
+                g_reset_event_importing_iat_rva = first_thunk_rva + index * 8U;
             }
             if (equal_text(module, "KERNEL32.dll") &&
                 equal_text(g_import_records[symbols].symbol,
@@ -11638,6 +11803,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:COM_COINITIALIZEEX_GETLASTERROR_INVOLVED=0\r\n");
     if (g_set_event_import_descriptor_index != 2U ||
         g_set_event_importing_iat_rva != 0x7D0E0U ||
+        g_reset_event_import_descriptor_index != 2U ||
+        g_reset_event_import_symbol_index != 0x28U ||
+        g_reset_event_importing_iat_rva != 0x7D178U ||
         g_wait_import_descriptor_index != 2U ||
         g_wait_import_symbol_index != 0x1AU ||
         g_wait_importing_iat_rva != 0x7D108U) {
@@ -11656,6 +11824,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:SETEVENT_PREFERRED_IAT=0x",
                      image.preferred_base + g_set_event_importing_iat_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:RESETEVENT_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:RESETEVENT_IMPORT_SYMBOL=ResetEvent\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_reset_event_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_IMPORT_SYMBOL_INDEX=0x",
+                     g_reset_event_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_IMPORT_IAT_RVA=0x",
+                     g_reset_event_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:RESETEVENT_PREFERRED_IAT=0x",
+                     image.preferred_base + g_reset_event_importing_iat_rva);
     serial_text("\r\n");
     serial_text("GXOS_NET10:WAITFORMULTIPLEOBJECTSEX_IMPORT_DLL=KERNEL32.dll\r\n");
     serial_text("GXOS_NET10:WAITFORMULTIPLEOBJECTSEX_IMPORT_SYMBOL=WaitForMultipleObjectsEx\r\n");
