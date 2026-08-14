@@ -116,8 +116,25 @@ typedef enum {
     GXOS_SCHEDULER_OBJECT_FREE = 0,
     GXOS_SCHEDULER_OBJECT_THREAD = 1,
     GXOS_SCHEDULER_OBJECT_EVENT = 2,
-    GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION = 3
+    GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION = 3,
+    GXOS_SCHEDULER_OBJECT_STANDARD_STREAM = 4
 } GXOS_SCHEDULER_OBJECT_TYPE;
+
+enum {
+    GXOS_SCHEDULER_STANDARD_STREAM_ROLE_INPUT = 0x01,
+    GXOS_SCHEDULER_STANDARD_STREAM_ROLE_OUTPUT = 0x02,
+    GXOS_SCHEDULER_STANDARD_STREAM_ROLE_ERROR = 0x04
+};
+
+enum {
+    GXOS_SCHEDULER_STANDARD_STREAM_BACKEND_NONE = 0,
+    GXOS_SCHEDULER_STANDARD_STREAM_BACKEND_SERIAL_COM1 = 1
+};
+
+enum {
+    GXOS_SCHEDULER_STANDARD_STREAM_CAPABILITY_READ = 0x01,
+    GXOS_SCHEDULER_STANDARD_STREAM_CAPABILITY_WRITE = 0x02
+};
 
 typedef enum {
     GXOS_SCHEDULER_WAIT_FAILURE = -1,
@@ -199,6 +216,17 @@ typedef struct GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION {
     GXOS_SCHEDULER_WAITABLE waitable;
 } GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION;
 
+typedef struct GXOS_SCHEDULER_STANDARD_STREAM {
+    uint8_t live;
+    uint8_t role_mask;
+    uint8_t backend;
+    uint8_t capabilities;
+    uint16_t generation;
+    uint16_t object_slot;
+    uint32_t reserved;
+    GXOS_SCHEDULER_HANDLE handle;
+} GXOS_SCHEDULER_STANDARD_STREAM;
+
 typedef struct GXOS_SCHEDULER_TCB {
     uint8_t live;
     uint8_t is_boot_thread;
@@ -250,6 +278,10 @@ typedef struct GXOS_SCHEDULER {
     GXOS_SCHEDULER_EVENT events[GXOS_SCHEDULER_MAX_EVENTS];
     GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION
         memory_resource_notifications[GXOS_SCHEDULER_MAX_MEMORY_RESOURCE_NOTIFICATIONS];
+    GXOS_SCHEDULER_STANDARD_STREAM standard_stream;
+    GXOS_SCHEDULER_HANDLE standard_input_handle;
+    GXOS_SCHEDULER_HANDLE standard_output_handle;
+    GXOS_SCHEDULER_HANDLE standard_error_handle;
     GXOS_SCHEDULER_OBJECT objects[GXOS_SCHEDULER_MAX_OBJECTS];
     GXOS_SCHEDULER_TCB *runnable_queue[GXOS_SCHEDULER_MAX_THREADS];
     uint32_t runnable_count;
@@ -308,6 +340,11 @@ int gxos_scheduler_create_memory_resource_notification(
     GXOS_SCHEDULER *scheduler,
     uint32_t notification_type,
     GXOS_SCHEDULER_HANDLE *handle);
+int gxos_scheduler_install_standard_stream(
+    GXOS_SCHEDULER *scheduler,
+    uint8_t role_mask,
+    uint8_t backend,
+    uint8_t capabilities);
 int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
                                             GXOS_SCHEDULER_ENTRY entry,
                                             void *argument,
@@ -349,11 +386,14 @@ GXOS_SCHEDULER_EVENT *gxos_scheduler_event_from_handle(GXOS_SCHEDULER_HANDLE han
 GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *
 gxos_scheduler_memory_resource_notification_from_handle(
     GXOS_SCHEDULER_HANDLE handle);
+GXOS_SCHEDULER_STANDARD_STREAM *gxos_scheduler_standard_stream_from_handle(
+    GXOS_SCHEDULER_HANDLE handle);
 GXOS_SCHEDULER_OBJECT *gxos_scheduler_object_from_handle(
     GXOS_SCHEDULER_HANDLE handle);
 GXOS_SCHEDULER_WAITABLE *gxos_scheduler_waitable_from_handle(
     GXOS_SCHEDULER_HANDLE handle);
 GXOS_SCHEDULER_WAIT_RECORD *gxos_scheduler_active_wait_record(void);
+GXOS_SCHEDULER_HANDLE gxos_scheduler_standard_handle_for_role(uint8_t role);
 uint32_t gxos_scheduler_active_wait_count(void);
 uint32_t gxos_scheduler_blocked_count(void);
 uint64_t gxos_scheduler_current_gs_base(void);

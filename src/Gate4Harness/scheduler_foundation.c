@@ -679,6 +679,64 @@ int gxos_scheduler_create_memory_resource_notification(
     return 1;
 }
 
+int gxos_scheduler_install_standard_stream(
+    GXOS_SCHEDULER *scheduler,
+    uint8_t role_mask,
+    uint8_t backend,
+    uint8_t capabilities)
+{
+    GXOS_SCHEDULER_STANDARD_STREAM *stream;
+    GXOS_SCHEDULER_OBJECT *object;
+    GXOS_SCHEDULER_HANDLE handle;
+    uint16_t object_slot;
+
+    if (scheduler == 0 || scheduler != g_scheduler || !scheduler->active ||
+        role_mask == 0 ||
+        (role_mask & ~(GXOS_SCHEDULER_STANDARD_STREAM_ROLE_OUTPUT |
+                       GXOS_SCHEDULER_STANDARD_STREAM_ROLE_ERROR)) != 0 ||
+        backend == GXOS_SCHEDULER_STANDARD_STREAM_BACKEND_NONE ||
+        capabilities == 0) {
+        return 0;
+    }
+
+    stream = &scheduler->standard_stream;
+    if (stream->live) {
+        if (stream->backend != backend ||
+            stream->capabilities != capabilities) {
+            return 0;
+        }
+        stream->role_mask |= role_mask;
+        if ((stream->role_mask &
+             GXOS_SCHEDULER_STANDARD_STREAM_ROLE_OUTPUT) != 0) {
+            scheduler->standard_output_handle = stream->handle;
+        }
+        if ((stream->role_mask &
+             GXOS_SCHEDULER_STANDARD_STREAM_ROLE_ERROR) != 0) {
+            scheduler->standard_error_handle = stream->handle;
+        }
+        return 1;
+    }
+
+    zero_bytes(stream, sizeof(*stream));
+    object = allocate_object(GXOS_SCHEDULER_OBJECT_STANDARD_STREAM, stream,
+                             &object_slot, &handle);
+    if (object == 0) return 0;
+    stream->live = 1;
+    stream->role_mask = role_mask;
+    stream->backend = backend;
+    stream->capabilities = capabilities;
+    stream->generation = object->generation;
+    stream->object_slot = object_slot;
+    stream->handle = handle;
+    if ((role_mask & GXOS_SCHEDULER_STANDARD_STREAM_ROLE_OUTPUT) != 0) {
+        scheduler->standard_output_handle = handle;
+    }
+    if ((role_mask & GXOS_SCHEDULER_STANDARD_STREAM_ROLE_ERROR) != 0) {
+        scheduler->standard_error_handle = handle;
+    }
+    return 1;
+}
+
 int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
                                             GXOS_SCHEDULER_ENTRY entry,
                                             void *argument,
@@ -1227,6 +1285,25 @@ int gxos_scheduler_teardown(GXOS_SCHEDULER *scheduler)
     if (success) {
         GXOS_SCHEDULER_OBJECT *boot_object =
             &scheduler->objects[scheduler->boot_thread->object_slot];
+        if (scheduler->standard_stream.live) {
+            GXOS_SCHEDULER_OBJECT *standard_object = &scheduler->objects[
+                scheduler->standard_stream.object_slot];
+            if (!standard_object->live ||
+                standard_object->type !=
+                    GXOS_SCHEDULER_OBJECT_STANDARD_STREAM ||
+                standard_object->generation !=
+                    scheduler->standard_stream.generation ||
+                standard_object->public_handle_refs == 0) {
+                return 0;
+            }
+            standard_object->internal_refs = 0;
+            release_object_record(standard_object);
+            zero_bytes(&scheduler->standard_stream,
+                       sizeof(scheduler->standard_stream));
+            scheduler->standard_input_handle = 0;
+            scheduler->standard_output_handle = 0;
+            scheduler->standard_error_handle = 0;
+        }
         free_thread_environment(scheduler->boot_thread);
         boot_object->internal_refs = 0;
         release_object_record(boot_object);
@@ -1271,13 +1348,22 @@ gxos_scheduler_memory_resource_notification_from_handle(
         : (GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *)object->target;
 }
 
+GXOS_SCHEDULER_STANDARD_STREAM *gxos_scheduler_standard_stream_from_handle(
+    GXOS_SCHEDULER_HANDLE handle)
+{
+    GXOS_SCHEDULER_OBJECT *object = lookup_object(
+        handle, GXOS_SCHEDULER_OBJECT_STANDARD_STREAM);
+    return object == 0 ? 0 : (GXOS_SCHEDULER_STANDARD_STREAM *)object->target;
+}
+
 GXOS_SCHEDULER_OBJECT *gxos_scheduler_object_from_handle(
     GXOS_SCHEDULER_HANDLE handle)
 {
     uint8_t type = (uint8_t)(handle >> 48);
     if (type != GXOS_SCHEDULER_OBJECT_THREAD &&
         type != GXOS_SCHEDULER_OBJECT_EVENT &&
-        type != GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION) {
+        type != GXOS_SCHEDULER_OBJECT_MEMORY_RESOURCE_NOTIFICATION &&
+        type != GXOS_SCHEDULER_OBJECT_STANDARD_STREAM) {
         return 0;
     }
     return lookup_object(handle, type);
@@ -1295,6 +1381,21 @@ GXOS_SCHEDULER_WAITABLE *gxos_scheduler_waitable_from_handle(
         GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *notification =
             (GXOS_SCHEDULER_MEMORY_RESOURCE_NOTIFICATION *)object->target;
         return notification == 0 ? 0 : &notification->waitable;
+    }
+    return 0;
+}
+
+GXOS_SCHEDULER_HANDLE gxos_scheduler_standard_handle_for_role(uint8_t role)
+{
+    if (g_scheduler == 0) return 0;
+    if (role == GXOS_SCHEDULER_STANDARD_STREAM_ROLE_INPUT) {
+        return g_scheduler->standard_input_handle;
+    }
+    if (role == GXOS_SCHEDULER_STANDARD_STREAM_ROLE_OUTPUT) {
+        return g_scheduler->standard_output_handle;
+    }
+    if (role == GXOS_SCHEDULER_STANDARD_STREAM_ROLE_ERROR) {
+        return g_scheduler->standard_error_handle;
     }
     return 0;
 }

@@ -40,6 +40,7 @@
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
 #include "event_api.h"
 #include "com_api.h"
+#include "standard_handle.h"
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
 #include "create_event_w.h"
@@ -390,6 +391,17 @@ static uint32_t g_co_uninitialize_importing_iat_rva;
 static uint32_t g_co_wait_for_multiple_handles_import_descriptor_index;
 static uint32_t g_co_wait_for_multiple_handles_import_symbol_index;
 static uint32_t g_co_wait_for_multiple_handles_importing_iat_rva;
+static uint32_t g_get_std_handle_import_descriptor_index;
+static uint32_t g_get_std_handle_import_symbol_index;
+static uint32_t g_get_std_handle_importing_iat_rva;
+static uint32_t g_get_std_handle_invocation_count;
+static uint32_t g_get_std_handle_success_count;
+static uint32_t g_get_std_handle_absent_count;
+static uint32_t g_get_std_handle_failure_count;
+static uint32_t g_get_std_handle_last_selector;
+static uint64_t g_get_std_handle_last_returned_handle;
+static uint64_t g_get_std_handle_last_call_site;
+static GXOS_STANDARD_HANDLE_CONTEXT g_standard_handle_context;
 static uint32_t g_co_initialize_ex_invocation_count;
 static uint64_t g_co_initialize_ex_last_call_site;
 static uint32_t g_co_initialize_ex_last_thread_identity;
@@ -465,6 +477,10 @@ static uint32_t g_wait_resume_object_internal_refs;
 static uint32_t g_wait_resume_event_signaled;
 static uint32_t g_wait_resume_result;
 static GXOS_EVENT_API_CONTEXT g_event_api_context;
+static void emit_standard_handle_counts(uint32_t *live_objects,
+                                        uint32_t *live_public_handles,
+                                        uint32_t *standard_objects);
+static void *EFIAPI platform_get_std_handle(uint32_t selector);
 static int32_t EFIAPI platform_co_initialize_ex(void *pv_reserved,
                                                  uint32_t coinit);
 static void EFIAPI platform_co_uninitialize(void);
@@ -1377,6 +1393,205 @@ static void *EFIAPI platform_create_event_w(void *event_attributes,
     serial_field_hex("GXOS_NET10:CREATEEVENTW_TCB_STATE_UNCHANGED=0x", tcb_unchanged);
     serial_text("\r\n");
     serial_text("GXOS_NET10:CREATEEVENTW_RETURNED\r\n");
+    return (void *)(uintptr_t)handle;
+}
+#endif
+
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+static void emit_standard_handle_counts(uint32_t *live_objects,
+                                         uint32_t *live_public_handles,
+                                         uint32_t *standard_objects)
+{
+    uint32_t index;
+    if (live_objects != 0) *live_objects = 0;
+    if (live_public_handles != 0) *live_public_handles = 0;
+    if (standard_objects != 0) *standard_objects = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        GXOS_SCHEDULER_OBJECT *object = &g_create_event_scheduler.objects[index];
+        if (!object->live) continue;
+        if (live_objects != 0) ++*live_objects;
+        if (live_public_handles != 0) {
+            *live_public_handles += object->public_handle_refs;
+        }
+        if (standard_objects != 0 &&
+            object->type == GXOS_SCHEDULER_OBJECT_STANDARD_STREAM) {
+            ++*standard_objects;
+        }
+    }
+}
+
+static const char *standard_handle_selector_name(uint32_t selector)
+{
+    if (selector == GXOS_STANDARD_HANDLE_INPUT) return "STD_INPUT_HANDLE";
+    if (selector == GXOS_STANDARD_HANDLE_OUTPUT) return "STD_OUTPUT_HANDLE";
+    if (selector == GXOS_STANDARD_HANDLE_ERROR) return "STD_ERROR_HANDLE";
+    return "INVALID_SELECTOR";
+}
+
+static void *EFIAPI platform_get_std_handle(uint32_t selector)
+{
+    uint32_t live_objects_before;
+    uint32_t live_objects_after;
+    uint32_t live_public_handles_before;
+    uint32_t live_public_handles_after;
+    uint32_t standard_objects_before;
+    uint32_t standard_objects_after;
+    uint32_t previous_error = g_platform_last_error;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = import_call_site(return_address);
+    GXOS_SCHEDULER_HANDLE handle;
+    GXOS_SCHEDULER_OBJECT *object = 0;
+    GXOS_SCHEDULER_STANDARD_STREAM *stream = 0;
+    GXOS_SCHEDULER_TCB *current = gxos_scheduler_current_thread();
+    uint8_t role = 0;
+
+    emit_standard_handle_counts(&live_objects_before,
+                                &live_public_handles_before,
+                                &standard_objects_before);
+    ++g_get_std_handle_invocation_count;
+    g_get_std_handle_last_selector = selector;
+    g_get_std_handle_last_call_site = call_site;
+    handle = gxos_get_std_handle_contract(&g_standard_handle_context, selector);
+    g_get_std_handle_last_returned_handle = handle;
+    if (selector == GXOS_STANDARD_HANDLE_INPUT) {
+        role = GXOS_SCHEDULER_STANDARD_STREAM_ROLE_INPUT;
+    } else if (selector == GXOS_STANDARD_HANDLE_OUTPUT) {
+        role = GXOS_SCHEDULER_STANDARD_STREAM_ROLE_OUTPUT;
+    } else if (selector == GXOS_STANDARD_HANDLE_ERROR) {
+        role = GXOS_SCHEDULER_STANDARD_STREAM_ROLE_ERROR;
+    }
+    emit_standard_handle_counts(&live_objects_after,
+                                &live_public_handles_after,
+                                &standard_objects_after);
+
+    if (handle == GXOS_STANDARD_HANDLE_INVALID_VALUE) {
+        ++g_get_std_handle_failure_count;
+    } else if (handle == 0) {
+        if ((selector == GXOS_STANDARD_HANDLE_INPUT &&
+             !g_standard_handle_context.input_available) ||
+            (selector == GXOS_STANDARD_HANDLE_OUTPUT &&
+             !g_standard_handle_context.output_available) ||
+            (selector == GXOS_STANDARD_HANDLE_ERROR &&
+             !g_standard_handle_context.error_available)) {
+            ++g_get_std_handle_absent_count;
+        } else {
+            ++g_get_std_handle_failure_count;
+        }
+    } else {
+        object = gxos_scheduler_object_from_handle(handle);
+        stream = gxos_scheduler_standard_stream_from_handle(handle);
+        if (object == 0 || stream == 0 || !stream->live ||
+            object->type != GXOS_SCHEDULER_OBJECT_STANDARD_STREAM ||
+            object->generation != stream->generation ||
+            object->slot != stream->object_slot ||
+            object->public_handle_refs == 0 || object->internal_refs == 0 ||
+            (role == 0 || (stream->role_mask & role) == 0) ||
+            gxos_scheduler_standard_handle_for_role(role) != handle) {
+            fail("getstdhandle-handle-validation");
+        }
+        ++g_get_std_handle_success_count;
+    }
+
+    serial_text("GXOS_NET10:GETSTDHANDLE_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_INVOCATION=0x",
+                     g_get_std_handle_invocation_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_IMPORT_MODULE=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_IMPORT_SYMBOL=GetStdHandle\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_DESCRIPTOR_INDEX=0x",
+                     g_get_std_handle_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_SYMBOL_INDEX=0x",
+                     g_get_std_handle_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_IAT_RVA=0x",
+                     g_get_std_handle_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_CALLER_RVA=0x",
+                     g_managed_image_base == 0 ? 0 : call_site - g_managed_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_SELECTOR=0x", selector);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_SELECTOR_NAME=");
+    serial_text(standard_handle_selector_name(selector));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_CURRENT_THREAD_IDENTITY=0x",
+                     current == 0 ? 0 : current->identity);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_SCHEDULER_THREAD=");
+    serial_text(current == 0 ? "NONE" :
+                (current == g_create_event_scheduler.boot_thread ?
+                     "main" : "worker"));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_LIVE_OBJECT_COUNT_BEFORE=0x",
+                     live_objects_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_CURRENT_PUBLIC_HANDLE_COUNT_BEFORE=0x",
+                     live_public_handles_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_EXISTING_OUTPUT_OBJECT_COUNT=0x",
+                     standard_objects_before);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_PHYSICAL_BACKEND=SERIAL_COM1_16550\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_SERIAL_IO_BASE=0x", 0x3F8);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_UEFI_TEXT_CONSOLE=0\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_DIAGNOSTIC_SINK_SHARED=1\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_PUBLIC_POLICY_STDOUT=SERIAL_COM1\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_PUBLIC_POLICY_STDERR=SERIAL_COM1\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_PUBLIC_POLICY_STDIN=ABSENT\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_RETURNED_HANDLE=0x", handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_LIVE_OBJECT_COUNT_AFTER=0x",
+                     live_objects_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_CURRENT_PUBLIC_HANDLE_COUNT_AFTER=0x",
+                     live_public_handles_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_PUBLIC_HANDLE_DELTA=0x",
+                     live_public_handles_after - live_public_handles_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_STANDARD_OBJECT_COUNT_AFTER=0x",
+                     standard_objects_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_LAST_ERROR_BEFORE=0x",
+                     previous_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_LAST_ERROR_AFTER=0x",
+                     g_platform_last_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_LAST_ERROR_PRESERVED=0x",
+                     previous_error == g_platform_last_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_OBJECT_SLOT=0x",
+                     object == 0 ? 0 : object->slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_OBJECT_GENERATION=0x",
+                     object == 0 ? 0 : object->generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_OBJECT_TYPE=0x",
+                     object == 0 ? 0 : object->type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_PUBLIC_REFERENCE_COUNT=0x",
+                     object == 0 ? 0 : object->public_handle_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_INTERNAL_REFERENCE_COUNT=0x",
+                     object == 0 ? 0 : object->internal_refs);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_STREAM_ROLE_MASK=0x",
+                     stream == 0 ? 0 : stream->role_mask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_STREAM_BACKEND=0x",
+                     stream == 0 ? 0 : stream->backend);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GETSTDHANDLE_STREAM_CAPABILITIES=0x",
+                     stream == 0 ? 0 : stream->capabilities);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_RETURN_VALUE_CONSUMER=KERNEL32.dll!WriteFile\r\n");
+    serial_text("GXOS_NET10:GETSTDHANDLE_RETURNED\r\n");
     return (void *)(uintptr_t)handle;
 }
 #endif
@@ -7395,6 +7610,10 @@ static void *platform_import_target(const char *module, const char *symbol)
     }
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetStdHandle")) {
+        return (void *)(uintptr_t)platform_get_std_handle;
+    }
     if (equal_text(module, "ole32.dll") &&
         equal_text(symbol, "CoInitializeEx")) {
         return (void *)(uintptr_t)platform_co_initialize_ex;
@@ -7744,6 +7963,13 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
             }
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol, "GetStdHandle")) {
+                g_get_std_handle_import_descriptor_index = descriptors - 1U;
+                g_get_std_handle_import_symbol_index = index;
+                g_get_std_handle_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
             if (equal_text(module, "ole32.dll") &&
                 equal_text(g_import_records[symbols].symbol,
                            "CoGetApartmentType")) {
@@ -12152,6 +12378,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
     g_event_api_context.scheduler = &g_create_event_scheduler;
     g_event_api_context.read_handle = platform_wait_read_handle;
+    g_standard_handle_context.scheduler = &g_create_event_scheduler;
+    g_standard_handle_context.last_error = &g_platform_last_error;
+    g_standard_handle_context.input_available = 0;
+    g_standard_handle_context.output_available = 1;
+    g_standard_handle_context.error_available = 1;
+    g_standard_handle_context.output_backend =
+        GXOS_SCHEDULER_STANDARD_STREAM_BACKEND_SERIAL_COM1;
+    g_standard_handle_context.output_capabilities =
+        GXOS_SCHEDULER_STANDARD_STREAM_CAPABILITY_WRITE;
 #endif
     serial_text("GXOS_NET10:CREATEEVENTW_SCHEDULER_INITIALIZED=1\r\n");
     serial_text("GXOS_NET10:CREATEEVENTW_SCHEDULER_BOOT_ENVIRONMENT=PAYLOAD_TLS\r\n");

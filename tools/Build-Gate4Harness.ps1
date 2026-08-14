@@ -36,6 +36,7 @@ $schedulerAssembly = Join-Path $root 'src\Gate4Harness\scheduler_context.S'
 $schedulerProofSource = Join-Path $root 'src\Gate4Harness\scheduler_proof.c'
 $createEventSource = Join-Path $root 'src\Gate4Harness\create_event_w.c'
 $eventApiSource = Join-Path $root 'src\Gate4Harness\event_api.c'
+$standardHandleSource = Join-Path $root 'src\Gate4Harness\standard_handle.c'
 $comApiSource = Join-Path $root 'src\Gate4Harness\com_api.c'
 $createMemoryResourceNotificationSource = Join-Path $root 'src\Gate4Harness\create_memory_resource_notification.c'
 $createThreadSource = Join-Path $root 'src\Gate4Harness\create_thread.c'
@@ -81,6 +82,7 @@ if (-not (Test-Path -LiteralPath $schedulerAssembly)) { throw "Scheduler assembl
 if (-not (Test-Path -LiteralPath $schedulerProofSource)) { throw "Scheduler proof source not found: $schedulerProofSource" }
 if (-not (Test-Path -LiteralPath $createEventSource)) { throw "CreateEventW source not found: $createEventSource" }
 if (-not (Test-Path -LiteralPath $comApiSource)) { throw "COM API source not found: $comApiSource" }
+if (-not (Test-Path -LiteralPath $standardHandleSource)) { throw "Standard handle source not found: $standardHandleSource" }
 if (-not (Test-Path -LiteralPath $createMemoryResourceNotificationSource)) {
     throw "CreateMemoryResourceNotification source not found: $createMemoryResourceNotificationSource"
 }
@@ -976,6 +978,7 @@ if ($Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait') {
 if ($Scenario -eq 'NativeAotEventWait') {
     $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_EVENT_WAIT'
     $gccArguments += $eventApiSource
+    $gccArguments += $standardHandleSource
     $gccArguments += $comApiSource
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
