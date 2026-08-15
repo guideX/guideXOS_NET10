@@ -42,6 +42,8 @@ $writeFileEntryAssembly = Join-Path $root 'src\Gate4Harness\write_file_entry.S'
 $comApiSource = Join-Path $root 'src\Gate4Harness\com_api.c'
 $multibyteSource = Join-Path $root 'src\Gate4Harness\platform_multibyte.c'
 $multibyteAssembly = Join-Path $root 'src\Gate4Harness\platform_multibyte_entry.S'
+$moduleRegistrySource = Join-Path $root 'src\Gate4Harness\platform_module_registry.c'
+$loadLibrarySource = Join-Path $root 'src\Gate4Harness\platform_load_library.c'
 $createMemoryResourceNotificationSource = Join-Path $root 'src\Gate4Harness\create_memory_resource_notification.c'
 $createThreadSource = Join-Path $root 'src\Gate4Harness\create_thread.c'
 $createThreadEntryAssembly = Join-Path $root 'src\Gate4Harness\create_thread_entry.S'
@@ -73,6 +75,10 @@ if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
 }
 
 if (-not (Test-Path -LiteralPath $source)) { throw "Harness source not found: $source" }
+if (-not (Test-Path -LiteralPath $moduleRegistrySource) -or
+    -not (Test-Path -LiteralPath $loadLibrarySource)) {
+    throw "Module loading sources not found: $moduleRegistrySource / $loadLibrarySource"
+}
 if (-not (Test-Path -LiteralPath $memoryAccountingSource)) { throw "Memory accounting source not found: $memoryAccountingSource" }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
@@ -157,6 +163,8 @@ $gccArguments = @(
     (Join-Path $root 'src\Gate4Harness\platform_query_information_job_object.c'),
     $isProcessInJobSource,
     $importFailfastEntryAssembly,
+    $moduleRegistrySource,
+    $loadLibrarySource,
     (Join-Path $root 'src\Gate4Harness\platform_get_module_handle.c'),
     (Join-Path $root 'src\Gate4Harness\platform_get_module_handle_ex.c'),
     (Join-Path $root 'src\Gate4Harness\platform_get_proc_address.c'),

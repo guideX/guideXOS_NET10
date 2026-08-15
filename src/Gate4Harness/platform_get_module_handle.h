@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "crt_initterm.h"
+#include "platform_module_registry.h"
 
 #if defined(__x86_64__)
 #define GXOS_MODULE_HANDLE_MS_ABI __attribute__((ms_abi))
@@ -62,7 +63,8 @@ typedef struct GXOS_MAIN_MODULE_FACTS {
 
 typedef enum GXOS_MODULE_HANDLE_SELECTED_MODULE {
     GXOS_MODULE_HANDLE_SELECTED_NONE = 0,
-    GXOS_MODULE_HANDLE_SELECTED_MAIN_NATIVEAOT_PAYLOAD
+    GXOS_MODULE_HANDLE_SELECTED_MAIN_NATIVEAOT_PAYLOAD,
+    GXOS_MODULE_HANDLE_SELECTED_BUILTIN_KERNEL32
 } GXOS_MODULE_HANDLE_SELECTED_MODULE;
 
 typedef struct GXOS_MODULE_HANDLE_REPORT {

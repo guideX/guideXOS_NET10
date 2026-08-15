@@ -1,5 +1,7 @@
 #include "platform_get_proc_address.h"
 
+#include "platform_module_registry.h"
+
 static int gxos_get_proc_address_is_canonical(uintptr_t address)
 {
     uint64_t high = (uint64_t)address >> 47;
@@ -217,6 +219,15 @@ gxos_get_proc_address_checked(
     }
     if (module_handle == 0) {
         active_report->status = GXOS_GET_PROC_ADDRESS_STATUS_INVALID_MODULE_HANDLE;
+        *last_error = GXOS_GET_PROC_ADDRESS_ERROR_PROC_NOT_FOUND;
+        active_report->last_error_after = *last_error;
+        return active_report->status;
+    }
+    if (gxos_module_registry_is_kernel32_handle(module_handle)) {
+        active_report->module_approved = 1;
+        active_report->module_valid = 1;
+        active_report->export_lookup_attempted = 1;
+        active_report->status = GXOS_GET_PROC_ADDRESS_STATUS_EXPORT_NOT_FOUND;
         *last_error = GXOS_GET_PROC_ADDRESS_ERROR_PROC_NOT_FOUND;
         active_report->last_error_after = *last_error;
         return active_report->status;

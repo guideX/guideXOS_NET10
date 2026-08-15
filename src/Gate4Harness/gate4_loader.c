@@ -20,6 +20,8 @@
 #include "platform_get_module_handle.h"
 #include "platform_get_module_handle_ex.h"
 #include "platform_get_proc_address.h"
+#include "platform_load_library.h"
+#include "platform_module_registry.h"
 #include "crt_malloc.h"
 #include "memory_accounting.h"
 #include "vm_substrate.h"
@@ -381,6 +383,17 @@ static void *EFIAPI platform_create_event_w(void *event_attributes,
                                              const uint16_t *name);
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+static uint32_t g_load_library_import_descriptor_index;
+static uint32_t g_load_library_import_symbol_index;
+static uint32_t g_load_library_importing_iat_rva;
+static uint64_t g_load_library_invocation_count;
+static uint64_t g_load_library_success_count;
+static uint64_t g_load_library_failure_count;
+static GXOS_LOAD_LIBRARY_MEMORY_CONTEXT g_load_library_memory;
+static GXOS_LOAD_LIBRARY_REPORT g_load_library_last_report;
+static uint32_t g_load_library_last_error_before;
+static uint32_t g_load_library_last_error_after;
+static uintptr_t g_load_library_last_handle;
 static uint32_t g_co_get_apartment_type_import_descriptor_index;
 static uint32_t g_co_get_apartment_type_import_symbol_index;
 static uint32_t g_co_get_apartment_type_importing_iat_rva;
@@ -2273,7 +2286,11 @@ static void platform_get_proc_address_emit_call(
     serial_text("\r\n");
     serial_text("GXOS_NET10:GETPROCADDRESS_MODULE_CLASS=");
     serial_text(report->module_is_null ? "ABSENT_NULL\r\n" :
-                (report->module_approved ? "APPROVED_MAPPED\r\n" :
+                (report->module_approved ?
+                     (gxos_module_registry_is_kernel32_handle(
+                          report->module_handle)
+                          ? "APPROVED_BUILTIN_KERNEL32\r\n"
+                          : "APPROVED_MAPPED\r\n") :
                  "NONNULL_UNAPPROVED\r\n"));
     serial_field_hex("GXOS_NET10:GETPROCADDRESS_IDENTIFIER_RAW=0x",
                      report->identifier_raw);
@@ -2353,7 +2370,10 @@ static void platform_get_proc_address_emit_call(
     serial_text("GXOS_NET10:GETPROCADDRESS_MODULE_HANDLE_PROVENANCE=");
     serial_text(report->module_handle == 0
                     ? "PRECEDING_GETMODULEHANDLEW_NULL_RESULT\r\n"
-                    : "NONNULL_HANDLE_NOT_APPROVED\r\n");
+                    : (gxos_module_registry_is_kernel32_handle(
+                           report->module_handle)
+                           ? "REGISTERED_BUILTIN_KERNEL32_DESCRIPTOR\r\n"
+                           : "NONNULL_HANDLE_NOT_APPROVED\r\n"));
     if (report->status == GXOS_GET_PROC_ADDRESS_STATUS_INVALID_MODULE_HANDLE &&
         report->module_handle == 0) {
         serial_text("GXOS_NET10:GETPROCADDRESS_EXPECTED_ABSENT_MODULE_FAILURE\r\n");
@@ -4212,6 +4232,9 @@ void __attribute__((noreturn)) EFIAPI import_failfast(
     serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_STACK_ARG6=0x",
                      arguments == 0 ? 0 : arguments[10]);
     serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_LAST_ERROR=0x",
+                     g_platform_last_error);
+    serial_text("\r\n");
 #ifdef GXOS_ENABLE_CREATE_THREAD
     emit_create_thread_final_summary();
 #endif
@@ -4999,7 +5022,9 @@ static void platform_get_module_handle_emit_call(
     serial_text("GXOS_NET10:GETMODULEHANDLEW_SELECTED_MODULE=");
     serial_text(report->selected_module == GXOS_MODULE_HANDLE_SELECTED_MAIN_NATIVEAOT_PAYLOAD
                     ? "MAIN_NATIVEAOT_PAYLOAD\r\n"
-                    : "NONE\r\n");
+                    : (report->selected_module ==
+                           GXOS_MODULE_HANDLE_SELECTED_BUILTIN_KERNEL32
+                           ? "BUILTIN_KERNEL32\r\n" : "NONE\r\n"));
     serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_RESULT=0x", result);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GETMODULEHANDLEW_LAST_ERROR_BEFORE=0x", error_before);
@@ -8108,6 +8133,215 @@ int32_t GXOS_MULTIBYTE_MS_ABI gxos_multibyte_import(
     serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_RETURNED\r\n");
     return result;
 }
+
+static uint64_t platform_load_library_static_call_site(uintptr_t call_site)
+{
+    if (g_managed_image_base != 0 && call_site >= g_managed_image_base) {
+        return 0x180000000ULL +
+               (uint64_t)(call_site - (uintptr_t)g_managed_image_base);
+    }
+    return 0;
+}
+
+static uint64_t platform_load_library_caller_start(uint64_t static_call_site)
+{
+    if (static_call_site == 0x18003C99EULL ||
+        static_call_site == 0x18003CACAULL) {
+        return 0x18003C940ULL;
+    }
+    if (static_call_site == 0x18003CE67ULL) return 0x18003CD60ULL;
+    return 0;
+}
+
+static const char *platform_load_library_caller_name(uint64_t static_call_site)
+{
+    if (static_call_site == 0x18003CE67ULL) {
+        return "NativeAOT_finalizer_thread_description_setup";
+    }
+    if (static_call_site == 0x18003C99EULL ||
+        static_call_site == 0x18003CACAULL) {
+        return "NativeAOT_runtime_feature_probe_region";
+    }
+    return "nearest-identifiable-NativeAOT-region";
+}
+
+static void platform_load_library_emit_utf16(
+    GXOS_LOAD_LIBRARY_LPCWSTR module_name,
+    const GXOS_LOAD_LIBRARY_REPORT *report)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint32_t index;
+
+    if (module_name == 0 || report == 0 || report->status !=
+        GXOS_LOAD_LIBRARY_STATUS_OK) {
+        return;
+    }
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_NAME_UTF16=");
+    for (index = 0; index != report->name_length; ++index) {
+        uint16_t unit = module_name[index];
+        serial_char((uint8_t)digits[(unit >> 12) & 0xFU]);
+        serial_char((uint8_t)digits[(unit >> 8) & 0xFU]);
+        serial_char((uint8_t)digits[(unit >> 4) & 0xFU]);
+        serial_char((uint8_t)digits[unit & 0xFU]);
+        if (index + 1U != report->name_length) serial_char(',');
+    }
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_NAME_PREVIEW=\"");
+    for (index = 0; index != report->name_length; ++index) {
+        uint16_t unit = module_name[index];
+        serial_char(unit >= 0x20U && unit <= 0x7EU ? (uint8_t)unit : '.');
+    }
+    serial_text("\"\r\n");
+}
+
+static GXOS_LOAD_LIBRARY_HMODULE GXOS_LOAD_LIBRARY_MS_ABI
+platform_load_library_ex_w(
+    GXOS_LOAD_LIBRARY_LPCWSTR module_name,
+    GXOS_LOAD_LIBRARY_HFILE hfile,
+    uint32_t flags)
+{
+    GXOS_LOAD_LIBRARY_HMODULE result = 0;
+    GXOS_LOAD_LIBRARY_STATUS status;
+    uint32_t previous_error = g_platform_last_error;
+    uint32_t last_error = previous_error;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = import_call_site(return_address);
+    uint64_t static_call_site = platform_load_library_static_call_site(call_site);
+    uint64_t caller_start = platform_load_library_caller_start(static_call_site);
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+
+    ++g_load_library_invocation_count;
+    status = gxos_load_library_ex_checked(
+        module_name, hfile, flags, &g_load_library_memory,
+        previous_error, &result, &last_error, &g_load_library_last_report);
+    g_platform_last_error = last_error;
+    g_load_library_last_error_before = previous_error;
+    g_load_library_last_error_after = last_error;
+    g_load_library_last_handle = result;
+    if (status == GXOS_LOAD_LIBRARY_STATUS_OK) {
+        ++g_load_library_success_count;
+    } else {
+        ++g_load_library_failure_count;
+    }
+
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_CALL_INDEX=0x",
+                     g_load_library_invocation_count - 1U);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_IMPORT_SYMBOL=LoadLibraryExW\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_DESCRIPTOR_INDEX=0x",
+                     g_load_library_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_SYMBOL_INDEX=0x",
+                     g_load_library_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_IAT_RVA=0x",
+                     g_load_library_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_PREFERRED_IAT=0x",
+                     0x180000000ULL + g_load_library_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_load_library_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_STATIC_CALL_SITE=0x",
+                     static_call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_CALLER_RVA=0x",
+                     caller_start >= 0x180000000ULL
+                         ? caller_start - 0x180000000ULL : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_CALLER_START=0x",
+                     caller_start);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_CALLER=");
+    serial_text(platform_load_library_caller_name(static_call_site));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_LP_LIB_FILE_NAME=0x",
+                     (uintptr_t)module_name);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_HFILE=0x", hfile);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_DW_FLAGS=0x", flags);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_FLAG_MEANING=");
+    serial_text(flags == GXOS_LOAD_LIBRARY_SEARCH_SYSTEM32
+                    ? "LOAD_LIBRARY_SEARCH_SYSTEM32\r\n"
+                    : "UNSUPPORTED_OR_INVALID\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_NAME_IS_NULL=0x",
+                     g_load_library_last_report.name_is_null);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_NAME_POINTER_CANONICAL=0x",
+                     g_load_library_last_report.name_pointer_canonical);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_NAME_READABLE=0x",
+                     g_load_library_last_report.name_readable);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_NAME_LENGTH=0x",
+                     g_load_library_last_report.name_length);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_NAME_TERMINATOR=0x",
+                     g_load_library_last_report.name_terminator);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_NAME_HAS_PATH=0x",
+                     g_load_library_last_report.name_has_path);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_NAME_HAS_EXTENSION=0x",
+                     g_load_library_last_report.name_has_extension);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_NAME_MATCHES_KERNEL32=0x",
+                     g_load_library_last_report.name_matches_kernel32);
+    serial_text("\r\n");
+    platform_load_library_emit_utf16(module_name, &g_load_library_last_report);
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_SYSTEM32_SEARCH_APPLIED=0x",
+                     g_load_library_last_report.system32_search_applied);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_SELECTED_MODULE=");
+    serial_text(g_load_library_last_report.selected_module ==
+                    GXOS_LOAD_LIBRARY_SELECTED_BUILTIN_KERNEL32
+                    ? "BUILTIN_KERNEL32\r\n" : "NONE\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_RESULT=0x", result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_LAST_ERROR_BEFORE=0x",
+                     previous_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_LAST_ERROR_AFTER=0x",
+                     last_error);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_LAST_ERROR_PRESERVED=");
+    serial_text(previous_error == last_error ? "1\r\n" : "0\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_THREAD_IDENTITY=0x",
+                     thread == 0 ? 0 : thread->identity);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_SCHEDULER_THREAD=");
+    serial_text(thread == 0 ? "NONE\r\n" :
+                (thread == g_create_event_scheduler.boot_thread
+                     ? "main\r\n" : "finalizer\r\n"));
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_COM_INITIALIZED=0x",
+                     thread == 0 ? 0 : gxos_com_is_initialized(thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_COM_MODEL=0x",
+                     thread == 0 ? GXOS_COM_MODEL_NONE : gxos_com_model(thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_COM_COUNT=0x",
+                     thread == 0 ? 0 : gxos_com_nesting_count(thread));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_STATUS=");
+    serial_text(gxos_load_library_status_name(status));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_HANDLE_PROVENANCE=");
+    serial_text(result != 0 &&
+                g_load_library_last_report.selected_module ==
+                    GXOS_LOAD_LIBRARY_SELECTED_BUILTIN_KERNEL32
+                    ? "REGISTERED_BUILTIN_MODULE_DESCRIPTOR\r\n"
+                    : "NONE\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_RETURNED\r\n");
+    return result;
+}
 #endif
 
 static void *platform_import_target(const char *module, const char *symbol)
@@ -8147,6 +8381,10 @@ static void *platform_import_target(const char *module, const char *symbol)
     }
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "LoadLibraryExW")) {
+        return (void *)(uintptr_t)platform_load_library_ex_w;
+    }
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "MultiByteToWideChar")) {
         return (void *)(uintptr_t)gxos_multibyte_to_wide_char_entry;
@@ -8508,6 +8746,14 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
             }
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "LoadLibraryExW")) {
+                g_load_library_import_descriptor_index = descriptors - 1U;
+                g_load_library_import_symbol_index = index;
+                g_load_library_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
             if (equal_text(module, "KERNEL32.dll") &&
                 equal_text(g_import_records[symbols].symbol,
                            "MultiByteToWideChar")) {
@@ -12287,6 +12533,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     }
     g_multibyte_image_regions = image.memory_regions;
     g_multibyte_image_region_count = image.memory_region_count;
+    g_load_library_memory.regions = image.memory_regions;
+    g_load_library_memory.region_count = image.memory_region_count;
 #endif
 #if defined(GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE) || defined(GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER)
     configure_veh_registry(&image);
@@ -12450,6 +12698,28 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     resolve_imports(&image, boot_services, &import_descriptors, &import_symbols,
                     &import_functional, &import_failfast, &unresolved_imports);
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (g_load_library_import_descriptor_index != 2U ||
+        g_load_library_import_symbol_index != 0x39U ||
+        g_load_library_importing_iat_rva != 0x7D200U) {
+        fail("loadlibraryexw-import-contract");
+    }
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:LOADLIBRARYEXW_IMPORT_SYMBOL=LoadLibraryExW\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_load_library_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_IMPORT_SYMBOL_INDEX=0x",
+                     g_load_library_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_IMPORT_IAT_RVA=0x",
+                     g_load_library_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_PREFERRED_IAT=0x",
+                     image.preferred_base + g_load_library_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:LOADLIBRARYEXW_RUNTIME_IAT=0x",
+                     image.actual_base + g_load_library_importing_iat_rva);
+    serial_text("\r\n");
     if (g_multibyte_import_descriptor_index != 2U ||
         g_multibyte_import_symbol_index != 0x11U ||
         g_multibyte_importing_iat_rva != 0x7D0C0U) {

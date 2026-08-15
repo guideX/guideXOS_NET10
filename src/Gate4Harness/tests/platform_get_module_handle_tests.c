@@ -125,8 +125,17 @@ static void test_observed_names_and_name_rules(void)
 
     name = image_name(0x900, "KERNEL32.DLL");
     expect(checked(name, &facts, &result, &report) ==
-               GXOS_MODULE_HANDLE_STATUS_MODULE_NOT_FOUND,
-           "kernel32 case-insensitive not-found");
+               GXOS_MODULE_HANDLE_STATUS_OK,
+           "kernel32 case-insensitive succeeds");
+    expect(result == gxos_module_registry_kernel32_handle() &&
+               report.selected_module ==
+                   GXOS_MODULE_HANDLE_SELECTED_BUILTIN_KERNEL32,
+           "kernel32 returns registered builtin handle");
+    name = image_name(0x980, "kernel32");
+    expect(checked(name, &facts, &result, &report) ==
+               GXOS_MODULE_HANDLE_STATUS_OK &&
+               result == gxos_module_registry_kernel32_handle(),
+           "kernel32 basename succeeds");
     name = image_name(0xA00, "C:\\Windows\\System32\\ntdll.dll");
     expect(checked(name, &facts, &result, &report) ==
                GXOS_MODULE_HANDLE_STATUS_UNSUPPORTED_NAME &&

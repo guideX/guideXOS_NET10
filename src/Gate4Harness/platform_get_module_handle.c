@@ -83,6 +83,27 @@ static uint16_t gxos_module_read_u16(uintptr_t address)
     return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
 }
 
+static int gxos_module_ascii_equal_ci(
+    const GXOS_MODULE_HANDLE_WCHAR *value,
+    uint32_t length,
+    const char *ascii)
+{
+    uint32_t index = 0;
+    while (ascii[index] != 0) {
+        uint16_t expected;
+        uint16_t actual;
+        if (index >= length) return 0;
+        expected = (uint16_t)(uint8_t)ascii[index];
+        actual = value[index];
+        if (actual >= (uint16_t)'A' && actual <= (uint16_t)'Z') {
+            actual = (uint16_t)(actual + ((uint16_t)'a' - (uint16_t)'A'));
+        }
+        if (actual != expected) return 0;
+        ++index;
+    }
+    return index == length;
+}
+
 static uint32_t gxos_module_read_u32(uintptr_t address)
 {
     return (uint32_t)gxos_module_read_u16(address) |
@@ -125,27 +146,6 @@ static void gxos_module_zero_report(GXOS_MODULE_HANDLE_REPORT *report)
     report->caller_read_mask = 0;
     report->output_written = 0;
     report->result = 0;
-}
-
-static int gxos_module_ascii_equal_ci(
-    const GXOS_MODULE_HANDLE_WCHAR *value,
-    uint32_t length,
-    const char *ascii)
-{
-    uint32_t index = 0;
-    while (ascii[index] != 0) {
-        uint16_t expected;
-        uint16_t actual;
-        if (index >= length) return 0;
-        expected = (uint16_t)(uint8_t)ascii[index];
-        actual = value[index];
-        if (actual >= (uint16_t)'A' && actual <= (uint16_t)'Z') {
-            actual = (uint16_t)(actual + ((uint16_t)'a' - (uint16_t)'A'));
-        }
-        if (actual != expected) return 0;
-        ++index;
-    }
-    return index == length;
 }
 
 static GXOS_MODULE_HANDLE_STATUS gxos_module_scan_name(
@@ -209,8 +209,15 @@ static GXOS_MODULE_HANDLE_STATUS gxos_module_scan_name(
         if (unit == (uint16_t)'.') report->name_has_extension = 1;
     }
     if (!report->name_has_path &&
-        (gxos_module_ascii_equal_ci(module_name, report->name_length, "ntdll.dll") ||
-         gxos_module_ascii_equal_ci(module_name, report->name_length, "kernel32.dll"))) {
+        gxos_module_registry_kernel32_name_matches(module_name,
+                                                    report->name_length)) {
+        report->name_exact_observed_form = 1;
+        report->selected_module = GXOS_MODULE_HANDLE_SELECTED_BUILTIN_KERNEL32;
+        return GXOS_MODULE_HANDLE_STATUS_OK;
+    }
+    if (!report->name_has_path &&
+        gxos_module_ascii_equal_ci(module_name, report->name_length,
+                                    "ntdll.dll")) {
         report->name_exact_observed_form = 1;
         return GXOS_MODULE_HANDLE_STATUS_MODULE_NOT_FOUND;
     }
@@ -356,6 +363,14 @@ gxos_get_module_handle_checked(
     status = gxos_module_scan_name(module_name, main_module, active_report);
     active_report->status = status;
     if (status != GXOS_MODULE_HANDLE_STATUS_OK) return status;
+    if (active_report->selected_module ==
+        GXOS_MODULE_HANDLE_SELECTED_BUILTIN_KERNEL32) {
+        *module_handle_out = gxos_module_registry_kernel32_handle();
+        active_report->output_written = 1;
+        active_report->result = *module_handle_out;
+        active_report->status = GXOS_MODULE_HANDLE_STATUS_OK;
+        return GXOS_MODULE_HANDLE_STATUS_OK;
+    }
     status = gxos_module_validate_facts(main_module, active_report);
     active_report->status = status;
     if (status != GXOS_MODULE_HANDLE_STATUS_OK) return status;
