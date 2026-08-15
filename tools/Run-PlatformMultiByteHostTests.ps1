@@ -1,0 +1,38 @@
+[CmdletBinding()]
+param(
+    [string]$OutputDirectory = ''
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    $OutputDirectory = Join-Path $root 'artifacts\platform-multibyte-host-tests-20260815'
+}
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+
+$source = Join-Path $root 'src\Gate4Harness\platform_multibyte.c'
+$header = Join-Path $root 'src\Gate4Harness\platform_multibyte.h'
+$test = Join-Path $root 'src\Gate4Harness\tests\platform_multibyte_tests.c'
+$include = Join-Path $root 'src\Gate4Harness'
+$exe = Join-Path $OutputDirectory 'platform_multibyte_tests.exe'
+$object = Join-Path $OutputDirectory 'platform_multibyte.o'
+$gcc = Get-Command gcc -ErrorAction Stop
+
+$common = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fno-builtin', '-I', $include)
+& $gcc.Source @common '-o' $exe $source $test
+if ($LASTEXITCODE -ne 0) { throw "MultiByteToWideChar host test compile failed: $LASTEXITCODE" }
+& $exe
+if ($LASTEXITCODE -ne 0) { throw "MultiByteToWideChar host tests failed: $LASTEXITCODE" }
+
+& $gcc.Source @common '-ffreestanding' '-c' $source '-o' $object
+if ($LASTEXITCODE -ne 0) { throw "MultiByteToWideChar core object compile failed: $LASTEXITCODE" }
+$nm = Get-Command nm -ErrorAction Stop
+$undefined = & $nm.Source '-u' $object
+if (-not [string]::IsNullOrWhiteSpace(($undefined -join "`n"))) {
+    throw "MultiByteToWideChar core has unexpected external references: $($undefined -join ' ')"
+}
+Write-Output 'MULTIBYTE_TEST_NO_EXTERNAL_REFERENCES=PASS'
+Get-FileHash -Algorithm SHA256 -LiteralPath $header,$source,$test,$exe,$object | Format-Table -AutoSize
+Write-Output 'MULTIBYTE_HOST_TESTS=PASSED'

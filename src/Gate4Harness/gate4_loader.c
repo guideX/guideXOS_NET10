@@ -27,6 +27,7 @@
 #include "global_memory_status_ex.h"
 #include "exception_context.h"
 #include "vectored_handler.h"
+#include "platform_multibyte.h"
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
@@ -411,6 +412,15 @@ static uint32_t g_write_file_success_count;
 static uint32_t g_write_file_failure_count;
 static GXOS_WRITE_FILE_CONTEXT g_write_file_context;
 static GXOS_WRITE_FILE_REPORT g_write_file_last_report;
+static uint32_t g_multibyte_import_descriptor_index;
+static uint32_t g_multibyte_import_symbol_index;
+static uint32_t g_multibyte_importing_iat_rva;
+static uint32_t g_multibyte_invocation_count;
+static const GXOS_CRT_INITTERM_MEMORY_REGION *g_multibyte_image_regions;
+static uint32_t g_multibyte_image_region_count;
+static GXOS_MULTIBYTE_MEMORY_REGION
+    g_multibyte_memory_regions[GXOS_MULTIBYTE_MAX_MEMORY_REGIONS];
+static GXOS_MULTIBYTE_REPORT g_multibyte_last_report;
 static uint32_t g_co_initialize_ex_invocation_count;
 static uint64_t g_co_initialize_ex_last_call_site;
 static uint32_t g_co_initialize_ex_last_thread_identity;
@@ -7799,6 +7809,307 @@ int EFIAPI gxos_set_thread_priority_platform_impl(
 }
 #endif
 
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+static void multibyte_add_region(uint32_t *count, uintptr_t base,
+                                 uintptr_t end, uint32_t writable)
+{
+    GXOS_MULTIBYTE_MEMORY_REGION *region;
+
+    if (count == 0 || *count >= GXOS_MULTIBYTE_MAX_MEMORY_REGIONS ||
+        base == 0 || base >= end) {
+        return;
+    }
+    region = &g_multibyte_memory_regions[(*count)++];
+    region->base = base;
+    region->end = end;
+    region->readable = 1;
+    region->writable = writable;
+}
+
+static void multibyte_build_memory_context(
+    GXOS_MULTIBYTE_MEMORY_CONTEXT *memory)
+{
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    uint32_t count = 0;
+    uint32_t index;
+
+    if (memory == 0) return;
+    for (index = 0; index != g_multibyte_image_region_count; ++index) {
+        const GXOS_CRT_INITTERM_MEMORY_REGION *source_region =
+            &g_multibyte_image_regions[index];
+        multibyte_add_region(&count, source_region->base, source_region->end,
+                             source_region->writable);
+    }
+    multibyte_add_region(&count, (uintptr_t)g_stack_lower,
+                         (uintptr_t)g_stack_upper, 1);
+    if (thread != 0 && !thread->is_boot_thread) {
+        multibyte_add_region(&count, (uintptr_t)thread->stack_base,
+                             (uintptr_t)thread->stack_limit, 1);
+    }
+    for (index = 0; index != GXOS_CRT_MALLOC_REGISTRY_CAPACITY; ++index) {
+        const GXOS_CRT_MALLOC_RECORD *record =
+            &g_crt_malloc_context.records[index];
+        uintptr_t end;
+
+        if (!record->occupied || record->state != GXOS_CRT_MALLOC_RECORD_LIVE ||
+            record->pointer == 0 || record->requested_size == 0 ||
+            record->requested_size > (uint64_t)UINTPTR_MAX ||
+            record->pointer > UINTPTR_MAX - (uintptr_t)record->requested_size) {
+            continue;
+        }
+        end = record->pointer + (uintptr_t)record->requested_size;
+        multibyte_add_region(&count, record->pointer, end, 1);
+    }
+    memory->region_count = count;
+    memory->regions = g_multibyte_memory_regions;
+}
+
+static void serial_multibyte_bytes(const uint8_t *bytes, uint32_t count)
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint32_t index;
+
+    for (index = 0; index != count; ++index) {
+        serial_char('\\');
+        serial_char('x');
+        serial_char((uint8_t)digits[bytes[index] >> 4]);
+        serial_char((uint8_t)digits[bytes[index] & 0x0FU]);
+    }
+}
+
+static void serial_multibyte_utf16(const uint16_t *units, uint32_t count)
+{
+    uint32_t index;
+
+    for (index = 0; index != count; ++index) {
+        if (index != 0) serial_char(',');
+        serial_hex64(units[index]);
+    }
+}
+
+static void multibyte_scheduler_counts(uint32_t *live_objects,
+                                       uint32_t *live_public_handles,
+                                       uint32_t *live_internal_references)
+{
+    uint32_t index;
+
+    if (live_objects != 0) *live_objects = 0;
+    if (live_public_handles != 0) *live_public_handles = 0;
+    if (live_internal_references != 0) *live_internal_references = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        const GXOS_SCHEDULER_OBJECT *object =
+            &g_create_event_scheduler.objects[index];
+        if (!object->live) continue;
+        if (live_objects != 0) ++*live_objects;
+        if (live_public_handles != 0) {
+            *live_public_handles += object->public_handle_refs;
+        }
+        if (live_internal_references != 0) {
+            *live_internal_references += object->internal_refs;
+        }
+    }
+}
+
+int32_t GXOS_MULTIBYTE_MS_ABI gxos_multibyte_import(
+    const GXOS_MULTIBYTE_CALL *call)
+{
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    GXOS_MULTIBYTE_MEMORY_CONTEXT memory = {0};
+    uint32_t previous_error = g_platform_last_error;
+    uint32_t cb_raw = call == 0 ? 0 : (uint32_t)call->cb_multi_byte_raw;
+    uint32_t cch_raw = call == 0 ? 0 : (uint32_t)call->cch_wide_char_raw;
+    int32_t cb = (int32_t)cb_raw;
+    int32_t cch = (int32_t)cch_raw;
+    int32_t result;
+    uintptr_t call_site = call == 0 ? 0 : import_call_site(call->return_address);
+    uint32_t state_before = thread == 0 ? 0 : thread->state;
+    uint32_t com_initialized = thread == 0
+        ? 0 : gxos_com_is_initialized(thread);
+    uint32_t com_model = thread == 0 ? GXOS_COM_MODEL_NONE
+                                     : gxos_com_model(thread);
+    uint32_t com_count = thread == 0 ? 0 : gxos_com_nesting_count(thread);
+    uint32_t live_objects_before;
+    uint32_t live_public_handles_before;
+    uint32_t live_internal_references_before;
+    uint32_t runnable_count_before = g_create_event_scheduler.runnable_count;
+    uint32_t active_wait_count_before = g_create_event_scheduler.active_wait_count;
+    uint32_t live_objects_after;
+    uint32_t live_public_handles_after;
+    uint32_t live_internal_references_after;
+
+    ++g_multibyte_invocation_count;
+    multibyte_scheduler_counts(&live_objects_before,
+                               &live_public_handles_before,
+                               &live_internal_references_before);
+    multibyte_build_memory_context(&memory);
+    result = gxos_multibyte_to_wide_char_checked(
+        call == 0 ? 0 : call->code_page,
+        call == 0 ? 0 : call->flags,
+        call == 0 ? 0 : (const char *)(uintptr_t)call->source,
+        cb,
+        call == 0 ? 0 : (uint16_t *)(uintptr_t)call->destination,
+        cch,
+        &memory,
+        previous_error,
+        &g_platform_last_error,
+        &g_multibyte_last_report);
+    multibyte_scheduler_counts(&live_objects_after,
+                               &live_public_handles_after,
+                               &live_internal_references_after);
+
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_INVOCATION=0x",
+                     g_multibyte_invocation_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_IMPORT_SYMBOL=MultiByteToWideChar\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_DESCRIPTOR_INDEX=0x",
+                     g_multibyte_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_SYMBOL_INDEX=0x",
+                     g_multibyte_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_IAT_RVA=0x",
+                     g_multibyte_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_multibyte_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_THREAD_IDENTITY=0x",
+                     thread == 0 ? 0 : thread->identity);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_SCHEDULER_THREAD=");
+    serial_text(thread == 0 ? "NONE\r\n" :
+                (thread == g_create_event_scheduler.boot_thread
+                     ? "main\r\n" : "finalizer\r\n"));
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_COM_INITIALIZED=0x",
+                     com_initialized);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_COM_MODEL=0x", com_model);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_COM_COUNT=0x", com_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_RCX_CODE_PAGE=0x",
+                     call == 0 ? 0 : call->code_page);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_RDX_FLAGS=0x",
+                     call == 0 ? 0 : call->flags);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_R8_SOURCE=0x",
+                     call == 0 ? 0 : call->source);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_R9_RAW=0x",
+                     call == 0 ? 0 : call->cb_multi_byte_raw);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_CB_INT32=0x",
+                     (uint64_t)(int64_t)cb);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_STACK_ARG5_DESTINATION=0x",
+                     call == 0 ? 0 : call->destination);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_STACK_ARG6_RAW=0x",
+                     call == 0 ? 0 : call->cch_wide_char_raw);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_CCH_INT32=0x",
+                     (uint64_t)(int64_t)cch);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_LAST_ERROR_BEFORE=0x",
+                     previous_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_SOURCE_BYTES_INCLUDING_NUL=0x",
+                     g_multibyte_last_report.source_bytes_including_terminator);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_SOURCE_BYTES_EXCLUDING_NUL=0x",
+                     g_multibyte_last_report.source_bytes_excluding_terminator);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_SOURCE_ESCAPED=");
+    serial_multibyte_bytes(g_multibyte_last_report.source_capture,
+                           g_multibyte_last_report.source_capture_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_DESTINATION_CAPACITY=0x",
+                     cch > 0 ? (uint32_t)cch : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_DESTINATION_RANGE_VALID=0x",
+                     g_multibyte_last_report.destination_range_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_DESTINATION_ZEROED_BEFORE=0x",
+                     g_multibyte_last_report.destination_zeroed_before_call);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_DESTINATION_BEFORE=");
+    serial_multibyte_bytes(g_multibyte_last_report.destination_before,
+                           g_multibyte_last_report.destination_before_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_DESTINATION_AFTER=");
+    serial_multibyte_bytes(g_multibyte_last_report.destination_after,
+                           g_multibyte_last_report.destination_after_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_REQUIRED_UTF16_UNITS=0x",
+                     g_multibyte_last_report.required_utf16_units);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_RETURN_VALUE=0x",
+                     (uint64_t)(int64_t)result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_OUTPUT_CAPTURE_COUNT=0x",
+                     g_multibyte_last_report.output_capture_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_OUTPUT_UTF16=");
+    serial_multibyte_utf16(g_multibyte_last_report.output_capture,
+                           g_multibyte_last_report.output_capture_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_LAST_ERROR_AFTER=0x",
+                     g_platform_last_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_LAST_ERROR_PRESERVED=0x",
+                     previous_error == g_platform_last_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_SCHEDULER_STATE_BEFORE=0x",
+                     state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_SCHEDULER_STATE_AFTER=0x",
+                     thread == 0 ? 0 : thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_LIVE_OBJECTS_BEFORE=0x",
+                     live_objects_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_LIVE_OBJECTS_AFTER=0x",
+                     live_objects_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_PUBLIC_HANDLES_BEFORE=0x",
+                     live_public_handles_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_PUBLIC_HANDLES_AFTER=0x",
+                     live_public_handles_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_INTERNAL_REFERENCES_BEFORE=0x",
+                     live_internal_references_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_INTERNAL_REFERENCES_AFTER=0x",
+                     live_internal_references_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_RUNNABLE_COUNT_BEFORE=0x",
+                     runnable_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_RUNNABLE_COUNT_AFTER=0x",
+                     g_create_event_scheduler.runnable_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_ACTIVE_WAIT_COUNT_BEFORE=0x",
+                     active_wait_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_ACTIVE_WAIT_COUNT_AFTER=0x",
+                     g_create_event_scheduler.active_wait_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_RETURNED\r\n");
+    return result;
+}
+#endif
+
 static void *platform_import_target(const char *module, const char *symbol)
 {
 #ifdef GXOS_ENABLE_VIRTUAL_MEMORY
@@ -7836,6 +8147,10 @@ static void *platform_import_target(const char *module, const char *symbol)
     }
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "MultiByteToWideChar")) {
+        return (void *)(uintptr_t)gxos_multibyte_to_wide_char_entry;
+    }
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "WriteFile")) {
         return (void *)(uintptr_t)gxos_write_file_entry;
@@ -8193,6 +8508,14 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
             }
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "MultiByteToWideChar")) {
+                g_multibyte_import_descriptor_index = descriptors - 1U;
+                g_multibyte_import_symbol_index = index;
+                g_multibyte_importing_iat_rva =
+                    first_thunk_rva + index * 8U;
+            }
             if (equal_text(module, "KERNEL32.dll") &&
                 equal_text(g_import_records[symbols].symbol, "WriteFile")) {
                 g_write_file_import_descriptor_index = descriptors - 1U;
@@ -11957,6 +12280,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:PE_READ_OK\r\n");
     load_pe_image(&image, boot_services);
     serial_text("GXOS_NET10:PE_RELOCATIONS_OK\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (image.memory_region_count == 0 ||
+        image.memory_region_count > GXOS_MULTIBYTE_MAX_MEMORY_REGIONS) {
+        fail("multibyte-image-context");
+    }
+    g_multibyte_image_regions = image.memory_regions;
+    g_multibyte_image_region_count = image.memory_region_count;
+#endif
 #if defined(GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE) || defined(GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER)
     configure_veh_registry(&image);
 #endif
@@ -12118,6 +12449,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
     resolve_imports(&image, boot_services, &import_descriptors, &import_symbols,
                     &import_functional, &import_failfast, &unresolved_imports);
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (g_multibyte_import_descriptor_index != 2U ||
+        g_multibyte_import_symbol_index != 0x11U ||
+        g_multibyte_importing_iat_rva != 0x7D0C0U) {
+        fail("multibyte-import-contract");
+    }
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_IMPORT_SYMBOL=MultiByteToWideChar\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_multibyte_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_IMPORT_SYMBOL_INDEX=0x",
+                     g_multibyte_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_IMPORT_IAT_RVA=0x",
+                     g_multibyte_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MULTIBYTETOWIDECHAR_PREFERRED_IAT=0x",
+                     image.preferred_base + g_multibyte_importing_iat_rva);
+    serial_text("\r\n");
+#endif
 #ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
     if (g_memory_status_ex_import_descriptor_index != 2U ||
         g_memory_status_ex_import_symbol_index != 0x44U ||

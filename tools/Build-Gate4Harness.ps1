@@ -40,6 +40,8 @@ $standardHandleSource = Join-Path $root 'src\Gate4Harness\standard_handle.c'
 $writeFileSource = Join-Path $root 'src\Gate4Harness\write_file.c'
 $writeFileEntryAssembly = Join-Path $root 'src\Gate4Harness\write_file_entry.S'
 $comApiSource = Join-Path $root 'src\Gate4Harness\com_api.c'
+$multibyteSource = Join-Path $root 'src\Gate4Harness\platform_multibyte.c'
+$multibyteAssembly = Join-Path $root 'src\Gate4Harness\platform_multibyte_entry.S'
 $createMemoryResourceNotificationSource = Join-Path $root 'src\Gate4Harness\create_memory_resource_notification.c'
 $createThreadSource = Join-Path $root 'src\Gate4Harness\create_thread.c'
 $createThreadEntryAssembly = Join-Path $root 'src\Gate4Harness\create_thread_entry.S'
@@ -84,6 +86,10 @@ if (-not (Test-Path -LiteralPath $schedulerAssembly)) { throw "Scheduler assembl
 if (-not (Test-Path -LiteralPath $schedulerProofSource)) { throw "Scheduler proof source not found: $schedulerProofSource" }
 if (-not (Test-Path -LiteralPath $createEventSource)) { throw "CreateEventW source not found: $createEventSource" }
 if (-not (Test-Path -LiteralPath $comApiSource)) { throw "COM API source not found: $comApiSource" }
+if (-not (Test-Path -LiteralPath $multibyteSource) -or
+    -not (Test-Path -LiteralPath $multibyteAssembly)) {
+    throw "MultiByteToWideChar sources not found: $multibyteSource / $multibyteAssembly"
+}
 if (-not (Test-Path -LiteralPath $standardHandleSource)) { throw "Standard handle source not found: $standardHandleSource" }
 if (-not (Test-Path -LiteralPath $writeFileSource) -or
     -not (Test-Path -LiteralPath $writeFileEntryAssembly)) {
@@ -988,6 +994,8 @@ if ($Scenario -eq 'NativeAotEventWait') {
     $gccArguments += $writeFileSource
     $gccArguments += $writeFileEntryAssembly
     $gccArguments += $comApiSource
+    $gccArguments += $multibyteSource
+    $gccArguments += $multibyteAssembly
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
 if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }
