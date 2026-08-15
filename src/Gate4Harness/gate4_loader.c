@@ -4316,6 +4316,36 @@ void __attribute__((noreturn)) EFIAPI import_failfast(
                          worker_scheduler_thread->execution_count);
     serial_text("\r\n");
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_MAIN_COM_INITIALIZED=0x",
+                     g_create_event_scheduler.boot_thread == 0 ? 0 :
+                         gxos_com_is_initialized(
+                             g_create_event_scheduler.boot_thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_MAIN_COM_MODEL=0x",
+                     g_create_event_scheduler.boot_thread == 0
+                         ? GXOS_COM_MODEL_NONE
+                         : gxos_com_model(g_create_event_scheduler.boot_thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_MAIN_COM_COUNT=0x",
+                     g_create_event_scheduler.boot_thread == 0 ? 0 :
+                         gxos_com_nesting_count(
+                             g_create_event_scheduler.boot_thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_COM_INITIALIZED=0x",
+                     worker_scheduler_thread == 0 ? 0 :
+                         gxos_com_is_initialized(worker_scheduler_thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_COM_MODEL=0x",
+                     worker_scheduler_thread == 0
+                         ? GXOS_COM_MODEL_NONE
+                         : gxos_com_model(worker_scheduler_thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:IMPORT_BLOCKER_WORKER_COM_COUNT=0x",
+                     worker_scheduler_thread == 0 ? 0 :
+                         gxos_com_nesting_count(worker_scheduler_thread));
+    serial_text("\r\n");
+#endif
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
     serial_text("GXOS_NET10:WAIT_BLOCKED_PROOF=1\r\n");
     serial_field_hex("GXOS_NET10:WAIT_BLOCKED_RECORD_ADDRESS=0x",
                      active_wait_record == 0 ? 0 : (uintptr_t)active_wait_record);
@@ -7039,16 +7069,24 @@ static int32_t EFIAPI platform_co_initialize_ex(void *pv_reserved,
         thread == 0 ? 0 : thread->identity;
     g_co_initialize_ex_last_reserved = (uint64_t)(uintptr_t)pv_reserved;
     g_co_initialize_ex_last_flags = coinit;
-    g_co_initialize_ex_last_state_before_initialized = 0;
-    g_co_initialize_ex_last_state_before_model = 0;
-    g_co_initialize_ex_last_state_before_flags = 0;
-    g_co_initialize_ex_last_state_before_count = 0;
+    g_co_initialize_ex_last_state_before_initialized = thread == 0
+        ? 0 : gxos_com_is_initialized(thread);
+    g_co_initialize_ex_last_state_before_model = thread == 0
+        ? GXOS_COM_MODEL_NONE : gxos_com_model(thread);
+    g_co_initialize_ex_last_state_before_flags = thread == 0
+        ? 0 : gxos_com_ancillary_flags(thread);
+    g_co_initialize_ex_last_state_before_count = thread == 0
+        ? 0 : gxos_com_nesting_count(thread);
     result = gxos_com_initialize_ex(pv_reserved, coinit);
     g_co_initialize_ex_last_hresult = result;
-    g_co_initialize_ex_last_state_after_initialized = 0;
-    g_co_initialize_ex_last_state_after_model = 0;
-    g_co_initialize_ex_last_state_after_flags = 0;
-    g_co_initialize_ex_last_state_after_count = 0;
+    g_co_initialize_ex_last_state_after_initialized = thread == 0
+        ? 0 : gxos_com_is_initialized(thread);
+    g_co_initialize_ex_last_state_after_model = thread == 0
+        ? GXOS_COM_MODEL_NONE : gxos_com_model(thread);
+    g_co_initialize_ex_last_state_after_flags = thread == 0
+        ? 0 : gxos_com_ancillary_flags(thread);
+    g_co_initialize_ex_last_state_after_count = thread == 0
+        ? 0 : gxos_com_nesting_count(thread);
     ++g_co_initialize_ex_invocation_count;
 
     serial_text("GXOS_NET10:COINITIALIZEEX_BEGIN\r\n");
@@ -12224,7 +12262,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:COM_CENSUS_COWAITFORMULTIPLEHANDLES_IAT_RVA=0x",
                      g_co_wait_for_multiple_handles_importing_iat_rva);
     serial_text("\r\n");
-    serial_text("GXOS_NET10:COM_COINITIALIZEEX_IMPLEMENTATION=OUTCOME_B_UNSUPPORTED_FALLBACK\r\n");
+    serial_text("GXOS_NET10:COM_COINITIALIZEEX_IMPLEMENTATION=PER_THREAD_MTA_BOOKKEEPING\r\n");
+    serial_text("GXOS_NET10:COM_COINITIALIZEEX_HIGHER_LEVEL_SERVICES=UNSUPPORTED\r\n");
     serial_field_hex("GXOS_NET10:COM_COINITIALIZEEX_NATURAL_DWCOINIT=0x", 0);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:COM_COINITIALIZEEX_KNOWN_FLAGS=0x",

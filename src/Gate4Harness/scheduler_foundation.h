@@ -260,6 +260,14 @@ typedef struct GXOS_SCHEDULER_TCB {
     uint64_t fls_values[GXOS_SCHEDULER_FLS_SLOTS];
     uint8_t fls_allocated[GXOS_SCHEDULER_FLS_SLOTS];
     uint32_t last_error;
+    /* Embedded per-thread COM initialization/apartment bookkeeping. */
+    uint8_t com_initialized;
+    uint8_t com_model;
+    uint8_t com_ancillary_flags;
+    uint8_t com_state_reserved;
+    uint32_t com_initialization_count;
+    uint16_t com_generation;
+    uint16_t com_state_reserved2;
     GXOS_SCHEDULER_HANDLE blocked_object;
     GXOS_SCHEDULER_WAIT_RESULT blocked_result;
     GXOS_SCHEDULER_WAIT_RECORD *wait_record;

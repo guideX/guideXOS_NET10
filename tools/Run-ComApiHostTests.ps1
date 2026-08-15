@@ -14,11 +14,12 @@ New-Item -ItemType Directory -Force -Path $output | Out-Null
 $gcc = Get-Command gcc -ErrorAction Stop
 $include = Join-Path $root 'src\Gate4Harness'
 $exe = Join-Path $output 'com-api-tests.exe'
+$scheduler = Join-Path $include 'scheduler_foundation.c'
 $arguments = @(
     '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2',
     '-DGXOS_SCHEDULER_HOST_TEST', '-I', $include, '-o', $exe,
     (Join-Path $include 'tests\com_api_tests.c'),
-    (Join-Path $include 'com_api.c'))
+    (Join-Path $include 'com_api.c'), $scheduler)
 & $gcc.Source @arguments
 if ($LASTEXITCODE -ne 0) { throw "COM API host test compile failed: $LASTEXITCODE" }
 & $exe
