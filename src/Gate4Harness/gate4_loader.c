@@ -30,6 +30,7 @@
 #include "exception_context.h"
 #include "vectored_handler.h"
 #include "platform_multibyte.h"
+#include "nativeaot_callback_bridge.h"
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
@@ -60,6 +61,12 @@
 #endif
 #ifdef GXOS_ENABLE_RESUME_THREAD
 #include "resume_thread.h"
+#endif
+
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+#define GXOS_NATIVEAOT_THREAD_START_RVA 0x35360U
+#else
+#define GXOS_NATIVEAOT_THREAD_START_RVA 0x35320U
 #endif
 
 typedef uint64_t EFI_STATUS;
@@ -295,6 +302,11 @@ static uint32_t g_phase;
 static uint64_t g_managed_target;
 static uint64_t g_managed_image_base;
 static uint64_t g_managed_image_size;
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+static uint64_t g_managed_callback_target;
+static GXOS_NATIVEAOT_CALLBACK_BRIDGE g_managed_callback_bridge;
+static uint32_t g_nativeaot_runtime_fls_slot = UINT32_MAX;
+#endif
 static uint32_t g_platform_last_error;
 static uint64_t g_stack_lower;
 static uint64_t g_stack_upper;
@@ -4038,6 +4050,7 @@ typedef struct {
     uint32_t export_rva;
     uint32_t export_size;
     uint32_t managed_main_rva;
+    uint32_t managed_callback_rva;
     uint32_t tls_template_rva;
     uint32_t tls_template_size;
     uint32_t tls_index_rva;
@@ -6703,7 +6716,7 @@ uint32_t EFIAPI gxos_resume_thread_platform_impl(
             start_rva = (uint32_t)(start - g_managed_image_base);
         }
         prepared_context_valid =
-            start_rva == 0x35320U &&
+            start_rva == GXOS_NATIVEAOT_THREAD_START_RVA &&
             gxos_create_thread_start_is_executable(
                 &g_create_thread_context, before_thread->entry) &&
             before_thread->entry_argument ==
@@ -7164,7 +7177,7 @@ void *EFIAPI gxos_create_thread_platform_impl(
         before_thread->state == GXOS_SCHEDULER_THREAD_RUNNING &&
         before_thread->execution_refs == 1U &&
         before_thread->public_handle_refs == 0U;
-    if (start_rva != 0x35320U || thread->entry !=
+    if (start_rva != GXOS_NATIVEAOT_THREAD_START_RVA || thread->entry !=
             (GXOS_SCHEDULER_ENTRY)(uintptr_t)start_routine ||
         thread->entry_argument != parameter || thread->state !=
             GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED ||
@@ -9546,6 +9559,15 @@ static void restore_nativeaot_tls(void)
 {
     write_msr(0xC0000101, g_saved_gs_base);
     if ((g_saved_flags & 0x200) != 0) __asm__ volatile ("sti");
+}
+
+static void activate_nativeaot_tls(void)
+{
+    if (g_gs_area == 0 || g_tls_vector == 0 || g_tls_block == 0) {
+        fail("nativeaot-tls-reentry-state");
+    }
+    __asm__ volatile ("cli");
+    write_msr(0xC0000101, (uint64_t)(uintptr_t)g_gs_area);
 }
 
 static uint64_t EFIAPI memory_get_memory_map(
@@ -12786,34 +12808,31 @@ static GXOS_PROCESS_AFFINITY_BOOL EFIAPI platform_get_process_affinity_mask(
 
 static void find_managed_main(PE_IMAGE *image)
 {
-    const uint8_t *exports = rva_to_file(image, image->export_rva, image->export_size);
-    uint32_t name_count;
-    uint32_t names_rva;
-    uint32_t ordinals_rva;
-    uint32_t functions_rva;
-    uint32_t i;
-    if (!exports || image->export_size < 40) fail("export-bounds");
-    name_count = read_u32(exports + 24);
-    functions_rva = read_u32(exports + 28);
-    names_rva = read_u32(exports + 32);
-    ordinals_rva = read_u32(exports + 36);
-    for (i = 0; i < name_count; i++) {
-        const uint8_t *name_rva_ptr = rva_to_file(image, names_rva + i * 4, 4);
-        const char *name;
-        uint16_t ordinal;
-        const uint8_t *function_rva_ptr;
-        if (!name_rva_ptr) fail("export-name-bounds");
-        name = (const char *)rva_to_file(image, read_u32(name_rva_ptr), 1);
-        ordinal = read_u16(rva_to_file(image, ordinals_rva + i * 2, 2));
-        function_rva_ptr = rva_to_file(image, functions_rva + (uint32_t)ordinal * 4, 4);
-        if (!name || !function_rva_ptr) fail("export-function-bounds");
-        if (equal_text(name, "ManagedMain")) {
-            image->managed_main_rva = read_u32(function_rva_ptr);
-            return;
-        }
-    }
-    fail("ManagedMain-export-missing");
+    GXOS_NATIVEAOT_EXPORT_IMAGE export_image = {
+        image->loaded, image->loaded_size, image->export_rva,
+        image->export_size};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_STATUS status = gxos_nativeaot_find_export(
+        &export_image, "ManagedMain", &resolution);
+    if (status != GXOS_NATIVEAOT_EXPORT_OK) fail("ManagedMain-export-missing");
+    image->managed_main_rva = resolution.rva;
 }
+
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+static void find_managed_callback(PE_IMAGE *image)
+{
+    GXOS_NATIVEAOT_EXPORT_IMAGE export_image = {
+        image->loaded, image->loaded_size, image->export_rva,
+        image->export_size};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_STATUS status = gxos_nativeaot_find_export(
+        &export_image, "ManagedCallback", &resolution);
+    if (status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("ManagedCallback-export-missing");
+    }
+    image->managed_callback_rva = resolution.rva;
+}
+#endif
 
 static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
 {
@@ -12936,6 +12955,9 @@ static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
     }
     apply_relocations(image);
     find_managed_main(image);
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    find_managed_callback(image);
+#endif
     if (tls_rva != 0) {
         const uint8_t *tls = rva_to_file(image, tls_rva, 40);
         uint64_t tls_start;
@@ -13260,6 +13282,9 @@ static void nativeaot_durability_probe(void)
         main_thread, blocked_worker);
     nativeaot_durability_require(fls_slot != UINT32_MAX,
                                  "nativeaot-durability-runtime-fls-slot");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    g_nativeaot_runtime_fls_slot = fls_slot;
+#endif
     baseline = nativeaot_durability_counts();
     baseline_blocked = baseline.blocked_count;
     baseline_active_waits = baseline.active_wait_count;
@@ -13536,6 +13561,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     uint32_t managed_result;
     uint64_t rsp_before_call;
     ManagedMainEntry managed_entry;
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION callback_resolution = {0};
+    int32_t callback_result1 = 0;
+    int32_t callback_result2 = 0;
+    uint32_t nativeaot_process_entry_calls = 0;
+    GXOS_SCHEDULER_TCB *callback_thread;
+    GXOS_SCHEDULER_TCB *callback_finalizer;
+    uintptr_t callback_fls_before;
+    uintptr_t callback_fls_after;
+    uintptr_t callback_finalizer_fls_before;
+    GXOS_NATIVEAOT_DURABILITY_COUNTS callback_counts;
+#endif
 #ifdef GXOS_ENABLE_CRT_INITTERM_E
     GXOS_CRT_INITTERM_E_CONTEXT initterm_e_context = {0};
     uint32_t initterm_e_region_index;
@@ -13704,10 +13741,32 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     g_managed_image_base = image.actual_base;
     g_managed_image_size = image.loaded_size;
     g_managed_target = image.actual_base + image.managed_main_rva;
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    g_managed_callback_target = image.actual_base + image.managed_callback_rva;
+    callback_resolution.rva = image.managed_callback_rva;
+    callback_resolution.address = (uintptr_t)g_managed_callback_target;
+    callback_resolution.ordinal = 0;
+    if (!gxos_nativeaot_callback_register(&g_managed_callback_bridge,
+                                         &callback_resolution)) {
+        fail("ManagedCallback-registration");
+    }
+#endif
     serial_field_hex("GXOS_NET10:IMAGE_BASE=0x", image.actual_base);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_TARGET_VA=0x", g_managed_target);
     serial_text("\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_EXPORT=ManagedCallback\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_EXPORT_RVA=0x",
+                     image.managed_callback_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_TARGET_VA=0x",
+                     g_managed_callback_target);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_ABI=MS_X64_INT32_TO_INT32\r\n");
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_DISCOVERY=PE_EXPORT_TABLE\r\n");
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_READY=0\r\n");
+#endif
 #ifdef GXOS_ENABLE_CREATE_THREAD
     if (image.actual_base == 0 || image.loaded_size == 0 ||
         image.loaded_size > UINTPTR_MAX - image.actual_base ||
@@ -14249,6 +14308,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
     {
         NativeAotDllEntry nativeaot_entry = (NativeAotDllEntry)(uintptr_t)(image.actual_base + image.entry_rva);
+        ++nativeaot_process_entry_calls;
         int nativeaot_result = nativeaot_entry((uintptr_t)image.actual_base, 1, 0);
         serial_field_hex("GXOS_NET10:NATIVEAOT_STARTUP_RETURN=0x", (uint64_t)(uint32_t)nativeaot_result);
         serial_text("\r\n");
@@ -14392,6 +14452,179 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     if (managed_result != 0) fail("managed-return-nonzero");
     g_phase = PHASE_COMPLETE;
     serial_text("GXOS_NET10:MANAGED_ENTRY_COMPLETE\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    if (g_nativeaot_runtime_fls_slot == UINT32_MAX ||
+        !gxos_nativeaot_callback_mark_ready(&g_managed_callback_bridge)) {
+        fail("nativeaot-managed-callback-readiness");
+    }
+    callback_thread = gxos_scheduler_current_thread();
+    callback_finalizer = nativeaot_durability_blocked_worker();
+    if (callback_thread == 0 || callback_finalizer == 0 ||
+        callback_thread->identity == callback_finalizer->identity ||
+        callback_thread->state != GXOS_SCHEDULER_THREAD_RUNNING ||
+        callback_finalizer->state != GXOS_SCHEDULER_THREAD_BLOCKED ||
+        callback_finalizer->wait_record == 0) {
+        fail("nativeaot-managed-callback-thread-affinity");
+    }
+    callback_counts = nativeaot_durability_counts();
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_READY=1\r\n");
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_READINESS=AFTER_MANAGED_ENTRY_COMPLETE\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_CALLER_IDENTITY=0x",
+                     callback_thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_CALLER_STATE=0x",
+                     callback_thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_FINALIZER_IDENTITY=0x",
+                     callback_finalizer->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_FINALIZER_STATE=0x",
+                     callback_finalizer->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_FLS_SLOT=0x",
+                     g_nativeaot_runtime_fls_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_MAIN_FLS_BEFORE=0x",
+                     callback_thread->fls_values[g_nativeaot_runtime_fls_slot]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_FINALIZER_FLS_BEFORE=0x",
+                     callback_finalizer->fls_values[g_nativeaot_runtime_fls_slot]);
+    serial_text("\r\n");
+    callback_finalizer_fls_before = (uintptr_t)callback_finalizer->fls_values[
+        g_nativeaot_runtime_fls_slot];
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_MAIN_COM=0x",
+                     gxos_com_is_initialized(callback_thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_FINALIZER_COM=0x",
+                     gxos_com_is_initialized(callback_finalizer));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_TLS_VECTOR=0x", g_tls_vector);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_TLS_BLOCK=0x", g_tls_block);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_NATIVE_THREAD_STATE=0x",
+                     *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x30));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_STACK_VM_REGIONS=0x",
+                     callback_counts.vm_region_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_ACTIVE_WAITS=0x",
+                     callback_counts.active_wait_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_VALID_WAIT_RECORDS=0x",
+                     callback_counts.valid_wait_records);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_REVERSE_PINVOKE=GENERATED_EXPORT_THUNK\r\n");
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_EXCEPTION_POLICY=NO_EXCEPTION_CROSSING\r\n");
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_GC_POLICY=GC_LIGHT_NO_ALLOCATION\r\n");
+    install_fault_handlers();
+    callback_fls_before = (uintptr_t)callback_thread->fls_values[
+        g_nativeaot_runtime_fls_slot];
+    activate_nativeaot_tls();
+    g_phase = PHASE_IN_MANAGED;
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_1_BEGIN\r\n");
+    if (gxos_nativeaot_callback_invoke(&g_managed_callback_bridge, 41,
+                                       &callback_result1) !=
+        GXOS_NATIVEAOT_CALLBACK_OK) {
+        restore_nativeaot_tls();
+        fail("nativeaot-managed-callback-1");
+    }
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
+    restore_nativeaot_tls();
+    callback_fls_after = (uintptr_t)callback_thread->fls_values[
+        g_nativeaot_runtime_fls_slot];
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_INPUT1=0x", 41);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_RESULT1=0x",
+                     (uint32_t)callback_result1);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_COUNTER1=0x",
+                     ((uint32_t)callback_result1 >> 16) & 0xFFFFU);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_MAIN_FLS1_BEFORE=0x",
+                     callback_fls_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_MAIN_FLS1_AFTER=0x",
+                     callback_fls_after);
+    serial_text("\r\n");
+    if ((uint32_t)callback_result1 != 0x0001002AU ||
+        callback_fls_before != callback_fls_after) {
+        fail("nativeaot-managed-callback-1-result-or-fls");
+    }
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_1_OK\r\n");
+
+    callback_fls_before = (uintptr_t)callback_thread->fls_values[
+        g_nativeaot_runtime_fls_slot];
+    activate_nativeaot_tls();
+    g_phase = PHASE_IN_MANAGED;
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_2_BEGIN\r\n");
+    if (gxos_nativeaot_callback_invoke(&g_managed_callback_bridge, 99,
+                                       &callback_result2) !=
+        GXOS_NATIVEAOT_CALLBACK_OK) {
+        restore_nativeaot_tls();
+        fail("nativeaot-managed-callback-2");
+    }
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
+    restore_nativeaot_tls();
+    callback_fls_after = (uintptr_t)callback_thread->fls_values[
+        g_nativeaot_runtime_fls_slot];
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_INPUT2=0x", 99);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_RESULT2=0x",
+                     (uint32_t)callback_result2);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_COUNTER2=0x",
+                     ((uint32_t)callback_result2 >> 16) & 0xFFFFU);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_MAIN_FLS2_BEFORE=0x",
+                     callback_fls_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_MAIN_FLS2_AFTER=0x",
+                     callback_fls_after);
+    serial_text("\r\n");
+    if ((uint32_t)callback_result2 != 0x00020064U ||
+        callback_fls_before != callback_fls_after) {
+        fail("nativeaot-managed-callback-2-result-or-fls");
+    }
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_2_OK\r\n");
+    restore_fault_handlers();
+    callback_finalizer = nativeaot_durability_blocked_worker();
+    callback_counts = nativeaot_durability_counts();
+    if (callback_thread != gxos_scheduler_current_thread() ||
+        callback_thread->state != GXOS_SCHEDULER_THREAD_RUNNING ||
+        callback_finalizer == 0 ||
+        callback_finalizer->state != GXOS_SCHEDULER_THREAD_BLOCKED ||
+        callback_finalizer->wait_record == 0 ||
+        callback_finalizer->fls_values[g_nativeaot_runtime_fls_slot] == 0 ||
+        callback_finalizer->fls_values[g_nativeaot_runtime_fls_slot] !=
+            callback_finalizer_fls_before ||
+        gxos_com_is_initialized(callback_thread) != 0 ||
+        gxos_com_model(callback_finalizer) != GXOS_COM_MODEL_MTA ||
+        callback_counts.active_wait_count != 1U ||
+        callback_counts.valid_wait_records != 1U ||
+        callback_counts.vm_region_count != 2U) {
+        fail("nativeaot-managed-callback-post-state");
+    }
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_MAIN_FLS_AFTER=0x",
+                     callback_thread->fls_values[g_nativeaot_runtime_fls_slot]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_FINALIZER_FLS_AFTER=0x",
+                     callback_finalizer->fls_values[g_nativeaot_runtime_fls_slot]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_FINALIZER_WAIT_RECORD=0x",
+                     (uintptr_t)callback_finalizer->wait_record);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_COUNT=0x",
+                     g_managed_callback_bridge.invocation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_PROCESS_INITIALIZATION_CALLS=0x",
+                     nativeaot_process_entry_calls);
+    serial_text("\r\n");
+    if (g_managed_callback_bridge.invocation_count != 2U ||
+        nativeaot_process_entry_calls != 1U) {
+        fail("nativeaot-managed-callback-count");
+    }
+#endif
     halt_forever();
     return EFI_SUCCESS;
 }

@@ -5,11 +5,19 @@ param(
     [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'IsProcessInJob', 'IsProcessInJobDisabled', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'RegisterOnexitMarkerMutation', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled', 'CreateEventW', 'CreateEventWDisabled', 'CreateMemoryResourceNotification', 'CreateMemoryResourceNotificationDisabled', 'CreateThread', 'CreateThreadDisabled', 'SetThreadPriority', 'SetThreadPriorityDisabled', 'ResumeThread', 'ResumeThreadDisabled', 'GlobalMemoryStatusEx', 'GlobalMemoryStatusExDisabled', 'VirtualMemory', 'NativeAotEventWait', 'SyntheticScheduler')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
+    [switch]$EnableNativeAotManagedCallback,
     [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($EnableNativeAotManagedCallback -and $Scenario -ne 'NativeAotEventWait') {
+    throw 'NativeAot managed callback validation requires the NativeAotEventWait scenario.'
+}
+if ($EnableNativeAotManagedCallback -and -not $EnableNativeAotStartup) {
+    throw 'NativeAot managed callback validation requires -EnableNativeAotStartup.'
+}
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
@@ -45,6 +53,7 @@ $multibyteSource = Join-Path $root 'src\Gate4Harness\platform_multibyte.c'
 $multibyteAssembly = Join-Path $root 'src\Gate4Harness\platform_multibyte_entry.S'
 $moduleRegistrySource = Join-Path $root 'src\Gate4Harness\platform_module_registry.c'
 $loadLibrarySource = Join-Path $root 'src\Gate4Harness\platform_load_library.c'
+$nativeAotCallbackBridgeSource = Join-Path $root 'src\Gate4Harness\nativeaot_callback_bridge.c'
 $createMemoryResourceNotificationSource = Join-Path $root 'src\Gate4Harness\create_memory_resource_notification.c'
 $createThreadSource = Join-Path $root 'src\Gate4Harness\create_thread.c'
 $createThreadEntryAssembly = Join-Path $root 'src\Gate4Harness\create_thread_entry.S'
@@ -79,6 +88,9 @@ if (-not (Test-Path -LiteralPath $source)) { throw "Harness source not found: $s
 if (-not (Test-Path -LiteralPath $moduleRegistrySource) -or
     -not (Test-Path -LiteralPath $loadLibrarySource)) {
     throw "Module loading sources not found: $moduleRegistrySource / $loadLibrarySource"
+}
+if (-not (Test-Path -LiteralPath $nativeAotCallbackBridgeSource)) {
+    throw "NativeAOT callback bridge source not found: $nativeAotCallbackBridgeSource"
 }
 if (-not (Test-Path -LiteralPath $memoryAccountingSource)) { throw "Memory accounting source not found: $memoryAccountingSource" }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
@@ -128,7 +140,8 @@ if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
     $Scenario -eq 'GlobalMemoryStatusEx' -or $Scenario -eq 'GlobalMemoryStatusExDisabled' -or
     $Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait') {
     $payloadHash = (Get-FileHash -LiteralPath $managedArtifact -Algorithm SHA256).Hash.ToUpperInvariant()
-    if ($payloadHash -ne '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837') {
+    if (-not $EnableNativeAotManagedCallback -and
+        $payloadHash -ne '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837') {
         throw "The thread payload integration requires the exact veh-final3-normal-gate payload. Hash=$payloadHash"
     }
 }
@@ -168,6 +181,7 @@ $gccArguments = @(
     $importFailfastEntryAssembly,
     $moduleRegistrySource,
     $loadLibrarySource,
+    $nativeAotCallbackBridgeSource,
     (Join-Path $root 'src\Gate4Harness\platform_get_module_handle.c'),
     (Join-Path $root 'src\Gate4Harness\platform_get_module_handle_ex.c'),
     (Join-Path $root 'src\Gate4Harness\platform_get_proc_address.c'),
@@ -1009,6 +1023,7 @@ if ($Scenario -eq 'NativeAotEventWait') {
     $gccArguments += $multibyteAssembly
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
+if ($EnableNativeAotManagedCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK' }
 if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }
 if ($Scenario -eq 'SyntheticScheduler') {
     $gccArguments += '-DGXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF'

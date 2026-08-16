@@ -15,6 +15,8 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
+The post-initialization managed callback bridge is now proven: the loaded PE export table discovers `ManagedCallback`, the one-shot NativeAOT process entry returns, and three fresh QEMU boots execute two later native-to-managed-to-native calls with managed counter results `0x0001002A` and `0x00020064`. See [the NativeAOT managed callback bridge contract](docs/NATIVEAOT_MANAGED_CALLBACK.md).
+
 The allocation/GC follow-on remains bounded: the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, `_initterm`, `strcmp`, `strlen`, `GetEnvironmentVariableW`, Microsoft x64 `_stricmp`, and the bounded pre-heap `malloc` contracts advance authentic startup. Three fresh positive malloc runs reach the first three payload allocations and stop at the next authentic `KERNEL32.dll!AddVectoredExceptionHandler` import. No `free`, `calloc`, `realloc`, `_recalloc`, `_callnewh`, GC startup, managed-thread registration, general SLIST operation, or generalized heap behavior is claimed. See [the bounded `malloc` bootstrap contract](docs/CRT_MALLOC_BOOTSTRAP.md) and [the `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md).
 
 ## Provisional first-image path
@@ -27,6 +29,7 @@ UEFI firmware
   -> bounded TLS, stack, FLS, handle, virtual-query, and one-thread lock state
   -> exported ManagedMain reverse-P/Invoke entry
   -> managed serial callback and deterministic return
+  -> post-initialization ManagedCallback export with existing runtime state
 ```
 
 This milestone deliberately excludes allocation, garbage collection, exceptions, unwinding, threads, synchronization beyond the startup contract, reflection, dynamic loading, networking, globalization, filesystem support, and broad framework compatibility.

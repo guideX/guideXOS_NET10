@@ -22,6 +22,19 @@ public unsafe struct GuideXBootInfo
 public static unsafe class ManagedEntry
 {
     private const int MarkerLength = 29;
+    private static int s_managedCallbackCount;
+
+    [UnmanagedCallersOnly(EntryPoint = "ManagedCallback")]
+    public static int ManagedCallback(int value)
+    {
+        if ((uint)value > 0xFFFEU)
+        {
+            return -1;
+        }
+
+        s_managedCallbackCount++;
+        return (s_managedCallbackCount << 16) | (value + 1);
+    }
 
 #if GXOS_ALLOCATION_PROBE
     private const ulong AllocationValue = 0x1122334455667788UL;

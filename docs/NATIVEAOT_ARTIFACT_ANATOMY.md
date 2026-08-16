@@ -75,6 +75,23 @@ Each of the 95 currently unreachable symbols is patched to a guideXOS-owned stub
 
 The current path is therefore a legitimate direct exported NativeAOT entry for this no-allocation artifact, with its required transition state explicitly supplied by the loader. It is not a general NativeAOT process-start contract.
 
+## Post-initialization callback differential
+
+The callback milestone intentionally rebuilds the payload with one additional
+`[UnmanagedCallersOnly(EntryPoint = "ManagedCallback")]` method. The original
+payload remains the historical one-export artifact documented above; the
+callback artifact is 729,600 bytes with SHA-256
+`72F5CD40EE698B6BCCF6D67AEAB1BA570A2CE6B49B083B447AF067AA6F1EE9FA`, versus
+the original `2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837`.
+It exports `ManagedCallback` at RVA `0x24724` and `ManagedMain` at RVA
+`0x2476C`. The added method is the only managed behavior change for this
+milestone; its bounded static counter proves two entries into the same
+initialized runtime. The loader discovers the callback by name from the loaded
+PE export directory and activates the already initialized main-thread GS/TLS
+state for each call. It never invokes the PE top-level process entry a second
+time. Full evidence is in
+[NATIVEAOT_MANAGED_CALLBACK.md](NATIVEAOT_MANAGED_CALLBACK.md).
+
 ## Allocation-enabled variant
 
 The follow-on allocation artifact is intentionally a differential build, not a replacement for the Gate 4 control. Its shared PE is 731,136 bytes with SHA-256 `6D1306C8E1DE9DDEADAC478171418B32841E1E683F3DBCEB8191BDBCB48A1379`; the no-allocation control used for the fresh baseline is 729,600 bytes with SHA-256 `C9BCC17E21BE1871C9BBFA4FFFEAD7211513AD420F073F0023DEEB122B5C4861`. The two manifests have identical 10 import descriptors and 124 import symbols. The allocation map adds the probe EEType, writable data, constructor, and `ManagedEntry__AllocateOne`; it does not add a platform import.
