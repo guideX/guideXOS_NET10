@@ -6,6 +6,7 @@
 #define GXOS_EVENT_ERROR_INVALID_HANDLE 6U
 #define GXOS_EVENT_ERROR_NOT_ENOUGH_MEMORY 8U
 #define GXOS_EVENT_ERROR_INVALID_PARAMETER 87U
+#define GXOS_WAIT_IO_COMPLETION 0x000000C0U
 
 typedef int (*GXOS_WAIT_READ_HANDLE)(const void *source,
                                      GXOS_SCHEDULER_HANDLE *handle_out);
@@ -20,6 +21,17 @@ int gxos_set_event_contract(const GXOS_EVENT_API_CONTEXT *context,
 
 int gxos_reset_event_contract(const GXOS_EVENT_API_CONTEXT *context,
                               GXOS_SCHEDULER_HANDLE handle);
+
+uint32_t gxos_wait_for_single_object_ex_contract(
+    const GXOS_EVENT_API_CONTEXT *context,
+    GXOS_SCHEDULER_HANDLE handle,
+    uint32_t milliseconds,
+    uint32_t alertable);
+
+uint32_t gxos_wait_for_single_object_contract(
+    const GXOS_EVENT_API_CONTEXT *context,
+    GXOS_SCHEDULER_HANDLE handle,
+    uint32_t milliseconds);
 
 uint32_t gxos_wait_for_multiple_objects_ex_contract(
     const GXOS_EVENT_API_CONTEXT *context,

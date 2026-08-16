@@ -25,8 +25,8 @@ Current limitations are explicit:
 
 - one CPU only;
 - cooperative scheduling only, with no preemption or SMP;
-- no timeout queue yet, although wait preparation is the integration point for
-  a future timer queue;
+- finite wait deadlines are serviced cooperatively through the configured
+  scheduler clock; there is no preemptive timer interrupt or SMP wake source;
 - only the separately documented, exact `KERNEL32.dll!CreateEventW` payload
   boundary; no general Windows API claim;
 - unnamed events only, with no `SECURITY_ATTRIBUTES` support;
@@ -154,9 +154,22 @@ Reset clears the bit in either mode.  Wait registration, wakeup, reset, close,
 and destruction are bounded operations.  The event record remains live while a
 waiter is registered, even if its public handle has been closed.
 
-The current wait API accepts infinite waits.  It has no timeout implementation
-yet; the scheduler's wait preparation/selection boundary is the reserved
-timer-queue integration point.
+The shared single-object wait path accepts zero, finite, and `INFINITE` waits.
+Finite waits capture an overflow-saturating millisecond deadline from the
+configured clock, arm it in the canonical wait record, and are completed by
+`gxos_scheduler_service_timeouts`/`gxos_scheduler_poll_timeouts`.  A timeout
+removes the waiter, releases the object pin, makes the TCB `Runnable`, and
+returns `WAIT_TIMEOUT`; a signal uses the same path and returns
+`WAIT_OBJECT_0`.  The NativeAOT loader clock is EFI `GetTime` converted to
+100-nanosecond `FILETIME` units and then milliseconds.  No timer interrupt is
+claimed.
+
+`WaitForSingleObjectEx` currently exposes the truthful non-alertable contract
+for modeled Event objects.  `bAlertable != FALSE` returns `WAIT_FAILED` with
+`ERROR_INVALID_PARAMETER`: this scheduler has no APC queue, completion
+routine, or asynchronous-I/O completion source and therefore never fabricates
+`WAIT_IO_COMPLETION`.  Thread handles and other non-Event object types remain
+unsupported by this public wait adapter and fail with `ERROR_INVALID_PARAMETER`.
 
 ## Deterministic Gate4 scenario
 

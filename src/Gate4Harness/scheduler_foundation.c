@@ -4,6 +4,29 @@
 static GXOS_SCHEDULER *g_scheduler;
 
 #ifdef GXOS_SCHEDULER_HOST_TEST
+/* Host-only link fallbacks.  Event API tests provide strong shims that model
+   a context switch; unrelated host suites only need the scheduler object to
+   link without pulling in freestanding assembly. */
+void __attribute__((weak)) gxos_scheduler_main_block(
+    GXOS_SCHEDULER_HANDLE event,
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot,
+    int32_t *wait_result)
+{
+    (void)event;
+    (void)snapshot;
+    if (wait_result != 0) *wait_result = GXOS_SCHEDULER_WAIT_FAILURE;
+}
+
+void __attribute__((weak)) gxos_scheduler_worker_wait(
+    GXOS_SCHEDULER_HANDLE event,
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot,
+    int32_t *wait_result)
+{
+    gxos_scheduler_main_block(event, snapshot, wait_result);
+}
+#endif
+
+#ifdef GXOS_SCHEDULER_HOST_TEST
 static uint64_t g_host_gs_base;
 static uint64_t g_host_flags = 0x202U;
 
@@ -413,7 +436,10 @@ static void remove_waiter(GXOS_SCHEDULER_WAITABLE *waitable, uint32_t index)
     }
 }
 
-static void wake_waiter(GXOS_SCHEDULER_WAITABLE *waitable, uint32_t index)
+static void complete_waiter(GXOS_SCHEDULER_WAITABLE *waitable,
+                            uint32_t index,
+                            uint32_t completion_result,
+                            GXOS_SCHEDULER_WAIT_RESULT wait_result)
 {
     GXOS_SCHEDULER_WAIT_RECORD *record;
     GXOS_SCHEDULER_TCB *thread;
@@ -427,15 +453,30 @@ static void wake_waiter(GXOS_SCHEDULER_WAITABLE *waitable, uint32_t index)
     thread = record->thread;
     remove_waiter(waitable, index);
     record->completed = 1;
-    record->completion_result = GXOS_WAIT_OBJECT_0;
+    record->completion_result = completion_result;
     thread->blocked_object = 0;
-    thread->blocked_result = GXOS_SCHEDULER_WAIT_SIGNALED;
+    thread->blocked_result = wait_result;
     thread->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
     if (!enqueue_runnable(thread)) {
         /* A blocked thread frees its running slot, so this is defensive only;
            retain completion state if a future queue policy rejects it. */
         thread->state = GXOS_SCHEDULER_THREAD_BLOCKED;
     }
+}
+
+static void wake_waiter(GXOS_SCHEDULER_WAITABLE *waitable, uint32_t index)
+{
+    complete_waiter(waitable, index, GXOS_WAIT_OBJECT_0,
+                    GXOS_SCHEDULER_WAIT_SIGNALED);
+}
+
+static void timeout_waiter(GXOS_SCHEDULER_WAIT_RECORD *record)
+{
+    if (record == 0 || record->waitable == 0 || !record->waiter_linked) {
+        return;
+    }
+    complete_waiter(record->waitable, record->waiter_index, GXOS_WAIT_TIMEOUT,
+                    GXOS_SCHEDULER_WAIT_TIMED_OUT);
 }
 
 static GXOS_SCHEDULER_WAIT_RECORD *find_free_wait_record(void)
@@ -611,6 +652,60 @@ int gxos_scheduler_configure_stack_vm(
     scheduler->unregister_stack_vm = unregister_stack_vm;
     scheduler->stack_vm_context = context;
     return 1;
+}
+
+int gxos_scheduler_configure_clock(GXOS_SCHEDULER *scheduler,
+                                   GXOS_SCHEDULER_NOW_MS now_ms,
+                                   void *context)
+{
+    if (scheduler == 0 || scheduler != g_scheduler || !scheduler->active ||
+        scheduler->current != scheduler->boot_thread || now_ms == 0) {
+        return 0;
+    }
+    scheduler->now_ms = now_ms;
+    scheduler->clock_context = context;
+    return 1;
+}
+
+int gxos_scheduler_arm_wait_timeout(uint64_t deadline_ms)
+{
+    if (g_scheduler == 0 || !g_scheduler->active ||
+        g_scheduler->current == 0 ||
+        g_scheduler->current->state != GXOS_SCHEDULER_THREAD_RUNNING ||
+        g_scheduler->current->wait_record != 0) {
+        return 0;
+    }
+    g_scheduler->pending_wait_timeout_armed = 1;
+    g_scheduler->pending_wait_deadline_ms = deadline_ms;
+    return 1;
+}
+
+int gxos_scheduler_service_timeouts(uint64_t now_ms)
+{
+    uint32_t index;
+    uint32_t completed = 0;
+    if (g_scheduler == 0 || !g_scheduler->active) return 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_WAIT_RECORDS; ++index) {
+        GXOS_SCHEDULER_WAIT_RECORD *record = &g_scheduler->wait_records[index];
+        if (!record->valid || !record->active || !record->timeout_armed ||
+            record->completed || now_ms < record->deadline_ms) {
+            continue;
+        }
+        timeout_waiter(record);
+        ++completed;
+    }
+    return (int)completed;
+}
+
+int gxos_scheduler_poll_timeouts(void)
+{
+    uint64_t now_ms;
+    if (g_scheduler == 0 || !g_scheduler->active ||
+        g_scheduler->now_ms == 0 ||
+        !g_scheduler->now_ms(g_scheduler->clock_context, &now_ms)) {
+        return 0;
+    }
+    return gxos_scheduler_service_timeouts(now_ms);
 }
 
 int gxos_scheduler_adopt_boot_environment(GXOS_SCHEDULER *scheduler,
@@ -1070,10 +1165,16 @@ int gxos_scheduler_prepare_wait_record(
     GXOS_SCHEDULER_TCB *next;
     GXOS_SCHEDULER_WAIT_RECORD *record;
     GXOS_SCHEDULER_WAITABLE *legacy_waitable;
+    uint8_t timeout_armed;
+    uint64_t deadline_ms;
     if (record_out != 0) *record_out = 0;
     if (g_scheduler == 0 || plan == 0 || !g_scheduler->active) {
         return GXOS_SCHEDULER_WAIT_FAILURE;
     }
+    timeout_armed = g_scheduler->pending_wait_timeout_armed;
+    deadline_ms = g_scheduler->pending_wait_deadline_ms;
+    g_scheduler->pending_wait_timeout_armed = 0;
+    g_scheduler->pending_wait_deadline_ms = 0;
     current = g_scheduler->current;
     if (current == 0 || current->state != GXOS_SCHEDULER_THREAD_RUNNING ||
         current->wait_record != 0) {
@@ -1113,6 +1214,8 @@ int gxos_scheduler_prepare_wait_record(
     record->waitable = event;
     record->pin_held = 1;
     record->completion_result = GXOS_WAIT_FAILED;
+    record->timeout_armed = timeout_armed;
+    record->deadline_ms = deadline_ms;
 
     /* The event can be signaled between the first check and registration. */
     if (event->signaled || !add_waiter(event, record)) {
@@ -1151,24 +1254,43 @@ int gxos_scheduler_prepare_wait(GXOS_SCHEDULER_HANDLE handle,
     return gxos_scheduler_prepare_wait_record(handle, plan, 0);
 }
 
+void gxos_scheduler_block_current(GXOS_SCHEDULER_HANDLE handle,
+                                  GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot,
+                                  int32_t *wait_result)
+{
+    GXOS_SCHEDULER_TCB *current = gxos_scheduler_current_thread();
+    if (current != 0 && current->is_boot_thread) {
+        gxos_scheduler_main_block(handle, snapshot, wait_result);
+    } else {
+        gxos_scheduler_worker_wait(handle, snapshot, wait_result);
+    }
+}
+
 int gxos_scheduler_finish_wait(GXOS_SCHEDULER_HANDLE handle)
 {
     GXOS_SCHEDULER_TCB *current = g_scheduler == 0 ? 0 : g_scheduler->current;
     GXOS_SCHEDULER_WAIT_RECORD *record;
     uint16_t slot;
     uint16_t generation;
+    GXOS_SCHEDULER_WAIT_RESULT wait_result;
     if (current == 0 ||
-        current->blocked_result != GXOS_SCHEDULER_WAIT_SIGNALED) {
+        (current->blocked_result != GXOS_SCHEDULER_WAIT_SIGNALED &&
+         current->blocked_result != GXOS_SCHEDULER_WAIT_TIMED_OUT)) {
         return GXOS_SCHEDULER_WAIT_FAILURE;
     }
+    wait_result = current->blocked_result;
     record = current->wait_record;
     if (record == 0) {
         current->blocked_object = 0;
         current->blocked_result = GXOS_SCHEDULER_WAIT_FAILURE;
-        return GXOS_SCHEDULER_WAIT_SIGNALED;
+        return wait_result;
     }
     if (!record->valid || !record->active || !record->completed ||
-        record->thread != current || record->completion_result != GXOS_WAIT_OBJECT_0 ||
+        record->thread != current ||
+        (wait_result == GXOS_SCHEDULER_WAIT_SIGNALED &&
+         record->completion_result != GXOS_WAIT_OBJECT_0) ||
+        (wait_result == GXOS_SCHEDULER_WAIT_TIMED_OUT &&
+         record->completion_result != GXOS_WAIT_TIMEOUT) ||
         (handle != 0 && (!decode_event_identity(handle, &slot, &generation) ||
                          slot != record->object_slot ||
                          generation != record->object_generation))) {
@@ -1178,7 +1300,7 @@ int gxos_scheduler_finish_wait(GXOS_SCHEDULER_HANDLE handle)
     current->blocked_object = 0;
     current->blocked_result = GXOS_SCHEDULER_WAIT_FAILURE;
     release_wait_record(record);
-    return GXOS_SCHEDULER_WAIT_SIGNALED;
+    return wait_result;
 }
 
 

@@ -16,6 +16,26 @@ calls. This opt-in does not route any wait, close, duplicate, query, signal,
 reset, thread, or memory-status import. See
 [KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md](KERNEL32_CREATEMEMORYRESOURCENOTIFICATION_BOOTSTRAP.md).
 
+## `WaitForSingleObjectEx` addendum (2026-08-16)
+
+The first natural NativeAOT call is now routed through the canonical
+guideXOS handle/event/wait-record/scheduler machinery.  Its exact payload
+identity is `KERNEL32.dll!WaitForSingleObjectEx`, descriptor `2`, symbol
+`0x29`, IAT RVA `0x7d180`, caller RVA `0x3539c`.  The observed call uses the
+generation-checked auto-reset Event created by the earlier `CreateEventW`
+call at caller RVA `0x41e04`; that handle is also the `CreateThread` parameter
+for the finalizer/worker entry at RVA `0x35320`.  The first call is
+`dwMilliseconds = INFINITE` and `bAlertable = FALSE`, so the worker is
+truthfully registered as blocked when the Event is nonsignaled.
+
+`WaitForSingleObject` is factored through the same routine.  The public
+single-object adapter supports modeled Event objects, zero/finite/`INFINITE`
+timeouts, generation validation, manual- and auto-reset semantics, and
+`LastError` preservation on successful wait/poll/timeout paths.  Alertable
+waits, thread-handle waits, mutexes, semaphores, APCs, completion routines,
+and asynchronous-I/O completion remain deliberately deferred because no
+truthful substrate for them exists in this payload path.
+
 Final control treatment totals for the performance-enabled build are A=functional `21`, B=deterministic fail-fast `103`, C=import elimination `0`, and D=deferred required symbols `0`. The CRT opt-in follow-on adds `_initialize_onexit_table`, for A=`22` / B=`102`; the SLIST opt-in adds `InitializeSListHead`, for A=`23` / B=`101`; the `_initterm_e` opt-in adds one more, for A=`24` / B=`100`; the `_initterm` opt-in adds one more, for A=`25` / B=`99`; the `strcmp` opt-in adds one more, for A=`26` / B=`98`; the `strlen` opt-in adds one more, for A=`27` / B=`97`; the `GetEnvironmentVariableW` opt-in adds one more, for A=`28` / B=`96`; and the `_stricmp` opt-in adds one more, for A=`29` / B=`95`. The separate `GetSystemInfo` opt-in is A=`30` / B=`94`. All other deferred symbols retain their fail-fast treatment. The no-allocation control still passes managed entry. The current allocation/startup trace initializes both empty on-exit tables, initializes one x64 SLIST header, completes the one-entry `_initterm_e` range, completes the nine-entry `_initterm` range, compares `gcServer` with `gcConservative`, computes `strlen("gcServer") = 8`, queries missing `DOTNET_gcServer`, completes 885 checked `_stricmp` calls, completes the bounded `GetSystemInfo` contract, and stops at `KERNEL32.dll!GetNumaHighestNodeNumber`; the first allocation probe remains `-10` without a GC allocation context.
 
 ## `QueryInformationJobObject` addendum (2026-08-01)

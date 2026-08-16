@@ -10,6 +10,8 @@ static GXOS_SCHEDULER_TCB *g_worker;
 static unsigned int g_checks;
 static unsigned int g_failures;
 static GXOS_SCHEDULER_HANDLE g_handle_storage;
+static uint64_t g_wait_model_clock_ms;
+static unsigned int g_wait_model_mode;
 
 #define CHECK(condition) do { \
     ++g_checks; \
@@ -79,6 +81,14 @@ static uintptr_t model_entry(void *argument)
     return (uintptr_t)argument;
 }
 
+static int model_now_ms(void *context, uint64_t *now_ms)
+{
+    (void)context;
+    if (now_ms == 0) return 0;
+    *now_ms = g_wait_model_clock_ms;
+    return 1;
+}
+
 void gxos_scheduler_start_worker(void)
 {
 }
@@ -117,15 +127,33 @@ void gxos_scheduler_main_block(GXOS_SCHEDULER_HANDLE handle,
     worker_thread = gxos_scheduler_current_thread();
     CHECK(main_thread->state == GXOS_SCHEDULER_THREAD_BLOCKED);
     CHECK(record->active && record->pin_held && record->waiter_linked);
-    CHECK(gxos_scheduler_signal_event(handle));
-    CHECK(record->completed && record->completion_result == GXOS_WAIT_OBJECT_0);
+    if (g_wait_model_mode == 1U) {
+        CHECK(record->timeout_armed);
+        CHECK(gxos_scheduler_service_timeouts(record->deadline_ms) == 1);
+        CHECK(record->completed &&
+              record->completion_result == GXOS_WAIT_TIMEOUT);
+    } else {
+        CHECK(gxos_scheduler_signal_event(handle));
+        CHECK(record->completed &&
+              record->completion_result == GXOS_WAIT_OBJECT_0);
+    }
     CHECK(main_thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE);
     g_scheduler.current = main_thread;
     main_thread->state = GXOS_SCHEDULER_THREAD_RUNNING;
     main_thread->runnable_queued = 0;
     g_scheduler.runnable_count = 0;
     worker_thread->state = GXOS_SCHEDULER_THREAD_RUNNABLE;
+    worker_thread->runnable_queued = 1;
+    g_scheduler.runnable_queue[0] = worker_thread;
+    g_scheduler.runnable_count = 1;
     *wait_result = gxos_scheduler_finish_wait(handle);
+}
+
+void gxos_scheduler_worker_wait(GXOS_SCHEDULER_HANDLE handle,
+                                GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot,
+                                int32_t *wait_result)
+{
+    gxos_scheduler_main_block(handle, snapshot, wait_result);
 }
 
 int main(void)
@@ -152,10 +180,21 @@ int main(void)
     uint32_t reset_public_handle_refs;
     uint32_t index;
     uint32_t before_refs;
+    GXOS_SCHEDULER_HANDLE single_manual;
+    GXOS_SCHEDULER_HANDLE single_auto;
+    GXOS_SCHEDULER_HANDLE single_wrapper;
+    GXOS_SCHEDULER_HANDLE single_stale;
+    GXOS_SCHEDULER_HANDLE single_thread_handle;
+    GXOS_SCHEDULER_TCB *single_thread;
+    GXOS_SCHEDULER_OBJECT *single_object;
+    GXOS_SCHEDULER_EVENT *single_event;
 
     CHECK(gxos_scheduler_initialize(&g_scheduler, model_allocate, model_free,
                                     model_log_text, model_log_hex,
                                     model_log_u32));
+    g_wait_model_clock_ms = 1000;
+    g_wait_model_mode = 0;
+    CHECK(gxos_scheduler_configure_clock(&g_scheduler, model_now_ms, 0));
     context.scheduler = &g_scheduler;
     context.read_handle = read_one_handle;
 
@@ -434,12 +473,119 @@ int main(void)
     CHECK(gxos_scheduler_close_handle(reset_pending));
     CHECK(gxos_scheduler_try_destroy_event(reset_pending));
 
+    /* WaitForSingleObjectEx shares the canonical event, handle, timeout, and
+       scheduler path.  The host shim models the other runnable thread as the
+       signaler or as the cooperative timer service. */
     CHECK(gxos_scheduler_close_handle(reset_manual));
     CHECK(gxos_scheduler_try_destroy_event(reset_manual));
     CHECK(gxos_scheduler_close_handle(reset_auto));
     CHECK(gxos_scheduler_try_destroy_event(reset_auto));
     CHECK(gxos_scheduler_close_handle(immediate));
     CHECK(gxos_scheduler_try_destroy_event(immediate));
+
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 1, &single_manual));
+    single_object = gxos_scheduler_object_from_handle(single_manual);
+    single_event = gxos_scheduler_event_from_handle(single_manual);
+    CHECK(single_object != 0 && single_event != 0 &&
+          single_object->internal_refs == 1 && single_event->signaled);
+    gxos_scheduler_set_last_error(0x1234U);
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_manual, 0, 0) == GXOS_WAIT_OBJECT_0);
+    CHECK(single_event->signaled && single_event->waiter_count == 0 &&
+          gxos_scheduler_get_last_error() == 0x1234U);
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_manual, GXOS_INFINITE, 0) == GXOS_WAIT_OBJECT_0);
+    CHECK(single_event->signaled);
+    CHECK(gxos_reset_event_contract(&context, single_manual));
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_manual, 0, 0) == GXOS_WAIT_TIMEOUT);
+    CHECK(gxos_scheduler_get_last_error() == 0x1234U);
+    gxos_scheduler_set_last_error(0x2468U);
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, (GXOS_SCHEDULER_HANDLE)0, 0, 0) == GXOS_WAIT_FAILED);
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_HANDLE &&
+          g_scheduler.boot_thread->state == GXOS_SCHEDULER_THREAD_RUNNING);
+    gxos_scheduler_set_last_error(0x1234U);
+
+    CHECK(gxos_scheduler_create_suspended_thread(
+              &g_scheduler, model_entry, 0, &single_thread_handle,
+              &single_thread));
+    CHECK(gxos_scheduler_resume_thread(single_thread_handle, 0));
+
+    g_wait_model_clock_ms = 2000;
+    g_wait_model_mode = 1U;
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_manual, 25, 0) == GXOS_WAIT_TIMEOUT);
+    CHECK(g_scheduler.boot_thread->state == GXOS_SCHEDULER_THREAD_RUNNING &&
+          gxos_scheduler_active_wait_count() == 0 &&
+          gxos_scheduler_blocked_count() == 0 &&
+          single_event->waiter_count == 0 &&
+          single_object->internal_refs == 1 &&
+          gxos_scheduler_get_last_error() == 0x1234U);
+
+    /* A finite wait signaled before its deadline returns the object result. */
+    g_wait_model_mode = 0U;
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_manual, 50, 0) == GXOS_WAIT_OBJECT_0);
+    CHECK(single_event->signaled == 1 && single_event->waiter_count == 0 &&
+          gxos_scheduler_active_wait_count() == 0 &&
+          single_object->internal_refs == 1);
+
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 0, 1, &single_auto));
+    single_event = gxos_scheduler_event_from_handle(single_auto);
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_auto, 0, 0) == GXOS_WAIT_OBJECT_0);
+    CHECK(!single_event->signaled);
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_auto, 0, 0) == GXOS_WAIT_TIMEOUT);
+    CHECK(gxos_set_event_contract(&context, single_auto));
+    CHECK(gxos_wait_for_single_object_contract(
+              &context, single_auto, GXOS_INFINITE) == GXOS_WAIT_OBJECT_0);
+    CHECK(!single_event->signaled);
+
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 1, &single_wrapper));
+    single_event = gxos_scheduler_event_from_handle(single_wrapper);
+    CHECK(gxos_wait_for_single_object_contract(
+              &context, single_wrapper, 0) == GXOS_WAIT_OBJECT_0);
+    CHECK(single_event->signaled);
+    CHECK(gxos_reset_event_contract(&context, single_wrapper));
+    g_wait_model_clock_ms = UINT64_MAX - 2U;
+    g_wait_model_mode = 1U;
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_wrapper, 100, 0) == GXOS_WAIT_TIMEOUT);
+    CHECK(g_scheduler.boot_thread->state == GXOS_SCHEDULER_THREAD_RUNNING &&
+          gxos_scheduler_active_wait_count() == 0 &&
+          single_event->waiter_count == 0);
+
+    /* The Ex flag is defined, but no APC or completion source exists. */
+    gxos_scheduler_set_last_error(0x5678U);
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_wrapper, GXOS_INFINITE, 1) == GXOS_WAIT_FAILED);
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_PARAMETER &&
+          single_event->waiter_count == 0 &&
+          g_scheduler.boot_thread->state == GXOS_SCHEDULER_THREAD_RUNNING);
+
+    gxos_scheduler_set_last_error(0x9ABCU);
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_thread_handle, 0, 0) == GXOS_WAIT_FAILED);
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_PARAMETER);
+    CHECK(gxos_scheduler_close_handle(single_thread_handle));
+    CHECK(gxos_scheduler_discard_created_thread(single_thread));
+
+    CHECK(gxos_scheduler_create_event(&g_scheduler, 1, 0, &single_stale));
+    CHECK(gxos_scheduler_close_handle(single_stale));
+    CHECK(gxos_scheduler_try_destroy_event(single_stale));
+    gxos_scheduler_set_last_error(0x1357U);
+    CHECK(gxos_wait_for_single_object_ex_contract(
+              &context, single_stale, 0, 0) == GXOS_WAIT_FAILED);
+    CHECK(gxos_scheduler_get_last_error() == GXOS_EVENT_ERROR_INVALID_HANDLE);
+
+    CHECK(gxos_scheduler_close_handle(single_manual));
+    CHECK(gxos_scheduler_try_destroy_event(single_manual));
+    CHECK(gxos_scheduler_close_handle(single_auto));
+    CHECK(gxos_scheduler_try_destroy_event(single_auto));
+    CHECK(gxos_scheduler_close_handle(single_wrapper));
+    CHECK(gxos_scheduler_try_destroy_event(single_wrapper));
 
     CHECK(gxos_scheduler_teardown(&g_scheduler));
     CHECK(g_failures == 0);

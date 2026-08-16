@@ -48,6 +48,7 @@ typedef uint64_t (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_ALLOCATE_PAGES)(
     uint32_t type, uint32_t memory_type, uint64_t pages, uint64_t *memory);
 typedef uint64_t (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_FREE_PAGES)(
     uint64_t memory, uint64_t pages);
+typedef int (*GXOS_SCHEDULER_NOW_MS)(void *context, uint64_t *now_ms);
 typedef void (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_LOG_TEXT)(const char *text);
 typedef void (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_LOG_HEX)(const char *name,
                                                                uint64_t value);
@@ -149,7 +150,8 @@ enum {
 typedef enum {
     GXOS_SCHEDULER_WAIT_FAILURE = -1,
     GXOS_SCHEDULER_WAIT_BLOCKED = 0,
-    GXOS_SCHEDULER_WAIT_SIGNALED = 1
+    GXOS_SCHEDULER_WAIT_SIGNALED = 1,
+    GXOS_SCHEDULER_WAIT_TIMED_OUT = 2
 } GXOS_SCHEDULER_WAIT_RESULT;
 
 typedef uint64_t GXOS_SCHEDULER_HANDLE;
@@ -202,7 +204,8 @@ typedef struct GXOS_SCHEDULER_WAIT_RECORD {
     uint8_t waiter_linked;
     uint8_t pin_held;
     uint8_t wait_kind;
-    uint16_t reserved;
+    uint8_t timeout_armed;
+    uint8_t reserved;
     uint32_t generation;
     uint32_t waiting_identity;
     uint16_t waiting_thread_slot;
@@ -211,6 +214,7 @@ typedef struct GXOS_SCHEDULER_WAIT_RECORD {
     uint16_t object_generation;
     uint32_t waiter_index;
     uint32_t completion_result;
+    uint64_t deadline_ms;
     struct GXOS_SCHEDULER_TCB *thread;
     GXOS_SCHEDULER_OBJECT *object;
     GXOS_SCHEDULER_WAITABLE *waitable;
@@ -289,6 +293,8 @@ typedef struct GXOS_SCHEDULER_TCB {
 typedef struct GXOS_SCHEDULER {
     GXOS_SCHEDULER_ALLOCATE_PAGES allocate_pages;
     GXOS_SCHEDULER_FREE_PAGES free_pages;
+    GXOS_SCHEDULER_NOW_MS now_ms;
+    void *clock_context;
     GXOS_SCHEDULER_LOG_TEXT log_text;
     GXOS_SCHEDULER_LOG_HEX log_hex;
     GXOS_SCHEDULER_LOG_U32 log_u32;
@@ -319,6 +325,9 @@ typedef struct GXOS_SCHEDULER {
     uint64_t boot_stack_lower;
     uint64_t boot_stack_upper;
     uint8_t active;
+    uint8_t pending_wait_timeout_armed;
+    uint8_t reserved_scheduler[6];
+    uint64_t pending_wait_deadline_ms;
     GXOS_SCHEDULER_SWITCH_PLAN pending_plan;
 } GXOS_SCHEDULER;
 
@@ -333,6 +342,9 @@ void gxos_scheduler_main_dispatch(GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot);
 void gxos_scheduler_worker_wait(GXOS_SCHEDULER_HANDLE event,
                                 GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot,
                                 int32_t *wait_result);
+void gxos_scheduler_block_current(GXOS_SCHEDULER_HANDLE event,
+                                  GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot,
+                                  int32_t *wait_result);
 GXOS_SCHEDULER_SWITCH_PLAN *gxos_scheduler_pending_plan(void);
 void gxos_scheduler_set_worker_sentinels(void);
 void gxos_scheduler_capture_worker_sentinels(
@@ -359,6 +371,9 @@ int gxos_scheduler_configure_stack_vm(
     GXOS_SCHEDULER_REGISTER_STACK_VM register_stack_vm,
     GXOS_SCHEDULER_UNREGISTER_STACK_VM unregister_stack_vm,
     void *context);
+int gxos_scheduler_configure_clock(GXOS_SCHEDULER *scheduler,
+                                   GXOS_SCHEDULER_NOW_MS now_ms,
+                                   void *context);
 int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
                                 uint8_t manual_reset,
                                 uint8_t initial_signaled,
@@ -392,6 +407,9 @@ int gxos_scheduler_prepare_wait_record(
     GXOS_SCHEDULER_HANDLE handle,
     GXOS_SCHEDULER_SWITCH_PLAN *plan,
     GXOS_SCHEDULER_WAIT_RECORD **record_out);
+int gxos_scheduler_arm_wait_timeout(uint64_t deadline_ms);
+int gxos_scheduler_service_timeouts(uint64_t now_ms);
+int gxos_scheduler_poll_timeouts(void);
 int gxos_scheduler_finish_wait(GXOS_SCHEDULER_HANDLE handle);
 int gxos_scheduler_prepare_yield(GXOS_SCHEDULER_SWITCH_PLAN *plan);
 int gxos_scheduler_prepare_terminate(uintptr_t return_value,

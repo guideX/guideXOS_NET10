@@ -484,6 +484,46 @@ static uint32_t g_reset_event_active_wait_count_after;
 static uint32_t g_wait_import_descriptor_index;
 static uint32_t g_wait_import_symbol_index;
 static uint32_t g_wait_importing_iat_rva;
+static uint32_t g_wait_single_import_descriptor_index;
+static uint32_t g_wait_single_import_symbol_index;
+static uint32_t g_wait_single_importing_iat_rva;
+static uint32_t g_wait_single_invocation_count;
+static uint32_t g_wait_single_success_count;
+static uint32_t g_wait_single_timeout_count;
+static uint32_t g_wait_single_failure_count;
+static uint64_t g_wait_single_last_handle;
+static uint32_t g_wait_single_last_timeout;
+static uint32_t g_wait_single_last_alertable;
+static uint32_t g_wait_single_last_error_before;
+static uint32_t g_wait_single_last_error_after;
+static uint32_t g_wait_single_last_result;
+static uint32_t g_wait_single_last_blocked;
+static uint32_t g_wait_single_last_object_slot;
+static uint32_t g_wait_single_last_object_generation;
+static uint32_t g_wait_single_last_object_type;
+static uint32_t g_wait_single_last_object_signaled_before;
+static uint32_t g_wait_single_last_object_signaled_after;
+static uint32_t g_wait_single_last_object_internal_refs_before;
+static uint32_t g_wait_single_last_object_internal_refs_after;
+static uint32_t g_wait_single_last_waiter_count_before;
+static uint32_t g_wait_single_last_waiter_count_after;
+static uint32_t g_wait_single_last_scheduler_thread_identity;
+static uint32_t g_wait_single_last_scheduler_state_before;
+static uint32_t g_wait_single_last_scheduler_state_after;
+static uint32_t g_wait_single_last_main_state_before;
+static uint32_t g_wait_single_last_main_state_after;
+static uint32_t g_wait_single_last_worker_state_before;
+static uint32_t g_wait_single_last_worker_state_after;
+static uint32_t g_wait_single_last_runnable_count_before;
+static uint32_t g_wait_single_last_runnable_count_after;
+static uint32_t g_wait_single_last_blocked_count_before;
+static uint32_t g_wait_single_last_blocked_count_after;
+static uint64_t g_wait_single_last_worker_execution_count;
+static uint32_t g_wait_single_last_main_com_initialized;
+static uint32_t g_wait_single_last_worker_com_initialized;
+static uint32_t g_wait_single_last_main_com_model;
+static uint32_t g_wait_single_last_worker_com_model;
+static uint64_t g_wait_single_last_current_rsp;
 static uint32_t g_wait_invocation_count;
 static uint32_t g_wait_success_count;
 static uint32_t g_wait_failure_count;
@@ -526,6 +566,13 @@ static uint32_t EFIAPI platform_wait_for_multiple_objects_ex(
     uint32_t wait_all,
     uint32_t milliseconds,
     uint32_t alertable);
+static uint32_t EFIAPI platform_wait_for_single_object_ex(
+    void *handle,
+    uint32_t milliseconds,
+    uint32_t alertable);
+static uint32_t EFIAPI platform_wait_for_single_object(
+    void *handle,
+    uint32_t milliseconds);
 #endif
 #ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
 static GXOS_CREATE_MEMORY_RESOURCE_NOTIFICATION_CONTEXT
@@ -1443,6 +1490,25 @@ static void *EFIAPI platform_create_event_w(void *event_attributes,
 #endif
 
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+static int scheduler_now_ms(void *context, uint64_t *now_ms)
+{
+    GXOS_EFI_RUNTIME_SERVICES *runtime_services =
+        (GXOS_EFI_RUNTIME_SERVICES *)context;
+    GXOS_EFI_TIME firmware_time;
+    uint64_t filetime;
+
+    if (runtime_services == 0 || runtime_services->GetTime == 0 ||
+        now_ms == 0 || runtime_services->GetTime(&firmware_time, 0) != 0) {
+        return 0;
+    }
+    if (firmware_time.TimeZone == 2047) firmware_time.TimeZone = 0;
+    if (gxos_filetime_from_efi_time(&firmware_time, &filetime) != GXOS_TIME_OK) {
+        return 0;
+    }
+    *now_ms = filetime / 10000ULL;
+    return 1;
+}
+
 static void emit_standard_handle_counts(uint32_t *live_objects,
                                          uint32_t *live_public_handles,
                                          uint32_t *standard_objects)
@@ -7694,6 +7760,220 @@ static uint32_t EFIAPI platform_wait_for_multiple_objects_ex(
     serial_text("GXOS_NET10:WAITFORMULTIPLEOBJECTSEX_RETURNED\r\n");
     return result;
 }
+
+static uint32_t EFIAPI platform_wait_for_single_object_ex(
+    void *handle,
+    uint32_t milliseconds,
+    uint32_t alertable)
+{
+    GXOS_SCHEDULER_OBJECT *object = gxos_scheduler_object_from_handle(
+        (GXOS_SCHEDULER_HANDLE)(uintptr_t)handle);
+    GXOS_SCHEDULER_EVENT *event = object != 0 &&
+        object->type == GXOS_SCHEDULER_OBJECT_EVENT
+        ? (GXOS_SCHEDULER_EVENT *)object->target : 0;
+    GXOS_SCHEDULER_TCB *current = gxos_scheduler_current_thread();
+    GXOS_SCHEDULER_TCB *main_thread = g_create_event_scheduler.boot_thread;
+    GXOS_SCHEDULER_TCB *worker = gxos_scheduler_thread_from_handle(
+        g_create_thread_handle);
+    uint32_t result;
+    uint32_t invocation = ++g_wait_single_invocation_count;
+    uint32_t error_before = g_platform_last_error;
+    uintptr_t return_address = (uintptr_t)__builtin_return_address(0);
+    uintptr_t call_site = import_call_site(return_address);
+
+    g_wait_single_last_handle = (uint64_t)(uintptr_t)handle;
+    g_wait_single_last_timeout = milliseconds;
+    g_wait_single_last_alertable = alertable;
+    g_wait_single_last_error_before = error_before;
+    g_wait_single_last_blocked = 0;
+    g_wait_single_last_result = GXOS_WAIT_FAILED;
+    g_wait_single_last_object_slot = object == 0 ? UINT32_MAX : object->slot;
+    g_wait_single_last_object_generation = object == 0 ? 0 : object->generation;
+    g_wait_single_last_object_type = object == 0 ? 0 : object->type;
+    g_wait_single_last_object_signaled_before = event == 0 ? 0 : event->signaled;
+    g_wait_single_last_object_internal_refs_before =
+        object == 0 ? 0 : object->internal_refs;
+    g_wait_single_last_waiter_count_before = event == 0 ? 0 : event->waiter_count;
+    g_wait_single_last_scheduler_thread_identity = current == 0 ? 0 : current->identity;
+    g_wait_single_last_scheduler_state_before = current == 0 ? 0 : current->state;
+    g_wait_single_last_main_state_before = main_thread == 0 ? 0 : main_thread->state;
+    g_wait_single_last_worker_state_before = worker == 0 ? 0 : worker->state;
+    g_wait_single_last_runnable_count_before = gxos_scheduler_runnable_count();
+    g_wait_single_last_blocked_count_before = gxos_scheduler_blocked_count();
+    g_wait_single_last_worker_execution_count = worker == 0 ? 0 : worker->execution_count;
+    g_wait_single_last_main_com_initialized = main_thread == 0 ? 0 :
+        gxos_com_is_initialized(main_thread);
+    g_wait_single_last_worker_com_initialized = worker == 0 ? 0 :
+        gxos_com_is_initialized(worker);
+    g_wait_single_last_main_com_model = main_thread == 0 ? GXOS_COM_MODEL_NONE :
+        gxos_com_model(main_thread);
+    g_wait_single_last_worker_com_model = worker == 0 ? GXOS_COM_MODEL_NONE :
+        gxos_com_model(worker);
+    __asm__ volatile ("movq %%rsp, %0" : "=r"(g_wait_single_last_current_rsp));
+
+    serial_text("GXOS_NET10:WAITFORSINGLEOBJECTEX_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_INVOCATION=0x", invocation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_PAYLOAD_BASE=0x",
+                     g_managed_image_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_RUNTIME_IAT=0x",
+                     g_managed_image_base + g_wait_single_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_RUNTIME_CALL_SITE=0x",
+                     call_site);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_CALLER_RVA=0x",
+                     call_site >= g_managed_image_base
+                         ? call_site - g_managed_image_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_RCX_HANDLE=0x",
+                     (uint64_t)(uintptr_t)handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_RDX_MILLISECONDS=0x",
+                     milliseconds);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_R8_ALERTABLE=0x", alertable);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:WAITFORSINGLEOBJECTEX_R9_UNUSED=0x0000000000000000\r\n");
+    serial_text("GXOS_NET10:WAITFORSINGLEOBJECTEX_STACK_ARGS=NONE\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_LAST_ERROR_BEFORE=0x",
+                     error_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_CURRENT_RSP=0x",
+                     g_wait_single_last_current_rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_SCHEDULER_THREAD_IDENTITY=0x",
+                     g_wait_single_last_scheduler_thread_identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_CURRENT_STATE_BEFORE=0x",
+                     g_wait_single_last_scheduler_state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_MAIN_STATE_BEFORE=0x",
+                     g_wait_single_last_main_state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_WORKER_STATE_BEFORE=0x",
+                     g_wait_single_last_worker_state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_RUNNABLE_COUNT_BEFORE=0x",
+                     g_wait_single_last_runnable_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_BLOCKED_COUNT_BEFORE=0x",
+                     g_wait_single_last_blocked_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_WORKER_EXECUTION_COUNT=0x",
+                     g_wait_single_last_worker_execution_count);
+    serial_text("\r\n");
+    g_wait_single_last_blocked = object != 0 && event != 0 &&
+        current != 0 && current->state == GXOS_SCHEDULER_THREAD_RUNNING &&
+        event->signaled == 0 && milliseconds != 0U && alertable == 0U &&
+        gxos_scheduler_runnable_count() != 0U;
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_WILL_BLOCK=0x",
+                     g_wait_single_last_blocked);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_OBJECT_SLOT=0x",
+                     g_wait_single_last_object_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_OBJECT_GENERATION=0x",
+                     g_wait_single_last_object_generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_OBJECT_TYPE=0x",
+                     g_wait_single_last_object_type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_EVENT_MANUAL_RESET=0x",
+                     event == 0 ? 0 : event->manual_reset);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_EVENT_SIGNALED_BEFORE=0x",
+                     g_wait_single_last_object_signaled_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_EVENT_WAITER_COUNT_BEFORE=0x",
+                     g_wait_single_last_waiter_count_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_OBJECT_INTERNAL_REFS_BEFORE=0x",
+                     g_wait_single_last_object_internal_refs_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_MAIN_COM_INITIALIZED=0x",
+                     g_wait_single_last_main_com_initialized);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_WORKER_COM_INITIALIZED=0x",
+                     g_wait_single_last_worker_com_initialized);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_MAIN_COM_MODEL=0x",
+                     g_wait_single_last_main_com_model);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_WORKER_COM_MODEL=0x",
+                     g_wait_single_last_worker_com_model);
+    serial_text("\r\n");
+
+    result = gxos_wait_for_single_object_ex_contract(
+        &g_event_api_context,
+        (GXOS_SCHEDULER_HANDLE)(uintptr_t)handle,
+        milliseconds,
+        alertable);
+    g_wait_single_last_result = result;
+    if (result == GXOS_WAIT_OBJECT_0) ++g_wait_single_success_count;
+    else if (result == GXOS_WAIT_TIMEOUT) ++g_wait_single_timeout_count;
+    else {
+        ++g_wait_single_failure_count;
+        g_platform_last_error = gxos_scheduler_get_last_error();
+        if (g_platform_last_error == 0) g_platform_last_error = 6U;
+    }
+    main_thread = g_create_event_scheduler.boot_thread;
+    current = gxos_scheduler_current_thread();
+    object = gxos_scheduler_object_from_handle(
+        (GXOS_SCHEDULER_HANDLE)(uintptr_t)handle);
+    event = object != 0 && object->type == GXOS_SCHEDULER_OBJECT_EVENT
+        ? (GXOS_SCHEDULER_EVENT *)object->target : 0;
+    g_wait_single_last_object_signaled_after = event == 0 ? 0 : event->signaled;
+    g_wait_single_last_object_internal_refs_after = object == 0 ? 0 : object->internal_refs;
+    g_wait_single_last_waiter_count_after = event == 0 ? 0 : event->waiter_count;
+    g_wait_single_last_scheduler_state_after = current == 0 ? 0 : current->state;
+    g_wait_single_last_main_state_after = main_thread == 0 ? 0 : main_thread->state;
+    g_wait_single_last_worker_state_after = worker == 0 ? 0 : worker->state;
+    g_wait_single_last_runnable_count_after = gxos_scheduler_runnable_count();
+    g_wait_single_last_blocked_count_after = gxos_scheduler_blocked_count();
+    g_wait_single_last_error_after = g_platform_last_error;
+    if (result == GXOS_WAIT_OBJECT_0 || result == GXOS_WAIT_TIMEOUT) {
+        serial_text("GXOS_NET10:WAITFORSINGLEOBJECTEX_RETURNED\r\n");
+    }
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_RETURN_VALUE=0x", result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_LAST_ERROR_AFTER=0x",
+                     g_wait_single_last_error_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_EVENT_SIGNALED_AFTER=0x",
+                     g_wait_single_last_object_signaled_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_EVENT_WAITER_COUNT_AFTER=0x",
+                     g_wait_single_last_waiter_count_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_OBJECT_INTERNAL_REFS_AFTER=0x",
+                     g_wait_single_last_object_internal_refs_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_CURRENT_STATE_AFTER=0x",
+                     g_wait_single_last_scheduler_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_MAIN_STATE_AFTER=0x",
+                     g_wait_single_last_main_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_WORKER_STATE_AFTER=0x",
+                     g_wait_single_last_worker_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_RUNNABLE_COUNT_AFTER=0x",
+                     g_wait_single_last_runnable_count_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_BLOCKED_COUNT_AFTER=0x",
+                     g_wait_single_last_blocked_count_after);
+    serial_text("\r\n");
+    return result;
+}
+
+static uint32_t EFIAPI platform_wait_for_single_object(
+    void *handle,
+    uint32_t milliseconds)
+{
+    return platform_wait_for_single_object_ex(handle, milliseconds, 0U);
+}
 #endif
 
 #ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
@@ -8506,6 +8786,14 @@ static void *platform_import_target(const char *module, const char *symbol)
         equal_text(symbol, "WaitForMultipleObjectsEx")) {
         return (void *)(uintptr_t)platform_wait_for_multiple_objects_ex;
     }
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "WaitForSingleObjectEx")) {
+        return (void *)(uintptr_t)platform_wait_for_single_object_ex;
+    }
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "WaitForSingleObject")) {
+        return (void *)(uintptr_t)platform_wait_for_single_object;
+    }
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
     if (equal_text(module, "KERNEL32.dll") &&
@@ -8919,6 +9207,13 @@ static void resolve_imports(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services,
                 g_wait_import_descriptor_index = descriptors - 1U;
                 g_wait_import_symbol_index = index;
                 g_wait_importing_iat_rva = first_thunk_rva + index * 8U;
+            }
+            if (equal_text(module, "KERNEL32.dll") &&
+                equal_text(g_import_records[symbols].symbol,
+                           "WaitForSingleObjectEx")) {
+                g_wait_single_import_descriptor_index = descriptors - 1U;
+                g_wait_single_import_symbol_index = index;
+                g_wait_single_importing_iat_rva = first_thunk_rva + index * 8U;
             }
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -13032,7 +13327,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         g_reset_event_importing_iat_rva != 0x7D178U ||
         g_wait_import_descriptor_index != 2U ||
         g_wait_import_symbol_index != 0x1AU ||
-        g_wait_importing_iat_rva != 0x7D108U) {
+        g_wait_importing_iat_rva != 0x7D108U ||
+        g_wait_single_import_descriptor_index != 2U ||
+        g_wait_single_import_symbol_index != 0x29U ||
+        g_wait_single_importing_iat_rva != 0x7D180U) {
         fail("nativeaot-event-wait-import-contract");
     }
     serial_text("GXOS_NET10:SETEVENT_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -13076,6 +13374,20 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:WAITFORMULTIPLEOBJECTSEX_PREFERRED_IAT=0x",
                      image.preferred_base + g_wait_importing_iat_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:WAITFORSINGLEOBJECTEX_IMPORT_DLL=KERNEL32.dll\r\n");
+    serial_text("GXOS_NET10:WAITFORSINGLEOBJECTEX_IMPORT_SYMBOL=WaitForSingleObjectEx\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_IMPORT_DESCRIPTOR_INDEX=0x",
+                     g_wait_single_import_descriptor_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_IMPORT_SYMBOL_INDEX=0x",
+                     g_wait_single_import_symbol_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_IMPORT_IAT_RVA=0x",
+                     g_wait_single_importing_iat_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:WAITFORSINGLEOBJECTEX_PREFERRED_IAT=0x",
+                     image.preferred_base + g_wait_single_importing_iat_rva);
     serial_text("\r\n");
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -13379,6 +13691,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         &g_create_event_scheduler;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    if (!gxos_scheduler_configure_clock(
+            &g_create_event_scheduler, scheduler_now_ms,
+            system_table->RuntimeServices)) {
+        fail("createeventw-scheduler-clock");
+    }
     g_event_api_context.scheduler = &g_create_event_scheduler;
     g_event_api_context.read_handle = platform_wait_read_handle;
     g_standard_handle_context.scheduler = &g_create_event_scheduler;
