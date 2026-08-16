@@ -4880,6 +4880,68 @@ typedef void (EFIAPI *FlsCleanupCallback)(void *value);
 static uint8_t g_fls_allocated[64];
 static void *g_fls_values[64];
 static FlsCleanupCallback g_fls_callbacks[64];
+#if defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+static uint8_t g_fls_scheduler_mode;
+#endif
+
+static void fls_trace(const char *operation, uint32_t index,
+                      uintptr_t requested_value, uintptr_t result,
+                      uint32_t success)
+{
+#if defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+#endif
+    serial_text("GXOS_NET10:FLS_CALL=");
+    serial_text(operation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FLS_INDEX=0x", index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FLS_REQUESTED_VALUE=0x",
+                     requested_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FLS_RESULT=0x", result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FLS_SUCCESS=0x", success);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:FLS_GLOBAL_ALLOCATED=0x",
+                     index < 64U && g_fls_allocated[index] != 0);
+    serial_text("\r\n");
+#if defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+    serial_field_hex("GXOS_NET10:FLS_SCHEDULER_MODE=0x",
+                     g_fls_scheduler_mode);
+    serial_text("\r\n");
+#endif
+#if defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+    serial_field_hex("GXOS_NET10:FLS_CURRENT_THREAD_IDENTITY=0x",
+                     thread == 0 ? 0 : thread->identity);
+    serial_text("\r\n");
+#else
+    serial_text("GXOS_NET10:FLS_CURRENT_THREAD_IDENTITY=0x0000000000000000\r\n");
+#endif
+}
+
+#if defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+static int fls_use_scheduler_storage(void)
+{
+    return g_fls_scheduler_mode != 0 &&
+           gxos_scheduler_current_thread() != 0;
+}
+
+static void fls_adopt_scheduler_storage(void)
+{
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    uint32_t index;
+    if (thread == 0) return;
+    for (index = 0; index != 64U; ++index) {
+        if (g_fls_allocated[index]) {
+            thread->fls_allocated[index] = 1;
+            thread->fls_values[index] = (uint64_t)(uintptr_t)g_fls_values[index];
+        }
+    }
+    g_fls_scheduler_mode = 1;
+    serial_text("GXOS_NET10:FLS_PER_THREAD_STORAGE_ACTIVE\r\n");
+}
+#endif
 
 typedef int (EFIAPI *NativeAotDllEntry)(uintptr_t module_handle, uint32_t reason, void *reserved);
 
@@ -4891,34 +4953,81 @@ static uint32_t EFIAPI platform_fls_alloc(FlsCleanupCallback callback)
             g_fls_allocated[index] = 1;
             g_fls_values[index] = 0;
             g_fls_callbacks[index] = callback;
+            fls_trace("ALLOC", index, 0, index, 1);
             return index;
         }
     }
+    fls_trace("ALLOC", 0xFFFFFFFFU, 0, 0xFFFFFFFFU, 0);
     return 0xFFFFFFFFu;
 }
 
 static void *EFIAPI platform_fls_get(uint32_t index)
 {
-    if (index >= 64 || !g_fls_allocated[index]) return 0;
-    return g_fls_values[index];
+    uintptr_t result = 0;
+    if (index < 64U && g_fls_allocated[index]) {
+#if defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+        if (fls_use_scheduler_storage()) {
+            result = gxos_scheduler_get_fls(index);
+        } else
+#endif
+        {
+            result = (uintptr_t)g_fls_values[index];
+        }
+    }
+    fls_trace("GET", index, 0, result, result != 0 ||
+              (index < 64U && g_fls_allocated[index]));
+    return (void *)result;
 }
 
 static int EFIAPI platform_fls_set(uint32_t index, void *value)
 {
-    if (index >= 64 || !g_fls_allocated[index]) return 0;
-    g_fls_values[index] = value;
-    return 1;
+    int success = 0;
+    if (index < 64U && g_fls_allocated[index]) {
+#if defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+        if (fls_use_scheduler_storage()) {
+            gxos_scheduler_set_fls(index, (uintptr_t)value);
+        } else
+#endif
+        {
+            g_fls_values[index] = value;
+        }
+        success = 1;
+    }
+    fls_trace("SET", index, (uintptr_t)value,
+              success ? (uintptr_t)value : 0, success);
+    return success;
 }
 
 static int EFIAPI platform_fls_free(uint32_t index)
 {
     void *value;
-    if (index >= 64 || !g_fls_allocated[index]) return 0;
-    value = g_fls_values[index];
+    if (index >= 64U || !g_fls_allocated[index]) {
+        fls_trace("FREE", index, 0, 0, 0);
+        return 0;
+    }
+#if defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+    if (fls_use_scheduler_storage()) {
+        value = (void *)(uintptr_t)gxos_scheduler_get_fls(index);
+    } else
+#endif
+    {
+        value = g_fls_values[index];
+    }
     if (value != 0 && g_fls_callbacks[index] != 0) g_fls_callbacks[index](value);
+#if defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+    if (g_fls_scheduler_mode) {
+        uint32_t thread_index;
+        for (thread_index = 0;
+             thread_index != GXOS_SCHEDULER_MAX_THREADS; ++thread_index) {
+            g_create_event_scheduler.threads[thread_index].fls_allocated[index] = 0;
+            g_create_event_scheduler.threads[thread_index].fls_values[index] = 0;
+        }
+    }
+#endif
     g_fls_allocated[index] = 0;
     g_fls_values[index] = 0;
     g_fls_callbacks[index] = 0;
+    fls_trace("FREE", index, (uintptr_t)value, 0, 1);
     return 1;
 }
 
@@ -13683,6 +13792,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
             g_stack_lower, g_stack_upper)) {
         fail("createeventw-scheduler-adopt-environment");
     }
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    fls_adopt_scheduler_storage();
+#endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
     g_create_event_context.scheduler = &g_create_event_scheduler;
 #endif

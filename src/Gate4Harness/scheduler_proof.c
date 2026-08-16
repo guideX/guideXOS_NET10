@@ -182,6 +182,14 @@ static uintptr_t GXOS_SCHEDULER_MS_ABI proof_worker_entry(void *argument)
     gxos_scheduler_set_fls(GXOS_SCHEDULER_FLS_PROOF_SLOT,
                            (uintptr_t)0x5757000000000200ULL);
     gxos_scheduler_set_last_error(0x57570003U);
+    if (proof->worker->fls_values[GXOS_SCHEDULER_FLS_PROOF_SLOT] !=
+            (uint64_t)0x5757000000000200ULL ||
+        proof->main_thread == proof->worker ||
+        proof->main_thread->fls_values[GXOS_SCHEDULER_FLS_PROOF_SLOT] ==
+            (uint64_t)0x5757000000000200ULL) {
+        proof_fail();
+    }
+    proof_text("GXOS_NET10:SCHEDULER_FLS_PER_TCB_ISOLATION=PROVEN\r\n");
     main_tls = *(uint64_t *)(uintptr_t)(proof->main_thread->tls_block_base +
                                         GXOS_SCHEDULER_TLS_OFFSET);
     if (gxos_scheduler_gs_tls_read() != 0x5757000000000100ULL ||
