@@ -12980,6 +12980,512 @@ static int EFIAPI call_managed_entry(ManagedMainEntry entry, uintptr_t argument,
     return entry(argument);
 }
 
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+typedef struct {
+    uint32_t fls_slot;
+    GXOS_SCHEDULER_HANDLE event_handle;
+    uint32_t run_wait;
+    uintptr_t expected_fls;
+    uintptr_t initial_fls;
+    uintptr_t after_set_fls;
+    uintptr_t after_wait_fls;
+    uint32_t initial_com;
+    uint32_t com_after_init;
+    uint32_t com_after_uninitialize;
+    int32_t wait_result;
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT wait_snapshot;
+} GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT;
+
+typedef struct {
+    uint32_t live_objects;
+    uint32_t live_public_handles;
+    uint32_t internal_references;
+    uint32_t runnable_count;
+    uint32_t blocked_count;
+    uint32_t active_wait_count;
+    uint32_t valid_wait_records;
+    uint32_t live_thread_count;
+    uint32_t fls_slot_count;
+    uint32_t vm_region_count;
+} GXOS_NATIVEAOT_DURABILITY_COUNTS;
+
+/* Keep the context-switch register snapshots in static storage.  The
+   freestanding harness intentionally has no compiler stack-probe runtime. */
+static GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT
+    g_nativeaot_durability_first_context;
+static GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT
+    g_nativeaot_durability_second_context;
+static GXOS_SCHEDULER_REGISTER_SNAPSHOT g_nativeaot_durability_main_snapshot;
+static GXOS_VM_MEMORY_BASIC_INFORMATION g_nativeaot_durability_information;
+
+static void nativeaot_durability_require(int condition, const char *reason)
+{
+    if (!condition) fail(reason);
+}
+
+static uint32_t nativeaot_durability_live_thread_count(void)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        if (g_create_event_scheduler.threads[index].live) ++count;
+    }
+    return count;
+}
+
+static uint32_t nativeaot_durability_fls_slot_count(void)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != 64U; ++index) {
+        if (g_fls_allocated[index]) ++count;
+    }
+    return count;
+}
+
+static GXOS_NATIVEAOT_DURABILITY_COUNTS nativeaot_durability_counts(void)
+{
+    GXOS_NATIVEAOT_DURABILITY_COUNTS counts = {0};
+    uint32_t index;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        GXOS_SCHEDULER_OBJECT *object = &g_create_event_scheduler.objects[index];
+        if (!object->live) continue;
+        ++counts.live_objects;
+        counts.live_public_handles += object->public_handle_refs;
+        counts.internal_references += object->internal_refs;
+    }
+    for (index = 0; index != GXOS_SCHEDULER_MAX_WAIT_RECORDS; ++index) {
+        if (g_create_event_scheduler.wait_records[index].valid) {
+            ++counts.valid_wait_records;
+        }
+    }
+    counts.runnable_count = gxos_scheduler_runnable_count();
+    counts.blocked_count = gxos_scheduler_blocked_count();
+    counts.active_wait_count = gxos_scheduler_active_wait_count();
+    counts.live_thread_count = nativeaot_durability_live_thread_count();
+    counts.fls_slot_count = nativeaot_durability_fls_slot_count();
+    counts.vm_region_count = g_memory_vm_regions.live_count;
+    return counts;
+}
+
+static void nativeaot_durability_emit_count_fields(
+    const char *prefix, GXOS_NATIVEAOT_DURABILITY_COUNTS counts)
+{
+    serial_text(prefix);
+    serial_field_hex("LIVE_OBJECTS=0x", counts.live_objects);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("LIVE_PUBLIC_HANDLES=0x", counts.live_public_handles);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("INTERNAL_REFERENCES=0x", counts.internal_references);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("RUNNABLE_COUNT=0x", counts.runnable_count);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("BLOCKED_COUNT=0x", counts.blocked_count);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("ACTIVE_WAIT_COUNT=0x", counts.active_wait_count);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("VALID_WAIT_RECORDS=0x", counts.valid_wait_records);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("LIVE_THREAD_COUNT=0x", counts.live_thread_count);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("FLS_SLOT_COUNT=0x", counts.fls_slot_count);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("VM_REGION_COUNT=0x", counts.vm_region_count);
+    serial_text("\r\n");
+}
+
+static GXOS_SCHEDULER_TCB *nativeaot_durability_blocked_worker(void)
+{
+    uint32_t index;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        GXOS_SCHEDULER_TCB *thread = &g_create_event_scheduler.threads[index];
+        if (thread->live && !thread->is_boot_thread &&
+            thread->state == GXOS_SCHEDULER_THREAD_BLOCKED) {
+            return thread;
+        }
+    }
+    return 0;
+}
+
+static uint32_t nativeaot_durability_find_runtime_fls_slot(
+    GXOS_SCHEDULER_TCB *main_thread, GXOS_SCHEDULER_TCB *blocked_worker)
+{
+    uint32_t index;
+    if (main_thread == 0 || blocked_worker == 0) return UINT32_MAX;
+    for (index = 0; index != 64U; ++index) {
+        if (g_fls_allocated[index] &&
+            main_thread->fls_allocated[index] &&
+            blocked_worker->fls_allocated[index] &&
+            main_thread->fls_values[index] != 0 &&
+            blocked_worker->fls_values[index] != 0 &&
+            main_thread->fls_values[index] != blocked_worker->fls_values[index]) {
+            return index;
+        }
+    }
+    return UINT32_MAX;
+}
+
+static int nativeaot_durability_stack_query(GXOS_SCHEDULER_TCB *thread)
+{
+    GXOS_VM_MEMORY_BASIC_INFORMATION information;
+    if (thread == 0 || !thread->live || thread->stack_base == 0 ||
+        thread->stack_limit <= thread->stack_base) return 0;
+    return gxos_vm_region_virtual_query(
+               &g_memory_vm_regions, thread->stack_base, &information,
+               sizeof(information)) == sizeof(information) &&
+        information.BaseAddress == thread->stack_base &&
+        information.RegionSize == thread->stack_limit - thread->stack_base &&
+        information.State == GXOS_VM_REGION_STATE_COMMIT &&
+        information.Type == GXOS_VM_REGION_TYPE_PRIVATE;
+}
+
+static uintptr_t EFIAPI nativeaot_durability_thread_entry(void *argument)
+{
+    GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT *context =
+        (GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT *)argument;
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    uintptr_t generated_value;
+    int32_t hresult;
+
+    nativeaot_durability_require(context != 0 && thread != 0 && thread->live,
+                                 "nativeaot-durability-thread-context");
+    generated_value = ((uintptr_t)0xD000000000000000ULL) |
+                      (uintptr_t)thread->identity;
+    context->expected_fls = generated_value;
+    context->initial_fls = (uintptr_t)platform_fls_get(context->fls_slot);
+    context->initial_com = gxos_com_is_initialized(thread);
+    nativeaot_durability_require(context->initial_fls == 0 &&
+                                 context->initial_com == 0,
+                                 "nativeaot-durability-fresh-thread-state");
+    nativeaot_durability_require(platform_fls_set(
+                                     context->fls_slot,
+                                     (void *)generated_value),
+                                 "nativeaot-durability-thread-fls-set");
+    context->after_set_fls =
+        (uintptr_t)platform_fls_get(context->fls_slot);
+    nativeaot_durability_require(context->after_set_fls == generated_value,
+                                 "nativeaot-durability-thread-fls-readback");
+
+    hresult = gxos_com_initialize_ex(0, GXOS_COM_COINIT_MULTITHREADED);
+    nativeaot_durability_require(hresult == GXOS_COM_S_OK,
+                                 "nativeaot-durability-thread-com-init");
+    context->com_after_init = gxos_com_is_initialized(thread);
+    nativeaot_durability_require(context->com_after_init != 0 &&
+                                 gxos_com_model(thread) == GXOS_COM_MODEL_MTA,
+                                 "nativeaot-durability-thread-com-state");
+
+    if (context->run_wait != 0) {
+        context->wait_result = GXOS_SCHEDULER_WAIT_FAILURE;
+        gxos_scheduler_worker_wait(context->event_handle,
+                                   &context->wait_snapshot,
+                                   &context->wait_result);
+        nativeaot_durability_require(
+            context->wait_result == GXOS_SCHEDULER_WAIT_SIGNALED,
+            "nativeaot-durability-thread-wait");
+        context->after_wait_fls =
+            (uintptr_t)platform_fls_get(context->fls_slot);
+        nativeaot_durability_require(context->after_wait_fls == generated_value,
+                                     "nativeaot-durability-thread-wait-fls");
+    }
+
+    gxos_com_uninitialize();
+    context->com_after_uninitialize = gxos_com_is_initialized(thread);
+    nativeaot_durability_require(context->com_after_uninitialize == 0,
+                                 "nativeaot-durability-thread-com-uninit");
+    return generated_value;
+}
+
+static void nativeaot_durability_probe(void)
+{
+    GXOS_SCHEDULER_TCB *main_thread = g_create_event_scheduler.boot_thread;
+    GXOS_SCHEDULER_TCB *blocked_worker = nativeaot_durability_blocked_worker();
+    GXOS_NATIVEAOT_DURABILITY_COUNTS baseline;
+    GXOS_NATIVEAOT_DURABILITY_COUNTS after_cleanup;
+    GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT *first_context =
+        &g_nativeaot_durability_first_context;
+    GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT *second_context =
+        &g_nativeaot_durability_second_context;
+    GXOS_SCHEDULER_TCB *first_thread = 0;
+    GXOS_SCHEDULER_TCB *second_thread = 0;
+    GXOS_SCHEDULER_EVENT *test_event;
+    GXOS_SCHEDULER_HANDLE test_event_handle = 0;
+    GXOS_SCHEDULER_HANDLE first_handle = 0;
+    GXOS_SCHEDULER_HANDLE second_handle = 0;
+    GXOS_SCHEDULER_OBJECT *first_object;
+    GXOS_SCHEDULER_OBJECT *second_object;
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT *main_snapshot =
+        &g_nativeaot_durability_main_snapshot;
+    GXOS_VM_MEMORY_BASIC_INFORMATION *information =
+        &g_nativeaot_durability_information;
+    uint32_t fls_slot;
+    uint32_t first_generation;
+    uint32_t second_generation;
+    uint32_t baseline_blocked;
+    uint32_t baseline_active_waits;
+    uint32_t baseline_valid_wait_records;
+    uint32_t baseline_runnable;
+    uint32_t baseline_vm_regions;
+    uint64_t first_stack_base;
+    uint64_t first_stack_identity;
+    uint64_t second_stack_identity;
+    uint32_t second_stack_reused;
+    uint32_t first_identity;
+    uint32_t second_identity;
+    uintptr_t blocked_worker_fls;
+    uint64_t second_stack_base;
+
+    nativeaot_durability_require(main_thread != 0 && main_thread->live &&
+                                 main_thread->is_boot_thread &&
+                                 g_create_event_scheduler.current == main_thread,
+                                 "nativeaot-durability-main-state");
+    zero_bytes((uint8_t *)first_context, sizeof(*first_context));
+    zero_bytes((uint8_t *)second_context, sizeof(*second_context));
+    zero_bytes((uint8_t *)main_snapshot, sizeof(*main_snapshot));
+    zero_bytes((uint8_t *)information, sizeof(*information));
+    nativeaot_durability_require(blocked_worker != 0 &&
+                                 blocked_worker->wait_record != 0 &&
+                                 blocked_worker->com_initialized != 0 &&
+                                 blocked_worker->com_model == GXOS_COM_MODEL_MTA,
+                                 "nativeaot-durability-blocked-worker-state");
+    fls_slot = nativeaot_durability_find_runtime_fls_slot(
+        main_thread, blocked_worker);
+    nativeaot_durability_require(fls_slot != UINT32_MAX,
+                                 "nativeaot-durability-runtime-fls-slot");
+    baseline = nativeaot_durability_counts();
+    baseline_blocked = baseline.blocked_count;
+    baseline_active_waits = baseline.active_wait_count;
+    baseline_valid_wait_records = baseline.valid_wait_records;
+    baseline_runnable = baseline.runnable_count;
+    baseline_vm_regions = baseline.vm_region_count;
+    blocked_worker_fls = (uintptr_t)blocked_worker->fls_values[fls_slot];
+
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_MAIN_IDENTITY=0x",
+                     main_thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_BLOCKED_WORKER_IDENTITY=0x",
+                     blocked_worker->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_RUNTIME_FLS_SLOT=0x",
+                     fls_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_MAIN_FLS=0x",
+                     main_thread->fls_values[fls_slot]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_BLOCKED_WORKER_FLS=0x",
+                     blocked_worker->fls_values[fls_slot]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_MAIN_COM=0x",
+                     gxos_com_is_initialized(main_thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_BLOCKED_WORKER_COM=0x",
+                     gxos_com_is_initialized(blocked_worker));
+    serial_text("\r\n");
+    nativeaot_durability_emit_count_fields(
+        "GXOS_NET10:NATIVEAOT_DURABILITY_BASELINE_", baseline);
+    nativeaot_durability_require(nativeaot_durability_stack_query(blocked_worker),
+                                 "nativeaot-durability-blocked-stack-query");
+
+    nativeaot_durability_require(gxos_scheduler_create_event(
+                                     &g_create_event_scheduler, 0, 0,
+                                     &test_event_handle),
+                                 "nativeaot-durability-test-event-create");
+    test_event = gxos_scheduler_event_from_handle(test_event_handle);
+    nativeaot_durability_require(test_event != 0 && !test_event->signaled,
+                                 "nativeaot-durability-test-event-state");
+    first_context->fls_slot = fls_slot;
+    first_context->event_handle = test_event_handle;
+    first_context->run_wait = 1;
+    nativeaot_durability_require(gxos_scheduler_create_suspended_thread(
+                                     &g_create_event_scheduler,
+                                     nativeaot_durability_thread_entry,
+                                     first_context, &first_handle,
+                                     &first_thread),
+                                 "nativeaot-durability-first-thread-create");
+    first_object = gxos_scheduler_object_from_handle(first_handle);
+    nativeaot_durability_require(first_thread != 0 && first_object != 0 &&
+                                 first_thread->fls_allocated[fls_slot] == 0 &&
+                                 first_thread->fls_values[fls_slot] == 0 &&
+                                 nativeaot_durability_stack_query(first_thread),
+                                 "nativeaot-durability-first-thread-fresh");
+    first_identity = first_thread->identity;
+    first_generation = first_object->generation;
+    first_stack_base = first_thread->stack_base;
+    first_stack_identity = first_thread->stack_vm_identity;
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_CREATED=1\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_IDENTITY=0x",
+                     first_identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_STACK_BASE=0x",
+                     first_stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_VM_IDENTITY=0x",
+                     first_stack_identity);
+    serial_text("\r\n");
+    nativeaot_durability_require(gxos_scheduler_resume_thread(
+                                     first_handle, 0),
+                                 "nativeaot-durability-first-thread-resume");
+    gxos_scheduler_main_dispatch(main_snapshot);
+    nativeaot_durability_require(g_create_event_scheduler.current == main_thread &&
+                                 first_thread->state == GXOS_SCHEDULER_THREAD_BLOCKED &&
+                                 test_event->waiter_count == 1 &&
+                                 gxos_scheduler_blocked_count() == baseline_blocked + 1U &&
+                                 gxos_scheduler_active_wait_count() == baseline_active_waits + 1U &&
+                                 gxos_scheduler_runnable_count() == baseline_runnable,
+                                 "nativeaot-durability-first-thread-blocked");
+    nativeaot_durability_require(first_context->initial_fls == 0 &&
+                                 first_context->initial_com == 0 &&
+                                 first_thread->fls_values[fls_slot] ==
+                                     (uint64_t)first_context->expected_fls &&
+                                 blocked_worker->fls_values[fls_slot] ==
+                                     (uint64_t)blocked_worker_fls &&
+                                 nativeaot_durability_stack_query(blocked_worker),
+                                 "nativeaot-durability-blocked-state-stable");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_BLOCKED=1\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_INITIAL_FLS=0x",
+                     first_context->initial_fls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_FLS=0x",
+                     first_thread->fls_values[fls_slot]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_WAITER_COUNT=0x",
+                     test_event->waiter_count);
+    serial_text("\r\n");
+    nativeaot_durability_require(gxos_scheduler_signal_event(test_event_handle) &&
+                                 test_event->waiter_count == 0 &&
+                                 first_thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE &&
+                                 gxos_scheduler_runnable_count() == baseline_runnable + 1U &&
+                                 gxos_scheduler_blocked_count() == baseline_blocked,
+                                 "nativeaot-durability-first-thread-signal");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_SIGNALLED=1\r\n");
+    gxos_scheduler_main_dispatch(main_snapshot);
+    nativeaot_durability_require(g_create_event_scheduler.current == main_thread &&
+                                 first_thread->state == GXOS_SCHEDULER_THREAD_TERMINATED &&
+                                 first_thread->execution_refs == 0 &&
+                                 first_context->wait_result == GXOS_SCHEDULER_WAIT_SIGNALED &&
+                                 first_context->after_wait_fls == first_context->expected_fls &&
+                                 first_context->com_after_uninitialize == 0 &&
+                                 test_event->waiter_count == 0 &&
+                                 gxos_scheduler_blocked_count() == baseline_blocked &&
+                                 gxos_scheduler_active_wait_count() == baseline_active_waits &&
+                                 gxos_scheduler_runnable_count() == baseline_runnable &&
+                                 blocked_worker->state == GXOS_SCHEDULER_THREAD_BLOCKED &&
+                                 blocked_worker->fls_values[fls_slot] != 0 &&
+                                 nativeaot_durability_stack_query(blocked_worker),
+                                 "nativeaot-durability-first-thread-return");
+    nativeaot_durability_require(gxos_scheduler_close_handle(first_handle) &&
+                                 gxos_scheduler_collect(&g_create_event_scheduler) &&
+                                 first_thread->live == 0 &&
+                                 first_thread->fls_allocated[fls_slot] == 0 &&
+                                 first_thread->fls_values[fls_slot] == 0 &&
+                                 gxos_scheduler_thread_from_handle(first_handle) == 0 &&
+                                 gxos_vm_region_virtual_query(
+                                     &g_memory_vm_regions, first_stack_base,
+                                     information, sizeof(*information)) == 0 &&
+                                 g_memory_vm_regions.live_count == baseline_vm_regions,
+                                 "nativeaot-durability-first-thread-reclaim");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_FIRST_THREAD_RECLAIMED=1\r\n");
+
+    second_context->fls_slot = fls_slot;
+    second_context->event_handle = test_event_handle;
+    second_context->run_wait = 0;
+    nativeaot_durability_require(gxos_scheduler_create_suspended_thread(
+                                     &g_create_event_scheduler,
+                                     nativeaot_durability_thread_entry,
+                                     second_context, &second_handle,
+                                     &second_thread),
+                                 "nativeaot-durability-second-thread-create");
+    second_object = gxos_scheduler_object_from_handle(second_handle);
+    nativeaot_durability_require(second_thread != 0 && second_object != 0 &&
+                                 second_thread->identity != first_identity &&
+                                 second_object->generation != first_generation &&
+                                 second_thread->fls_allocated[fls_slot] == 0 &&
+                                 second_thread->fls_values[fls_slot] == 0 &&
+                                 nativeaot_durability_stack_query(second_thread),
+                                 "nativeaot-durability-second-thread-fresh");
+    second_identity = second_thread->identity;
+    second_generation = second_object->generation;
+    second_stack_base = second_thread->stack_base;
+    second_stack_identity = second_thread->stack_vm_identity;
+    second_stack_reused = second_thread->stack_base == first_stack_base;
+    nativeaot_durability_require(second_stack_identity != first_stack_identity,
+                                 "nativeaot-durability-stack-generation");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_SECOND_THREAD_IDENTITY=0x",
+                     second_identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_SECOND_THREAD_GENERATION=0x",
+                     second_generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVEAOT_DURABILITY_SECOND_THREAD_STACK_REUSED=0x",
+                     second_stack_reused);
+    serial_text("\r\n");
+    nativeaot_durability_require(gxos_scheduler_resume_thread(
+                                     second_handle, 0),
+                                 "nativeaot-durability-second-thread-resume");
+    gxos_scheduler_main_dispatch(main_snapshot);
+    nativeaot_durability_require(g_create_event_scheduler.current == main_thread &&
+                                 second_thread->state == GXOS_SCHEDULER_THREAD_TERMINATED &&
+                                 second_context->initial_fls == 0 &&
+                                 second_context->initial_com == 0 &&
+                                 second_context->after_set_fls == second_context->expected_fls &&
+                                 second_context->com_after_uninitialize == 0,
+                                 "nativeaot-durability-second-thread-return");
+    nativeaot_durability_require(gxos_scheduler_close_handle(second_handle) &&
+                                 gxos_scheduler_collect(&g_create_event_scheduler) &&
+                                 second_thread->live == 0 &&
+                                 second_thread->fls_allocated[fls_slot] == 0 &&
+                                 second_thread->fls_values[fls_slot] == 0 &&
+                                 gxos_scheduler_thread_from_handle(second_handle) == 0 &&
+                                 gxos_vm_region_virtual_query(
+                                     &g_memory_vm_regions, second_stack_base,
+                                     information, sizeof(*information)) == 0 &&
+                                 g_memory_vm_regions.live_count == baseline_vm_regions,
+                                 "nativeaot-durability-second-thread-reclaim");
+    nativeaot_durability_require(gxos_scheduler_close_handle(test_event_handle) &&
+                                 gxos_scheduler_try_destroy_event(test_event_handle) &&
+                                 gxos_scheduler_event_from_handle(test_event_handle) == 0,
+                                 "nativeaot-durability-test-event-reclaim");
+    after_cleanup = nativeaot_durability_counts();
+    nativeaot_durability_require(after_cleanup.live_objects == baseline.live_objects &&
+                                 after_cleanup.live_public_handles == baseline.live_public_handles &&
+                                 after_cleanup.internal_references == baseline.internal_references &&
+                                 after_cleanup.runnable_count == baseline.runnable_count &&
+                                 after_cleanup.blocked_count == baseline.blocked_count &&
+                                 after_cleanup.active_wait_count == baseline.active_wait_count &&
+                                 after_cleanup.valid_wait_records == baseline_valid_wait_records &&
+                                 after_cleanup.live_thread_count == baseline.live_thread_count &&
+                                 after_cleanup.fls_slot_count == baseline.fls_slot_count &&
+                                 after_cleanup.vm_region_count == baseline.vm_region_count &&
+                                 gxos_scheduler_current_thread() == main_thread &&
+                                 main_thread->fls_values[fls_slot] != 0 &&
+                                 blocked_worker->fls_values[fls_slot] != 0 &&
+                                 gxos_com_is_initialized(main_thread) == 0 &&
+                                 gxos_com_is_initialized(blocked_worker) != 0 &&
+                                 gxos_com_model(blocked_worker) == GXOS_COM_MODEL_MTA &&
+                                 nativeaot_durability_stack_query(blocked_worker),
+                                 "nativeaot-durability-baseline-restored");
+    nativeaot_durability_emit_count_fields(
+        "GXOS_NET10:NATIVEAOT_DURABILITY_AFTER_CLEANUP_", after_cleanup);
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_THREE_THREAD_FLS_ISOLATION=1\r\n");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_SWITCH_FLS_PRESERVED=1\r\n");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_WAIT_RECORD_STABLE=1\r\n");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_COM_ISOLATION=1\r\n");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_STACK_VM_LIFETIME=1\r\n");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_HANDLE_GENERATION=1\r\n");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_REPEATED_CALLBACKS=2\r\n");
+    serial_text("GXOS_NET10:NATIVEAOT_DURABILITY_PASS=1\r\n");
+}
+#endif
+
 static const uint16_t gPayloadPath[] = {
     '\\', 'G', 'X', 'O', 'S', '\\', 'g', 'x', 'o', 's', '-', 'm', 'a', 'n', 'a', 'g', 'e', 'd', '-', 'e', 'n', 't', 'r', 'y', '-', 'p', 'r', 'o', 'b', 'e', '.', 'd', 'l', 'l', 0
 };
@@ -13865,6 +14371,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     g_phase = PHASE_AFTER_MANAGED_RETURN;
     restore_nativeaot_tls();
     restore_fault_handlers();
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    g_phase = PHASE_IN_MANAGED;
+    nativeaot_durability_probe();
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
+#endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
     if (g_crt_onexit_register_successes != 0) {
         serial_text("GXOS_NET10:REGISTER_ONEXIT_CONTINUATION_BEYOND_CALL_SITE=1\r\n");
