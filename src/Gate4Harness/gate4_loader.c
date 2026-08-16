@@ -13040,6 +13040,41 @@ static GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT
 static GXOS_SCHEDULER_REGISTER_SNAPSHOT g_nativeaot_durability_main_snapshot;
 static GXOS_VM_MEMORY_BASIC_INFORMATION g_nativeaot_durability_information;
 
+#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
+/* The generated reverse-P/Invoke helper loads the active NativeAOT thread
+   state from the TLS block at +0x78.  +0x30 is the adjacent allocation
+   context, not the thread-state pointer. */
+#define GXOS_NATIVEAOT_TLS_THREAD_STATE_OFFSET 0x78U
+
+typedef struct {
+    GXOS_SCHEDULER_HANDLE handle;
+    GXOS_SCHEDULER_HANDLE event_handle;
+    GXOS_SCHEDULER_TCB *thread;
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT before_callback;
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT second_before_callback;
+    uint64_t native_thread_state_before;
+    uint64_t first_native_thread_state_after;
+    uint64_t second_native_thread_state_after;
+    uint64_t resumed_native_thread_state;
+    uintptr_t fls_before;
+    uintptr_t first_fls_after;
+    uintptr_t second_fls_after;
+    uintptr_t resumed_fls;
+    uint32_t scheduler_last_error_before;
+    uint32_t first_scheduler_last_error_after;
+    uint32_t second_scheduler_last_error_after;
+    uint32_t callback_count;
+    uint32_t first_callback_status;
+    uint32_t second_callback_status;
+    uint32_t wait_result;
+    int32_t first_callback_result;
+    int32_t second_callback_result;
+} GXOS_NATIVEAOT_SCHEDULER_CALLBACK_CONTEXT;
+
+static GXOS_NATIVEAOT_SCHEDULER_CALLBACK_CONTEXT
+    g_nativeaot_scheduler_callback_context;
+#endif
+
 static void nativeaot_durability_require(int condition, const char *reason)
 {
     if (!condition) fail(reason);
@@ -13169,6 +13204,379 @@ static int nativeaot_durability_stack_query(GXOS_SCHEDULER_TCB *thread)
         information.State == GXOS_VM_REGION_STATE_COMMIT &&
         information.Type == GXOS_VM_REGION_TYPE_PRIVATE;
 }
+
+static uint64_t nativeaot_tls_thread_state_value(uint64_t tls_block)
+{
+    if (tls_block == 0) return 0;
+    return *(const uint64_t *)(uintptr_t)(tls_block + 0x78U);
+}
+
+#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
+static uint64_t nativeaot_scheduler_callback_thread_state(
+    const GXOS_SCHEDULER_TCB *thread)
+{
+    if (thread == 0 || thread->tls_block_base == 0) return 0;
+    return nativeaot_tls_thread_state_value(thread->tls_block_base);
+}
+
+static uintptr_t nativeaot_scheduler_callback_fls(
+    const GXOS_SCHEDULER_TCB *thread)
+{
+    if (thread == 0 || g_nativeaot_runtime_fls_slot >= 64U) return 0;
+    return (uintptr_t)thread->fls_values[g_nativeaot_runtime_fls_slot];
+}
+
+static uintptr_t EFIAPI nativeaot_scheduler_callback_thread_entry(void *argument)
+{
+    GXOS_NATIVEAOT_SCHEDULER_CALLBACK_CONTEXT *context =
+        (GXOS_NATIVEAOT_SCHEDULER_CALLBACK_CONTEXT *)argument;
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    GXOS_SCHEDULER_OBJECT *object;
+    uint32_t input;
+    uint32_t wait_result;
+    int32_t result = 0;
+    uint32_t status;
+
+    nativeaot_durability_require(context != 0 && thread != 0 && thread->live &&
+                                 !thread->is_boot_thread,
+                                 "nativeaot-scheduler-callback-thread-context");
+    context->thread = thread;
+    object = gxos_scheduler_object_from_handle(context->handle);
+    gxos_scheduler_capture_registers(&context->before_callback);
+    context->native_thread_state_before =
+        nativeaot_scheduler_callback_thread_state(thread);
+    context->fls_before = nativeaot_scheduler_callback_fls(thread);
+    context->scheduler_last_error_before = gxos_scheduler_get_last_error();
+    serial_text("GXOS_NET10:MANAGED_THREAD_CALLBACK_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_IDENTITY=0x", thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_STATE=0x", thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_HANDLE=0x", context->handle);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_OBJECT=0x",
+                     (uintptr_t)object);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_STACK_BASE=0x",
+                     thread->stack_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_STACK_LIMIT=0x",
+                     thread->stack_limit);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_RSP=0x",
+                     context->before_callback.rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_RSP_MOD16=0x",
+                     context->before_callback.rsp & 0x0FU);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_STACK_VM_IDENTITY=0x",
+                     thread->stack_vm_identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_VM_REGIONS=0x",
+                     g_memory_vm_regions.live_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_GS_BASE=0x",
+                     gxos_scheduler_current_gs_base());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_TEB_BASE=0x",
+                     gxos_scheduler_current_teb_base());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_TLS_VECTOR=0x",
+                     thread->tls_vector_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_TLS_BLOCK=0x",
+                     thread->tls_block_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_NATIVE_STATE_BEFORE=0x",
+                     context->native_thread_state_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_NATIVE_STATE_SLOT=0x",
+                     GXOS_NATIVEAOT_TLS_THREAD_STATE_OFFSET);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_FLS_SLOT=0x",
+                     g_nativeaot_runtime_fls_slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_FLS_BEFORE=0x",
+                     context->fls_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_FLS_ALLOCATED=0x",
+                     g_nativeaot_runtime_fls_slot == UINT32_MAX ? 0 :
+                         thread->fls_allocated[g_nativeaot_runtime_fls_slot]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_COM_INITIALIZED=0x",
+                     gxos_com_is_initialized(thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_COM_MODEL=0x",
+                     gxos_com_model(thread));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_SCHEDULER_LAST_ERROR=0x",
+                     context->scheduler_last_error_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_PLATFORM_LAST_ERROR=0x",
+                     g_platform_last_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_ADDRESS=0x",
+                     g_managed_callback_bridge.callback);
+    serial_text("\r\n");
+    input = context->callback_count == 2U ? 7U : 9U;
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_INPUT=0x", input);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_ECX_INPUT=0x", input);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_THREAD_ATTACH_STATE=UNATTACHED_DIAGNOSTIC\r\n");
+
+    g_phase = PHASE_IN_MANAGED;
+    status = (uint32_t)gxos_nativeaot_callback_invoke(
+        &g_managed_callback_bridge, (int32_t)input, &result);
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
+    context->first_callback_status = status;
+    context->first_callback_result = result;
+    context->first_native_thread_state_after =
+        nativeaot_scheduler_callback_thread_state(thread);
+    context->first_fls_after = nativeaot_scheduler_callback_fls(thread);
+    context->first_scheduler_last_error_after = gxos_scheduler_get_last_error();
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_STATUS=0x", status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_1_RESULT=0x",
+                     (uint32_t)context->first_callback_result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_NATIVE_STATE_AFTER=0x",
+                     context->first_native_thread_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_FLS_AFTER=0x",
+                     context->first_fls_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_SCHEDULER_LAST_ERROR_AFTER=0x",
+                     context->first_scheduler_last_error_after);
+    serial_text("\r\n");
+    nativeaot_durability_require(status == GXOS_NATIVEAOT_CALLBACK_OK &&
+                                 context->first_fls_after != 0 &&
+                                 context->first_native_thread_state_after ==
+                                     UINT64_MAX,
+                                 "nativeaot-scheduler-callback-first");
+    serial_text("GXOS_NET10:MANAGED_THREAD_ATTACH_OK=1\r\n");
+    serial_text("GXOS_NET10:MANAGED_THREAD_CALLBACK_1_OK\r\n");
+
+    if (context->callback_count == 1U) {
+        return (uintptr_t)context->first_callback_result;
+    }
+
+    context->wait_result = GXOS_SCHEDULER_WAIT_FAILURE;
+    wait_result = gxos_wait_for_single_object_contract(
+        &g_event_api_context, context->event_handle, GXOS_INFINITE);
+    context->wait_result = wait_result;
+    context->resumed_native_thread_state =
+        nativeaot_scheduler_callback_thread_state(thread);
+    context->resumed_fls = nativeaot_scheduler_callback_fls(thread);
+    serial_text("GXOS_NET10:MANAGED_THREAD_SWITCH_RESUMED=1\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_RESUMED_FLS=0x",
+                     context->resumed_fls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_RESUMED_NATIVE_STATE=0x",
+                     context->resumed_native_thread_state);
+    serial_text("\r\n");
+    nativeaot_durability_require(wait_result == GXOS_WAIT_OBJECT_0 &&
+                                 context->resumed_fls == context->first_fls_after &&
+                                 context->resumed_native_thread_state ==
+                                     UINT64_MAX,
+                                 "nativeaot-scheduler-callback-resume-state");
+
+    gxos_scheduler_capture_registers(&context->second_before_callback);
+    g_phase = PHASE_IN_MANAGED;
+    status = (uint32_t)gxos_nativeaot_callback_invoke(
+        &g_managed_callback_bridge, 8, &result);
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
+    context->second_callback_status = status;
+    context->second_callback_result = result;
+    context->second_native_thread_state_after =
+        nativeaot_scheduler_callback_thread_state(thread);
+    context->second_fls_after = nativeaot_scheduler_callback_fls(thread);
+    context->second_scheduler_last_error_after = gxos_scheduler_get_last_error();
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_2_STATUS=0x", status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_2_RESULT=0x",
+                     (uint32_t)context->second_callback_result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_2_FLS=0x",
+                     context->second_fls_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_2_NATIVE_STATE=0x",
+                     context->second_native_thread_state_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_2_RSP_MOD16=0x",
+                     context->second_before_callback.rsp & 0x0FU);
+    serial_text("\r\n");
+    nativeaot_durability_require(status == GXOS_NATIVEAOT_CALLBACK_OK &&
+                                 context->second_fls_after == context->first_fls_after &&
+                                 context->second_native_thread_state_after ==
+                                     UINT64_MAX,
+                                 "nativeaot-scheduler-callback-second");
+    serial_text("GXOS_NET10:MANAGED_THREAD_CALLBACK_2_OK\r\n");
+    return (uintptr_t)context->second_callback_result;
+}
+
+static void nativeaot_scheduler_callback_probe(void)
+{
+    GXOS_NATIVEAOT_SCHEDULER_CALLBACK_CONTEXT *context =
+        &g_nativeaot_scheduler_callback_context;
+    GXOS_SCHEDULER_TCB *main_thread = g_create_event_scheduler.boot_thread;
+    GXOS_SCHEDULER_TCB *thread = 0;
+    GXOS_SCHEDULER_TCB *second_thread = 0;
+    GXOS_SCHEDULER_OBJECT *object;
+    GXOS_SCHEDULER_OBJECT *second_object;
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT main_snapshot = {0};
+    GXOS_SCHEDULER_HANDLE handle = 0;
+    GXOS_SCHEDULER_HANDLE second_handle = 0;
+    GXOS_SCHEDULER_EVENT *event;
+    GXOS_SCHEDULER_HANDLE event_handle = 0;
+    GXOS_NATIVEAOT_DURABILITY_COUNTS before;
+    uint64_t first_tls_block;
+    uint32_t first_identity;
+
+    zero_bytes((uint8_t *)context, sizeof(*context));
+    before = nativeaot_durability_counts();
+    nativeaot_durability_require(main_thread != 0 &&
+                                 g_create_event_scheduler.current == main_thread,
+                                 "nativeaot-scheduler-callback-main-state");
+    nativeaot_durability_require(gxos_scheduler_create_event(
+                                     &g_create_event_scheduler, 0, 0,
+                                     &event_handle) &&
+                                 (event = gxos_scheduler_event_from_handle(
+                                     event_handle)) != 0 && !event->signaled,
+                                 "nativeaot-scheduler-callback-event-create");
+    context->callback_count = 2;
+    context->event_handle = event_handle;
+    nativeaot_durability_require(gxos_scheduler_create_suspended_thread(
+                                     &g_create_event_scheduler,
+                                     nativeaot_scheduler_callback_thread_entry,
+                                     context, &handle, &thread),
+                                 "nativeaot-scheduler-callback-thread-create");
+    context->handle = handle;
+    object = gxos_scheduler_object_from_handle(handle);
+    first_tls_block = thread == 0 ? 0 : thread->tls_block_base;
+    first_identity = thread == 0 ? 0 : thread->identity;
+    nativeaot_durability_require(g_nativeaot_runtime_fls_slot < 64U &&
+                                 thread != 0 && object != 0 &&
+                                 nativeaot_scheduler_callback_fls(thread) == 0 &&
+                                 nativeaot_scheduler_callback_thread_state(thread) == 0 &&
+                                 thread->tls_block_base != g_tls_block &&
+                                 nativeaot_durability_stack_query(thread),
+                                 "nativeaot-scheduler-callback-thread-fresh");
+    serial_text("GXOS_NET10:MANAGED_THREAD_CREATED=1\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CREATED_IDENTITY=0x",
+                     thread->identity);
+    serial_text("\r\n");
+    nativeaot_durability_require(gxos_scheduler_resume_thread(handle, 0),
+                                 "nativeaot-scheduler-callback-thread-resume");
+    gxos_scheduler_main_dispatch(&main_snapshot);
+    nativeaot_durability_require(g_create_event_scheduler.current == main_thread &&
+                                 thread->state == GXOS_SCHEDULER_THREAD_BLOCKED &&
+                                 context->first_callback_status ==
+                                     GXOS_NATIVEAOT_CALLBACK_OK &&
+                                 context->first_callback_result == 0x00030008 &&
+                                 event->waiter_count == 1U &&
+                                 gxos_scheduler_blocked_count() ==
+                                     before.blocked_count + 1U,
+                                 "nativeaot-scheduler-callback-thread-blocked");
+    serial_text("GXOS_NET10:MANAGED_THREAD_SWITCH_BLOCKED=1\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_1_RESULT=0x",
+                     (uint32_t)context->first_callback_result);
+    serial_text("\r\n");
+    nativeaot_durability_require(gxos_scheduler_signal_event(event_handle) &&
+                                 event->waiter_count == 0U &&
+                                 thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE,
+                                 "nativeaot-scheduler-callback-thread-signal");
+    serial_text("GXOS_NET10:MANAGED_THREAD_SWITCH_SIGNALLED=1\r\n");
+    gxos_scheduler_main_dispatch(&main_snapshot);
+    nativeaot_durability_require(g_create_event_scheduler.current == main_thread &&
+                                 thread->state == GXOS_SCHEDULER_THREAD_TERMINATED &&
+                                 context->wait_result == GXOS_WAIT_OBJECT_0 &&
+                                 context->second_callback_status ==
+                                     GXOS_NATIVEAOT_CALLBACK_OK &&
+                                 context->second_callback_result == 0x00040009 &&
+                                 thread->return_value ==
+                                     (uintptr_t)context->second_callback_result,
+                                 "nativeaot-scheduler-callback-thread-return");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_RETURN_VALUE=0x",
+                     thread->return_value);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_COUNT=0x",
+                     g_managed_callback_bridge.invocation_count);
+    serial_text("\r\n");
+    nativeaot_durability_require(gxos_scheduler_close_handle(handle) &&
+                                 gxos_scheduler_collect(&g_create_event_scheduler) &&
+                                 thread->live == 0 &&
+                                 thread->fls_values[g_nativeaot_runtime_fls_slot] == 0 &&
+                                 thread->tls_block_base == 0 &&
+                                 gxos_scheduler_thread_from_handle(handle) == 0 &&
+                                 g_memory_vm_regions.live_count == before.vm_region_count,
+                                 "nativeaot-scheduler-callback-thread-reclaim");
+    serial_text("GXOS_NET10:MANAGED_THREAD_DETACH_OK=1\r\n");
+    serial_text("GXOS_NET10:MANAGED_THREAD_RECLAIMED=1\r\n");
+
+    nativeaot_durability_require(gxos_scheduler_close_handle(event_handle) &&
+                                 gxos_scheduler_try_destroy_event(event_handle) &&
+                                 gxos_scheduler_event_from_handle(event_handle) == 0,
+                                 "nativeaot-scheduler-callback-event-reclaim");
+
+    zero_bytes((uint8_t *)context, sizeof(*context));
+    context->callback_count = 1;
+    nativeaot_durability_require(gxos_scheduler_create_suspended_thread(
+                                     &g_create_event_scheduler,
+                                     nativeaot_scheduler_callback_thread_entry,
+                                     context, &second_handle, &second_thread),
+                                 "nativeaot-scheduler-callback-second-thread-create");
+    context->handle = second_handle;
+    object = gxos_scheduler_object_from_handle(second_handle);
+    second_object = object;
+    nativeaot_durability_require(g_nativeaot_runtime_fls_slot < 64U &&
+                                 second_thread != 0 && second_object != 0 &&
+                                 second_thread->identity != first_identity &&
+                                 nativeaot_scheduler_callback_fls(second_thread) == 0 &&
+                                 nativeaot_scheduler_callback_thread_state(second_thread) == 0 &&
+                                 second_thread->tls_block_base != g_tls_block &&
+                                 nativeaot_durability_stack_query(second_thread),
+                                 "nativeaot-scheduler-callback-second-thread-fresh");
+    serial_text("GXOS_NET10:MANAGED_THREAD_SECOND_FRESH=1\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_SECOND_IDENTITY=0x",
+                     second_thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_SECOND_TLS_BLOCK=0x",
+                     second_thread->tls_block_base);
+    serial_text("\r\n");
+    nativeaot_durability_require(gxos_scheduler_resume_thread(second_handle, 0),
+                                 "nativeaot-scheduler-callback-second-thread-resume");
+    gxos_scheduler_main_dispatch(&main_snapshot);
+    nativeaot_durability_require(g_create_event_scheduler.current == main_thread &&
+                                 second_thread->state == GXOS_SCHEDULER_THREAD_TERMINATED &&
+                                 context->first_callback_status ==
+                                     GXOS_NATIVEAOT_CALLBACK_OK &&
+                                 context->first_callback_result == 0x0005000A &&
+                                 second_thread->return_value ==
+                                     (uintptr_t)context->first_callback_result,
+                                 "nativeaot-scheduler-callback-second-thread-return");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_SECOND_RESULT=0x",
+                     (uint32_t)context->first_callback_result);
+    serial_text("\r\n");
+    nativeaot_durability_require(gxos_scheduler_close_handle(second_handle) &&
+                                 gxos_scheduler_collect(&g_create_event_scheduler) &&
+                                 second_thread->live == 0 &&
+                                 second_thread->fls_values[g_nativeaot_runtime_fls_slot] == 0 &&
+                                 second_thread->tls_block_base == 0 &&
+                                 gxos_scheduler_thread_from_handle(second_handle) == 0 &&
+                                 g_memory_vm_regions.live_count == before.vm_region_count,
+                                 "nativeaot-scheduler-callback-second-thread-reclaim");
+    nativeaot_durability_require(first_tls_block != 0,
+                                 "nativeaot-scheduler-callback-first-tls-recorded");
+    serial_text("GXOS_NET10:MANAGED_THREAD_REUSE_OK=1\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_FIRST_TLS_BLOCK=0x",
+                     first_tls_block);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_COUNT_FINAL=0x",
+                     g_managed_callback_bridge.invocation_count);
+    serial_text("\r\n");
+}
+#endif
 
 static uintptr_t EFIAPI nativeaot_durability_thread_entry(void *argument)
 {
@@ -14503,7 +14911,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_TLS_BLOCK=0x", g_tls_block);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_NATIVE_THREAD_STATE=0x",
-                     *(uint64_t *)((uint8_t *)(uintptr_t)g_tls_block + 0x30));
+                     nativeaot_tls_thread_state_value(g_tls_block));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_FINALIZER_NATIVE_THREAD_STATE=0x",
+                     nativeaot_tls_thread_state_value(
+                         callback_finalizer->tls_block_base));
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_STACK_VM_REGIONS=0x",
                      callback_counts.vm_region_count);
@@ -14587,6 +14999,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("nativeaot-managed-callback-2-result-or-fls");
     }
     serial_text("GXOS_NET10:MANAGED_CALLBACK_2_OK\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
+    nativeaot_scheduler_callback_probe();
+#endif
     restore_fault_handlers();
     callback_finalizer = nativeaot_durability_blocked_worker();
     callback_counts = nativeaot_durability_counts();
@@ -14620,7 +15035,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_PROCESS_INITIALIZATION_CALLS=0x",
                      nativeaot_process_entry_calls);
     serial_text("\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
+    if (g_managed_callback_bridge.invocation_count != 5U ||
+#else
     if (g_managed_callback_bridge.invocation_count != 2U ||
+#endif
         nativeaot_process_entry_calls != 1U) {
         fail("nativeaot-managed-callback-count");
     }

@@ -1,6 +1,6 @@
 # NativeAOT managed callback bridge
 
-Status: passed. This milestone adds a second direct NativeAOT export that is callable after the one legal NativeAOT process-entry call has returned. It does not call the top-level NativeAOT entry a second time.
+Status: passed. This milestone adds a second direct NativeAOT export that is callable after the one legal NativeAOT process-entry call has returned. It does not call the top-level NativeAOT entry a second time. The follow-on scheduler-thread attachment proof is documented in [NATIVEAOT_SCHEDULER_THREAD_ATTACH.md](NATIVEAOT_SCHEDULER_THREAD_ATTACH.md).
 
 ## Contract
 
@@ -51,13 +51,13 @@ The export table exists before runtime initialization, but the pointer is not le
 2. The payload TLS template, TLS vector, TLS block, GS/TEB state, stack limits, FLS bridge, and imports are installed.
 3. The top-level NativeAOT process entry has been called exactly once.
 4. `NATIVEAOT_STARTUP_OK`, `GC_STARTUP_ADVANCED`, `MANAGED_ENTRY_OK`, `AFTER_MANAGED_RETURN=0`, and `MANAGED_ENTRY_COMPLETE` have been reached.
-5. The invoking scheduler thread is the live main thread with its existing NativeAOT TLS/FLS state active.
+5. The invoking scheduler thread is either the initialized main thread with its existing NativeAOT TLS/FLS state active, or a scheduler-created thread with a distinct GS/TEB/TLS/FLS environment that the generated reverse-P/Invoke transition can recognize and attach.
 
 Before each callback, the loader reactivates the already allocated main-thread GS/TLS state. It does not allocate a second runtime state, clone the main state into another TCB, or call the top-level NativeAOT entry again. After each call it restores the firmware/native GS base.
 
 The first proof caller is scheduler identity `1`, state `RUNNING` (`3`). The finalizer worker remains identity `2`, state `BLOCKED` (`4`), with a valid wait record and independent FLS value. Main FLS is unchanged before and after both callbacks; finalizer FLS, COM MTA state, active wait count, valid wait-record count, and two registered scheduler VM regions remain stable.
 
-An additional scheduler-created thread was not used as a managed callback caller. Its NativeAOT thread-attach/reverse-transition contract remains the next boundary; the existing durability probe proves that native scheduler-created threads have isolated FLS/COM/stack state, not that they can enter managed code.
+The scheduler-thread follow-on proof uses the canonical scheduler APIs to create a fresh worker without copying main state. The generated reverse-P/Invoke thunk attaches it automatically, returns to native code, survives a scheduler block/resume, and can be called again. A second fresh worker attaches independently. Main/finalizer isolation and the existing durability invariants remain unchanged.
 
 Exceptions are intentionally excluded from the ABI. The callback does not throw, and no managed exception is allowed to cross this unmanaged export boundary. Results are explicit integer status/data. The callback performs no deliberate allocation and no GC activity was observed in the QEMU proof.
 

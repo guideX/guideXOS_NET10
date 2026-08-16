@@ -116,6 +116,11 @@ static void require_cleared_thread(const GXOS_SCHEDULER_TCB *thread)
 {
     uint32_t slot;
     REQUIRE(thread != 0 && thread->live == 0U);
+    REQUIRE(thread->environment_owned == 0U);
+    REQUIRE(thread->gs_base == 0U);
+    REQUIRE(thread->teb_base == 0U);
+    REQUIRE(thread->tls_vector_base == 0U);
+    REQUIRE(thread->tls_block_base == 0U);
     REQUIRE(thread->com_initialized == 0U);
     REQUIRE(thread->com_model == GXOS_COM_MODEL_NONE);
     REQUIRE(thread->com_initialization_count == 0U);
@@ -191,6 +196,24 @@ int main(void)
     require_stack(first);
     require_stack(second);
     REQUIRE(first->stack_vm_identity != second->stack_vm_identity);
+    REQUIRE(first->gs_base != 0U && first->teb_base != 0U);
+    REQUIRE(first->tls_vector_base != 0U && first->tls_block_base != 0U);
+    REQUIRE(second->gs_base != 0U && second->teb_base != 0U);
+    REQUIRE(second->tls_vector_base != 0U && second->tls_block_base != 0U);
+    REQUIRE(first->gs_base != main_thread->gs_base &&
+            first->teb_base != main_thread->teb_base &&
+            first->tls_vector_base != main_thread->tls_vector_base &&
+            first->tls_block_base != main_thread->tls_block_base);
+    REQUIRE(second->gs_base != main_thread->gs_base &&
+            second->teb_base != main_thread->teb_base &&
+            second->tls_vector_base != main_thread->tls_vector_base &&
+            second->tls_block_base != main_thread->tls_block_base);
+    REQUIRE(first->gs_base != second->gs_base &&
+            first->teb_base != second->teb_base &&
+            first->tls_vector_base != second->tls_vector_base &&
+            first->tls_block_base != second->tls_block_base);
+    REQUIRE(first->context.gs_base == first->gs_base &&
+            second->context.gs_base == second->gs_base);
     REQUIRE(g_regions.live_count == 2U);
     first_identity = first->identity;
     first_generation = first->generation;
@@ -325,6 +348,9 @@ int main(void)
                 &g_scheduler, test_entry, 0, &recycled_handle, &recycled));
     require_fresh_thread(recycled);
     require_stack(recycled);
+    REQUIRE(recycled->environment_owned != 0U);
+    REQUIRE(recycled->gs_base != 0U && recycled->teb_base != 0U &&
+            recycled->tls_vector_base != 0U && recycled->tls_block_base != 0U);
     REQUIRE(recycled == first);
     REQUIRE(recycled->identity != first_identity);
     REQUIRE(recycled->generation != first_generation);
