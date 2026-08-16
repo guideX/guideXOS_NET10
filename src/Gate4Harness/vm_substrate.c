@@ -31,6 +31,176 @@ static int range_end(uint64_t base, uint64_t bytes, uint64_t *end)
     return 1;
 }
 
+static int vm_region_contains(const GXOS_VM_REGION *region,
+                              uint64_t address)
+{
+    uint64_t end;
+    return region != 0 && region->live &&
+        range_end(region->base, region->bytes, &end) &&
+        address >= region->base && address < end;
+}
+
+void gxos_vm_region_ledger_init(GXOS_VM_REGION_LEDGER *ledger)
+{
+    if (ledger == 0) return;
+    zero_bytes(ledger, sizeof(*ledger));
+    ledger->next_identity = 1;
+}
+
+GXOS_VM_STATUS gxos_vm_region_register(
+    GXOS_VM_REGION_LEDGER *ledger,
+    uint64_t base,
+    uint64_t bytes,
+    uint64_t allocation_base,
+    uint32_t allocation_protect,
+    uint32_t state,
+    uint32_t protect,
+    uint32_t type,
+    uint64_t *allocation_identity_out)
+{
+    uint32_t index;
+    uint64_t end;
+    if (allocation_identity_out != 0) *allocation_identity_out = 0;
+    if (ledger == 0 || allocation_identity_out == 0 || base == 0 ||
+        allocation_base == 0 || bytes == 0 ||
+        base % GXOS_VM_PAGE_SIZE != 0 ||
+        bytes % GXOS_VM_PAGE_SIZE != 0 ||
+        allocation_base % GXOS_VM_PAGE_SIZE != 0 ||
+        !range_end(base, bytes, &end) || allocation_base > base ||
+        (state != GXOS_VM_REGION_STATE_COMMIT &&
+         state != GXOS_VM_REGION_STATE_RESERVE) || type == 0) {
+        return base != 0 && bytes != 0 && base > UINT64_MAX - bytes
+            ? GXOS_VM_STATUS_OVERFLOW : GXOS_VM_STATUS_INVALID_ARGUMENT;
+    }
+    for (index = 0; index != GXOS_VM_REGION_LEDGER_CAPACITY; ++index) {
+        const GXOS_VM_REGION *existing = &ledger->entries[index];
+        uint64_t existing_end;
+        if (!existing->live) continue;
+        if (!range_end(existing->base, existing->bytes, &existing_end)) {
+            return GXOS_VM_STATUS_INVALID_STATE;
+        }
+        if (base < existing_end && existing->base < end) {
+            return GXOS_VM_STATUS_OVERLAP;
+        }
+    }
+    if (ledger->live_count >= GXOS_VM_REGION_LEDGER_CAPACITY) {
+        ledger->exhausted = 1;
+        return GXOS_VM_STATUS_CAPACITY;
+    }
+    if (ledger->next_identity == 0) ledger->next_identity = 1;
+    for (index = 0; index != GXOS_VM_REGION_LEDGER_CAPACITY; ++index) {
+        GXOS_VM_REGION *region = &ledger->entries[index];
+        uint64_t identity;
+        if (region->live) continue;
+        identity = ledger->next_identity++;
+        if (identity == 0) {
+            identity = ledger->next_identity++;
+            if (identity == 0) return GXOS_VM_STATUS_OVERFLOW;
+        }
+        zero_bytes(region, sizeof(*region));
+        region->live = 1;
+        region->base = base;
+        region->bytes = bytes;
+        region->allocation_base = allocation_base;
+        region->allocation_protect = allocation_protect;
+        region->state = state;
+        region->protect = protect;
+        region->type = type;
+        region->allocation_identity = identity;
+        ++ledger->live_count;
+        *allocation_identity_out = identity;
+        return GXOS_VM_STATUS_OK;
+    }
+    ledger->exhausted = 1;
+    return GXOS_VM_STATUS_CAPACITY;
+}
+
+GXOS_VM_STATUS gxos_vm_region_unregister(
+    GXOS_VM_REGION_LEDGER *ledger,
+    uint64_t base,
+    uint64_t bytes,
+    uint64_t allocation_identity)
+{
+    uint32_t index;
+    if (ledger == 0 || base == 0 || bytes == 0 ||
+        allocation_identity == 0) return GXOS_VM_STATUS_INVALID_ARGUMENT;
+    for (index = 0; index != GXOS_VM_REGION_LEDGER_CAPACITY; ++index) {
+        GXOS_VM_REGION *region = &ledger->entries[index];
+        if (region->live && region->base == base && region->bytes == bytes &&
+            region->allocation_identity == allocation_identity) {
+            zero_bytes(region, sizeof(*region));
+            if (ledger->live_count == 0) return GXOS_VM_STATUS_INVALID_STATE;
+            --ledger->live_count;
+            return GXOS_VM_STATUS_OK;
+        }
+    }
+    return GXOS_VM_STATUS_NOT_FOUND;
+}
+
+int gxos_vm_region_ledger_validate(const GXOS_VM_REGION_LEDGER *ledger)
+{
+    uint32_t index;
+    uint32_t live_count = 0;
+    if (ledger == 0 || ledger->next_identity == 0 ||
+        ledger->live_count > GXOS_VM_REGION_LEDGER_CAPACITY) return 0;
+    for (index = 0; index != GXOS_VM_REGION_LEDGER_CAPACITY; ++index) {
+        const GXOS_VM_REGION *region = &ledger->entries[index];
+        uint32_t other;
+        uint64_t end;
+        if (!region->live) continue;
+        ++live_count;
+        if (region->base == 0 || region->allocation_base == 0 ||
+            region->bytes == 0 || region->base % GXOS_VM_PAGE_SIZE != 0 ||
+            region->bytes % GXOS_VM_PAGE_SIZE != 0 ||
+            region->allocation_base % GXOS_VM_PAGE_SIZE != 0 ||
+            region->allocation_base > region->base ||
+            !range_end(region->base, region->bytes, &end) ||
+            (region->state != GXOS_VM_REGION_STATE_COMMIT &&
+             region->state != GXOS_VM_REGION_STATE_RESERVE) ||
+            region->type == 0 || region->allocation_identity == 0) {
+            return 0;
+        }
+        for (other = index + 1; other != GXOS_VM_REGION_LEDGER_CAPACITY;
+             ++other) {
+            const GXOS_VM_REGION *candidate = &ledger->entries[other];
+            uint64_t candidate_end;
+            if (!candidate->live) continue;
+            if (!range_end(candidate->base, candidate->bytes, &candidate_end) ||
+                (region->base < candidate_end &&
+                 candidate->base < end)) return 0;
+        }
+    }
+    return live_count == ledger->live_count;
+}
+
+uint64_t gxos_vm_region_virtual_query(
+    const GXOS_VM_REGION_LEDGER *ledger,
+    uint64_t address,
+    GXOS_VM_MEMORY_BASIC_INFORMATION *information,
+    uint64_t length)
+{
+    uint32_t index;
+    const GXOS_VM_REGION *region = 0;
+    if (ledger == 0 || information == 0 ||
+        length < sizeof(*information)) return 0;
+    for (index = 0; index != GXOS_VM_REGION_LEDGER_CAPACITY; ++index) {
+        if (vm_region_contains(&ledger->entries[index], address)) {
+            region = &ledger->entries[index];
+            break;
+        }
+    }
+    if (region == 0) return 0;
+    zero_bytes(information, sizeof(*information));
+    information->BaseAddress = region->base;
+    information->AllocationBase = region->allocation_base;
+    information->AllocationProtect = region->allocation_protect;
+    information->RegionSize = region->bytes;
+    information->State = region->state;
+    information->Protect = region->protect;
+    information->Type = region->type;
+    return sizeof(*information);
+}
+
 static int canonical48(uint64_t address)
 {
     uint64_t upper = address >> 48;

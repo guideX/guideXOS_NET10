@@ -196,3 +196,21 @@ RSI/RDI preservation, XMM6–XMM15, MXCSR, x87 control, flags/direction policy,
 actual GS switching, generation-checked fixed object records, bounded stacks
 and canaries, independent TLS/FLS/last-error state, and deterministic lifetime
 rules.  Server scheduler code and files remain untouched.
+
+## Stack virtual-memory registration
+
+Each scheduler worker stack is a fixed, contiguous four-page allocation.  All
+four pages are zeroed and usable when the suspended thread is returned, so the
+current contract is one homogeneous `MEM_COMMIT`/`PAGE_READWRITE`/
+`MEM_PRIVATE` region with no guard or reserve subregion.  The scheduler
+registers that range with the bounded `GXOS_VM_REGION_LEDGER` before the thread
+can run and unregisters it before the backing pages are freed.  The loader
+stack is registered in the same descriptor ledger.
+
+The region ledger describes API-visible address ranges only.  It does not add
+physical, committed, or reserved bytes: scheduler page allocations already
+enter the physical ledger with their backing and impact bytes, while
+`GXOS_VM_ARENA` continues to account for the dynamic `VirtualAlloc` arena.
+Keeping these roles separate prevents stack query metadata from double-counting
+memory while allowing `VirtualQuery` to describe scheduler-owned stacks
+truthfully.

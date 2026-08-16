@@ -27,6 +27,24 @@ typedef struct {
 static GXOS_SCHEDULER_PROOF_STATE *g_proof;
 static GXOS_SCHEDULER_PROOF_STATE g_proof_storage;
 
+static int GXOS_SCHEDULER_MS_ABI proof_register_stack_vm(
+    void *context, uint64_t base, uint64_t bytes,
+    uint64_t *allocation_identity_out)
+{
+    (void)context;
+    if (base == 0 || bytes == 0 || allocation_identity_out == 0) return 0;
+    *allocation_identity_out = base;
+    return 1;
+}
+
+static int GXOS_SCHEDULER_MS_ABI proof_unregister_stack_vm(
+    void *context, uint64_t base, uint64_t bytes,
+    uint64_t allocation_identity)
+{
+    (void)context;
+    return base != 0 && bytes != 0 && allocation_identity == base;
+}
+
 static void proof_zero(void *destination, size_t count)
 {
     uint8_t *bytes = (uint8_t *)destination;
@@ -371,6 +389,13 @@ int gxos_synthetic_scheduler_proof(
               GXOS_SCHEDULER_STACK_SIZE);
     if (!gxos_scheduler_initialize(&proof->scheduler, allocate_pages, free_pages,
                                    log_text, log_hex, log_u32)) {
+        proof_text("GXOS_NET10:SCHEDULER_PROOF=FAILED\r\n");
+        g_proof = 0;
+        return 0;
+    }
+    if (!gxos_scheduler_configure_stack_vm(
+            &proof->scheduler, proof_register_stack_vm,
+            proof_unregister_stack_vm, 0)) {
         proof_text("GXOS_NET10:SCHEDULER_PROOF=FAILED\r\n");
         g_proof = 0;
         return 0;

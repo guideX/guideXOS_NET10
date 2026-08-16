@@ -1,6 +1,7 @@
 #ifndef GXOS_VM_SUBSTRATE_H
 #define GXOS_VM_SUBSTRATE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "memory_accounting.h"
@@ -11,6 +12,91 @@
 #define GXOS_X64_PAGING_ENTRY_NO_EXECUTE ((uint64_t)1U << 63)
 #define GXOS_X64_PAGING_PHYSICAL_MASK ((uint64_t)0x000FFFFFFFFFF000ULL)
 #define GXOS_VM_MAX_OWNED_TABLE_PAGES 64U
+#define GXOS_VM_REGION_LEDGER_CAPACITY 64U
+
+/* Windows-compatible values used by the queryable-region description. */
+#define GXOS_VM_REGION_STATE_COMMIT ((uint32_t)0x1000U)
+#define GXOS_VM_REGION_STATE_RESERVE ((uint32_t)0x2000U)
+#define GXOS_VM_REGION_PAGE_READWRITE ((uint32_t)0x04U)
+#define GXOS_VM_REGION_PAGE_GUARD ((uint32_t)0x100U)
+#define GXOS_VM_REGION_TYPE_PRIVATE ((uint32_t)0x20000U)
+
+/*
+ * This is the exact x64 MEMORY_BASIC_INFORMATION layout consumed by the
+ * NativeAOT payload.  Region records are descriptors only; backing-page and
+ * commit accounting remains in the physical ledger/VM arena.
+ */
+typedef struct {
+    uint64_t BaseAddress;
+    uint64_t AllocationBase;
+    uint32_t AllocationProtect;
+    uint32_t Padding0;
+    uint64_t RegionSize;
+    uint32_t State;
+    uint32_t Protect;
+    uint32_t Type;
+    uint32_t Padding1;
+} GXOS_VM_MEMORY_BASIC_INFORMATION;
+
+_Static_assert(offsetof(GXOS_VM_MEMORY_BASIC_INFORMATION, BaseAddress) == 0,
+               "VM query BaseAddress offset");
+_Static_assert(offsetof(GXOS_VM_MEMORY_BASIC_INFORMATION, AllocationBase) == 8,
+               "VM query AllocationBase offset");
+_Static_assert(offsetof(GXOS_VM_MEMORY_BASIC_INFORMATION, AllocationProtect) == 16,
+               "VM query AllocationProtect offset");
+_Static_assert(offsetof(GXOS_VM_MEMORY_BASIC_INFORMATION, RegionSize) == 24,
+               "VM query RegionSize offset");
+_Static_assert(offsetof(GXOS_VM_MEMORY_BASIC_INFORMATION, State) == 32,
+               "VM query State offset");
+_Static_assert(offsetof(GXOS_VM_MEMORY_BASIC_INFORMATION, Protect) == 36,
+               "VM query Protect offset");
+_Static_assert(offsetof(GXOS_VM_MEMORY_BASIC_INFORMATION, Type) == 40,
+               "VM query Type offset");
+_Static_assert(sizeof(GXOS_VM_MEMORY_BASIC_INFORMATION) == 48,
+               "VM query structure size");
+
+typedef struct {
+    uint32_t live;
+    uint32_t reserved;
+    uint64_t base;
+    uint64_t bytes;
+    uint64_t allocation_base;
+    uint32_t allocation_protect;
+    uint32_t state;
+    uint32_t protect;
+    uint32_t type;
+    uint64_t allocation_identity;
+} GXOS_VM_REGION;
+
+typedef struct {
+    GXOS_VM_REGION entries[GXOS_VM_REGION_LEDGER_CAPACITY];
+    uint32_t live_count;
+    uint32_t exhausted;
+    uint64_t next_identity;
+} GXOS_VM_REGION_LEDGER;
+
+void gxos_vm_region_ledger_init(GXOS_VM_REGION_LEDGER *ledger);
+GXOS_VM_STATUS gxos_vm_region_register(
+    GXOS_VM_REGION_LEDGER *ledger,
+    uint64_t base,
+    uint64_t bytes,
+    uint64_t allocation_base,
+    uint32_t allocation_protect,
+    uint32_t state,
+    uint32_t protect,
+    uint32_t type,
+    uint64_t *allocation_identity_out);
+GXOS_VM_STATUS gxos_vm_region_unregister(
+    GXOS_VM_REGION_LEDGER *ledger,
+    uint64_t base,
+    uint64_t bytes,
+    uint64_t allocation_identity);
+int gxos_vm_region_ledger_validate(const GXOS_VM_REGION_LEDGER *ledger);
+uint64_t gxos_vm_region_virtual_query(
+    const GXOS_VM_REGION_LEDGER *ledger,
+    uint64_t address,
+    GXOS_VM_MEMORY_BASIC_INFORMATION *information,
+    uint64_t length);
 
 typedef void *(*GXOS_VM_PHYSICAL_ALIAS)(void *context,
                                         uint64_t physical_address);

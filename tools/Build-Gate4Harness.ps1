@@ -25,6 +25,7 @@ $source = Join-Path $root 'src\Gate4Harness\gate4_loader.c'
 $memoryAccountingSource = Join-Path $root 'src\Gate4Harness\memory_accounting.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
+$virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
 $processorTopologySource = Join-Path $root 'src\Gate4Harness\platform_processor_topology.c'
 $timeSource = Join-Path $root 'src\Gate4Harness\platform_time.c'
 $performanceSource = Join-Path $root 'src\Gate4Harness\platform_performance.c'
@@ -82,6 +83,7 @@ if (-not (Test-Path -LiteralPath $moduleRegistrySource) -or
 if (-not (Test-Path -LiteralPath $memoryAccountingSource)) { throw "Memory accounting source not found: $memoryAccountingSource" }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
+if (-not (Test-Path -LiteralPath $virtualQueryCaptureAssembly)) { throw "VirtualQuery capture assembly not found: $virtualQueryCaptureAssembly" }
 if (-not (Test-Path -LiteralPath $timeSource)) { throw "Platform time source not found: $timeSource" }
 if (-not (Test-Path -LiteralPath $performanceSource)) { throw "Platform performance source not found: $performanceSource" }
 if (-not (Test-Path -LiteralPath $exceptionSource)) { throw "Exception context source not found: $exceptionSource" }
@@ -148,6 +150,7 @@ $gccArguments = @(
     '-o', $efi, $source, $memoryAccountingSource, $vmSubstrateSource, $timeSource, $performanceSource,
     $exceptionSource, $exceptionAssembly, $vectoredHandlerSource,
     $virtualMemorySource,
+    $virtualQueryCaptureAssembly,
     (Join-Path $root 'src\Gate4Harness\crt_onexit.c'),
     (Join-Path $root 'src\Gate4Harness\crt_initterm_e.c'),
     (Join-Path $root 'src\Gate4Harness\crt_initterm.c'),

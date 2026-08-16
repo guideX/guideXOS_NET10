@@ -6,6 +6,25 @@ static GXOS_SCHEDULER *g_scheduler;
 #ifdef GXOS_SCHEDULER_HOST_TEST
 static uint64_t g_host_gs_base;
 static uint64_t g_host_flags = 0x202U;
+
+/* Existing scheduler-only host tests do not exercise the VM substrate.  Keep
+   their stack lifecycle explicit while allowing the VM integration test to
+   replace these callbacks with a real region ledger. */
+static int host_register_stack_vm(void *context, uint64_t base, uint64_t bytes,
+                                  uint64_t *allocation_identity_out)
+{
+    (void)context;
+    if (allocation_identity_out == 0 || base == 0 || bytes == 0) return 0;
+    *allocation_identity_out = base;
+    return 1;
+}
+
+static int host_unregister_stack_vm(void *context, uint64_t base, uint64_t bytes,
+                                    uint64_t allocation_identity)
+{
+    (void)context;
+    return base != 0 && bytes != 0 && allocation_identity == base;
+}
 #endif
 
 static void zero_bytes(void *destination, size_t count)
@@ -533,6 +552,10 @@ int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
     scheduler->log_text = log_text;
     scheduler->log_hex = log_hex;
     scheduler->log_u32 = log_u32;
+#ifdef GXOS_SCHEDULER_HOST_TEST
+    scheduler->register_stack_vm = host_register_stack_vm;
+    scheduler->unregister_stack_vm = host_unregister_stack_vm;
+#endif
     scheduler->next_identity = 1;
     scheduler->next_wait_generation = 1;
     scheduler->saved_boot_gs_base = read_msr(0xC0000101U);
@@ -568,6 +591,25 @@ int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
     scheduler->boot_thread = boot;
     scheduler->active = 1;
     set_gs_base(boot->gs_base);
+    return 1;
+}
+
+int gxos_scheduler_configure_stack_vm(
+    GXOS_SCHEDULER *scheduler,
+    GXOS_SCHEDULER_REGISTER_STACK_VM register_stack_vm,
+    GXOS_SCHEDULER_UNREGISTER_STACK_VM unregister_stack_vm,
+    void *context)
+{
+    uint32_t index;
+    if (scheduler == 0 || scheduler != g_scheduler || !scheduler->active ||
+        scheduler->current != scheduler->boot_thread ||
+        register_stack_vm == 0 || unregister_stack_vm == 0) return 0;
+    for (index = 1; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        if (scheduler->threads[index].live) return 0;
+    }
+    scheduler->register_stack_vm = register_stack_vm;
+    scheduler->unregister_stack_vm = unregister_stack_vm;
+    scheduler->stack_vm_context = context;
     return 1;
 }
 
@@ -748,8 +790,12 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
     uint16_t object_slot;
     uint64_t stack_memory;
     uint64_t stack_top;
+    uint64_t stack_vm_identity = 0;
+    if (handle != 0) *handle = 0;
+    if (thread_out != 0) *thread_out = 0;
     if (scheduler == 0 || scheduler != g_scheduler || entry == 0 ||
-        handle == 0 || thread_out == 0) return 0;
+        handle == 0 || thread_out == 0 || scheduler->register_stack_vm == 0 ||
+        scheduler->unregister_stack_vm == 0) return 0;
     thread = find_free_thread();
     if (thread == 0) return 0;
     zero_bytes(thread, sizeof(*thread));
@@ -775,6 +821,7 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
                                   &stack_memory) != 0 || stack_memory == 0) {
         release_object_record(object);
         --scheduler->next_identity;
+        *handle = 0;
         zero_bytes(thread, sizeof(*thread));
         return 0;
     }
@@ -787,9 +834,23 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
         page_free(scheduler, stack_memory);
         release_object_record(object);
         --scheduler->next_identity;
+        *handle = 0;
         zero_bytes(thread, sizeof(*thread));
         return 0;
     }
+    if (!scheduler->register_stack_vm(
+            scheduler->stack_vm_context, thread->stack_base,
+            thread->stack_limit - thread->stack_base, &stack_vm_identity) ||
+        stack_vm_identity == 0) {
+        free_thread_environment(thread);
+        page_free(scheduler, stack_memory);
+        release_object_record(object);
+        --scheduler->next_identity;
+        *handle = 0;
+        zero_bytes(thread, sizeof(*thread));
+        return 0;
+    }
+    thread->stack_vm_identity = stack_vm_identity;
     stack_top = thread->stack_limit - GXOS_SCHEDULER_CANARY_BYTES;
     stack_top &= ~0xFULL;
     thread->initial_rsp = stack_top - 8U;
@@ -928,6 +989,17 @@ static void maybe_reclaim_thread(GXOS_SCHEDULER_TCB *thread)
         thread->runnable_queued || !gxos_scheduler_check_canaries(thread)) return;
     object = &g_scheduler->objects[thread->object_slot];
     if (!object->live || object->type != GXOS_SCHEDULER_OBJECT_THREAD) return;
+    if (thread->stack_pages_memory != 0) {
+        if (thread->stack_vm_identity == 0 ||
+            g_scheduler->unregister_stack_vm == 0 ||
+            !g_scheduler->unregister_stack_vm(
+                g_scheduler->stack_vm_context, thread->stack_base,
+                thread->stack_limit - thread->stack_base,
+                thread->stack_vm_identity)) {
+            return;
+        }
+        thread->stack_vm_identity = 0;
+    }
     object->internal_refs = 0;
     page_free(g_scheduler, thread->stack_pages_memory);
     thread->stack_pages_memory = 0;

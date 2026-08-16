@@ -53,6 +53,16 @@ typedef void (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_LOG_HEX)(const char *name,
                                                                uint64_t value);
 typedef void (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_LOG_U32)(const char *name,
                                                               uint32_t value);
+typedef int (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_REGISTER_STACK_VM)(
+    void *context,
+    uint64_t base,
+    uint64_t bytes,
+    uint64_t *allocation_identity_out);
+typedef int (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_UNREGISTER_STACK_VM)(
+    void *context,
+    uint64_t base,
+    uint64_t bytes,
+    uint64_t allocation_identity);
 
 typedef struct __attribute__((aligned(16))) {
     uint64_t rbx;
@@ -253,6 +263,7 @@ typedef struct GXOS_SCHEDULER_TCB {
     uint64_t stack_limit;
     uint64_t initial_rsp;
     uint64_t stack_pages_memory;
+    uint64_t stack_vm_identity;
     uint64_t teb_base;
     uint64_t gs_base;
     uint64_t tls_vector_base;
@@ -281,6 +292,9 @@ typedef struct GXOS_SCHEDULER {
     GXOS_SCHEDULER_LOG_TEXT log_text;
     GXOS_SCHEDULER_LOG_HEX log_hex;
     GXOS_SCHEDULER_LOG_U32 log_u32;
+    GXOS_SCHEDULER_REGISTER_STACK_VM register_stack_vm;
+    GXOS_SCHEDULER_UNREGISTER_STACK_VM unregister_stack_vm;
+    void *stack_vm_context;
     GXOS_SCHEDULER_TCB threads[GXOS_SCHEDULER_MAX_THREADS];
     GXOS_SCHEDULER_WAIT_RECORD wait_records[GXOS_SCHEDULER_MAX_WAIT_RECORDS];
     GXOS_SCHEDULER_EVENT events[GXOS_SCHEDULER_MAX_EVENTS];
@@ -340,6 +354,11 @@ int gxos_scheduler_adopt_boot_environment(GXOS_SCHEDULER *scheduler,
                                            uint64_t tls_block_base,
                                            uint64_t stack_lower,
                                            uint64_t stack_upper);
+int gxos_scheduler_configure_stack_vm(
+    GXOS_SCHEDULER *scheduler,
+    GXOS_SCHEDULER_REGISTER_STACK_VM register_stack_vm,
+    GXOS_SCHEDULER_UNREGISTER_STACK_VM unregister_stack_vm,
+    void *context);
 int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
                                 uint8_t manual_reset,
                                 uint8_t initial_signaled,

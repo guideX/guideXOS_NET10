@@ -298,6 +298,7 @@ static uint64_t g_managed_image_size;
 static uint32_t g_platform_last_error;
 static uint64_t g_stack_lower;
 static uint64_t g_stack_upper;
+static uint64_t g_loader_stack_vm_identity;
 static uint64_t g_loader_image_base;
 static uint64_t g_loader_image_size;
 static EFI_BOOT_SERVICES *g_memory_boot_services;
@@ -306,6 +307,7 @@ static GXOS_UEFI_MEMORY_MAP g_memory_map;
 static GXOS_MEMORY_CLASSIFICATION g_memory_classification;
 static GXOS_PHYSICAL_LEDGER g_memory_ledger;
 static GXOS_VM_ARENA g_memory_virtual_arena;
+static GXOS_VM_REGION_LEDGER g_memory_vm_regions;
 static GXOS_PHYSICAL_SNAPSHOT g_memory_physical_snapshot;
 static GXOS_COMMIT_MODEL g_memory_commit_model;
 static GXOS_MEMORY_SNAPSHOT g_memory_snapshot;
@@ -341,7 +343,7 @@ static int GXOS_VM_PUBLIC_MS_ABI platform_virtual_free(
 static GXOS_MEMORY_STATUS_EX_MEMORY_REGION
     g_memory_status_ex_regions[GXOS_MEMORY_STATUS_EX_MAX_MEMORY_REGIONS];
 static uint32_t g_memory_status_ex_region_count;
-static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_allocate_pool(
+static uint64_t GXOS_MEMORY_EFIAPI __attribute__((unused)) memory_tracked_allocate_pool(
     uint32_t pool_type, uint64_t size, void **buffer);
 static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_free_pool(void *buffer);
 static void emit_memory_accounting_diagnostics(void);
@@ -739,6 +741,17 @@ extern void gxos_exception_probe(void);
 extern const uint8_t gxos_exception_probe_int3[];
 extern void gxos_exception_probe_landing(void);
 static void serial_text(const char *text);
+static void serial_field_hex(const char *name, uint64_t value);
+extern void gxos_platform_virtual_query_capture(void);
+uint64_t gxos_virtual_query_entry_rcx;
+uint64_t gxos_virtual_query_entry_rdx;
+uint64_t gxos_virtual_query_entry_r8;
+uint64_t gxos_virtual_query_entry_r9;
+uint64_t gxos_virtual_query_entry_rsp;
+uint64_t gxos_virtual_query_entry_return_address;
+uint64_t gxos_virtual_query_entry_stack_arg4;
+uint64_t gxos_virtual_query_entry_stack_arg5;
+uint64_t gxos_virtual_query_entry_count;
 #ifdef GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF
 static void GXOS_SCHEDULER_MS_ABI scheduler_log_hex(const char *name,
                                                     uint64_t value);
@@ -4165,6 +4178,12 @@ void __attribute__((noreturn)) EFIAPI import_failfast(
     uintptr_t original_rdx = arguments == 0 ? 0 : (uintptr_t)arguments[2];
     uintptr_t original_r8 = arguments == 0 ? 0 : (uintptr_t)arguments[1];
     uintptr_t original_r9 = arguments == 0 ? 0 : (uintptr_t)arguments[0];
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_COUNT_AT_IMPORT_BLOCKER=0x",
+                     gxos_virtual_query_entry_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_RCX_AT_IMPORT_BLOCKER=0x",
+                     gxos_virtual_query_entry_rcx);
+    serial_text("\r\n");
     emit_memory_accounting_diagnostics();
 #if defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
@@ -5262,34 +5281,104 @@ static int EFIAPI platform_close_handle(void *handle)
     return 0;
 }
 
-typedef struct {
-    uint64_t BaseAddress;
-    uint64_t AllocationBase;
-    uint32_t AllocationProtect;
-    uint32_t Padding0;
-    uint64_t RegionSize;
-    uint32_t State;
-    uint32_t Protect;
-    uint32_t Type;
-    uint32_t Padding1;
-} PlatformMemoryBasicInformation;
-
-static EFI_UINTN EFIAPI platform_virtual_query(const void *address,
-                                               PlatformMemoryBasicInformation *information,
-                                               EFI_UINTN length)
+EFI_UINTN EFIAPI platform_virtual_query(const void *address,
+                                        GXOS_VM_MEMORY_BASIC_INFORMATION *information,
+                                        EFI_UINTN length)
 {
     uint64_t address_value = (uint64_t)(uintptr_t)address;
-    if (information == 0 || length < sizeof(PlatformMemoryBasicInformation) ||
-        address_value < g_stack_lower || address_value >= g_stack_upper) return 0;
-    zero_bytes((uint8_t *)information, sizeof(*information));
-    information->BaseAddress = g_stack_lower;
-    information->AllocationBase = g_stack_lower;
-    information->AllocationProtect = 0x04;
-    information->RegionSize = g_stack_upper - g_stack_lower;
-    information->State = 0x1000;
-    information->Protect = 0x04;
-    information->Type = 0x20000;
-    return sizeof(*information);
+    EFI_UINTN result;
+    ++gxos_virtual_query_entry_count;
+    if (gxos_virtual_query_entry_rsp != 0) {
+        gxos_virtual_query_entry_return_address =
+            *(const uint64_t *)(uintptr_t)gxos_virtual_query_entry_rsp;
+    }
+    result = (EFI_UINTN)gxos_vm_region_virtual_query(
+        &g_memory_vm_regions, address_value, information, length);
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_COUNT=0x",
+                     gxos_virtual_query_entry_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_RCX=0x",
+                     gxos_virtual_query_entry_rcx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_RDX=0x",
+                     gxos_virtual_query_entry_rdx);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_R8=0x",
+                     gxos_virtual_query_entry_r8);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_R9=0x",
+                     gxos_virtual_query_entry_r9);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_ENTRY_RSP=0x",
+                     gxos_virtual_query_entry_rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_RETURN_ADDRESS=0x",
+                     gxos_virtual_query_entry_return_address);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_STACK_ARG4=0x",
+                     gxos_virtual_query_entry_stack_arg4);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_STACK_ARG5=0x",
+                     gxos_virtual_query_entry_stack_arg5);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_LENGTH=0x", length);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_LAST_ERROR=0x",
+                     g_platform_last_error);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_RESULT=0x", result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_BASE_ADDRESS=0x",
+                     result == 0 || information == 0 ? 0 : information->BaseAddress);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_ALLOCATION_BASE=0x",
+                     result == 0 || information == 0 ? 0 : information->AllocationBase);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_ALLOCATION_PROTECT=0x",
+                     result == 0 || information == 0 ? 0 : information->AllocationProtect);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_REGION_SIZE=0x",
+                     result == 0 || information == 0 ? 0 : information->RegionSize);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_STATE=0x",
+                     result == 0 || information == 0 ? 0 : information->State);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_PROTECT=0x",
+                     result == 0 || information == 0 ? 0 : information->Protect);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_TYPE=0x",
+                     result == 0 || information == 0 ? 0 : information->Type);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_TARGET_STACK_OFFSET=0x",
+                     address_value >= g_stack_lower && address_value < g_stack_upper
+                         ? address_value - g_stack_lower : UINT64_MAX);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_TARGET_WORKER_OFFSET=0x",
+                     gxos_scheduler_current_thread() != 0 &&
+                             address_value >= gxos_scheduler_current_thread()->stack_base &&
+                             address_value < gxos_scheduler_current_thread()->stack_limit
+                         ? address_value - gxos_scheduler_current_thread()->stack_base : UINT64_MAX);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_CURRENT_RSP=0x",
+                     gxos_virtual_query_entry_rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_WORKER_STACK_BASE=0x",
+                     gxos_scheduler_current_thread() != 0
+                         ? gxos_scheduler_current_thread()->stack_base : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_WORKER_STACK_LIMIT=0x",
+                     gxos_scheduler_current_thread() != 0
+                         ? gxos_scheduler_current_thread()->stack_limit : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_CURRENT_IDENTITY=0x",
+                     gxos_scheduler_current_thread() != 0
+                         ? gxos_scheduler_current_thread()->identity : 0);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:VIRTUALQUERY_CAPTURE_CURRENT_STATE=0x",
+                     gxos_scheduler_current_thread() != 0
+                         ? gxos_scheduler_current_thread()->state : 0);
+    serial_text("\r\n");
+    return result;
 }
 
 typedef struct {
@@ -8479,7 +8568,7 @@ static void *platform_import_target(const char *module, const char *symbol)
 #endif
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "DuplicateHandle")) return (void *)(uintptr_t)platform_duplicate_handle;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "CloseHandle")) return (void *)(uintptr_t)platform_close_handle;
-    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "VirtualQuery")) return (void *)(uintptr_t)platform_virtual_query;
+    if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "VirtualQuery")) return (void *)(uintptr_t)gxos_platform_virtual_query_capture;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "InitializeCriticalSectionEx")) return (void *)(uintptr_t)platform_initialize_critical_section_ex;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "InitializeCriticalSection")) return (void *)(uintptr_t)platform_initialize_critical_section;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "EnterCriticalSection")) return (void *)(uintptr_t)platform_enter_critical_section;
@@ -9538,6 +9627,32 @@ static void memory_make_allocation(
     allocation->generation = g_memory_map.generation;
 }
 
+static int GXOS_MEMORY_EFIAPI __attribute__((unused)) memory_register_scheduler_stack(
+    void *context,
+    uint64_t base,
+    uint64_t bytes,
+    uint64_t *allocation_identity_out)
+{
+    GXOS_VM_STATUS status;
+    status = gxos_vm_region_register(
+        (GXOS_VM_REGION_LEDGER *)context, base, bytes, base,
+        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_STATE_COMMIT,
+        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_TYPE_PRIVATE,
+        allocation_identity_out);
+    return status == GXOS_VM_STATUS_OK;
+}
+
+static int GXOS_MEMORY_EFIAPI __attribute__((unused)) memory_unregister_scheduler_stack(
+    void *context,
+    uint64_t base,
+    uint64_t bytes,
+    uint64_t allocation_identity)
+{
+    return gxos_vm_region_unregister(
+               (GXOS_VM_REGION_LEDGER *)context, base, bytes,
+               allocation_identity) == GXOS_VM_STATUS_OK;
+}
+
 static int memory_find_ledger_base(uint64_t base, uint32_t *slot_out)
 {
     uint32_t index;
@@ -9580,7 +9695,7 @@ static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_allocate_pool(
     return EFI_SUCCESS;
 }
 
-static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_free_pool(void *buffer)
+static uint64_t GXOS_MEMORY_EFIAPI __attribute__((unused)) memory_tracked_free_pool(void *buffer)
 {
     uint32_t ledger_slot;
     GXOS_PHYSICAL_ALLOCATION *allocation;
@@ -9606,7 +9721,7 @@ static uint64_t GXOS_MEMORY_EFIAPI memory_tracked_free_pool(void *buffer)
     return EFI_SUCCESS;
 }
 
-static uint64_t EFIAPI memory_tracked_allocate_pages(
+static uint64_t EFIAPI __attribute__((unused)) memory_tracked_allocate_pages(
     uint32_t type, uint32_t memory_type, uint64_t pages,
     EFI_PHYSICAL_ADDRESS *memory)
 {
@@ -9642,7 +9757,7 @@ static uint64_t EFIAPI memory_tracked_allocate_pages(
     return EFI_SUCCESS;
 }
 
-static uint64_t EFIAPI memory_tracked_free_pages(
+static uint64_t EFIAPI __attribute__((unused)) memory_tracked_free_pages(
     EFI_PHYSICAL_ADDRESS memory, uint64_t pages)
 {
     uint32_t ledger_slot;
@@ -9687,12 +9802,22 @@ static void initialize_memory_accounting(const PE_IMAGE *image,
     gxos_physical_ledger_init(&g_memory_ledger, g_memory_map.generation);
     gxos_vm_arena_init(&g_memory_virtual_arena, GXOS_VM_ARENA_BASE,
                        GXOS_VM_ARENA_LENGTH, g_memory_map.generation);
+    gxos_vm_region_ledger_init(&g_memory_vm_regions);
     if (!g_memory_virtual_arena.valid || image->actual_base == 0 ||
         image->loaded_size == 0 || image->actual_base > UINT64_MAX -
             image->loaded_size) {
         fail("memory-virtual-arena");
     }
     if (g_stack_lower >= g_stack_upper) fail("memory-main-stack-range");
+    if (gxos_vm_region_register(
+            &g_memory_vm_regions, g_stack_lower,
+            g_stack_upper - g_stack_lower, g_stack_lower,
+            GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_STATE_COMMIT,
+            GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_TYPE_PRIVATE,
+            &g_loader_stack_vm_identity) != GXOS_VM_STATUS_OK ||
+        !gxos_vm_region_ledger_validate(&g_memory_vm_regions)) {
+        fail("memory-main-stack-region");
+    }
     if (image->memory_region_count == 0 ||
         image->memory_region_count + 1U >
             GXOS_MEMORY_STATUS_EX_MAX_MEMORY_REGIONS) {
@@ -9729,6 +9854,10 @@ static void initialize_memory_accounting(const PE_IMAGE *image,
     serial_text("GXOS_NET10:VIRTUAL_MEMORY_CONTEXT_INITIALIZED=1\r\n");
 #endif
     serial_text("GXOS_NET10:FIRMWARE_MEASURED_MEMORY_MAP_VALID=1\r\n");
+    serial_text("GXOS_NET10:VM_REGION_LEDGER_INITIALIZED=1\r\n");
+    serial_field_hex("GXOS_NET10:VM_REGION_LOADER_STACK_IDENTITY=0x",
+                     g_loader_stack_vm_identity);
+    serial_text("\r\n");
     serial_field_hex("GXOS_NET10:FIRMWARE_MEASURED_MEMORY_MAP_GENERATION=0x",
                      g_memory_map.generation);
     serial_text("\r\n");
@@ -9770,7 +9899,8 @@ static void emit_memory_accounting_diagnostics(void)
     uint64_t current_available_commit;
     if (!g_memory_snapshot.valid) return;
     if (!gxos_physical_ledger_validate(&g_memory_ledger) ||
-        !gxos_vm_arena_validate(&g_memory_virtual_arena)) {
+        !gxos_vm_arena_validate(&g_memory_virtual_arena) ||
+        !gxos_vm_region_ledger_validate(&g_memory_vm_regions)) {
         fail("memory-current-accounting");
     }
     if (g_memory_classification.conventional_bytes >= g_memory_ledger.physical_bytes) {
@@ -9805,6 +9935,9 @@ static void emit_memory_accounting_diagnostics(void)
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GUIDEXOS_ACCOUNTED_LEDGER_LIVE_COUNT=0x",
                      g_memory_ledger.live_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GUIDEXOS_VM_REGION_LIVE_COUNT=0x",
+                     g_memory_vm_regions.live_count);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GUIDEXOS_ACCOUNTED_LEDGER_PHYSICAL_BYTES=0x",
                      g_memory_ledger.physical_bytes);
@@ -13227,6 +13360,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("createeventw-scheduler-initialize");
     }
     ++g_create_event_scheduler_initialize_count;
+    if (!gxos_scheduler_configure_stack_vm(
+            &g_create_event_scheduler, memory_register_scheduler_stack,
+            memory_unregister_scheduler_stack, &g_memory_vm_regions)) {
+        fail("createeventw-scheduler-stack-vm");
+    }
     if (!gxos_scheduler_adopt_boot_environment(
             &g_create_event_scheduler,
             g_gs_area, g_teb_area, g_tls_vector, g_tls_block,
