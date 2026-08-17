@@ -37,12 +37,14 @@ process-initialization counter remains exactly `1`.
 
 ## What the generated thunk does
 
-The authoritative payload is the callback payload from the previous
-milestone:
+The attach proof below records the callback-era payload from the previous
+milestone. It is historical milestone evidence; the current merge-gate
+payload is the 730,112-byte callback/GC rebuild documented in
+[NATIVEAOT_GC_SCHEDULER_THREAD.md](NATIVEAOT_GC_SCHEDULER_THREAD.md).
 
 | Item | Value |
 | --- | --- |
-| Payload SHA-256 | `72F5CD40EE698B6BCCF6D67AEAB1BA570A2CE6B49B083B447AF067AA6F1EE9FA` |
+| Historical callback payload SHA-256 | `72F5CD40EE698B6BCCF6D67AEAB1BA570A2CE6B49B083B447AF067AA6F1EE9FA` |
 | Payload size | `729600` bytes |
 | `ManagedCallback` export RVA | `0x24724` |
 | Representative relocated address | `0x000000000549F724` |

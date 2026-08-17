@@ -5493,6 +5493,101 @@ static uint64_t *nativeaot_unwind_register(GXOS_CONTEXT_COMPAT *context,
     }
 }
 
+static int nativeaot_gc_canonical_address(uint64_t address)
+{
+    uint64_t upper = address >> 48;
+    uint64_t sign = (address >> 47) & 1U;
+    return (sign == 0 && upper == 0) ||
+        (sign != 0 && upper == 0xFFFFU);
+}
+
+static int nativeaot_gc_range_within(uint64_t address, uint64_t bytes,
+                                     uint64_t lower, uint64_t upper)
+{
+    uint64_t end;
+    if (bytes == 0 || lower >= upper || address < lower || address > upper ||
+        address > UINT64_MAX - bytes) return 0;
+    end = address + bytes;
+    return end > address && end <= upper &&
+        nativeaot_gc_canonical_address(address) &&
+        nativeaot_gc_canonical_address(end - 1U);
+}
+
+static int nativeaot_gc_committed_arena_range(uint64_t address,
+                                              uint64_t bytes)
+{
+    uint64_t end;
+    uint64_t page;
+    uint64_t last_page;
+    uint32_t commitment_slot;
+    if (!g_memory_virtual_arena.valid || bytes == 0 ||
+        address > UINT64_MAX - bytes ||
+        !gxos_vm_arena_contains(&g_memory_virtual_arena, address, bytes)) {
+        return 0;
+    }
+    end = address + bytes;
+    page = address & ~((uint64_t)GXOS_VM_PAGE_SIZE - 1U);
+    last_page = (end - 1U) & ~((uint64_t)GXOS_VM_PAGE_SIZE - 1U);
+    for (;;) {
+        if (gxos_vm_arena_find_commitment(
+                &g_memory_virtual_arena, page, &commitment_slot) !=
+            GXOS_VM_STATUS_OK) return 0;
+        if (page == last_page) return 1;
+        if (page > UINT64_MAX - GXOS_VM_PAGE_SIZE) return 0;
+        page += GXOS_VM_PAGE_SIZE;
+    }
+}
+
+static int nativeaot_gc_readable_range(uint64_t address, uint64_t bytes)
+{
+    uint64_t image_end;
+    uint32_t index;
+    if (g_managed_image_base == 0 || g_managed_image_size == 0 ||
+        g_managed_image_base > UINT64_MAX - g_managed_image_size) return 0;
+    image_end = g_managed_image_base + g_managed_image_size;
+    if (nativeaot_gc_range_within(address, bytes, g_managed_image_base,
+                                  image_end) ||
+        nativeaot_gc_range_within(address, bytes, g_stack_lower,
+                                  g_stack_upper) ||
+        (g_stack_lower >= EFI_PAGE_SIZE && nativeaot_gc_range_within(
+            address, bytes, g_stack_lower - EFI_PAGE_SIZE, g_stack_upper)) ||
+        nativeaot_gc_committed_arena_range(address, bytes)) return 1;
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        const GXOS_SCHEDULER_TCB *thread = &g_create_event_scheduler.threads[index];
+        if (thread->live && nativeaot_gc_range_within(
+                address, bytes, thread->stack_base, thread->stack_limit)) {
+            return 1;
+        }
+    }
+#else
+    (void)index;
+#endif
+    return 0;
+}
+
+static int nativeaot_gc_add_u64(uint64_t left, uint64_t right,
+                                uint64_t *result)
+{
+    if (result == 0 || left > UINT64_MAX - right) return 0;
+    *result = left + right;
+    return 1;
+}
+
+static int nativeaot_gc_read_stack_u64(uint64_t *stack_pointer,
+                                       uint64_t *value)
+{
+    uint64_t next;
+    if (stack_pointer == 0 || value == 0 ||
+        !nativeaot_gc_readable_range(*stack_pointer, sizeof(*value)) ||
+        !nativeaot_gc_add_u64(*stack_pointer, sizeof(*value), &next)) {
+        return 0;
+    }
+    *value = *(const uint64_t *)(uintptr_t)*stack_pointer;
+    *stack_pointer = next;
+    return 1;
+}
+
 static uint32_t EFIAPI platform_rtl_virtual_unwind(
     uint32_t handler_type,
     uint64_t image_base,
@@ -5513,29 +5608,48 @@ static uint32_t EFIAPI platform_rtl_virtual_unwind(
     uint64_t frame_base;
     uint32_t frame_register;
     uint32_t frame_offset;
+    uint64_t control_rva;
+    uint64_t code_bytes;
 
     (void)handler_type;
     (void)context_pointers;
     ++g_nativeaot_gc_virtual_unwind_calls;
     g_nativeaot_gc_last_unwind_context = (uint64_t)(uintptr_t)context_record;
-    g_nativeaot_gc_last_unwind_context_rsp =
-        context_record == 0 ? 0 : context_record->rsp;
-    g_nativeaot_gc_last_unwind_context_rip =
-        context_record == 0 ? 0 : context_record->rip;
+    g_nativeaot_gc_last_unwind_context_rsp = 0;
+    g_nativeaot_gc_last_unwind_context_rip = 0;
     g_nativeaot_gc_last_unwind_control_pc = control_pc;
-    if (image_base == 0 || function_entry == 0 || context_record == 0 ||
+    if (image_base == 0 || image_base != g_managed_image_base ||
+        function_entry == 0 || context_record == 0 ||
+        !nativeaot_gc_readable_range((uint64_t)(uintptr_t)function_entry,
+                                     sizeof(*function_entry)) ||
+        !nativeaot_gc_readable_range((uint64_t)(uintptr_t)context_record,
+                                     sizeof(*context_record)) ||
         control_pc < image_base ||
-        function_entry->unwind_data < 0x1000U) {
-        ++g_nativeaot_gc_virtual_unwind_failures;
-        return 0;
-    }
+        g_managed_image_size == 0 ||
+        control_pc - image_base > UINT32_MAX) goto unwind_failure;
+    control_rva = control_pc - image_base;
+    if (function_entry->begin_address >= function_entry->end_address ||
+        function_entry->end_address > g_managed_image_size ||
+        control_rva < function_entry->begin_address ||
+        control_rva >= function_entry->end_address ||
+        function_entry->unwind_data < 0x1000U) goto unwind_failure;
     unwind_rva = function_entry->unwind_data & 0xFFFFFFFCU;
+    if (g_managed_image_size < 4U ||
+        (uint64_t)unwind_rva > g_managed_image_size - 4U) {
+        goto unwind_failure;
+    }
     unwind_info = (const uint8_t *)(uintptr_t)(image_base + unwind_rva);
     codes = unwind_info + 4;
     code_count = unwind_info[2];
+    code_bytes = (uint64_t)code_count * 2U;
+    if (code_bytes > g_managed_image_size - unwind_rva - 4U) {
+        goto unwind_failure;
+    }
     frame_register = unwind_info[3] & 0x0FU;
     frame_offset = unwind_info[3] >> 4;
-    prologue_offset = (uint32_t)(control_pc - image_base) -
+    g_nativeaot_gc_last_unwind_context_rsp = context_record->rsp;
+    g_nativeaot_gc_last_unwind_context_rip = context_record->rip;
+    prologue_offset = (uint32_t)control_rva -
                       function_entry->begin_address;
     frame_before = context_record->rsp;
     frame_base = context_record->rsp;
@@ -5547,7 +5661,23 @@ static uint32_t EFIAPI platform_rtl_virtual_unwind(
         uint32_t slots = 1;
         uint64_t value;
         uint64_t *register_value;
+        uint64_t address;
 
+        if (operation == 1U) {
+            if (operation_info == 0U) slots = 2;
+            else if (operation_info == 1U) slots = 3;
+            else goto unwind_failure;
+        } else if (operation == 4U || operation == 8U) {
+            slots = 2;
+        } else if (operation == 5U || operation == 9U) {
+            slots = 3;
+        } else if (operation == 0U || operation == 2U || operation == 3U ||
+                   operation == 10U) {
+            slots = 1;
+        } else {
+            goto unwind_failure;
+        }
+        if (slots > code_count - code_index) goto unwind_failure;
         if (code[0] > prologue_offset) {
             code_index += slots;
             continue;
@@ -5557,40 +5687,52 @@ static uint32_t EFIAPI platform_rtl_virtual_unwind(
             register_value = nativeaot_unwind_register(context_record,
                                                        operation_info);
             if (register_value == 0) goto unwind_failure;
-            *register_value = *(const uint64_t *)(uintptr_t)context_record->rsp;
-            context_record->rsp += 8;
+            if (!nativeaot_gc_read_stack_u64(&context_record->rsp, &value)) {
+                goto unwind_failure;
+            }
+            *register_value = value;
             break;
         case 1: /* UWOP_ALLOC_LARGE */
             if (operation_info == 0) {
                 value = *(const uint16_t *)(codes + (code_index + 1U) * 2U);
-                context_record->rsp += value * 8U;
-                slots = 2;
+                if (!nativeaot_gc_add_u64(context_record->rsp, value * 8U,
+                                          &context_record->rsp)) {
+                    goto unwind_failure;
+                }
             } else if (operation_info == 1) {
                 value = *(const uint32_t *)(codes + (code_index + 1U) * 2U) |
                         ((uint64_t)*(const uint16_t *)(codes +
                             (code_index + 2U) * 2U) << 16);
-                context_record->rsp += value;
-                slots = 3;
-            } else {
-                goto unwind_failure;
+                if (!nativeaot_gc_add_u64(context_record->rsp, value,
+                                          &context_record->rsp)) {
+                    goto unwind_failure;
+                }
             }
             break;
         case 2: /* UWOP_ALLOC_SMALL */
-            context_record->rsp += (uint64_t)operation_info * 8U + 8U;
+            if (!nativeaot_gc_add_u64(context_record->rsp,
+                                      (uint64_t)operation_info * 8U + 8U,
+                                      &context_record->rsp)) goto unwind_failure;
             break;
         case 3: /* UWOP_SET_FPREG */
             register_value = nativeaot_unwind_register(context_record,
                                                        frame_register);
             if (register_value == 0) goto unwind_failure;
-            context_record->rsp = *register_value - (uint64_t)frame_offset * 16U;
+            value = (uint64_t)frame_offset * 16U;
+            if (*register_value < value) goto unwind_failure;
+            context_record->rsp = *register_value - value;
             break;
         case 4: /* UWOP_SAVE_NONVOL */
             register_value = nativeaot_unwind_register(context_record,
                                                        operation_info);
             if (register_value == 0) goto unwind_failure;
             value = *(const uint16_t *)(codes + (code_index + 1U) * 2U);
-            *register_value = *(const uint64_t *)(uintptr_t)(frame_base + value * 8U);
-            slots = 2;
+            if (value > (UINT64_MAX - frame_base) / 8U) goto unwind_failure;
+            address = frame_base + value * 8U;
+            if (!nativeaot_gc_readable_range(address, sizeof(value))) {
+                goto unwind_failure;
+            }
+            *register_value = *(const uint64_t *)(uintptr_t)address;
             break;
         case 5: /* UWOP_SAVE_NONVOL_FAR */
             register_value = nativeaot_unwind_register(context_record,
@@ -5599,26 +5741,27 @@ static uint32_t EFIAPI platform_rtl_virtual_unwind(
             value = *(const uint32_t *)(codes + (code_index + 1U) * 2U) |
                     ((uint64_t)*(const uint16_t *)(codes +
                         (code_index + 2U) * 2U) << 16);
-            *register_value = *(const uint64_t *)(uintptr_t)(frame_base + value);
-            slots = 3;
+            if (!nativeaot_gc_add_u64(frame_base, value, &address) ||
+                !nativeaot_gc_readable_range(address, sizeof(value))) {
+                goto unwind_failure;
+            }
+            *register_value = *(const uint64_t *)(uintptr_t)address;
             break;
         case 8: /* UWOP_SAVE_XMM128 */
-            slots = 2;
             break;
         case 9: /* UWOP_SAVE_XMM128_FAR */
-            slots = 3;
             break;
         case 10: /* UWOP_PUSH_MACHFRAME */
-            context_record->rsp += operation_info == 0 ? 40U : 48U;
+            if (!nativeaot_gc_add_u64(context_record->rsp,
+                                      operation_info == 0 ? 40U : 48U,
+                                      &context_record->rsp)) goto unwind_failure;
             break;
-        default:
-            goto unwind_failure;
         }
         code_index += slots;
     }
 
-    context_record->rip = *(const uint64_t *)(uintptr_t)context_record->rsp;
-    context_record->rsp += 8;
+    if (!nativeaot_gc_read_stack_u64(&context_record->rsp,
+                                     &context_record->rip)) goto unwind_failure;
     if (establisher_frame != 0) *establisher_frame = frame_before;
     if (handler_data != 0) *handler_data = 0;
     return 0;

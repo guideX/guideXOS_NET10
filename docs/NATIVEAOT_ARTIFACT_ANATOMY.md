@@ -1,6 +1,6 @@
 # NativeAOT artifact anatomy
 
-The Gate 1 shared artifact is an ordinary .NET 10 NativeAOT PE32+ image, not an ELF image or flat freestanding blob. Gate 4 now loads it directly, applies relocations, patches all IAT slots, establishes the minimum one-thread NativeAOT transition state, and enters the exported method.
+The historical no-allocation Gate 1 control described in the first sections is an ordinary .NET 10 NativeAOT PE32+ image, not an ELF image or flat freestanding blob. Gate 4 loads it directly, applies relocations, patches all IAT slots, establishes the minimum one-thread NativeAOT transition state, and enters the exported method. The current merge-gate payload is the separate callback/GC rebuild recorded in [NATIVEAOT_GC_SCHEDULER_THREAD.md](NATIVEAOT_GC_SCHEDULER_THREAD.md): 730,112 bytes with SHA-256 `AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012`.
 
 ## Image facts
 

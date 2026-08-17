@@ -95,9 +95,13 @@ wait telemetry and reached `MANAGED_ENTRY_OK`, `AFTER_MANAGED_RETURN=0`, and
 `MANAGED_ENTRY_COMPLETE`. None emitted the old fail-fast at RVA `0x32C21`, the
 new import blocker at `0x3C6A4`, a CPU/page fault, or a corruption marker.
 
-Payload SHA-256 was unchanged in source and staged ESP for every run:
+The following hash belongs to this historical pre-callback FLS-fix artifact and
+was unchanged in source and staged ESP for every run:
 
 `2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837`
+
+The current callback/GC merge-gate payload is 730,112 bytes with SHA-256
+`AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012`.
 
 ## Deliberately deferred
 

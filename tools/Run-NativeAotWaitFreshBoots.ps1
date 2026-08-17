@@ -226,3 +226,4 @@ if (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count 
 }
 Write-Output "NATIVEAOT_WAIT_PAYLOAD_SHA256=$expectedHash"
 Write-Output "NATIVEAOT_WAIT_RUNS=$RunCount"
+Write-Output 'NATIVEAOT_WAIT_MODE=INTENTIONAL_BLOCKING_PROOF'

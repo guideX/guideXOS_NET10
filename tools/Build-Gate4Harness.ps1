@@ -14,6 +14,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$historicalControlPayloadSha256 = '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837'
+$callbackPayloadSha256 = '72F5CD40EE698B6BCCF6D67AEAB1BA570A2CE6B49B083B447AF067AA6F1EE9FA'
+$authoritativePayloadSha256 = 'AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012'
+$authoritativePayloadSize = 730112
+$requiresCallbackPayload = $EnableNativeAotManagedCallback -or $EnableNativeAotSchedulerCallback
+$requiresAuthoritativePayload = $EnableNativeAotManagedGcProbe
+
 if ($EnableNativeAotManagedCallback -and $Scenario -ne 'NativeAotEventWait') {
     throw 'NativeAot managed callback validation requires the NativeAotEventWait scenario.'
 }
@@ -81,6 +88,9 @@ $efi = Join-Path $efiDirectory 'BOOTX64.EFI'
 $payload = Join-Path $payloadDirectory 'gxos-managed-entry-probe.dll'
 $startupScript = Join-Path $espDirectory 'startup.nsh'
 if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
+    if ($requiresCallbackPayload -or $requiresAuthoritativePayload) {
+        throw 'Callback and GC builds require an explicit -ManagedArtifact pointing to the intended rebuilt payload.'
+    }
     if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
         $Scenario -eq 'CreateMemoryResourceNotification' -or
         $Scenario -eq 'CreateMemoryResourceNotificationDisabled' -or
@@ -154,8 +164,17 @@ if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
     $Scenario -eq 'GlobalMemoryStatusEx' -or $Scenario -eq 'GlobalMemoryStatusExDisabled' -or
     $Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait') {
     $payloadHash = (Get-FileHash -LiteralPath $managedArtifact -Algorithm SHA256).Hash.ToUpperInvariant()
-    if (-not $EnableNativeAotManagedCallback -and
-        $payloadHash -ne '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837') {
+    $payloadSize = (Get-Item -LiteralPath $managedArtifact).Length
+    if ($requiresAuthoritativePayload -and
+        ($payloadHash -ne $authoritativePayloadSha256 -or $payloadSize -ne $authoritativePayloadSize)) {
+        throw "The managed GC integration requires the authoritative $authoritativePayloadSize-byte payload. Hash=$payloadHash Size=$payloadSize"
+    }
+    if (-not $requiresAuthoritativePayload -and $requiresCallbackPayload -and
+        $payloadHash -ne $callbackPayloadSha256) {
+        throw "The managed callback integration requires the callback payload. Hash=$payloadHash"
+    }
+    if (-not $requiresAuthoritativePayload -and -not $requiresCallbackPayload -and
+        $payloadHash -ne $historicalControlPayloadSha256) {
         throw "The thread payload integration requires the exact veh-final3-normal-gate payload. Hash=$payloadHash"
     }
 }
@@ -169,11 +188,31 @@ New-Item -ItemType Directory -Path $efiDirectory,$payloadDirectory -Force | Out-
 Copy-Item -LiteralPath $managedArtifact -Destination $payload -Force
 Copy-Item -LiteralPath $startupSource -Destination $startupScript -Force
 
+if ($requiresAuthoritativePayload -or $requiresCallbackPayload) {
+    $stagedPayloadHash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant()
+    $stagedPayloadSize = (Get-Item -LiteralPath $payload).Length
+    $expectedStagedHash = if ($requiresAuthoritativePayload) {
+        $authoritativePayloadSha256
+    } else {
+        $callbackPayloadSha256
+    }
+    $expectedStagedSize = if ($requiresAuthoritativePayload) {
+        $authoritativePayloadSize
+    } else {
+        $null
+    }
+    if ($stagedPayloadHash -ne $expectedStagedHash -or
+        ($null -ne $expectedStagedSize -and $stagedPayloadSize -ne $expectedStagedSize)) {
+        throw "Staged managed payload identity mismatch. Hash=$stagedPayloadHash Size=$stagedPayloadSize"
+    }
+}
+
 $gccArguments = @(
     '-ffreestanding', '-fno-stack-protector', '-fno-asynchronous-unwind-tables',
     '-fno-ident', '-mno-red-zone', '-O2', '-Wall', '-Wextra', '-Werror',
     '-nostdlib', '-Wl,--entry,efi_main', '-Wl,--subsystem,10',
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
+    '-Wl,--no-insert-timestamp',
     '-o', $efi, $source, $memoryAccountingSource, $vmSubstrateSource, $timeSource, $performanceSource,
     $exceptionSource, $exceptionAssembly, $vectoredHandlerSource,
     $virtualMemorySource,

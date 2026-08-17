@@ -15,9 +15,9 @@ The repository contains a small .NET 10 NativeAOT managed-entry probe and a narr
 
 The earlier ten-descriptor import stop is retained as historical evidence. `GXOS_NET10:MANAGED_ENTRY_OK` is emitted by managed execution, not by the native loader.
 
-The post-initialization managed callback bridge is now proven: the loaded PE export table discovers `ManagedCallback`, the one-shot NativeAOT process entry returns, and three fresh QEMU boots execute two later native-to-managed-to-native calls with managed counter results `0x0001002A` and `0x00020064`. See [the NativeAOT managed callback bridge contract](docs/NATIVEAOT_MANAGED_CALLBACK.md).
+The post-initialization managed callback bridge is now proven: the loaded PE export table discovers `ManagedCallback`, the one-shot NativeAOT process entry returns, and three fresh QEMU boots execute later native-to-managed-to-native calls with persistent managed state. See [the NativeAOT managed callback bridge contract](docs/NATIVEAOT_MANAGED_CALLBACK.md).
 
-The allocation/GC follow-on remains bounded: the exact FILETIME, monotonic performance, CRT on-exit, x64 SLIST-head, `_initterm_e`, `_initterm`, `strcmp`, `strlen`, `GetEnvironmentVariableW`, Microsoft x64 `_stricmp`, and the bounded pre-heap `malloc` contracts advance authentic startup. Three fresh positive malloc runs reach the first three payload allocations and stop at the next authentic `KERNEL32.dll!AddVectoredExceptionHandler` import. No `free`, `calloc`, `realloc`, `_recalloc`, `_callnewh`, GC startup, managed-thread registration, general SLIST operation, or generalized heap behavior is claimed. See [the bounded `malloc` bootstrap contract](docs/CRT_MALLOC_BOOTSTRAP.md) and [the `_stricmp` bootstrap contract](docs/CRT_STRICMP_BOOTSTRAP.md).
+The NativeAOT/runtime foundation now includes bounded managed allocation and real GC participation on the main and scheduler-attached worker threads, including survival of a stack-local managed root across collection. See [the scheduler-thread GC proof](docs/NATIVEAOT_GC_SCHEDULER_THREAD.md). The older pre-heap and no-allocation artifacts remain historical controls; they do not define the current merge-gate payload.
 
 ## Provisional first-image path
 
@@ -30,9 +30,11 @@ UEFI firmware
   -> exported ManagedMain reverse-P/Invoke entry
   -> managed serial callback and deterministic return
   -> post-initialization ManagedCallback export with existing runtime state
+  -> scheduler-thread reverse-P/Invoke attach
+  -> managed allocation and real GC probe
 ```
 
-This milestone deliberately excludes allocation, garbage collection, exceptions, unwinding, threads, synchronization beyond the startup contract, reflection, dynamic loading, networking, globalization, filesystem support, and broad framework compatibility.
+This foundation deliberately excludes managed thread-pool/`Task`/async support, arbitrary managed `Thread` creation, heavy concurrent GC stress, finalizer stress, broad exception propagation, reflection-heavy features, dynamic assembly loading, full COM interop, APCs, `WaitForMultipleObjectsEx`, broad Win32 coverage, thread descriptions, full NativeAOT thread-store destruction semantics, advanced stack growth/guard behavior, networking, globalization, filesystem support, and broad framework compatibility.
 
 ## NativeAOT feasibility documents
 
@@ -44,6 +46,8 @@ This milestone deliberately excludes allocation, garbage collection, exceptions,
 - [Boot ABI](docs/BOOT_ABI.md)
 - [Managed-entry proof procedure](docs/MANAGED_ENTRY_PROOF.md)
 - [NativeAOT allocation and GC probe](docs/ALLOCATION_GC_PROBE.md)
+- [NativeAOT scheduler-thread attach](docs/NATIVEAOT_SCHEDULER_THREAD_ATTACH.md)
+- [NativeAOT scheduler-thread GC proof](docs/NATIVEAOT_GC_SCHEDULER_THREAD.md)
 - [NativeAOT platform time contract](docs/PLATFORM_TIME_CONTRACT.md)
 - [NativeAOT platform performance counter](docs/PLATFORM_PERFORMANCE_COUNTER.md)
 - [Windows x64 SLIST initialization contract](docs/PLATFORM_SLIST_CONTRACT.md)

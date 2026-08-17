@@ -35,8 +35,12 @@ this payload/runtime contract and is not used as a success criterion.
 The durable equivalent is the repeated scheduler callback path: two distinct
 temporary scheduler identities receive fresh FLS/COM state, switch around a
 wait, terminate, reclaim their stacks, and leave no stale handle, wait, FLS,
-COM, object, or VM-ledger state. The unchanged managed payload is invoked
-once, legally, and still reaches managed return.
+COM, object, or VM-ledger state. The pre-callback managed payload used by this
+historical checkpoint is invoked once, legally, and still reaches managed
+return. Its hash below is retained as historical evidence; the current
+merge-gate payload is the 730,112-byte GC rebuild
+`AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012`, documented
+in [NATIVEAOT_GC_SCHEDULER_THREAD.md](NATIVEAOT_GC_SCHEDULER_THREAD.md).
 
 Source and staged payload SHA-256:
 

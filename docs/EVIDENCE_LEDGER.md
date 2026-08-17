@@ -16,15 +16,26 @@ Generated binaries, emulator firmware, logs, and manifests remain under ignored 
 | Prior Gate 4 result | three fresh runs stopped at `PE_IMPORT_COUNT=10` / `GATE4_BLOCKED_IMPORTS`; preserved in earlier logs and documents |
 | Commit policy | no commit or staging performed by this pass |
 
-## NativeAOT artifact
+## Historical pre-callback/control artifacts
+
+The entries below are retained as historical Gate 1/Gate 4 evidence. They are
+not the current managed-entry/callback/GC payload identity.
 
 | Path | SHA-256 |
 | --- | --- |
-| `artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll` | `2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837` |
-| final staged `artifacts\gate4\ESP\GXOS\gxos-managed-entry-probe.dll` | `2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837` |
+| historical `artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll` | `2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837` |
+| historical staged `artifacts\gate4\ESP\GXOS\gxos-managed-entry-probe.dll` | `2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837` |
 | NativeAOT map XML retained from Gate 1 | `E38DB968C40F19F427D4AEF64D7BF5B19E3E16B3010F8DA83FD07CFB449899FC` |
 | ILC response retained from Gate 1 | `7E33D44C6E1ECF354F732A56565521DD87C086A194C557641882B4FE4232BF85` |
 | linker response retained from Gate 1 | `4A0B63F84FA712D4C30556C532C6F1F62C825257B5C78B45DDFBE5C6605C704A` |
+
+### Current merge-gate payload
+
+| Artifact | SHA-256 | Size |
+| --- | --- | ---: |
+| source `artifacts\nativeaot-gc-probe-gate1-20260817\shared\gxos-managed-entry-probe.dll` | `AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012` | 730,112 |
+| staged `artifacts\nativeaot-gc-probe-gate4-20260817\ESP\GXOS\gxos-managed-entry-probe.dll` | `AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012` | 730,112 |
+| deterministic audit loader `artifacts\nativeaot-gc-audit-gate4-deterministic-a-20260817\ESP\EFI\BOOT\BOOTX64.EFI` | `9E78E7145C8BB3AC8E5559C4347275EFDC160FC062088769C15A335E5E6D1601` | 534,299 |
 
 ### Current allocation milestone artifacts
 

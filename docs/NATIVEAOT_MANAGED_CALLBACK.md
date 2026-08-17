@@ -39,6 +39,11 @@ The callback payload is an intentional, limited rebuild:
 | Representative relocated callback address | `0x000000000549F724` |
 | Exported symbols | `ManagedCallback`, `ManagedMain` |
 
+This table records the historical callback milestone artifact. The current
+merge-gate payload is the later 730,112-byte managed-entry/callback/GC rebuild
+with SHA-256
+`AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012`.
+
 The payload was rebuilt with `tools\Build-Gate1.ps1` using the existing `ManagedEntryProbe.csproj` and `-c Release -r win-x64 --self-contained true -p:PublishAot=true`; the command was launched from an unrelated directory because this machine has SDK `10.0.400` while the repository pins `10.0.302` with roll-forward disabled. No repository or global configuration was changed.
 
 The emitted callback entry begins with the Microsoft x64 first integer argument in `ECX` and returns in `EAX`. The disassembly preserves nonvolatile registers and has associated `.pdata` exception/unwind entries. Its transition sequence calls the same generated NativeAOT reverse-P/Invoke/thread-transition helper family used by `ManagedMain`; the callback does not bypass the runtime transition. The native wrapper clears DF and establishes `MXCSR=0x1F80` and x87 control `0x037F`. The Microsoft x64 call boundary supplies the 32-byte shadow space; the native harness is built with `-mno-red-zone`.

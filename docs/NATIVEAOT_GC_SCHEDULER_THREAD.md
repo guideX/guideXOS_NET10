@@ -157,17 +157,20 @@ identity/lifetime remains a narrower runtime audit boundary.
 ## Validation
 
 The exact-payload pre-change callback baseline passed three independent boots
-with the authoritative `72F5...` payload and the existing callback/durability
+with the callback-era `72F5...` payload and the existing callback/durability
 markers. The final GC runner passed three independent fresh boots with the
-authoritative `AE19...` payload. Their serial byte counts were all `527111`;
-the serial files differ only in expected firmware/runtime addresses and were
-hashed as:
+current authoritative `AE19...` payload (730,112 bytes). Their serial byte
+counts were all `527111`; the serial files differ only in expected
+firmware/runtime addresses and were hashed as:
 
 ```text
-6D139D4BA888B079F86610D66DEF738905D2E0EFF07BF293C458036F4E3448F3
-9907F7DDA0A8936C1DDFB7E60BEB5FD2C3F1D539BC4B5C4036D88B8BF6F9C39A
-9CE665D376D0B1DB4BABCCD03887E3939D73E5667FC15871B3D3887A42A521FF
+4F353A4D2D8424D50A1410C59EB13F923B92006DBCD35E6BBD952ED45AFCA1C2
+C040E1937F7BC748A24AA555065015A7B0BC0191976524708FBBB9E68D66FF41
+B9B28B8C343EC9848FD7BD721CEB4FEEDE83968303301F87E92C5656A59213A9
 ```
+
+These fresh logs are retained under
+`artifacts\nativeaot-gc-audit-qemu-authoritative-20260817`.
 
 Focused host results:
 

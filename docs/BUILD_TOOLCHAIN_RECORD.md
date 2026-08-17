@@ -69,7 +69,12 @@ RootNamespace=GuideXOS.Net10.ManagedEntryProbe; AssemblyName=gxos-managed-entry-
 LinkerArg=/Brepro; NativeLib=Shared or Static for library forms
 ```
 
-## Reproducibility result
+## Historical Gate 1 reproducibility result
+
+The following records describe the earlier no-allocation/pre-callback Gate 1
+baseline. They are retained as historical evidence; the current merge-gate
+payload is the 730,112-byte managed-entry/callback/GC artifact with SHA-256
+`AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012`.
 
 Two independent `/Brepro` executable publishes produced the same SHA-256:
 
@@ -95,6 +100,15 @@ Recorded artifacts:
 | linker response | 3,052 | `4A0B63F84FA712D4C30556C532C6F1F62C825257B5C78B45DDFBE5C6605C704A` |
 
 The executable ran in a fresh Windows host process and returned `0`. That is Gate 1 evidence only; it is not freestanding evidence.
+
+## Current Gate 4 reproducibility audit
+
+The Gate 4 build script passes GNU `ld`'s `--no-insert-timestamp` option. Two
+independent callback/GC harness builds therefore produced the same 534,299-byte
+loader with SHA-256
+`9E78E7145C8BB3AC8E5559C4347275EFDC160FC062088769C15A335E5E6D1601` and staged
+the same 730,112-byte payload with SHA-256
+`AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012`.
 
 ## Negative cross-OS check
 
