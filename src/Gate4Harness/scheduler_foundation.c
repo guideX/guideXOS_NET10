@@ -207,12 +207,17 @@ static void release_object_record(GXOS_SCHEDULER_OBJECT *object)
 static void set_canaries(GXOS_SCHEDULER_TCB *thread)
 {
     uint32_t index;
+    /* NativeAOT owns and may clear the lower page of a registered managed
+       stack during collection.  Keep the scheduler's low reclamation
+       sentinel in a separate page so that the GC boundary is not mistaken
+       for scheduler memory corruption. */
     for (index = 0; index != GXOS_SCHEDULER_CANARY_BYTES; ++index) {
         thread->low_canary[index] = (uint8_t)(0xC1U + index);
         thread->high_canary[index] = (uint8_t)(0xD7U + index);
     }
     for (index = 0; index != GXOS_SCHEDULER_CANARY_BYTES; ++index) {
-        ((uint8_t *)(uintptr_t)thread->stack_base)[index] = thread->low_canary[index];
+        ((uint8_t *)(uintptr_t)thread->stack_canary_memory)[index] =
+            thread->low_canary[index];
         ((uint8_t *)(uintptr_t)thread->stack_limit - GXOS_SCHEDULER_CANARY_BYTES)[index] =
             thread->high_canary[index];
     }
@@ -222,11 +227,12 @@ int gxos_scheduler_check_canaries(const GXOS_SCHEDULER_TCB *thread)
 {
     uint32_t index;
     if (thread == 0 || !thread->live || thread->stack_base == 0 ||
+        thread->stack_canary_memory == 0 ||
         thread->stack_limit <= thread->stack_base + GXOS_SCHEDULER_CANARY_BYTES) {
         return 0;
     }
     for (index = 0; index != GXOS_SCHEDULER_CANARY_BYTES; ++index) {
-        if (((const uint8_t *)(uintptr_t)thread->stack_base)[index] !=
+        if (((const uint8_t *)(uintptr_t)thread->stack_canary_memory)[index] !=
                 thread->low_canary[index] ||
             ((const uint8_t *)(uintptr_t)thread->stack_limit -
              GXOS_SCHEDULER_CANARY_BYTES)[index] != thread->high_canary[index]) {
@@ -271,7 +277,8 @@ static int allocate_thread_environment(GXOS_SCHEDULER_TCB *thread)
     *(uint64_t *)(teb_bytes + 0x08) = thread->is_boot_thread
         ? scheduler->boot_stack_upper : thread->stack_limit;
     *(uint64_t *)(teb_bytes + 0x10) = thread->is_boot_thread
-        ? scheduler->boot_stack_lower : thread->stack_base;
+        ? scheduler->boot_stack_lower
+        : thread->stack_base;
     *(uint64_t *)(teb_bytes + 0x100) = thread->identity;
     zero_bytes((void *)(uintptr_t)block, GXOS_SCHEDULER_PAGE_SIZE);
     thread->environment_owned = 1;
@@ -924,8 +931,18 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
     thread->stack_pages_memory = stack_memory;
     thread->stack_base = stack_memory;
     thread->stack_limit = stack_memory + GXOS_SCHEDULER_STACK_SIZE;
+    thread->stack_canary_memory = page_allocate(scheduler);
+    if (thread->stack_canary_memory == 0) {
+        page_free(scheduler, stack_memory);
+        release_object_record(object);
+        --scheduler->next_identity;
+        *handle = 0;
+        zero_bytes(thread, sizeof(*thread));
+        return 0;
+    }
     set_canaries(thread);
     if (!allocate_thread_environment(thread)) {
+        page_free(scheduler, thread->stack_canary_memory);
         page_free(scheduler, stack_memory);
         release_object_record(object);
         --scheduler->next_identity;
@@ -938,6 +955,7 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
             thread->stack_limit - thread->stack_base, &stack_vm_identity) ||
         stack_vm_identity == 0) {
         free_thread_environment(thread);
+        page_free(scheduler, thread->stack_canary_memory);
         page_free(scheduler, stack_memory);
         release_object_record(object);
         --scheduler->next_identity;
@@ -991,6 +1009,7 @@ int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread)
         thread->execution_refs == 0 || thread->saved_context != &thread->context ||
         thread->entry == 0 || !canonical_nonzero_pointer((uint64_t)(uintptr_t)thread->entry) ||
         thread->stack_pages_memory == 0 ||
+        thread->stack_canary_memory == 0 ||
         !aligned_page_pointer(thread->stack_base) ||
         thread->stack_limit != thread->stack_base + GXOS_SCHEDULER_STACK_SIZE ||
         thread->initial_rsp < thread->stack_base + GXOS_SCHEDULER_CANARY_BYTES ||
@@ -1024,7 +1043,8 @@ int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread)
         *(const uint64_t *)(gs + 0x58) != thread->tls_vector_base ||
         tls_vector[0] != thread->tls_block_base ||
         *(const uint64_t *)(teb + 0x08) != thread->stack_limit ||
-        *(const uint64_t *)(teb + 0x10) != thread->stack_base ||
+        *(const uint64_t *)(teb + 0x10) !=
+            thread->stack_base ||
         *(const uint64_t *)(teb + 0x100) != thread->identity) {
         return 0;
     }
@@ -1098,6 +1118,8 @@ static void maybe_reclaim_thread(GXOS_SCHEDULER_TCB *thread)
     object->internal_refs = 0;
     page_free(g_scheduler, thread->stack_pages_memory);
     thread->stack_pages_memory = 0;
+    page_free(g_scheduler, thread->stack_canary_memory);
+    thread->stack_canary_memory = 0;
     free_thread_environment(thread);
     release_object_record(object);
     zero_bytes(thread, sizeof(*thread));

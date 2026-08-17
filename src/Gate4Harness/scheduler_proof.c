@@ -508,10 +508,11 @@ int gxos_synthetic_scheduler_proof(
         positive = 0;
     }
     proof_text("GXOS_NET10:SCHEDULER_WORKER_TERMINATED=1\r\n");
-    saved_low_canary = *(uint8_t *)(uintptr_t)worker->stack_base;
-    *(uint8_t *)(uintptr_t)worker->stack_base = (uint8_t)(saved_low_canary ^ 1U);
+    saved_low_canary = *(uint8_t *)(uintptr_t)worker->stack_canary_memory;
+    *(uint8_t *)(uintptr_t)worker->stack_canary_memory =
+        (uint8_t)(saved_low_canary ^ 1U);
     if (gxos_scheduler_check_canaries(worker)) positive = 0;
-    *(uint8_t *)(uintptr_t)worker->stack_base = saved_low_canary;
+    *(uint8_t *)(uintptr_t)worker->stack_canary_memory = saved_low_canary;
     proof_text("GXOS_NET10:SCHED_NEGATIVE_STACK_CANARY_REJECTION=1\r\n");
     if (!gxos_scheduler_check_canaries(worker)) positive = 0;
     proof_hex("GXOS_NET10:SCHEDULER_WORKER_FINAL_LOW_CANARY=0x",

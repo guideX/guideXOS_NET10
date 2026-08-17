@@ -31,6 +31,9 @@
 #include "vectored_handler.h"
 #include "platform_multibyte.h"
 #include "nativeaot_callback_bridge.h"
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+#include "nativeaot_gc_probe_contract.h"
+#endif
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
@@ -63,10 +66,18 @@
 #include "resume_thread.h"
 #endif
 
-#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+#define GXOS_NATIVEAOT_THREAD_START_RVA 0x35560U
+#elif defined(GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK)
 #define GXOS_NATIVEAOT_THREAD_START_RVA 0x35360U
 #else
 #define GXOS_NATIVEAOT_THREAD_START_RVA 0x35320U
+#endif
+
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+#define GXOS_NATIVEAOT_IAT_RVA(rva) ((rva) + 0x1000U)
+#else
+#define GXOS_NATIVEAOT_IAT_RVA(rva) (rva)
 #endif
 
 typedef uint64_t EFI_STATUS;
@@ -307,7 +318,21 @@ static uint64_t g_managed_callback_target;
 static GXOS_NATIVEAOT_CALLBACK_BRIDGE g_managed_callback_bridge;
 static uint32_t g_nativeaot_runtime_fls_slot = UINT32_MAX;
 #endif
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+static uint64_t g_managed_gc_probe_target;
+static GXOS_NATIVEAOT_CALLBACK_BRIDGE g_managed_gc_probe_bridge;
+#endif
 static uint32_t g_platform_last_error;
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+static volatile uint32_t g_nativeaot_gc_flush_process_write_buffers_calls;
+static volatile uint32_t g_nativeaot_gc_virtual_unwind_calls;
+static volatile uint32_t g_nativeaot_gc_virtual_unwind_failures;
+static volatile uint64_t g_nativeaot_gc_tick_count;
+static volatile uint64_t g_nativeaot_gc_last_unwind_context;
+static volatile uint64_t g_nativeaot_gc_last_unwind_context_rsp;
+static volatile uint64_t g_nativeaot_gc_last_unwind_context_rip;
+static volatile uint64_t g_nativeaot_gc_last_unwind_control_pc;
+#endif
 static uint64_t g_stack_lower;
 static uint64_t g_stack_upper;
 static uint64_t g_loader_stack_vm_identity;
@@ -4051,6 +4076,9 @@ typedef struct {
     uint32_t export_size;
     uint32_t managed_main_rva;
     uint32_t managed_callback_rva;
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    uint32_t managed_gc_probe_rva;
+#endif
     uint32_t tls_template_rva;
     uint32_t tls_template_size;
     uint32_t tls_index_rva;
@@ -5422,6 +5450,185 @@ static uint32_t EFIAPI platform_get_current_process_id(void)
     return 1;
 }
 
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+static uint64_t EFIAPI platform_get_tick_count64(void)
+{
+    return __atomic_add_fetch(&g_nativeaot_gc_tick_count, 1,
+                               __ATOMIC_RELAXED);
+}
+
+static void EFIAPI platform_flush_process_write_buffers(void)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    ++g_nativeaot_gc_flush_process_write_buffers_calls;
+}
+
+typedef struct {
+    uint32_t begin_address;
+    uint32_t end_address;
+    uint32_t unwind_data;
+} GXOS_NATIVEAOT_RUNTIME_FUNCTION;
+
+static uint64_t *nativeaot_unwind_register(GXOS_CONTEXT_COMPAT *context,
+                                           uint32_t register_number)
+{
+    switch (register_number) {
+    case 0: return &context->rax;
+    case 1: return &context->rcx;
+    case 2: return &context->rdx;
+    case 3: return &context->rbx;
+    case 4: return &context->rsp;
+    case 5: return &context->rbp;
+    case 6: return &context->rsi;
+    case 7: return &context->rdi;
+    case 8: return &context->r8;
+    case 9: return &context->r9;
+    case 10: return &context->r10;
+    case 11: return &context->r11;
+    case 12: return &context->r12;
+    case 13: return &context->r13;
+    case 14: return &context->r14;
+    case 15: return &context->r15;
+    default: return 0;
+    }
+}
+
+static uint32_t EFIAPI platform_rtl_virtual_unwind(
+    uint32_t handler_type,
+    uint64_t image_base,
+    uint64_t control_pc,
+    const GXOS_NATIVEAOT_RUNTIME_FUNCTION *function_entry,
+    GXOS_CONTEXT_COMPAT *context_record,
+    void **handler_data,
+    uint64_t *establisher_frame,
+    void *context_pointers)
+{
+    const uint8_t *unwind_info;
+    const uint8_t *codes;
+    uint32_t unwind_rva;
+    uint32_t code_count;
+    uint32_t prologue_offset;
+    uint32_t code_index;
+    uint64_t frame_before;
+    uint64_t frame_base;
+    uint32_t frame_register;
+    uint32_t frame_offset;
+
+    (void)handler_type;
+    (void)context_pointers;
+    ++g_nativeaot_gc_virtual_unwind_calls;
+    g_nativeaot_gc_last_unwind_context = (uint64_t)(uintptr_t)context_record;
+    g_nativeaot_gc_last_unwind_context_rsp =
+        context_record == 0 ? 0 : context_record->rsp;
+    g_nativeaot_gc_last_unwind_context_rip =
+        context_record == 0 ? 0 : context_record->rip;
+    g_nativeaot_gc_last_unwind_control_pc = control_pc;
+    if (image_base == 0 || function_entry == 0 || context_record == 0 ||
+        control_pc < image_base ||
+        function_entry->unwind_data < 0x1000U) {
+        ++g_nativeaot_gc_virtual_unwind_failures;
+        return 0;
+    }
+    unwind_rva = function_entry->unwind_data & 0xFFFFFFFCU;
+    unwind_info = (const uint8_t *)(uintptr_t)(image_base + unwind_rva);
+    codes = unwind_info + 4;
+    code_count = unwind_info[2];
+    frame_register = unwind_info[3] & 0x0FU;
+    frame_offset = unwind_info[3] >> 4;
+    prologue_offset = (uint32_t)(control_pc - image_base) -
+                      function_entry->begin_address;
+    frame_before = context_record->rsp;
+    frame_base = context_record->rsp;
+
+    for (code_index = 0; code_index < code_count; ) {
+        const uint8_t *code = codes + code_index * 2U;
+        uint32_t operation = code[1] & 0x0FU;
+        uint32_t operation_info = code[1] >> 4;
+        uint32_t slots = 1;
+        uint64_t value;
+        uint64_t *register_value;
+
+        if (code[0] > prologue_offset) {
+            code_index += slots;
+            continue;
+        }
+        switch (operation) {
+        case 0: /* UWOP_PUSH_NONVOL */
+            register_value = nativeaot_unwind_register(context_record,
+                                                       operation_info);
+            if (register_value == 0) goto unwind_failure;
+            *register_value = *(const uint64_t *)(uintptr_t)context_record->rsp;
+            context_record->rsp += 8;
+            break;
+        case 1: /* UWOP_ALLOC_LARGE */
+            if (operation_info == 0) {
+                value = *(const uint16_t *)(codes + (code_index + 1U) * 2U);
+                context_record->rsp += value * 8U;
+                slots = 2;
+            } else if (operation_info == 1) {
+                value = *(const uint32_t *)(codes + (code_index + 1U) * 2U) |
+                        ((uint64_t)*(const uint16_t *)(codes +
+                            (code_index + 2U) * 2U) << 16);
+                context_record->rsp += value;
+                slots = 3;
+            } else {
+                goto unwind_failure;
+            }
+            break;
+        case 2: /* UWOP_ALLOC_SMALL */
+            context_record->rsp += (uint64_t)operation_info * 8U + 8U;
+            break;
+        case 3: /* UWOP_SET_FPREG */
+            register_value = nativeaot_unwind_register(context_record,
+                                                       frame_register);
+            if (register_value == 0) goto unwind_failure;
+            context_record->rsp = *register_value - (uint64_t)frame_offset * 16U;
+            break;
+        case 4: /* UWOP_SAVE_NONVOL */
+            register_value = nativeaot_unwind_register(context_record,
+                                                       operation_info);
+            if (register_value == 0) goto unwind_failure;
+            value = *(const uint16_t *)(codes + (code_index + 1U) * 2U);
+            *register_value = *(const uint64_t *)(uintptr_t)(frame_base + value * 8U);
+            slots = 2;
+            break;
+        case 5: /* UWOP_SAVE_NONVOL_FAR */
+            register_value = nativeaot_unwind_register(context_record,
+                                                       operation_info);
+            if (register_value == 0) goto unwind_failure;
+            value = *(const uint32_t *)(codes + (code_index + 1U) * 2U) |
+                    ((uint64_t)*(const uint16_t *)(codes +
+                        (code_index + 2U) * 2U) << 16);
+            *register_value = *(const uint64_t *)(uintptr_t)(frame_base + value);
+            slots = 3;
+            break;
+        case 8: /* UWOP_SAVE_XMM128 */
+            slots = 2;
+            break;
+        case 9: /* UWOP_SAVE_XMM128_FAR */
+            slots = 3;
+            break;
+        case 10: /* UWOP_PUSH_MACHFRAME */
+            context_record->rsp += operation_info == 0 ? 40U : 48U;
+            break;
+        default:
+            goto unwind_failure;
+        }
+        code_index += slots;
+    }
+
+    context_record->rip = *(const uint64_t *)(uintptr_t)context_record->rsp;
+    context_record->rsp += 8;
+    if (establisher_frame != 0) *establisher_frame = frame_before;
+    if (handler_data != 0) *handler_data = 0;
+    return 0;
+
+unwind_failure:
+    ++g_nativeaot_gc_virtual_unwind_failures;
+    return 0;
+}
+#endif
+
 static void *EFIAPI platform_get_current_thread(void)
 {
     return (void *)(intptr_t)-2;
@@ -6290,7 +6497,7 @@ static void configure_platform_crt_malloc(
     serial_text("\r\n");
     if (g_crt_free_import_descriptor_index != 9U ||
         g_crt_free_import_symbol_index != 0U ||
-        g_crt_free_importing_iat_rva != 0x7D318U) {
+        g_crt_free_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D318U)) {
         fail("crt-free-import-contract");
     }
     serial_text("GXOS_NET10:CRT_FREE_IMPORT_DLL=");
@@ -7188,6 +7395,12 @@ void *EFIAPI gxos_create_thread_platform_impl(
         g_create_thread_worker_entry_alignment != 8U ||
         !g_create_thread_bootstrap_stack_valid ||
         !g_create_thread_shadow_space_valid || !tcb_unchanged) {
+        serial_field_hex("GXOS_NET10:CREATETHREAD_POSTCONDITION_START_RVA=0x",
+                         start_rva);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:CREATETHREAD_POSTCONDITION_EXPECTED_START_RVA=0x",
+                         GXOS_NATIVEAOT_THREAD_START_RVA);
+        serial_text("\r\n");
         fail("createthread-postcondition");
     }
     serial_text("GXOS_NET10:CREATETHREAD_BEGIN\r\n");
@@ -8952,6 +9165,20 @@ static void *platform_import_target(const char *module, const char *symbol)
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetCurrentProcess")) return (void *)(uintptr_t)platform_get_current_process;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "GetLastError")) return (void *)(uintptr_t)platform_get_last_error;
     if (equal_text(module, "KERNEL32.dll") && equal_text(symbol, "SetLastError")) return (void *)(uintptr_t)platform_set_last_error;
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "GetTickCount64")) {
+        return (void *)(uintptr_t)platform_get_tick_count64;
+    }
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "FlushProcessWriteBuffers")) {
+        return (void *)(uintptr_t)platform_flush_process_write_buffers;
+    }
+    if (equal_text(module, "KERNEL32.dll") &&
+        equal_text(symbol, "RtlVirtualUnwind")) {
+        return (void *)(uintptr_t)platform_rtl_virtual_unwind;
+    }
+#endif
 #ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
     if (equal_text(module, "KERNEL32.dll") &&
         equal_text(symbol, "AddVectoredExceptionHandler")) {
@@ -11968,12 +12195,13 @@ platform_get_process_group_affinity(
     serial_text("GXOS_NET10:GETPROCESSGROUPAFFINITY_IMPORT_SYMBOL=GetProcessGroupAffinity\r\n");
     serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_IMPORT_DESCRIPTOR_INDEX=0x", 2);
     serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_IAT_RVA=0x", 0x7D2A0);
+    serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_IAT_RVA=0x",
+                     GXOS_NATIVEAOT_IAT_RVA(0x7D2A0));
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_IAT_PREFERRED_ADDRESS=0x", 0x18007D2A0ULL);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_IAT_RUNTIME_ADDRESS=0x",
-                     g_managed_image_base + 0x7D2A0ULL);
+                     g_managed_image_base + GXOS_NATIVEAOT_IAT_RVA(0x7D2A0ULL));
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GETPROCESSGROUPAFFINITY_STATIC_CALL_SITE=0x", 0x1800436DAULL);
     serial_text("\r\n");
@@ -12247,12 +12475,13 @@ static void query_job_emit_report(
     serial_text("GXOS_NET10:QUERYJOBOBJECT_IMPORT_SYMBOL=QueryInformationJobObject\r\n");
     serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_IMPORT_DESCRIPTOR_INDEX=0x", 2);
     serial_text("\r\n");
-    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_IAT_RVA=0x", 0x7D1F0);
+    serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_IAT_RVA=0x",
+                     GXOS_NATIVEAOT_IAT_RVA(0x7D1F0));
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_PREFERRED_IAT=0x", 0x18007D1F0ULL);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_RUNTIME_IAT=0x",
-                     g_managed_image_base + 0x7D1F0ULL);
+                     g_managed_image_base + GXOS_NATIVEAOT_IAT_RVA(0x7D1F0ULL));
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:QUERYJOBOBJECT_STATIC_CALL_SITE=0x", static_call_site);
     serial_text("\r\n");
@@ -12623,10 +12852,12 @@ static GXOS_PROCESS_AFFINITY_BOOL EFIAPI platform_get_process_affinity_mask(
     serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_IMPORT_MODULE=KERNEL32.dll\r\n");
     serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_IMPORT_SYMBOL=GetProcessAffinityMask\r\n");
     serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_IMPORT_DESCRIPTOR_INDEX=0x2\r\n");
-    serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_IAT_RVA=0x7d208\r\n");
+    serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_IAT_RVA=0x",
+                     GXOS_NATIVEAOT_IAT_RVA(0x7d208U));
+    serial_text("\r\n");
     serial_text("GXOS_NET10:GETPROCESSAFFINITYMASK_PREFERRED_IAT=0x000000018007d208\r\n");
     serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_RUNTIME_IAT=0x",
-                     g_managed_image_base + 0x7d208U);
+                     g_managed_image_base + GXOS_NATIVEAOT_IAT_RVA(0x7d208U));
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:GETPROCESSAFFINITYMASK_STATIC_CALL_SITE=0x",
                      static_call_site);
@@ -12834,6 +13065,22 @@ static void find_managed_callback(PE_IMAGE *image)
 }
 #endif
 
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+static void find_managed_gc_probe(PE_IMAGE *image)
+{
+    GXOS_NATIVEAOT_EXPORT_IMAGE export_image = {
+        image->loaded, image->loaded_size, image->export_rva,
+        image->export_size};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_STATUS status = gxos_nativeaot_find_export(
+        &export_image, "ManagedGcProbe", &resolution);
+    if (status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("ManagedGcProbe-export-missing");
+    }
+    image->managed_gc_probe_rva = resolution.rva;
+}
+#endif
+
 static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
 {
     const uint8_t *nt;
@@ -12958,6 +13205,9 @@ static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
     find_managed_callback(image);
 #endif
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    find_managed_gc_probe(image);
+#endif
     if (tls_rva != 0) {
         const uint8_t *tls = rva_to_file(image, tls_rva, 40);
         uint64_t tls_start;
@@ -13066,6 +13316,12 @@ typedef struct {
     uint32_t callback_count;
     uint32_t first_callback_status;
     uint32_t second_callback_status;
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    uint32_t first_gc_status;
+    uint32_t second_gc_status;
+    int32_t first_gc_result;
+    int32_t second_gc_result;
+#endif
     uint32_t wait_result;
     int32_t first_callback_result;
     int32_t second_callback_result;
@@ -13079,6 +13335,98 @@ static void nativeaot_durability_require(int condition, const char *reason)
 {
     if (!condition) fail(reason);
 }
+
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+static void nativeaot_gc_emit_result(
+    const char *result_name, const char *delta_name,
+    const char *generation_name, const char *checksum_name,
+    int32_t result)
+{
+    uint32_t encoded = (uint32_t)result;
+    serial_field_hex(result_name, encoded);
+    serial_text("\r\n");
+    serial_field_hex(delta_name,
+                     (encoded >> 16) & 0xFFU);
+    serial_text("\r\n");
+    serial_field_hex(generation_name,
+                     (encoded >> 12) & 0x0FU);
+    serial_text("\r\n");
+    serial_field_hex(checksum_name,
+                     encoded & 0x0FFFU);
+    serial_text("\r\n");
+}
+
+static void nativeaot_gc_emit_worker_state(
+    const char *prefix, const GXOS_SCHEDULER_TCB *thread)
+{
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT snapshot = {0};
+    uint64_t teb = thread == 0 ? 0 : thread->teb_base;
+    uint64_t teb_lower = teb == 0 ? 0 :
+        *(const uint64_t *)(uintptr_t)(teb + 0x10U);
+    uint64_t teb_upper = teb == 0 ? 0 :
+        *(const uint64_t *)(uintptr_t)(teb + 0x08U);
+    gxos_scheduler_capture_registers(&snapshot);
+    serial_text(prefix);
+    serial_field_hex("STACK_BASE=0x", thread == 0 ? 0 : thread->stack_base);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("STACK_LIMIT=0x", thread == 0 ? 0 : thread->stack_limit);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("CANARY_MEMORY=0x", thread == 0 ? 0 :
+                     thread->stack_canary_memory);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("RSP=0x", snapshot.rsp);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("TEB_LOWER=0x", teb_lower);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("TEB_UPPER=0x", teb_upper);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("CANARY0=0x", thread == 0 ? 0 :
+                     ((const uint8_t *)(uintptr_t)thread->stack_canary_memory)[0]);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("CANARY15=0x", thread == 0 ? 0 :
+                     ((const uint8_t *)(uintptr_t)thread->stack_canary_memory)[15]);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("TLS_ALLOC_LIMIT=0x", thread == 0 ? 0 :
+                     *(const uint64_t *)(uintptr_t)(thread->tls_block_base + 0x30U));
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("TLS_ALLOC_PTR=0x", thread == 0 ? 0 :
+                     *(const uint64_t *)(uintptr_t)(thread->tls_block_base + 0x38U));
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("UNWIND_CALLS=0x", g_nativeaot_gc_virtual_unwind_calls);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("UNWIND_FAILURES=0x", g_nativeaot_gc_virtual_unwind_failures);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("LAST_UNWIND_CONTEXT=0x", g_nativeaot_gc_last_unwind_context);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("LAST_UNWIND_CONTEXT_RSP=0x", g_nativeaot_gc_last_unwind_context_rsp);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("LAST_UNWIND_CONTEXT_RIP=0x", g_nativeaot_gc_last_unwind_context_rip);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("LAST_UNWIND_CONTROL_PC=0x", g_nativeaot_gc_last_unwind_control_pc);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("FLUSH_CALLS=0x", g_nativeaot_gc_flush_process_write_buffers_calls);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("TICK_COUNT=0x", g_nativeaot_gc_tick_count);
+    serial_text("\r\n");
+}
+#endif
 
 static uint32_t nativeaot_durability_live_thread_count(void)
 {
@@ -13236,6 +13584,11 @@ static uintptr_t EFIAPI nativeaot_scheduler_callback_thread_entry(void *argument
     uint32_t wait_result;
     int32_t result = 0;
     uint32_t status;
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    uint32_t gc_delta;
+    uint32_t gc_generation;
+    uint32_t gc_checksum;
+#endif
 
     nativeaot_durability_require(context != 0 && thread != 0 && thread->live &&
                                  !thread->is_boot_thread,
@@ -13357,6 +13710,41 @@ static uintptr_t EFIAPI nativeaot_scheduler_callback_thread_entry(void *argument
     serial_text("GXOS_NET10:MANAGED_THREAD_ATTACH_OK=1\r\n");
     serial_text("GXOS_NET10:MANAGED_THREAD_CALLBACK_1_OK\r\n");
 
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    if (context->callback_count == 2U) {
+        serial_text("GXOS_NET10:MANAGED_GC_WORKER_BEGIN\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_WORKER_SEED=0x", 0x51U);
+        serial_text("\r\n");
+        nativeaot_gc_emit_worker_state(
+            "GXOS_NET10:MANAGED_GC_WORKER_BEFORE_", thread);
+        g_phase = PHASE_IN_MANAGED;
+        context->first_gc_status = (uint32_t)gxos_nativeaot_callback_invoke(
+            &g_managed_gc_probe_bridge, 0x51, &context->first_gc_result);
+        g_phase = PHASE_AFTER_MANAGED_RETURN;
+        nativeaot_gc_emit_worker_state(
+            "GXOS_NET10:MANAGED_GC_WORKER_AFTER_", thread);
+        nativeaot_gc_emit_result(
+            "GXOS_NET10:MANAGED_GC_WORKER_RESULT1=0x",
+            "GXOS_NET10:MANAGED_GC_WORKER_COLLECTION_DELTA1=0x",
+            "GXOS_NET10:MANAGED_GC_WORKER_GENERATION1=0x",
+            "GXOS_NET10:MANAGED_GC_WORKER_CHECKSUM1=0x",
+            context->first_gc_result);
+        nativeaot_durability_require(
+            context->first_gc_status == GXOS_NATIVEAOT_CALLBACK_OK &&
+            gxos_nativeaot_gc_result_valid(context->first_gc_result, 0x51U,
+                                      &gc_delta, &gc_generation, &gc_checksum),
+            "nativeaot-scheduler-gc-first");
+        (void)gc_generation;
+        (void)gc_checksum;
+        nativeaot_durability_require(gc_delta != 0,
+                                     "nativeaot-scheduler-gc-first-collection");
+        serial_text("GXOS_NET10:MANAGED_GC_WORKER_ATTACH_OK=1\r\n");
+        serial_text("GXOS_NET10:MANAGED_GC_WORKER_ALLOC_OK=1\r\n");
+        serial_text("GXOS_NET10:MANAGED_GC_COLLECTION_OBSERVED=1\r\n");
+        serial_text("GXOS_NET10:MANAGED_GC_ROOT_SURVIVED=1\r\n");
+    }
+#endif
+
     if (context->callback_count == 1U) {
         return (uintptr_t)context->first_callback_result;
     }
@@ -13412,6 +13800,35 @@ static uintptr_t EFIAPI nativeaot_scheduler_callback_thread_entry(void *argument
                                      UINT64_MAX,
                                  "nativeaot-scheduler-callback-second");
     serial_text("GXOS_NET10:MANAGED_THREAD_CALLBACK_2_OK\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    serial_text("GXOS_NET10:MANAGED_GC_WORKER_REPEAT_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_WORKER_REPEAT_SEED=0x", 0x52U);
+    serial_text("\r\n");
+    nativeaot_gc_emit_worker_state(
+        "GXOS_NET10:MANAGED_GC_WORKER_REPEAT_BEFORE_", thread);
+    g_phase = PHASE_IN_MANAGED;
+    context->second_gc_status = (uint32_t)gxos_nativeaot_callback_invoke(
+        &g_managed_gc_probe_bridge, 0x52, &context->second_gc_result);
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
+    nativeaot_gc_emit_worker_state(
+        "GXOS_NET10:MANAGED_GC_WORKER_REPEAT_AFTER_", thread);
+    nativeaot_gc_emit_result(
+        "GXOS_NET10:MANAGED_GC_WORKER_RESULT2=0x",
+        "GXOS_NET10:MANAGED_GC_WORKER_COLLECTION_DELTA2=0x",
+        "GXOS_NET10:MANAGED_GC_WORKER_GENERATION2=0x",
+        "GXOS_NET10:MANAGED_GC_WORKER_CHECKSUM2=0x",
+        context->second_gc_result);
+    nativeaot_durability_require(
+        context->second_gc_status == GXOS_NATIVEAOT_CALLBACK_OK &&
+        gxos_nativeaot_gc_result_valid(context->second_gc_result, 0x52U,
+                                  &gc_delta, &gc_generation, &gc_checksum),
+        "nativeaot-scheduler-gc-repeat");
+    (void)gc_generation;
+    (void)gc_checksum;
+    nativeaot_durability_require(gc_delta != 0,
+                                 "nativeaot-scheduler-gc-repeat-collection");
+    serial_text("GXOS_NET10:MANAGED_GC_WORKER_REPEAT_OK=1\r\n");
+#endif
     return (uintptr_t)context->second_callback_result;
 }
 
@@ -13503,6 +13920,127 @@ static void nativeaot_scheduler_callback_probe(void)
     serial_field_hex("GXOS_NET10:MANAGED_THREAD_CALLBACK_COUNT=0x",
                      g_managed_callback_bridge.invocation_count);
     serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_BEFORE_VM_REGIONS=0x",
+                     before.vm_region_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_VM_REGIONS=0x",
+                     g_memory_vm_regions.live_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_THREAD_LIVE=0x",
+                     thread->live);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_THREAD_STATE=0x",
+                     thread->state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_THREAD_FLS=0x",
+                     thread->fls_values[g_nativeaot_runtime_fls_slot]);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_THREAD_TLS=0x",
+                     thread->tls_block_base);
+    serial_text("\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    {
+        uint32_t vm_regions_after_gc = g_memory_vm_regions.live_count;
+        uint32_t canary_index = UINT32_MAX;
+        uint32_t canary_side = 0;
+        uint32_t canary_expected = 0;
+        uint32_t canary_actual = 0;
+        uint32_t canary_probe_index;
+        uint32_t canaries_before_close;
+        for (canary_probe_index = 0;
+             canary_probe_index != GXOS_SCHEDULER_CANARY_BYTES;
+             ++canary_probe_index) {
+            uint8_t low_actual = ((const uint8_t *)(uintptr_t)thread->stack_canary_memory)[
+                canary_probe_index];
+            uint8_t high_actual = ((const uint8_t *)(uintptr_t)thread->stack_limit -
+                                   GXOS_SCHEDULER_CANARY_BYTES)[canary_probe_index];
+            if (canary_index == UINT32_MAX &&
+                low_actual != thread->low_canary[canary_probe_index]) {
+                canary_index = canary_probe_index;
+                canary_side = 1;
+                canary_expected = thread->low_canary[canary_probe_index];
+                canary_actual = low_actual;
+            }
+            if (canary_index == UINT32_MAX &&
+                high_actual != thread->high_canary[canary_probe_index]) {
+                canary_index = canary_probe_index;
+                canary_side = 2;
+                canary_expected = thread->high_canary[canary_probe_index];
+                canary_actual = high_actual;
+            }
+        }
+        canaries_before_close = gxos_scheduler_check_canaries(thread);
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_CANARIES_BEFORE_CLOSE=0x",
+                         canaries_before_close);
+        serial_text("\r\n");
+        nativeaot_durability_require(
+            canaries_before_close != 0,
+            "nativeaot-scheduler-callback-thread-reclaim-sentinel");
+        uint32_t close_result = gxos_scheduler_close_handle(handle);
+        uint32_t collect_result = close_result != 0 &&
+            gxos_scheduler_collect(&g_create_event_scheduler);
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_CLOSE_RESULT=0x",
+                         close_result);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_COLLECT_RESULT=0x",
+                         collect_result);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_VM_REGIONS=0x",
+                         g_memory_vm_regions.live_count);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_THREAD_LIVE=0x",
+                         thread->live);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_THREAD_FLS=0x",
+                         thread->fls_values[g_nativeaot_runtime_fls_slot]);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_THREAD_TLS=0x",
+                         thread->tls_block_base);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_HANDLE_LOOKUP=0x",
+                         gxos_scheduler_thread_from_handle(handle) != 0);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_EXECUTION_REFS=0x",
+                         thread->execution_refs);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_PUBLIC_REFS=0x",
+                         thread->public_handle_refs);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_RUNNABLE=0x",
+                         thread->runnable_queued);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_OBJECT_INTERNAL_REFS=0x",
+                         object == 0 ? 0 : object->internal_refs);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_CANARIES=0x",
+                         gxos_scheduler_check_canaries(thread));
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_IS_CURRENT=0x",
+                         gxos_scheduler_current_thread() == thread);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_CANARY_INDEX=0x",
+                         canary_index);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_CANARY_SIDE=0x",
+                         canary_side);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_CANARY_EXPECTED=0x",
+                         canary_expected);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_CANARY_ACTUAL=0x",
+                         canary_actual);
+        serial_text("\r\n");
+        nativeaot_durability_require(close_result && collect_result &&
+                                     thread->live == 0 &&
+                                     thread->fls_values[g_nativeaot_runtime_fls_slot] == 0 &&
+                                     thread->tls_block_base == 0 &&
+                                     gxos_scheduler_thread_from_handle(handle) == 0 &&
+                                     vm_regions_after_gc != 0 &&
+                                     g_memory_vm_regions.live_count + 1U ==
+                                         vm_regions_after_gc,
+                                     "nativeaot-scheduler-callback-thread-reclaim");
+    }
+#else
     nativeaot_durability_require(gxos_scheduler_close_handle(handle) &&
                                  gxos_scheduler_collect(&g_create_event_scheduler) &&
                                  thread->live == 0 &&
@@ -13511,8 +14049,12 @@ static void nativeaot_scheduler_callback_probe(void)
                                  gxos_scheduler_thread_from_handle(handle) == 0 &&
                                  g_memory_vm_regions.live_count == before.vm_region_count,
                                  "nativeaot-scheduler-callback-thread-reclaim");
+#endif
     serial_text("GXOS_NET10:MANAGED_THREAD_DETACH_OK=1\r\n");
     serial_text("GXOS_NET10:MANAGED_THREAD_RECLAIMED=1\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    serial_text("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_OK=1\r\n");
+#endif
 
     nativeaot_durability_require(gxos_scheduler_close_handle(event_handle) &&
                                  gxos_scheduler_try_destroy_event(event_handle) &&
@@ -13566,6 +14108,9 @@ static void nativeaot_scheduler_callback_probe(void)
                                  gxos_scheduler_thread_from_handle(second_handle) == 0 &&
                                  g_memory_vm_regions.live_count == before.vm_region_count,
                                  "nativeaot-scheduler-callback-second-thread-reclaim");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    serial_text("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_OK=1\r\n");
+#endif
     nativeaot_durability_require(first_tls_block != 0,
                                  "nativeaot-scheduler-callback-first-tls-recorded");
     serial_text("GXOS_NET10:MANAGED_THREAD_REUSE_OK=1\r\n");
@@ -13981,6 +14526,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     uintptr_t callback_finalizer_fls_before;
     GXOS_NATIVEAOT_DURABILITY_COUNTS callback_counts;
 #endif
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION gc_probe_resolution = {0};
+    int32_t gc_main_result = 0;
+    uint32_t gc_main_status = 0;
+    uint32_t gc_main_delta = 0;
+    uint32_t gc_main_generation = 0;
+    uint32_t gc_main_checksum = 0;
+    uint64_t gc_main_tls_alloc_limit_before = 0;
+    uint64_t gc_main_tls_alloc_ptr_before = 0;
+    uint64_t gc_main_tls_alloc_limit_after = 0;
+    uint64_t gc_main_tls_alloc_ptr_after = 0;
+#endif
 #ifdef GXOS_ENABLE_CRT_INITTERM_E
     GXOS_CRT_INITTERM_E_CONTEXT initterm_e_context = {0};
     uint32_t initterm_e_region_index;
@@ -14159,6 +14716,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("ManagedCallback-registration");
     }
 #endif
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    g_managed_gc_probe_target = image.actual_base + image.managed_gc_probe_rva;
+    gc_probe_resolution.rva = image.managed_gc_probe_rva;
+    gc_probe_resolution.address = (uintptr_t)g_managed_gc_probe_target;
+    gc_probe_resolution.ordinal = 0;
+    if (!gxos_nativeaot_callback_register(&g_managed_gc_probe_bridge,
+                                         &gc_probe_resolution)) {
+        fail("ManagedGcProbe-registration");
+    }
+#endif
     serial_field_hex("GXOS_NET10:IMAGE_BASE=0x", image.actual_base);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_TARGET_VA=0x", g_managed_target);
@@ -14174,6 +14741,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_CALLBACK_ABI=MS_X64_INT32_TO_INT32\r\n");
     serial_text("GXOS_NET10:MANAGED_CALLBACK_DISCOVERY=PE_EXPORT_TABLE\r\n");
     serial_text("GXOS_NET10:MANAGED_CALLBACK_READY=0\r\n");
+#endif
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    serial_text("GXOS_NET10:MANAGED_GC_PROBE_EXPORT=ManagedGcProbe\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_PROBE_EXPORT_RVA=0x",
+                     image.managed_gc_probe_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_PROBE_TARGET_VA=0x",
+                     g_managed_gc_probe_target);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_GC_PROBE_ABI=MS_X64_INT32_TO_INT32\r\n");
+    serial_text("GXOS_NET10:MANAGED_GC_PROBE_DISCOVERY=PE_EXPORT_TABLE\r\n");
+    serial_text("GXOS_NET10:MANAGED_GC_PROBE_READY=0\r\n");
 #endif
 #ifdef GXOS_ENABLE_CREATE_THREAD
     if (image.actual_base == 0 || image.loaded_size == 0 ||
@@ -14210,7 +14789,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
     if (g_load_library_import_descriptor_index != 2U ||
         g_load_library_import_symbol_index != 0x39U ||
-        g_load_library_importing_iat_rva != 0x7D200U) {
+        g_load_library_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D200U)) {
         fail("loadlibraryexw-import-contract");
     }
     serial_text("GXOS_NET10:LOADLIBRARYEXW_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14232,7 +14811,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     if (g_multibyte_import_descriptor_index != 2U ||
         g_multibyte_import_symbol_index != 0x11U ||
-        g_multibyte_importing_iat_rva != 0x7D0C0U) {
+        g_multibyte_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D0C0U)) {
         fail("multibyte-import-contract");
     }
     serial_text("GXOS_NET10:MULTIBYTETOWIDECHAR_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14253,7 +14832,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
     if (g_memory_status_ex_import_descriptor_index != 2U ||
         g_memory_status_ex_import_symbol_index != 0x44U ||
-        g_memory_status_ex_importing_iat_rva != 0x7D258U) {
+        g_memory_status_ex_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D258U)) {
         fail("globalmemorystatusex-import-contract");
     }
     serial_text("GXOS_NET10:GLOBALMEMORYSTATUSEX_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14274,7 +14853,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_PROCESSOR_TOPOLOGY
     if (g_processor_topology_import_descriptor_index != 2U ||
         g_processor_topology_import_symbol_index != 0x46U ||
-        g_processor_topology_importing_iat_rva != 0x7D268U) {
+        g_processor_topology_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D268U)) {
         fail("processor-topology-import-contract");
     }
     serial_text("GXOS_NET10:PROCESSOR_TOPOLOGY_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14295,10 +14874,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_VIRTUAL_MEMORY
     if (g_virtual_alloc_import_descriptor_index != 2U ||
         g_virtual_alloc_import_symbol_index != 0x18U ||
-        g_virtual_alloc_importing_iat_rva != 0x7D0F8U ||
+        g_virtual_alloc_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D0F8U) ||
         g_virtual_free_import_descriptor_index != 2U ||
         g_virtual_free_import_symbol_index != 0x19U ||
-        g_virtual_free_importing_iat_rva != 0x7D100U) {
+        g_virtual_free_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D100U)) {
         fail("virtual-memory-import-contract");
     }
     serial_text("GXOS_NET10:VIRTUALALLOC_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14333,21 +14912,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
     if (g_write_file_import_descriptor_index != 2U ||
         g_write_file_import_symbol_index != 0x1CU ||
-        g_write_file_importing_iat_rva != 0x7D118U) {
+        g_write_file_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D118U)) {
         fail("nativeaot-writefile-import-contract");
     }
     if (g_co_get_apartment_type_import_descriptor_index != 3U ||
         g_co_get_apartment_type_import_symbol_index != 0U ||
-        g_co_get_apartment_type_importing_iat_rva != 0x7D408U ||
+        g_co_get_apartment_type_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D408U) ||
         g_co_initialize_ex_import_descriptor_index != 3U ||
         g_co_initialize_ex_import_symbol_index != 1U ||
-        g_co_initialize_ex_importing_iat_rva != 0x7D410U ||
+        g_co_initialize_ex_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D410U) ||
         g_co_uninitialize_import_descriptor_index != 3U ||
         g_co_uninitialize_import_symbol_index != 2U ||
-        g_co_uninitialize_importing_iat_rva != 0x7D418U ||
+        g_co_uninitialize_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D418U) ||
         g_co_wait_for_multiple_handles_import_descriptor_index != 3U ||
         g_co_wait_for_multiple_handles_import_symbol_index != 3U ||
-        g_co_wait_for_multiple_handles_importing_iat_rva != 0x7D420U) {
+        g_co_wait_for_multiple_handles_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D420U)) {
         fail("nativeaot-com-import-contract");
     }
     serial_text("GXOS_NET10:COM_CENSUS_COGETAPARTMENTTYPE_IMPORT_DLL=ole32.dll\r\n");
@@ -14403,16 +14982,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
     serial_text("GXOS_NET10:COM_COINITIALIZEEX_GETLASTERROR_INVOLVED=0\r\n");
     if (g_set_event_import_descriptor_index != 2U ||
-        g_set_event_importing_iat_rva != 0x7D0E0U ||
+        g_set_event_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D0E0U) ||
         g_reset_event_import_descriptor_index != 2U ||
         g_reset_event_import_symbol_index != 0x28U ||
-        g_reset_event_importing_iat_rva != 0x7D178U ||
+        g_reset_event_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D178U) ||
         g_wait_import_descriptor_index != 2U ||
         g_wait_import_symbol_index != 0x1AU ||
-        g_wait_importing_iat_rva != 0x7D108U ||
+        g_wait_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D108U) ||
         g_wait_single_import_descriptor_index != 2U ||
         g_wait_single_import_symbol_index != 0x29U ||
-        g_wait_single_importing_iat_rva != 0x7D180U) {
+        g_wait_single_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D180U)) {
         fail("nativeaot-event-wait-import-contract");
     }
     serial_text("GXOS_NET10:SETEVENT_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14475,7 +15054,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
     if (g_create_event_w_import_descriptor_index != 2U ||
         g_create_event_w_import_symbol_index != 42U ||
-        g_create_event_w_importing_iat_rva != 0x7D188U) {
+        g_create_event_w_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D188U)) {
         fail("createeventw-import-contract");
     }
     serial_text("GXOS_NET10:CREATEEVENTW_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14496,7 +15075,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION
     if (g_memory_resource_notification_import_descriptor_index != 2U ||
         g_memory_resource_notification_import_symbol_index != 0x36U ||
-        g_memory_resource_notification_importing_iat_rva != 0x7D1E8U) {
+        g_memory_resource_notification_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D1E8U)) {
         fail("memory-resource-notification-import-contract");
     }
     serial_text("GXOS_NET10:MEMORYRESOURCENOTIFICATION_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14518,7 +15097,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_CREATE_THREAD
     if (g_create_thread_import_descriptor_index != 2U ||
         g_create_thread_import_symbol_index != 0x2DU ||
-        g_create_thread_importing_iat_rva != 0x7D1A0U) {
+        g_create_thread_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D1A0U)) {
         fail("createthread-import-contract");
     }
     serial_text("GXOS_NET10:CREATETHREAD_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14539,7 +15118,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_SET_THREAD_PRIORITY
     if (g_set_thread_priority_import_descriptor_index != 2U ||
         g_set_thread_priority_import_symbol_index != 0x2FU ||
-        g_set_thread_priority_importing_iat_rva != 0x7D1B0U) {
+        g_set_thread_priority_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D1B0U)) {
         fail("setthreadpriority-import-contract");
     }
     serial_text("GXOS_NET10:SETTHREADPRIORITY_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14560,7 +15139,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_RESUME_THREAD
     if (g_resume_thread_import_descriptor_index != 2U ||
         g_resume_thread_import_symbol_index != 0x31U ||
-        g_resume_thread_importing_iat_rva != 0x7D1C0U) {
+        g_resume_thread_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D1C0U)) {
         fail("resumethread-import-contract");
     }
     serial_text("GXOS_NET10:RESUMETHREAD_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14581,7 +15160,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_IS_PROCESS_IN_JOB
     if (g_is_process_in_job_import_descriptor_index != 2U ||
         g_is_process_in_job_import_symbol_index != 0x4BU ||
-        g_is_process_in_job_importing_iat_rva != 0x7D290U) {
+        g_is_process_in_job_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D290U)) {
         fail("isprocessinjob-import-contract");
     }
     serial_text("GXOS_NET10:ISPROCESSINJOB_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14602,7 +15181,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER
     if (g_veh_add_import_descriptor_index != 2U ||
         g_veh_add_import_symbol_index != 30U ||
-        g_veh_add_importing_iat_rva != 0x7D128U) {
+        g_veh_add_importing_iat_rva != GXOS_NATIVEAOT_IAT_RVA(0x7D128U)) {
         fail("veh-import-contract");
     }
     serial_text("GXOS_NET10:VEH_IMPORT_DLL=KERNEL32.dll\r\n");
@@ -14865,6 +15444,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         !gxos_nativeaot_callback_mark_ready(&g_managed_callback_bridge)) {
         fail("nativeaot-managed-callback-readiness");
     }
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    if (!gxos_nativeaot_callback_mark_ready(&g_managed_gc_probe_bridge)) {
+        fail("nativeaot-managed-gc-probe-readiness");
+    }
+#endif
     callback_thread = gxos_scheduler_current_thread();
     callback_finalizer = nativeaot_durability_blocked_worker();
     if (callback_thread == 0 || callback_finalizer == 0 ||
@@ -14876,6 +15460,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     }
     callback_counts = nativeaot_durability_counts();
     serial_text("GXOS_NET10:MANAGED_CALLBACK_READY=1\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    serial_text("GXOS_NET10:MANAGED_GC_PROBE_READY=1\r\n");
+#endif
     serial_text("GXOS_NET10:MANAGED_CALLBACK_READINESS=AFTER_MANAGED_ENTRY_COMPLETE\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_CALLER_IDENTITY=0x",
                      callback_thread->identity);
@@ -14929,6 +15516,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_CALLBACK_REVERSE_PINVOKE=GENERATED_EXPORT_THUNK\r\n");
     serial_text("GXOS_NET10:MANAGED_CALLBACK_EXCEPTION_POLICY=NO_EXCEPTION_CROSSING\r\n");
     serial_text("GXOS_NET10:MANAGED_CALLBACK_GC_POLICY=GC_LIGHT_NO_ALLOCATION\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    serial_text("GXOS_NET10:MANAGED_GC_PROBE_ROOT_POLICY=MANAGED_STACK_LOCAL\r\n");
+    serial_text("GXOS_NET10:MANAGED_GC_PROBE_ALLOCATION_POLICY=FIVE_BOUNDED_ARRAYS\r\n");
+#endif
     install_fault_handlers();
     callback_fls_before = (uintptr_t)callback_thread->fls_values[
         g_nativeaot_runtime_fls_slot];
@@ -14999,8 +15590,62 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("nativeaot-managed-callback-2-result-or-fls");
     }
     serial_text("GXOS_NET10:MANAGED_CALLBACK_2_OK\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    serial_text("GXOS_NET10:MANAGED_GC_MAIN_BEGIN\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_MAIN_SEED=0x", 0x31U);
+    serial_text("\r\n");
+    gc_main_tls_alloc_limit_before =
+        *(const uint64_t *)(uintptr_t)(g_tls_block + 0x30U);
+    gc_main_tls_alloc_ptr_before =
+        *(const uint64_t *)(uintptr_t)(g_tls_block + 0x38U);
+    activate_nativeaot_tls();
+    g_phase = PHASE_IN_MANAGED;
+    gc_main_status = (uint32_t)gxos_nativeaot_callback_invoke(
+        &g_managed_gc_probe_bridge, 0x31, &gc_main_result);
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
+    gc_main_tls_alloc_limit_after =
+        *(const uint64_t *)(uintptr_t)(g_tls_block + 0x30U);
+    gc_main_tls_alloc_ptr_after =
+        *(const uint64_t *)(uintptr_t)(g_tls_block + 0x38U);
+    restore_nativeaot_tls();
+    serial_field_hex("GXOS_NET10:MANAGED_GC_MAIN_TLS_ALLOC_LIMIT_BEFORE=0x",
+                     gc_main_tls_alloc_limit_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_MAIN_TLS_ALLOC_PTR_BEFORE=0x",
+                     gc_main_tls_alloc_ptr_before);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_MAIN_TLS_ALLOC_LIMIT_AFTER=0x",
+                     gc_main_tls_alloc_limit_after);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_GC_MAIN_TLS_ALLOC_PTR_AFTER=0x",
+                     gc_main_tls_alloc_ptr_after);
+    serial_text("\r\n");
+    nativeaot_gc_emit_result(
+        "GXOS_NET10:MANAGED_GC_MAIN_RESULT=0x",
+        "GXOS_NET10:MANAGED_GC_MAIN_COLLECTION_DELTA=0x",
+        "GXOS_NET10:MANAGED_GC_MAIN_GENERATION=0x",
+        "GXOS_NET10:MANAGED_GC_MAIN_CHECKSUM=0x",
+        gc_main_result);
+    nativeaot_durability_require(
+        gc_main_status == GXOS_NATIVEAOT_CALLBACK_OK &&
+        gxos_nativeaot_gc_result_valid(gc_main_result, 0x31U,
+                                  &gc_main_delta, &gc_main_generation,
+                                  &gc_main_checksum),
+        "nativeaot-main-gc-probe");
+    nativeaot_durability_require(gc_main_delta != 0,
+                                 "nativeaot-main-gc-collection");
+    (void)gc_main_generation;
+    (void)gc_main_checksum;
+    serial_text("GXOS_NET10:MANAGED_GC_MAIN_OK=1\r\n");
+    serial_text("GXOS_NET10:MANAGED_GC_ALLOCATION_OK=1\r\n");
+    serial_text("GXOS_NET10:MANAGED_GC_COLLECTION_OBSERVED=1\r\n");
+    serial_text("GXOS_NET10:MANAGED_GC_ROOT_SURVIVED=1\r\n");
+#endif
 #ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
     nativeaot_scheduler_callback_probe();
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
+    serial_text("GXOS_NET10:MANAGED_GC_WORKER_RETURN_OK=1\r\n");
+#endif
 #endif
     restore_fault_handlers();
     callback_finalizer = nativeaot_durability_blocked_worker();

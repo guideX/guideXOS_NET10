@@ -7,6 +7,7 @@ param(
     [switch]$EnableNativeAotStartup,
     [switch]$EnableNativeAotManagedCallback,
     [switch]$EnableNativeAotSchedulerCallback,
+    [switch]$EnableNativeAotManagedGcProbe,
     [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
@@ -24,6 +25,12 @@ if ($EnableNativeAotSchedulerCallback -and -not $EnableNativeAotManagedCallback)
 }
 if ($EnableNativeAotSchedulerCallback -and $Scenario -ne 'NativeAotEventWait') {
     throw 'NativeAot scheduler callback validation requires the NativeAotEventWait scenario.'
+}
+if ($EnableNativeAotManagedGcProbe -and -not $EnableNativeAotManagedCallback) {
+    throw 'NativeAot managed GC validation requires -EnableNativeAotManagedCallback.'
+}
+if ($EnableNativeAotManagedGcProbe -and -not $EnableNativeAotSchedulerCallback) {
+    throw 'NativeAot managed GC validation requires -EnableNativeAotSchedulerCallback.'
 }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -1032,6 +1039,7 @@ if ($Scenario -eq 'NativeAotEventWait') {
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
 if ($EnableNativeAotManagedCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK' }
 if ($EnableNativeAotSchedulerCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK' }
+if ($EnableNativeAotManagedGcProbe) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE' }
 if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }
 if ($Scenario -eq 'SyntheticScheduler') {
     $gccArguments += '-DGXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF'

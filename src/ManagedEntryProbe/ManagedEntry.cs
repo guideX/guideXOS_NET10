@@ -24,6 +24,11 @@ public static unsafe class ManagedEntry
     private const int MarkerLength = 29;
     private static int s_managedCallbackCount;
 
+    private const int GcProbeRetainedLength = 8;
+    private const int GcProbePressureAllocations = 4;
+    private const int GcProbePressureLength = 64;
+    private const uint GcProbeSuccess = 0xC0000000U;
+
     [UnmanagedCallersOnly(EntryPoint = "ManagedCallback")]
     public static int ManagedCallback(int value)
     {
@@ -34,6 +39,66 @@ public static unsafe class ManagedEntry
 
         s_managedCallbackCount++;
         return (s_managedCallbackCount << 16) | (value + 1);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int ForceManagedCollection()
+    {
+        int before = System.GC.CollectionCount(0);
+        System.GC.Collect();
+        int after = System.GC.CollectionCount(0);
+        return after - before;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "ManagedGcProbe")]
+    public static int ManagedGcProbe(int seed)
+    {
+        if ((uint)seed > 0xFFFFU)
+        {
+            return -1;
+        }
+
+        int[] retained = new int[GcProbeRetainedLength];
+        uint checksum = 0;
+        for (int index = 0; index < retained.Length; index++)
+        {
+            retained[index] = unchecked(seed * 257 + 0x1234 + index * 17);
+            checksum = (checksum * 33U) ^ (uint)retained[index];
+        }
+
+        for (int index = 0; index < GcProbePressureAllocations; index++)
+        {
+            byte[] pressure = new byte[GcProbePressureLength];
+            pressure[0] = unchecked((byte)(seed + index));
+            pressure[GcProbePressureLength - 1] = unchecked((byte)(seed ^ index));
+        }
+
+        int collectionDelta = ForceManagedCollection();
+        System.GC.KeepAlive(retained);
+
+        uint postCollectionChecksum = 0;
+        for (int index = 0; index < retained.Length; index++)
+        {
+            int expected = unchecked(seed * 257 + 0x1234 + index * 17);
+            if (retained[index] != expected)
+            {
+                return -2;
+            }
+
+            postCollectionChecksum = (postCollectionChecksum * 33U) ^
+                                     (uint)retained[index];
+        }
+
+        if (postCollectionChecksum != checksum || collectionDelta <= 0)
+        {
+            return -3;
+        }
+
+        int generation = System.GC.GetGeneration(retained);
+        return unchecked((int)(GcProbeSuccess |
+                               ((uint)collectionDelta & 0xFFU) << 16 |
+                               ((uint)generation & 0x0FU) << 12 |
+                               (postCollectionChecksum & 0x0FFFU)));
     }
 
 #if GXOS_ALLOCATION_PROBE

@@ -7,6 +7,9 @@ export from a non-main scheduler thread. No NativeAOT process-entry replay,
 main-thread state copy, FLS copy, or process-global managed-thread singleton is
 used.
 
+The follow-on managed allocation/GC proof is documented in
+[NATIVEAOT_GC_SCHEDULER_THREAD.md](NATIVEAOT_GC_SCHEDULER_THREAD.md).
+
 ## Proven lifecycle
 
 The final QEMU harness performs this sequence:

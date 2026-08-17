@@ -267,6 +267,7 @@ typedef struct GXOS_SCHEDULER_TCB {
     uint64_t stack_limit;
     uint64_t initial_rsp;
     uint64_t stack_pages_memory;
+    uint64_t stack_canary_memory;
     uint64_t stack_vm_identity;
     uint64_t teb_base;
     uint64_t gs_base;
