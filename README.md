@@ -6,7 +6,12 @@ This repository is an archaeology and bootstrap project. It is not a direct upgr
 
 ## Current state
 
-The repository contains a small .NET 10 NativeAOT managed-entry probe and a narrowly scoped UEFI PE loader harness. The four-gate result is:
+The cooperative NativeAOT scheduler/runtime foundation is complete and remains
+covered by the small .NET 10 NativeAOT managed-entry probe and narrowly scoped
+UEFI PE loader harness. Managed-kernel integration is now active: the new
+`src/ManagedKernel` project is the first real managed guideXOS system layer and
+uses the versioned service contract documented in
+[MANAGED_KERNEL_ABI.md](docs/MANAGED_KERNEL_ABI.md). The four-gate result is:
 
 - Gate 1: passed — reproducible standard .NET 10 NativeAOT PE artifacts.
 - Gate 2: passed — the linked runtime and platform dependency census is recorded.

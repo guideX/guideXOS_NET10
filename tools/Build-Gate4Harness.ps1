@@ -2,6 +2,9 @@
 param(
     [string]$OutputDirectory = '',
     [string]$ManagedArtifact = '',
+    [ValidateSet('ManagedEntryProbe', 'ManagedKernel')]
+    [Alias('Payload')]
+    [string]$PayloadMode = 'ManagedEntryProbe',
     [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'IsProcessInJob', 'IsProcessInJobDisabled', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'RegisterOnexitMarkerMutation', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled', 'CreateEventW', 'CreateEventWDisabled', 'CreateMemoryResourceNotification', 'CreateMemoryResourceNotificationDisabled', 'CreateThread', 'CreateThreadDisabled', 'SetThreadPriority', 'SetThreadPriorityDisabled', 'ResumeThread', 'ResumeThreadDisabled', 'GlobalMemoryStatusEx', 'GlobalMemoryStatusExDisabled', 'VirtualMemory', 'NativeAotEventWait', 'SyntheticScheduler')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
@@ -20,6 +23,15 @@ $authoritativePayloadSha256 = 'AE19A4C414A7F642B89B637D131A86E206300323914858E88
 $authoritativePayloadSize = 730112
 $requiresCallbackPayload = $EnableNativeAotManagedCallback -or $EnableNativeAotSchedulerCallback
 $requiresAuthoritativePayload = $EnableNativeAotManagedGcProbe
+
+if ($PayloadMode -eq 'ManagedKernel' -and
+    ($EnableNativeAotManagedCallback -or $EnableNativeAotSchedulerCallback -or
+     $EnableNativeAotManagedGcProbe)) {
+    throw 'ManagedKernel payload selection is a separate service path and cannot enable probe-only callback/GC validation.'
+}
+if ($PayloadMode -eq 'ManagedKernel' -and -not $EnableNativeAotStartup) {
+    throw 'ManagedKernel payload selection requires -EnableNativeAotStartup.'
+}
 
 if ($EnableNativeAotManagedCallback -and $Scenario -ne 'NativeAotEventWait') {
     throw 'NativeAot managed callback validation requires the NativeAotEventWait scenario.'
@@ -85,10 +97,17 @@ $isProcessInJobEntryAssembly = Join-Path $root 'src\Gate4Harness\is_process_in_j
 $importFailfastEntryAssembly = Join-Path $root 'src\Gate4Harness\import_failfast_entry.S'
 $startupSource = Join-Path $root 'src\Gate4Harness\startup.nsh'
 $efi = Join-Path $efiDirectory 'BOOTX64.EFI'
-$payload = Join-Path $payloadDirectory 'gxos-managed-entry-probe.dll'
+$payloadName = if ($PayloadMode -eq 'ManagedKernel') {
+    'gxos-managed-kernel.dll'
+} else {
+    'gxos-managed-entry-probe.dll'
+}
+$payload = Join-Path $payloadDirectory $payloadName
 $startupScript = Join-Path $espDirectory 'startup.nsh'
 if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
-    if ($requiresCallbackPayload -or $requiresAuthoritativePayload) {
+    if ($PayloadMode -eq 'ManagedKernel') {
+        $managedArtifact = Join-Path $root 'artifacts\managed-kernel\gxos-managed-kernel.dll'
+    } elseif ($requiresCallbackPayload -or $requiresAuthoritativePayload) {
         throw 'Callback and GC builds require an explicit -ManagedArtifact pointing to the intended rebuilt payload.'
     }
     if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
@@ -165,15 +184,17 @@ if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
     $Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait') {
     $payloadHash = (Get-FileHash -LiteralPath $managedArtifact -Algorithm SHA256).Hash.ToUpperInvariant()
     $payloadSize = (Get-Item -LiteralPath $managedArtifact).Length
-    if ($requiresAuthoritativePayload -and
+    if ($PayloadMode -eq 'ManagedKernel') {
+        # ManagedKernel establishes its own payload identity for this phase.
+    } elseif ($requiresAuthoritativePayload -and
         ($payloadHash -ne $authoritativePayloadSha256 -or $payloadSize -ne $authoritativePayloadSize)) {
         throw "The managed GC integration requires the authoritative $authoritativePayloadSize-byte payload. Hash=$payloadHash Size=$payloadSize"
     }
-    if (-not $requiresAuthoritativePayload -and $requiresCallbackPayload -and
+    elseif (-not $requiresAuthoritativePayload -and $requiresCallbackPayload -and
         $payloadHash -ne $callbackPayloadSha256) {
         throw "The managed callback integration requires the callback payload. Hash=$payloadHash"
     }
-    if (-not $requiresAuthoritativePayload -and -not $requiresCallbackPayload -and
+    elseif (-not $requiresAuthoritativePayload -and -not $requiresCallbackPayload -and
         $payloadHash -ne $historicalControlPayloadSha256) {
         throw "The thread payload integration requires the exact veh-final3-normal-gate payload. Hash=$payloadHash"
     }
@@ -187,6 +208,21 @@ if (-not $objdumpCommand) { throw 'objdump is required to validate the UEFI harn
 New-Item -ItemType Directory -Path $efiDirectory,$payloadDirectory -Force | Out-Null
 Copy-Item -LiteralPath $managedArtifact -Destination $payload -Force
 Copy-Item -LiteralPath $startupSource -Destination $startupScript -Force
+
+$sourcePayloadHash = (Get-FileHash -LiteralPath $managedArtifact -Algorithm SHA256).Hash.ToUpperInvariant()
+$sourcePayloadSize = (Get-Item -LiteralPath $managedArtifact).Length
+$stagedPayloadHash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant()
+$stagedPayloadSize = (Get-Item -LiteralPath $payload).Length
+if ($sourcePayloadHash -ne $stagedPayloadHash -or $sourcePayloadSize -ne $stagedPayloadSize) {
+    throw "Source and staged payload differ. Source=$sourcePayloadHash/$sourcePayloadSize Staged=$stagedPayloadHash/$stagedPayloadSize"
+}
+Write-Output "MANAGED_PAYLOAD_MODE=$PayloadMode"
+Write-Output "MANAGED_PAYLOAD_SOURCE=$managedArtifact"
+Write-Output "MANAGED_PAYLOAD_SOURCE_SIZE=$sourcePayloadSize"
+Write-Output "MANAGED_PAYLOAD_SOURCE_SHA256=$sourcePayloadHash"
+Write-Output "MANAGED_PAYLOAD_STAGED_ESP=$payload"
+Write-Output "MANAGED_PAYLOAD_STAGED_SIZE=$stagedPayloadSize"
+Write-Output "MANAGED_PAYLOAD_STAGED_SHA256=$stagedPayloadHash"
 
 if ($requiresAuthoritativePayload -or $requiresCallbackPayload) {
     $stagedPayloadHash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant()
@@ -1079,6 +1115,7 @@ if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP
 if ($EnableNativeAotManagedCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK' }
 if ($EnableNativeAotSchedulerCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK' }
 if ($EnableNativeAotManagedGcProbe) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE' }
+if ($PayloadMode -eq 'ManagedKernel') { $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL' }
 if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }
 if ($Scenario -eq 'SyntheticScheduler') {
     $gccArguments += '-DGXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF'
