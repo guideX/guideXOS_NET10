@@ -198,9 +198,9 @@ failures.
 
 ## Boundary and deferred work
 
-The next natural boundary is the final integration/audit milestone before
-merging this branch into `main`. This proof does not establish a general
-managed thread store destruction protocol, finalizer execution, allocation
+The foundation is now integrated and closed on `main`; the next natural
+development boundary is managed kernel integration. This proof does not
+establish a general managed thread store destruction protocol, finalizer execution, allocation
 stress behavior, managed exceptions across the export ABI, managed thread
 pool, `Task`, async/await, arbitrary managed thread creation, reflection,
 dynamic assembly loading, APCs, or broader wait/COM APIs.
