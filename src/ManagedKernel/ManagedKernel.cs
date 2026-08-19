@@ -95,6 +95,39 @@ internal struct GxManagedKernelBootResourcePublicationV1
     internal ulong Reserved;
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelHostServicesV1
+{
+    internal const uint ExpectedSize = 56;
+    internal const ulong CapabilityAbi = 1UL << 0;
+    internal const ulong CapabilityLogUtf8 = 1UL << 1;
+    internal const ulong CapabilityMonotonicTime = 1UL << 2;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint ServiceVersion;
+    internal uint Architecture;
+    internal ulong Capabilities;
+    internal ulong LogUtf8Address;
+    internal ulong MonotonicTimeAddress;
+    internal ulong Reserved0;
+    internal ulong Reserved1;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelMonotonicTimeV1
+{
+    internal const uint ExpectedSize = 40;
+    internal const ulong FlagNormalizedFromStart = 1UL << 0;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal ulong Ticks;
+    internal ulong FrequencyHz;
+    internal ulong Flags;
+    internal ulong Reserved;
+}
+
 internal static unsafe class ManagedKernelLayout
 {
     internal static bool IsValid()
@@ -105,6 +138,8 @@ internal static unsafe class ManagedKernelLayout
                sizeof(GxManagedKernelBootResourceSummaryV1) == 56 &&
                sizeof(GxManagedKernelBootResourceRegionV1) == 32 &&
                sizeof(GxManagedKernelBootResourcePublicationV1) == 48 &&
+               sizeof(GxManagedKernelHostServicesV1) == 56 &&
+               sizeof(GxManagedKernelMonotonicTimeV1) == 40 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Magic)).ToInt32() == 0 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Version)).ToInt32() == 4 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Size)).ToInt32() == 6 &&
@@ -144,7 +179,22 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelBootResourcePublicationV1>(nameof(GxManagedKernelBootResourcePublicationV1.DescriptorCount)).ToInt32() == 24 &&
                Marshal.OffsetOf<GxManagedKernelBootResourcePublicationV1>(nameof(GxManagedKernelBootResourcePublicationV1.DescriptorSize)).ToInt32() == 28 &&
                Marshal.OffsetOf<GxManagedKernelBootResourcePublicationV1>(nameof(GxManagedKernelBootResourcePublicationV1.DescriptorByteLength)).ToInt32() == 32 &&
-               Marshal.OffsetOf<GxManagedKernelBootResourcePublicationV1>(nameof(GxManagedKernelBootResourcePublicationV1.Reserved)).ToInt32() == 40;
+               Marshal.OffsetOf<GxManagedKernelBootResourcePublicationV1>(nameof(GxManagedKernelBootResourcePublicationV1.Reserved)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.Size)).ToInt32() == 0 &&
+               Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.AbiVersion)).ToInt32() == 4 &&
+               Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.ServiceVersion)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.Architecture)).ToInt32() == 12 &&
+               Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.Capabilities)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.LogUtf8Address)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.MonotonicTimeAddress)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.Reserved0)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.Reserved1)).ToInt32() == 48 &&
+               Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Size)).ToInt32() == 0 &&
+               Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.AbiVersion)).ToInt32() == 4 &&
+               Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Ticks)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.FrequencyHz)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Flags)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Reserved)).ToInt32() == 32;
     }
 }
 
@@ -157,6 +207,7 @@ internal static unsafe class ManagedKernelContract
     internal const uint NotInitialized = 4;
     internal const uint AlreadyInitialized = 5;
     internal const uint OutOfRange = 6;
+    internal const uint InvalidState = 7;
 
     private const uint AbiVersionV1 = 1;
     private const uint ArchitectureX64 = 0x8664;
@@ -182,12 +233,41 @@ internal static unsafe class ManagedKernelContract
         GxManagedKernelBootResourceSummaryV1.CapabilityRegions |
         GxManagedKernelBootResourceSummaryV1.CapabilityTotals;
 
-    private static int s_initialized;
+    private const uint HostServicesAbiVersionV1 = 1;
+    private const uint HostServicesServiceVersionV1 = 1;
+    private const ulong HostServicesKnownCapabilities =
+        GxManagedKernelHostServicesV1.CapabilityAbi |
+        GxManagedKernelHostServicesV1.CapabilityLogUtf8 |
+        GxManagedKernelHostServicesV1.CapabilityMonotonicTime;
+    private const ulong RequiredHostServicesCapabilities =
+        GxManagedKernelHostServicesV1.CapabilityAbi |
+        GxManagedKernelHostServicesV1.CapabilityLogUtf8;
+    private const ulong MonotonicTimeKnownFlags =
+        GxManagedKernelMonotonicTimeV1.FlagNormalizedFromStart;
+
+    private enum LifecycleState
+    {
+        BootstrapAvailable = 0,
+        Initialized = 1,
+        EnvironmentInstalling = 2,
+        Ready = 3,
+        Started = 4
+    }
+
+    private static int s_lifecycleState = (int)LifecycleState.BootstrapAvailable;
     private static int s_bootResourcesPublished;
     private static nuint s_bootResourceSummaryAddress;
     private static nuint s_bootResourceDescriptorAddress;
     private static uint s_bootResourceDescriptorCount;
     private static nuint s_bootResourceDescriptorByteLength;
+    private static GxManagedKernelBootResourceSummaryV1 s_bootResourceSummarySnapshot;
+    private static int s_hostServicesInstalled;
+    private static ulong s_hostCapabilities;
+    private static nuint s_hostLogUtf8Address;
+    private static nuint s_hostMonotonicTimeAddress;
+
+    private static bool IsInitialized =>
+        s_lifecycleState != (int)LifecycleState.BootstrapAvailable;
 
     private static bool IsRangeValid(nuint address, nuint length)
     {
@@ -349,7 +429,7 @@ internal static unsafe class ManagedKernelContract
         out GxManagedKernelBootResourceSummaryV1 summary)
     {
         summary = default;
-        if (s_initialized == 0 || s_bootResourcesPublished == 0 ||
+        if (!IsInitialized || s_bootResourcesPublished == 0 ||
             !IsRangeValid(s_bootResourceSummaryAddress,
                           (nuint)GxManagedKernelBootResourceSummaryV1.ExpectedSize))
         {
@@ -363,7 +443,7 @@ internal static unsafe class ManagedKernelContract
         uint index, out GxManagedKernelBootResourceRegionV1 region)
     {
         region = default;
-        if (s_initialized == 0 || s_bootResourcesPublished == 0 ||
+        if (!IsInitialized || s_bootResourcesPublished == 0 ||
             index >= s_bootResourceDescriptorCount)
         {
             return false;
@@ -409,12 +489,12 @@ internal static unsafe class ManagedKernelContract
             return InvalidArgument;
         }
 
-        if (s_initialized != 0)
+        if (s_lifecycleState != (int)LifecycleState.BootstrapAvailable)
         {
             return AlreadyInitialized;
         }
 
-        s_initialized = 1;
+        s_lifecycleState = (int)LifecycleState.Initialized;
         return ManagedOk;
     }
 
@@ -429,13 +509,14 @@ internal static unsafe class ManagedKernelContract
         {
             return UnsupportedAbi;
         }
-        if (s_initialized == 0)
+        if (!IsInitialized)
         {
             return NotInitialized;
         }
-        if (s_bootResourcesPublished != 0)
+        if (s_bootResourcesPublished != 0 ||
+            s_lifecycleState != (int)LifecycleState.Initialized)
         {
-            return AlreadyInitialized;
+            return s_bootResourcesPublished != 0 ? AlreadyInitialized : InvalidState;
         }
         if (publicationAddress == 0)
         {
@@ -458,7 +539,176 @@ internal static unsafe class ManagedKernelContract
         s_bootResourceDescriptorCount =
             ((GxManagedKernelBootResourcePublicationV1*)publicationAddress)->DescriptorCount;
         s_bootResourceDescriptorByteLength = descriptorByteLength;
+        s_bootResourceSummarySnapshot =
+            *(GxManagedKernelBootResourceSummaryV1*)summaryAddress;
         s_bootResourcesPublished = 1;
+        s_lifecycleState = (int)LifecycleState.EnvironmentInstalling;
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallHostServices")]
+    internal static uint InstallHostServices(uint requestedAbiVersion,
+                                              nuint hostServicesAddress)
+    {
+        GxManagedKernelHostServicesV1 services;
+        const ulong requiredCapabilities = RequiredHostServicesCapabilities;
+
+        if (requestedAbiVersion != HostServicesAbiVersionV1)
+        {
+            return UnsupportedAbi;
+        }
+        if (!IsInitialized)
+        {
+            return NotInitialized;
+        }
+        if (s_hostServicesInstalled != 0)
+        {
+            return AlreadyInitialized;
+        }
+        if (s_lifecycleState != (int)LifecycleState.EnvironmentInstalling)
+        {
+            return InvalidState;
+        }
+        if (hostServicesAddress == 0 ||
+            !IsRangeValid(hostServicesAddress,
+                          (nuint)GxManagedKernelHostServicesV1.ExpectedSize))
+        {
+            return InvalidArgument;
+        }
+
+        services = *(GxManagedKernelHostServicesV1*)hostServicesAddress;
+        if (services.Size != GxManagedKernelHostServicesV1.ExpectedSize ||
+            services.AbiVersion != HostServicesAbiVersionV1 ||
+            services.ServiceVersion != HostServicesServiceVersionV1 ||
+            services.Architecture != ArchitectureX64 ||
+            (services.Capabilities & ~HostServicesKnownCapabilities) != 0 ||
+            (services.Capabilities & requiredCapabilities) != requiredCapabilities ||
+            services.LogUtf8Address == 0 ||
+            ((services.Capabilities & GxManagedKernelHostServicesV1.CapabilityMonotonicTime) != 0 &&
+             services.MonotonicTimeAddress == 0) ||
+            ((services.Capabilities & GxManagedKernelHostServicesV1.CapabilityMonotonicTime) == 0 &&
+             services.MonotonicTimeAddress != 0) ||
+            services.Reserved0 != 0 || services.Reserved1 != 0)
+        {
+            return InvalidArgument;
+        }
+
+        s_hostCapabilities = services.Capabilities;
+        s_hostLogUtf8Address = (nuint)services.LogUtf8Address;
+        s_hostMonotonicTimeAddress = (nuint)services.MonotonicTimeAddress;
+        s_hostServicesInstalled = 1;
+        s_lifecycleState = (int)LifecycleState.Ready;
+        return ManagedOk;
+    }
+
+    private static bool PublishedBootResourcesRemainStable()
+    {
+        GxManagedKernelBootResourceSummaryV1 current;
+        if (!TryGetBootResourceSummary(out current)) return false;
+        return current.Size == s_bootResourceSummarySnapshot.Size &&
+               current.AbiVersion == s_bootResourceSummarySnapshot.AbiVersion &&
+               current.ServiceVersion == s_bootResourceSummarySnapshot.ServiceVersion &&
+               current.Architecture == s_bootResourceSummarySnapshot.Architecture &&
+               current.RegionCount == s_bootResourceSummarySnapshot.RegionCount &&
+               current.ResourceMapIdentity == s_bootResourceSummarySnapshot.ResourceMapIdentity &&
+               current.TotalPhysicalBytes == s_bootResourceSummarySnapshot.TotalPhysicalBytes &&
+               current.UsablePhysicalBytes == s_bootResourceSummarySnapshot.UsablePhysicalBytes &&
+               current.Capabilities == s_bootResourceSummarySnapshot.Capabilities &&
+               current.Reserved == s_bootResourceSummarySnapshot.Reserved;
+    }
+
+    internal static bool TryInvokeHostLog(ReadOnlySpan<byte> utf8)
+    {
+        if (s_hostServicesInstalled == 0 ||
+            (s_hostCapabilities & GxManagedKernelHostServicesV1.CapabilityLogUtf8) == 0 ||
+            s_hostLogUtf8Address == 0 || utf8.Length > 1024)
+        {
+            return false;
+        }
+        delegate* unmanaged<nuint, nuint, uint, uint> callback =
+            (delegate* unmanaged<nuint, nuint, uint, uint>)s_hostLogUtf8Address;
+        fixed (byte* address = utf8)
+        {
+            return callback((nuint)address, (nuint)utf8.Length, 0) == ManagedOk;
+        }
+    }
+
+    internal static bool TryQueryMonotonicTime(
+        out GxManagedKernelMonotonicTimeV1 result)
+    {
+        result = default;
+        if (s_hostServicesInstalled == 0 ||
+            (s_hostCapabilities & GxManagedKernelHostServicesV1.CapabilityMonotonicTime) == 0 ||
+            s_hostMonotonicTimeAddress == 0)
+        {
+            return false;
+        }
+        delegate* unmanaged<uint, nuint, nuint, uint> callback =
+            (delegate* unmanaged<uint, nuint, nuint, uint>)s_hostMonotonicTimeAddress;
+        uint status;
+        fixed (GxManagedKernelMonotonicTimeV1* resultAddress = &result)
+        {
+            status = callback(HostServicesAbiVersionV1, (nuint)resultAddress,
+                              (nuint)GxManagedKernelMonotonicTimeV1.ExpectedSize);
+        }
+        return status == ManagedOk &&
+               result.Size == GxManagedKernelMonotonicTimeV1.ExpectedSize &&
+               result.AbiVersion == HostServicesAbiVersionV1 &&
+               result.FrequencyHz != 0 &&
+               (result.Flags & ~MonotonicTimeKnownFlags) == 0 &&
+               result.Reserved == 0;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelStart")]
+    internal static uint Start()
+    {
+        GxManagedKernelMonotonicTimeV1 firstTime;
+        GxManagedKernelMonotonicTimeV1 secondTime;
+        bool hasMonotonicTime;
+        uint index;
+
+        if (!IsInitialized)
+        {
+            return NotInitialized;
+        }
+        if (s_lifecycleState == (int)LifecycleState.Started)
+        {
+            return AlreadyInitialized;
+        }
+        if (s_lifecycleState != (int)LifecycleState.Ready ||
+            s_bootResourcesPublished == 0 || s_hostServicesInstalled == 0 ||
+            (s_hostCapabilities & RequiredHostServicesCapabilities) !=
+                RequiredHostServicesCapabilities ||
+            !PublishedBootResourcesRemainStable())
+        {
+            return InvalidState;
+        }
+
+        hasMonotonicTime =
+            (s_hostCapabilities & GxManagedKernelHostServicesV1.CapabilityMonotonicTime) != 0;
+        if (hasMonotonicTime)
+        {
+            if (!TryQueryMonotonicTime(out firstTime)) return InvalidState;
+            index = 0;
+            while (index != 1024)
+            {
+                index++;
+            }
+            if (!TryQueryMonotonicTime(out secondTime) ||
+                secondTime.Ticks < firstTime.Ticks ||
+                secondTime.FrequencyHz != firstTime.FrequencyHz)
+            {
+                return InvalidState;
+            }
+        }
+
+        if (!KernelLog.Write(KernelLog.ManagedStartLog) ||
+            !KernelLog.Write(KernelLog.ManagedHostLogCallOk) ||
+            (hasMonotonicTime && !KernelLog.Write(KernelLog.ManagedMonotonicTimeOk)))
+        {
+            return InvalidState;
+        }
+        s_lifecycleState = (int)LifecycleState.Started;
         return ManagedOk;
     }
 
@@ -472,7 +722,7 @@ internal static unsafe class ManagedKernelContract
             return UnsupportedAbi;
         }
 
-        if (s_initialized == 0)
+        if (!IsInitialized)
         {
             return NotInitialized;
         }
@@ -515,7 +765,7 @@ internal static unsafe class ManagedKernelContract
         {
             return UnsupportedAbi;
         }
-        if (s_initialized == 0 || s_bootResourcesPublished == 0)
+        if (!IsInitialized || s_bootResourcesPublished == 0)
         {
             return NotInitialized;
         }
@@ -549,7 +799,7 @@ internal static unsafe class ManagedKernelContract
         {
             return UnsupportedAbi;
         }
-        if (s_initialized == 0 || s_bootResourcesPublished == 0)
+        if (!IsInitialized || s_bootResourcesPublished == 0)
         {
             return NotInitialized;
         }
@@ -578,16 +828,27 @@ internal static unsafe class ManagedKernelContract
     }
 }
 
+internal static unsafe class KernelLog
+{
+    internal static ReadOnlySpan<byte> ManagedStartLog =>
+        "GXOS_NET10:MANAGED_KERNEL_HOST_LOG_FROM_MANAGED\r\n"u8;
+    internal static ReadOnlySpan<byte> ManagedHostLogCallOk =>
+        "GXOS_NET10:MANAGED_KERNEL_HOST_LOG_CALL_OK\r\n"u8;
+    internal static ReadOnlySpan<byte> ManagedMonotonicTimeOk =>
+        "GXOS_NET10:MANAGED_KERNEL_MONOTONIC_TIME_OK\r\n"u8;
+
+    internal static bool Write(ReadOnlySpan<byte> utf8)
+    {
+        return ManagedKernelContract.TryInvokeHostLog(utf8);
+    }
+}
+
 public static unsafe class ManagedKernelEntry
 {
     private static int s_bootstrapMarkerEmitted;
 
     private static ReadOnlySpan<byte> BootstrapMarker =>
         "GXOS_NET10:MANAGED_KERNEL_BOOTSTRAP_OK\r\n"u8;
-    private static ReadOnlySpan<byte> BootResourcesMarker =>
-        "GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCES_OK\r\n"u8;
-    private static ReadOnlySpan<byte> MemoryRegionMarker =>
-        "GXOS_NET10:MANAGED_KERNEL_MEMORY_REGION_OK\r\n"u8;
 
     private static void WriteSerial(GuideXBootInfo* bootInfo,
                                     ReadOnlySpan<byte> marker)
@@ -604,8 +865,6 @@ public static unsafe class ManagedKernelEntry
     public static int ManagedMain(nint bootInfoAddress)
     {
         GuideXBootInfo* bootInfo;
-        GxManagedKernelBootResourceSummaryV1 summary;
-        GxManagedKernelBootResourceRegionV1 region;
 
         if (!ManagedKernelLayout.IsValid() || bootInfoAddress == 0)
         {
@@ -622,43 +881,16 @@ public static unsafe class ManagedKernelEntry
             return -2;
         }
 
+        if (s_bootstrapMarkerEmitted != 0)
+        {
+            return -4;
+        }
+
         if (s_bootstrapMarkerEmitted == 0)
         {
             WriteSerial(bootInfo, BootstrapMarker);
             s_bootstrapMarkerEmitted = 1;
         }
-
-        if (!ManagedKernelContract.TryGetBootResourceSummary(out summary))
-        {
-            return 0;
-        }
-
-        if (summary.Size != GxManagedKernelBootResourceSummaryV1.ExpectedSize ||
-            summary.AbiVersion != 1 ||
-            summary.ServiceVersion != 1 ||
-            summary.Architecture != GuideXBootInfo.ArchitectureX64 ||
-            summary.RegionCount == 0 ||
-            summary.RegionCount > 2048 ||
-            summary.ResourceMapIdentity !=
-                GxManagedKernelBootResourceSummaryV1.ResourceMapIdentityUefiNormalizedV1 ||
-            summary.TotalPhysicalBytes == 0 ||
-            summary.UsablePhysicalBytes > summary.TotalPhysicalBytes ||
-            summary.Capabilities !=
-                (GxManagedKernelBootResourceSummaryV1.CapabilitySummary |
-                 GxManagedKernelBootResourceSummaryV1.CapabilityRegions |
-                 GxManagedKernelBootResourceSummaryV1.CapabilityTotals) ||
-            summary.Reserved != 0 ||
-            !ManagedKernelContract.TryGetBootResourceRegion(0, out region) ||
-            region.Size != GxManagedKernelBootResourceRegionV1.ExpectedSize ||
-            region.AbiVersion != 1 || region.Length == 0 ||
-            region.BaseAddress > ulong.MaxValue - region.Length ||
-            region.Type == 0 || region.Type > 16)
-        {
-            return -3;
-        }
-
-        WriteSerial(bootInfo, BootResourcesMarker);
-        WriteSerial(bootInfo, MemoryRegionMarker);
         return 0;
     }
 

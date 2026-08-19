@@ -330,5 +330,140 @@ services, full corlib integration,
 filesystem, networking, sound, drivers, process management, application
 model, thread pool, `Task`, async/await, managed `Thread`, reflection,
 dynamic assemblies, rich marshaling, object RPC, or a full managed-kernel
-port. The ABI currently exposes one service and x64 only. Additional services
-should follow this versioned, size-checked, capability-negotiated pattern.
+port. The ABI currently exposes the bounded Phase 2 resource-map service and
+Phase 3 Host Services v1 (logger plus optional monotonic time), and remains
+x64 only. Additional services should follow this versioned, size-checked,
+capability-negotiated pattern.
+
+## Phase 3: Managed kernel lifecycle and Host Services v1
+
+Phase 3 keeps the Phase 2 boot-resource ABI intact and adds an explicit
+managed-kernel lifecycle plus a small native-owned host-service table. The
+normal managed path is exactly one `ManagedMain` bootstrap call followed by
+the ordered exports below:
+
+```text
+BootstrapAvailable
+        --GxManagedKernelInitialize--> Initialized
+        --GxManagedKernelInstallBootResources--> EnvironmentInstalling
+        --GxManagedKernelInstallHostServices--> Ready
+        --GxManagedKernelStart--> Started
+```
+
+`GxManagedKernelInitialize` is the only operation that leaves
+`BootstrapAvailable`. Boot-resource publication is accepted only from
+`Initialized`, Host Services installation only from
+`EnvironmentInstalling`, and start only from `Ready`. An out-of-order
+operation returns `GX_MANAGED_INVALID_STATE`; a repeated initialize,
+resource publication, or Host Services installation returns
+`GX_MANAGED_ALREADY_INITIALIZED`. A repeated start also returns
+`GX_MANAGED_ALREADY_INITIALIZED`, without re-running callbacks. The loader's
+negative vectors exercise these boundaries before the successful transition.
+
+`ManagedMain` is bootstrap-only in the Phase 3 path. It validates the boot
+information and ABI layout, emits `MANAGED_KERNEL_BOOTSTRAP_OK`, and returns.
+It does not publish resources, install callbacks, start services, or get
+called a second time. Phase 2's second-entry experiment remains historical
+evidence only and is not part of the normal acceptance path.
+
+### Host Services v1 table
+
+`GX_MANAGED_KERNEL_HOST_SERVICES_V1` is a packed, fixed-width, 56-byte table.
+All fields are primitive values; the two callback fields are opaque native
+function addresses.
+
+| Offset | Field | Type | Meaning |
+|---:|---|---|---|
+| 0 | `Size` | `uint32_t` | Must equal 56. |
+| 4 | `AbiVersion` | `uint32_t` | Must equal Host Services ABI v1. |
+| 8 | `ServiceVersion` | `uint32_t` | Must equal service version v1. |
+| 12 | `Architecture` | `uint32_t` | Must equal the x64 architecture value. |
+| 16 | `Capabilities` | `uint64_t` | Negotiated interface bits. |
+| 24 | `LogUtf8Address` | `uintptr_t` | `ms_abi` UTF-8 logger address. |
+| 32 | `MonotonicTimeAddress` | `uintptr_t` | Optional `ms_abi` monotonic-time query address. |
+| 40 | `Reserved0` | `uint64_t` | Must be zero. |
+| 48 | `Reserved1` | `uint64_t` | Must be zero. |
+
+The managed side requires `SERVICE_ABI` (`1 << 0`) and `LOG_UTF8`
+(`1 << 1`). `MONOTONIC_TIME` (`1 << 2`) is optional: the loader advertises it
+only when the existing platform-performance source is initialized. Unknown
+capability bits, inconsistent optional-time fields, nonzero reserved fields,
+wrong size/version/architecture, and null required callback addresses are
+rejected before the table is installed. ManagedKernel copies the validated
+primitive addresses and capability mask; it does not retain the caller's
+table pointer.
+
+The table is caller-owned input. In the loader it is static native storage
+that remains valid for the process lifetime, while the managed kernel's
+copied callback addresses remain valid for the lifetime of the loaded image.
+No managed object, managed delegate, stack address, or transient UEFI buffer
+is used as a callback target.
+
+### Host callback contracts
+
+The logger has this Microsoft x64 signature:
+
+```text
+uint32_t GXOS_MS_ABI log_utf8(uintptr_t bytes,
+                              uintptr_t length,
+                              uint32_t flags);
+```
+
+`flags` must be zero and `length` must be at most 1024 bytes. A zero-length
+call is valid with a null byte address and does not invoke the sink. A
+nonzero call requires a non-null, overflow-safe range. The native bridge
+validates that the range belongs to a known loader or managed-image range,
+then forwards the exact byte range to the existing COM1 serial sink. The
+contract is length-delimited UTF-8 bytes; it does not require a trailing NUL,
+perform an unbounded scan, allocate, or retain the pointer.
+
+The optional time callback has this signature:
+
+```text
+uint32_t GXOS_MS_ABI query_monotonic_time(uint32_t requested_abi_version,
+                                          uintptr_t output_address,
+                                          uintptr_t output_capacity);
+```
+
+The output is `GX_MANAGED_KERNEL_MONOTONIC_TIME_V1`, a packed 40-byte
+structure:
+
+| Offset | Field | Type | Meaning |
+|---:|---|---|---|
+| 0 | `Size` | `uint32_t` | Must equal 40. |
+| 4 | `AbiVersion` | `uint32_t` | Monotonic-time ABI v1. |
+| 8 | `Ticks` | `uint64_t` | Normalized monotonic counter. |
+| 16 | `FrequencyHz` | `uint64_t` | Counter frequency; nonzero. |
+| 24 | `Flags` | `uint64_t` | Known flags only. |
+| 32 | `Reserved` | `uint64_t` | Must be zero. |
+
+The current flag is `NORMALIZED_FROM_START` (`1 << 0`). The value is a
+monotonic counter normalized from the native platform-performance start
+point; it is not UTC, wall-clock time, or a calendar timestamp. The loader's
+implementation uses the already audited invariant-TSC or ACPI PM-timer
+source selected by `platform_performance.c`, and the managed start proof
+queries it twice and checks nondecreasing ticks with a stable frequency.
+
+### Transition and call-boundary proof
+
+`GxManagedKernelStart` first verifies that the immutable Phase 2 resource
+snapshot is still stable, that required Host Services are installed, and
+that the optional time contract is internally consistent. It then performs
+the managed-to-native logger calls and, when offered, the two monotonic-time
+queries. Only after every callback returns `GX_MANAGED_OK` does it enter
+`Started` and emit `MANAGED_KERNEL_START_OK`. The native loader records the
+callback totals and the final Phase 3 marker.
+
+All Host Services callbacks are normal generated unmanaged function-pointer
+calls. They do not use `SuppressGCTransition`, and the loader invokes the
+managed exports only after the existing NativeAOT TLS/GS and one-thread
+runtime state has been activated. The native logger path is the existing
+`serial_write`/COM1 bridge; the managed-to-native route is the direct
+`delegate* unmanaged` call from the loaded NativeAOT image. This preserves
+the established callback ABI and monotonic-source decisions instead of
+introducing a second bridge or clock.
+
+The Phase 3 acceptance rule is deliberately narrow: add the smallest
+versioned Host Services v1 surface, keep the normal transition deterministic,
+and preserve every previously proven behavior. “Do not reinterpret existing
+proof as permission to rewrite the loader's established contracts.”

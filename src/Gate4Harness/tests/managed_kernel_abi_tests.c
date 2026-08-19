@@ -26,6 +26,10 @@ static void test_layout_and_constants(void)
            "boot resource region size is 32");
     expect(sizeof(GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1) == 48,
            "boot resource publication size is 48");
+    expect(sizeof(GX_MANAGED_KERNEL_HOST_SERVICES_V1) == 56,
+           "host services v1 size is 56");
+    expect(sizeof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1) == 40,
+           "monotonic time v1 size is 40");
     expect(offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1,
                     TotalPhysicalBytes) == 24 &&
                offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1,
@@ -43,6 +47,15 @@ static void test_layout_and_constants(void)
            "capabilities offset is 16");
     expect(offsetof(GX_MANAGED_KERNEL_SYSTEM_INFO_V1, Reserved) == 24,
            "reserved offset is 24");
+    expect(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, Capabilities) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, LogUtf8Address) == 24 &&
+               offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, MonotonicTimeAddress) == 32 &&
+               offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, Reserved1) == 48,
+           "host services offsets are stable");
+    expect(offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, Ticks) == 8 &&
+               offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, FrequencyHz) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, Reserved) == 32,
+           "monotonic time offsets are stable");
     expect(GX_MANAGED_KERNEL_ABI_V1 == 1U &&
                GX_MANAGED_KERNEL_SERVICE_VERSION_V1 == 1U,
            "ABI and service version are v1");
@@ -51,11 +64,16 @@ static void test_layout_and_constants(void)
                GX_MANAGED_BUFFER_TOO_SMALL == 3U &&
                GX_MANAGED_NOT_INITIALIZED == 4U &&
                GX_MANAGED_ALREADY_INITIALIZED == 5U &&
-               GX_MANAGED_OUT_OF_RANGE == 6U,
+               GX_MANAGED_OUT_OF_RANGE == 6U &&
+               GX_MANAGED_INVALID_STATE == 7U,
            "status constants are stable");
     expect(GX_MANAGED_CAPABILITY_SERVICE_ABI == 1ULL &&
                GX_MANAGED_CAPABILITY_SYSTEM_INFORMATION == 2ULL,
            "capability bits are stable");
+    expect(GX_MANAGED_HOST_CAPABILITY_ABI == 1ULL &&
+               GX_MANAGED_HOST_CAPABILITY_LOG_UTF8 == 2ULL &&
+               GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME == 4ULL,
+           "host service capability bits are stable");
     expect(GX_MANAGED_BOOT_RESOURCE_CAPABILITY_SUMMARY == 1ULL &&
                GX_MANAGED_BOOT_RESOURCE_CAPABILITY_REGIONS == 2ULL &&
                GX_MANAGED_BOOT_RESOURCE_CAPABILITY_TOTALS == 4ULL,

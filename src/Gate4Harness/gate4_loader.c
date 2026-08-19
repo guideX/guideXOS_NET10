@@ -34,6 +34,7 @@
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
 #include "managed_kernel_abi.h"
 #include "managed_kernel_boot_resources.h"
+#include "managed_kernel_host_services.h"
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
 #include "nativeaot_gc_probe_contract.h"
@@ -290,6 +291,9 @@ typedef uint32_t (EFIAPI *ManagedKernelQueryBootResourcesEntry)(
 typedef uint32_t (EFIAPI *ManagedKernelQueryMemoryRegionEntry)(
     uint32_t requested_abi_version, uint32_t index,
     uintptr_t output_address, uintptr_t output_capacity);
+typedef uint32_t (EFIAPI *ManagedKernelInstallHostServicesEntry)(
+    uint32_t requested_abi_version, uintptr_t host_services_address);
+typedef uint32_t (EFIAPI *ManagedKernelStartEntry)(void);
 #endif
 
 enum {
@@ -389,6 +393,9 @@ static GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1
 static GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 *
     g_managed_kernel_boot_resource_publication;
 static uint32_t g_managed_kernel_boot_resource_snapshot_ready;
+static GX_MANAGED_KERNEL_HOST_SERVICES_V1 g_managed_kernel_host_services;
+static uint32_t g_managed_kernel_host_log_calls;
+static uint32_t g_managed_kernel_host_time_calls;
 #endif
 static GXOS_VM_PAGING g_vm_paging;
 static GXOS_X64_PAGING_AUDIT g_vm_paging_audit;
@@ -1161,6 +1168,81 @@ static void EFIAPI serial_write(const uint8_t *bytes, EFI_UINTN length)
 {
     while (length-- != 0) serial_char(*bytes++);
 }
+
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+static int managed_kernel_host_range_is_known(uintptr_t address,
+                                              uintptr_t byte_length)
+{
+    uintptr_t image_end;
+    uintptr_t stack_end;
+    if (byte_length == 0) return 1;
+    if (address == 0 || byte_length > UINTPTR_MAX - address) return 0;
+    if (g_managed_image_base != 0 && g_managed_image_size != 0 &&
+        g_managed_image_base <= UINTPTR_MAX - g_managed_image_size) {
+        image_end = (uintptr_t)g_managed_image_base +
+            (uintptr_t)g_managed_image_size;
+        if (address >= (uintptr_t)g_managed_image_base &&
+            address + byte_length <= image_end) return 1;
+    }
+    if (g_stack_lower != 0 && g_stack_upper > g_stack_lower &&
+        g_stack_upper - g_stack_lower <= UINTPTR_MAX) {
+        stack_end = (uintptr_t)g_stack_upper;
+        if (address >= (uintptr_t)g_stack_lower &&
+            address + byte_length <= stack_end) return 1;
+    }
+    return 0;
+}
+
+static void managed_kernel_host_serial_sink(const uint8_t *bytes,
+                                            uintptr_t byte_length)
+{
+    serial_write(bytes, (EFI_UINTN)byte_length);
+}
+
+static uint32_t EFIAPI managed_kernel_host_log_utf8(
+    uintptr_t bytes_address, uintptr_t byte_length, uint32_t flags)
+{
+    GX_MANAGED_STATUS status;
+    status = gxos_managed_kernel_host_log_utf8(
+        bytes_address, byte_length, flags, managed_kernel_host_serial_sink,
+        managed_kernel_host_range_is_known);
+    if (status == GX_MANAGED_OK) ++g_managed_kernel_host_log_calls;
+    return (uint32_t)status;
+}
+
+static uint32_t EFIAPI managed_kernel_host_query_monotonic_time(
+    uint32_t requested_abi_version, uintptr_t output_address,
+    uintptr_t output_capacity)
+{
+    GX_MANAGED_KERNEL_MONOTONIC_TIME_V1 result;
+    GX_MANAGED_STATUS range_status;
+    int64_t ticks;
+    int64_t frequency;
+
+    if (requested_abi_version != GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1) {
+        return GX_MANAGED_UNSUPPORTED_ABI;
+    }
+    range_status = gxos_managed_kernel_host_validate_output_range(
+        output_address, output_capacity,
+        GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE);
+    if (range_status != GX_MANAGED_OK) return (uint32_t)range_status;
+    if (!gxos_perf_is_initialized() ||
+        !gxos_query_performance_counter(&ticks) ||
+        !gxos_query_performance_frequency(&frequency) ||
+        ticks < 0 || frequency <= 0) {
+        return GX_MANAGED_INVALID_STATE;
+    }
+    result.Size = GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE;
+    result.AbiVersion = GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1;
+    result.Ticks = (uint64_t)ticks;
+    result.FrequencyHz = (uint64_t)frequency;
+    result.Flags = GX_MANAGED_MONOTONIC_TIME_FLAG_NORMALIZED_FROM_START;
+    result.Reserved = 0;
+    *(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1 *)(uintptr_t)output_address = result;
+    ++g_managed_kernel_host_time_calls;
+    return GX_MANAGED_OK;
+}
+#endif
 
 static void serial_hex64(uint64_t value)
 {
@@ -4158,6 +4240,8 @@ typedef struct {
     uint32_t managed_kernel_install_boot_resources_rva;
     uint32_t managed_kernel_query_boot_resources_rva;
     uint32_t managed_kernel_query_memory_region_rva;
+    uint32_t managed_kernel_install_host_services_rva;
+    uint32_t managed_kernel_start_rva;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     uint32_t managed_gc_probe_rva;
@@ -10034,7 +10118,7 @@ static void restore_nativeaot_tls(void)
     if ((g_saved_flags & 0x200) != 0) __asm__ volatile ("sti");
 }
 
-static void activate_nativeaot_tls(void)
+static void __attribute__((unused)) activate_nativeaot_tls(void)
 {
     if (g_gs_area == 0 || g_tls_vector == 0 || g_tls_block == 0) {
         fail("nativeaot-tls-reentry-state");
@@ -11022,7 +11106,8 @@ static void managed_kernel_phase2_pre_main(
     ManagedKernelQuerySystemInfoEntry query_system_info,
     ManagedKernelInstallBootResourcesEntry install_boot_resources,
     ManagedKernelQueryBootResourcesEntry query_boot_resources,
-    ManagedKernelQueryMemoryRegionEntry query_memory_region)
+    ManagedKernelQueryMemoryRegionEntry query_memory_region,
+    ManagedKernelStartEntry start)
 {
     GX_MANAGED_KERNEL_INIT_REQUEST_V1 request = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 system_info;
@@ -11095,6 +11180,11 @@ static void managed_kernel_phase2_pre_main(
     serial_text("GXOS_NET10:MANAGED_KERNEL_INIT_OK\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_ABI_V1_OK\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_DOUBLE_INIT_REJECTED\r\n");
+
+    if (start() != GX_MANAGED_INVALID_STATE) {
+        fail("managed-kernel-start-before-boot-resources");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_START_BEFORE_PUBLICATION_REJECTED\r\n");
 
     fill_bytes((uint8_t *)&summary, 0xA5, sizeof(summary));
     fill_bytes((uint8_t *)&region, 0xA5, sizeof(region));
@@ -11189,6 +11279,126 @@ static void managed_kernel_phase2_pre_main(
         fail("managed-kernel-boot-resource-install");
     }
     serial_text("GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCES_INSTALLED\r\n");
+}
+
+static void managed_kernel_host_services_make_valid(void)
+{
+    zero_bytes((uint8_t *)&g_managed_kernel_host_services,
+               sizeof(g_managed_kernel_host_services));
+    g_managed_kernel_host_services.Size =
+        GX_MANAGED_KERNEL_HOST_SERVICES_V1_SIZE;
+    g_managed_kernel_host_services.AbiVersion =
+        GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1;
+    g_managed_kernel_host_services.ServiceVersion =
+        GX_MANAGED_KERNEL_HOST_SERVICES_VERSION_V1;
+    g_managed_kernel_host_services.Architecture = GX_MANAGED_KERNEL_ARCH_X64;
+    g_managed_kernel_host_services.Capabilities =
+        GX_MANAGED_HOST_CAPABILITY_ABI |
+        GX_MANAGED_HOST_CAPABILITY_LOG_UTF8;
+    g_managed_kernel_host_services.LogUtf8Address =
+        (uint64_t)(uintptr_t)managed_kernel_host_log_utf8;
+    if (gxos_perf_is_initialized()) {
+        g_managed_kernel_host_services.Capabilities |=
+            GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME;
+        g_managed_kernel_host_services.MonotonicTimeAddress =
+            (uint64_t)(uintptr_t)managed_kernel_host_query_monotonic_time;
+    }
+}
+
+static void managed_kernel_phase3_host_services_and_start(
+    ManagedKernelInstallHostServicesEntry install_host_services,
+    ManagedKernelStartEntry start)
+{
+    GX_MANAGED_KERNEL_HOST_SERVICES_V1 candidate;
+
+    managed_kernel_host_services_make_valid();
+    if (start() != GX_MANAGED_INVALID_STATE) {
+        fail("managed-kernel-start-before-host-services");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_START_BEFORE_HOST_SERVICES_REJECTED\r\n");
+
+    candidate = g_managed_kernel_host_services;
+    if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1, 0) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-host-services-null-table");
+    }
+    candidate.Size = GX_MANAGED_KERNEL_HOST_SERVICES_V1_SIZE - 1U;
+    if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                              (uintptr_t)&candidate) != GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-host-services-small-table");
+    }
+    candidate = g_managed_kernel_host_services;
+    if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1 + 1U,
+                              (uintptr_t)&candidate) != GX_MANAGED_UNSUPPORTED_ABI) {
+        fail("managed-kernel-host-services-unsupported-abi");
+    }
+    candidate.Architecture = 0;
+    if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                              (uintptr_t)&candidate) != GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-host-services-architecture");
+    }
+    candidate = g_managed_kernel_host_services;
+    candidate.Capabilities |= 1ULL << 63;
+    if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                              (uintptr_t)&candidate) != GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-host-services-unknown-capability");
+    }
+    candidate = g_managed_kernel_host_services;
+    candidate.Reserved0 = 1;
+    if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                              (uintptr_t)&candidate) != GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-host-services-reserved");
+    }
+    candidate = g_managed_kernel_host_services;
+    candidate.LogUtf8Address = 0;
+    if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                              (uintptr_t)&candidate) != GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-host-services-null-log");
+    }
+    if ((g_managed_kernel_host_services.Capabilities &
+            GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME) != 0) {
+        candidate = g_managed_kernel_host_services;
+        candidate.MonotonicTimeAddress = 0;
+        if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                  (uintptr_t)&candidate) != GX_MANAGED_INVALID_ARGUMENT) {
+            fail("managed-kernel-host-services-null-time");
+        }
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_LIFECYCLE_NEGATIVE_TESTS_OK\r\n");
+
+    if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                              (uintptr_t)&g_managed_kernel_host_services) !=
+            GX_MANAGED_OK) {
+        fail("managed-kernel-host-services-install");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_HOST_SERVICES_INSTALLED\r\n");
+    if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                              (uintptr_t)&g_managed_kernel_host_services) !=
+            GX_MANAGED_ALREADY_INITIALIZED) {
+        fail("managed-kernel-host-services-repeat");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_HOST_SERVICES_REPEAT_REJECTED\r\n");
+
+    if (start() != GX_MANAGED_OK) fail("managed-kernel-start");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_START_OK\r\n");
+    if (start() != GX_MANAGED_ALREADY_INITIALIZED) {
+        fail("managed-kernel-start-repeat");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_START_ONCE_OK\r\n");
+    if (g_managed_kernel_host_log_calls !=
+            ((g_managed_kernel_host_services.Capabilities &
+              GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME) != 0 ? 3U : 2U) ||
+        g_managed_kernel_host_time_calls !=
+            ((g_managed_kernel_host_services.Capabilities &
+              GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME) != 0 ? 2U : 0U)) {
+        fail("managed-kernel-host-callback-count");
+    }
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_HOST_LOG_CALLBACK_COUNT=0x",
+                     g_managed_kernel_host_log_calls);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_HOST_TIME_CALLBACK_COUNT=0x",
+                     g_managed_kernel_host_time_calls);
+    serial_text("\r\n");
 }
 
 static int managed_kernel_summary_matches_authority(
@@ -13660,6 +13870,8 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION boot_resources_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION memory_region_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION install_host_services_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION start_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_STATUS initialize_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInitialize",
@@ -13680,6 +13892,13 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedQueryMemoryRegion",
                                    &memory_region_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS install_host_services_status =
+        gxos_nativeaot_find_export(&export_image,
+                                   "GxManagedKernelInstallHostServices",
+                                   &install_host_services_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS start_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelStart",
+                                   &start_resolution);
     if (initialize_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInitialize-export-missing");
     }
@@ -13695,11 +13914,20 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     if (memory_region_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedQueryMemoryRegion-export-missing");
     }
+    if (install_host_services_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelInstallHostServices-export-missing");
+    }
+    if (start_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelStart-export-missing");
+    }
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
     image->managed_kernel_install_boot_resources_rva = install_resolution.rva;
     image->managed_kernel_query_boot_resources_rva = boot_resources_resolution.rva;
     image->managed_kernel_query_memory_region_rva = memory_region_resolution.rva;
+    image->managed_kernel_install_host_services_rva =
+        install_host_services_resolution.rva;
+    image->managed_kernel_start_rva = start_resolution.rva;
 }
 #endif
 
@@ -15156,11 +15384,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_boot_resources_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_memory_region_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_host_services_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_start_resolution = {0};
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
     ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
     ManagedKernelQueryBootResourcesEntry managed_kernel_query_boot_resources;
     ManagedKernelQueryMemoryRegionEntry managed_kernel_query_memory_region;
+    ManagedKernelInstallHostServicesEntry managed_kernel_install_host_services;
+    ManagedKernelStartEntry managed_kernel_start;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 managed_kernel_boot_resource_publication = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_system_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_repeat_info = {0};
@@ -15405,6 +15637,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         image.managed_kernel_query_memory_region_rva;
     managed_kernel_memory_region_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_query_memory_region_rva);
+    managed_kernel_install_host_services_resolution.rva =
+        image.managed_kernel_install_host_services_rva;
+    managed_kernel_install_host_services_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_install_host_services_rva);
+    managed_kernel_start_resolution.rva = image.managed_kernel_start_rva;
+    managed_kernel_start_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_start_rva);
     managed_kernel_initialize = (ManagedKernelInitializeEntry)
         managed_kernel_initialize_resolution.address;
     managed_kernel_query_system_info = (ManagedKernelQuerySystemInfoEntry)
@@ -15415,6 +15654,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_boot_resources_resolution.address;
     managed_kernel_query_memory_region = (ManagedKernelQueryMemoryRegionEntry)
         managed_kernel_memory_region_resolution.address;
+    managed_kernel_install_host_services = (ManagedKernelInstallHostServicesEntry)
+        managed_kernel_install_host_services_resolution.address;
+    managed_kernel_start = (ManagedKernelStartEntry)
+        managed_kernel_start_resolution.address;
     serial_text("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT=GxManagedKernelInitialize\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT_RVA=0x",
                      image.managed_kernel_initialize_rva);
@@ -15434,6 +15677,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_KERNEL_QUERY_MEMORY_REGION_EXPORT=GxManagedQueryMemoryRegion\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_QUERY_MEMORY_REGION_EXPORT_RVA=0x",
                      image.managed_kernel_query_memory_region_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_INSTALL_HOST_SERVICES_EXPORT=GxManagedKernelInstallHostServices\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INSTALL_HOST_SERVICES_EXPORT_RVA=0x",
+                     image.managed_kernel_install_host_services_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_START_EXPORT=GxManagedKernelStart\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_START_EXPORT_RVA=0x",
+                     image.managed_kernel_start_rva);
     serial_text("\r\n");
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
@@ -16174,20 +16425,23 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_ENTRY_COMPLETE\r\n");
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
     activate_nativeaot_tls();
+    if (managed_kernel_start() != GX_MANAGED_NOT_INITIALIZED ||
+        managed_kernel_install_host_services(
+            GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1, 0) !=
+            GX_MANAGED_NOT_INITIALIZED) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-before-init-negative");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_START_BEFORE_INIT_REJECTED\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_HOST_SERVICES_BEFORE_INIT_REJECTED\r\n");
+    restore_nativeaot_tls();
+    activate_nativeaot_tls();
     managed_kernel_phase2_pre_main(
         managed_kernel_initialize, managed_kernel_query_system_info,
         managed_kernel_install_boot_resources,
-        managed_kernel_query_boot_resources, managed_kernel_query_memory_region);
+        managed_kernel_query_boot_resources, managed_kernel_query_memory_region,
+        managed_kernel_start);
     restore_nativeaot_tls();
-    serial_text("GXOS_NET10:MANAGED_KERNEL_SERVICE_ENTRY_BEGIN\r\n");
-    activate_nativeaot_tls();
-    g_phase = PHASE_IN_MANAGED;
-    managed_result = (uint32_t)call_managed_entry(
-        managed_entry, (uintptr_t)&g_boot_info, &rsp_before_call);
-    g_phase = PHASE_AFTER_MANAGED_RETURN;
-    restore_nativeaot_tls();
-    if (managed_result != 0) fail("managed-kernel-service-managed-return-nonzero");
-    serial_text("GXOS_NET10:MANAGED_KERNEL_SERVICE_ENTRY_COMPLETE\r\n");
     activate_nativeaot_tls();
     managed_kernel_null_status = managed_kernel_query_system_info(
         GX_MANAGED_KERNEL_ABI_V1, 0, sizeof(managed_kernel_system_info));
@@ -16471,6 +16725,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE1_PASS\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE2_PASS\r\n");
     restore_nativeaot_tls();
+#endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+    activate_nativeaot_tls();
+    managed_kernel_phase3_host_services_and_start(
+        managed_kernel_install_host_services, managed_kernel_start);
+    restore_nativeaot_tls();
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS\r\n");
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
     if (g_nativeaot_runtime_fls_slot == UINT32_MAX ||

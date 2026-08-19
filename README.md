@@ -33,6 +33,15 @@ path validates publication, summary totals, first/middle/final descriptors,
 failure sentinels, repeat-query stability, and three fresh QEMU boots. See
 [the ManagedKernel ABI contract](docs/MANAGED_KERNEL_ABI.md).
 
+ManagedKernel Phase 3 adds the explicit lifecycle
+`Initialize -> InstallBootResources -> InstallHostServices -> Start`, with
+out-of-order and duplicate-call rejection. Host Services v1 provides only a
+bounded UTF-8 logger and an optional normalized monotonic-time query through
+fixed-size, capability-negotiated native callbacks. The normal path calls
+`ManagedMain` exactly once, preserves the immutable Phase 2 snapshot, and
+proves three fresh EventWait-profile QEMU boots. The ManagedEntryProbe remains
+the separate foundation control payload.
+
 Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
 versioned view of that truth through the managed-kernel ABI.
 
@@ -48,6 +57,8 @@ UEFI firmware
   -> managed serial callback and deterministic return
   -> native publication of the immutable boot-resource snapshot
   -> bounded ManagedKernel summary/region queries
+  -> native Host Services v1 installation
+  -> managed kernel start with bounded host logging and monotonic time
   -> post-initialization ManagedCallback export with existing runtime state
   -> scheduler-thread reverse-P/Invoke attach
   -> managed allocation and real GC probe

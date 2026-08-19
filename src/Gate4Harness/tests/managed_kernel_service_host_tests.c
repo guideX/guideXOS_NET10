@@ -6,6 +6,53 @@
 #include "../managed_kernel_abi.h"
 
 static uint32_t g_failures;
+static uint32_t g_log_calls;
+static uint32_t g_time_calls;
+static uint8_t g_last_log[GX_MANAGED_KERNEL_HOST_LOG_MAX_BYTES];
+static uint32_t g_last_log_length;
+
+static uint32_t GX_MANAGED_KERNEL_MS_ABI test_log_utf8(
+    uintptr_t bytes_address, uintptr_t byte_length, uint32_t flags)
+{
+    if (flags != 0 || byte_length > GX_MANAGED_KERNEL_HOST_LOG_MAX_BYTES ||
+        (byte_length != 0 &&
+         (bytes_address == 0 || byte_length > UINTPTR_MAX - bytes_address))) {
+        return GX_MANAGED_INVALID_ARGUMENT;
+    }
+    if (byte_length != 0) {
+        memcpy(g_last_log, (const void *)(uintptr_t)bytes_address,
+               (size_t)byte_length);
+    }
+    g_last_log_length = (uint32_t)byte_length;
+    ++g_log_calls;
+    return GX_MANAGED_OK;
+}
+
+static uint32_t GX_MANAGED_KERNEL_MS_ABI test_monotonic_time(
+    uint32_t requested_abi_version, uintptr_t output_address,
+    uintptr_t output_capacity)
+{
+    GX_MANAGED_KERNEL_MONOTONIC_TIME_V1 result;
+    if (requested_abi_version != GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1) {
+        return GX_MANAGED_UNSUPPORTED_ABI;
+    }
+    if (output_address == 0) return GX_MANAGED_INVALID_ARGUMENT;
+    if (output_capacity < GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE) {
+        return GX_MANAGED_BUFFER_TOO_SMALL;
+    }
+    if (output_capacity > UINTPTR_MAX - output_address) {
+        return GX_MANAGED_INVALID_ARGUMENT;
+    }
+    result.Size = GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE;
+    result.AbiVersion = GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1;
+    result.Ticks = 100U + g_time_calls;
+    result.FrequencyHz = 1000U;
+    result.Flags = GX_MANAGED_MONOTONIC_TIME_FLAG_NORMALIZED_FROM_START;
+    result.Reserved = 0;
+    *(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1 *)(uintptr_t)output_address = result;
+    ++g_time_calls;
+    return GX_MANAGED_OK;
+}
 
 static void expect(int condition, const char *message)
 {
@@ -45,11 +92,15 @@ int main(int argc, char **argv)
     FARPROC install_proc;
     FARPROC query_boot_resources_proc;
     FARPROC query_region_proc;
+    FARPROC install_host_services_proc;
+    FARPROC start_proc;
     GX_MANAGED_KERNEL_INITIALIZE_ENTRY initialize;
     GX_MANAGED_KERNEL_QUERY_SYSTEM_INFO_ENTRY query;
     GX_MANAGED_KERNEL_INSTALL_BOOT_RESOURCES_ENTRY install;
     GX_MANAGED_KERNEL_QUERY_BOOT_RESOURCES_ENTRY query_boot_resources;
     GX_MANAGED_KERNEL_QUERY_MEMORY_REGION_ENTRY query_region;
+    GX_MANAGED_KERNEL_INSTALL_HOST_SERVICES_ENTRY install_host_services;
+    GX_MANAGED_KERNEL_START_ENTRY start;
     GX_MANAGED_KERNEL_INIT_REQUEST_V1 request = {
         GX_MANAGED_KERNEL_INIT_REQUEST_V1_SIZE,
         GX_MANAGED_KERNEL_ABI_V1,
@@ -65,6 +116,8 @@ int main(int argc, char **argv)
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 publication;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1 bad_summary;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 bad_region;
+    GX_MANAGED_KERNEL_HOST_SERVICES_V1 host_services;
+    GX_MANAGED_KERNEL_HOST_SERVICES_V1 host_candidate;
     uint32_t status;
     uint32_t index;
     const char *payload = argc > 1
@@ -81,6 +134,8 @@ int main(int argc, char **argv)
     install_proc = GetProcAddress(module, "GxManagedKernelInstallBootResources");
     query_boot_resources_proc = GetProcAddress(module, "GxManagedQueryBootResources");
     query_region_proc = GetProcAddress(module, "GxManagedQueryMemoryRegion");
+    install_host_services_proc = GetProcAddress(module, "GxManagedKernelInstallHostServices");
+    start_proc = GetProcAddress(module, "GxManagedKernelStart");
     initialize = NULL;
     query = NULL;
     if (initialize_proc != NULL) {
@@ -92,6 +147,8 @@ int main(int argc, char **argv)
     install = NULL;
     query_boot_resources = NULL;
     query_region = NULL;
+    install_host_services = NULL;
+    start = NULL;
     if (install_proc != NULL) memcpy(&install, &install_proc, sizeof(install));
     if (query_boot_resources_proc != NULL) {
         memcpy(&query_boot_resources, &query_boot_resources_proc,
@@ -100,13 +157,21 @@ int main(int argc, char **argv)
     if (query_region_proc != NULL) {
         memcpy(&query_region, &query_region_proc, sizeof(query_region));
     }
+    if (install_host_services_proc != NULL) {
+        memcpy(&install_host_services, &install_host_services_proc,
+               sizeof(install_host_services));
+    }
+    if (start_proc != NULL) memcpy(&start, &start_proc, sizeof(start));
     expect(initialize != NULL, "initialization export discovered");
     expect(query != NULL, "system-info export discovered");
     expect(install != NULL, "boot-resource installation export discovered");
     expect(query_boot_resources != NULL, "boot-resource summary export discovered");
     expect(query_region != NULL, "memory-region export discovered");
+    expect(install_host_services != NULL, "host-service installation export discovered");
+    expect(start != NULL, "start export discovered");
     if (initialize == NULL || query == NULL || install == NULL ||
-        query_boot_resources == NULL || query_region == NULL) {
+        query_boot_resources == NULL || query_region == NULL ||
+        install_host_services == NULL || start == NULL) {
         FreeLibrary(module);
         return 1;
     }
@@ -150,6 +215,16 @@ int main(int argc, char **argv)
     publication.DescriptorByteLength =
         16ULL * GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1_SIZE;
     publication.Reserved = 0;
+    memset(&host_services, 0, sizeof(host_services));
+    host_services.Size = GX_MANAGED_KERNEL_HOST_SERVICES_V1_SIZE;
+    host_services.AbiVersion = GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1;
+    host_services.ServiceVersion = GX_MANAGED_KERNEL_HOST_SERVICES_VERSION_V1;
+    host_services.Architecture = GX_MANAGED_KERNEL_ARCH_X64;
+    host_services.Capabilities = GX_MANAGED_HOST_CAPABILITY_ABI |
+                                 GX_MANAGED_HOST_CAPABILITY_LOG_UTF8 |
+                                 GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME;
+    host_services.LogUtf8Address = (uint64_t)(uintptr_t)test_log_utf8;
+    host_services.MonotonicTimeAddress = (uint64_t)(uintptr_t)test_monotonic_time;
 
     memset(&repeat_summary, 0xA5, sizeof(repeat_summary));
     status = query_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
@@ -167,6 +242,11 @@ int main(int argc, char **argv)
     expect(install(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
                    (uintptr_t)&publication) == GX_MANAGED_NOT_INITIALIZED,
            "publication before initialization rejects");
+    expect(start() == GX_MANAGED_NOT_INITIALIZED,
+           "start before initialization rejects");
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1, 0) ==
+               GX_MANAGED_NOT_INITIALIZED,
+           "host services before initialization rejects");
 
     memset(&info, 0xA5, sizeof(info));
     status = query(GX_MANAGED_KERNEL_ABI_V1, (uintptr_t)&info, sizeof(info));
@@ -192,6 +272,11 @@ int main(int argc, char **argv)
     expect(status == GX_MANAGED_NOT_INITIALIZED &&
                all_bytes_equal(&repeat_summary, sizeof(repeat_summary), 0x5A),
            "summary before publication rejects without writing");
+    expect(start() == GX_MANAGED_INVALID_STATE,
+           "start before boot-resource publication rejects");
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_services) == GX_MANAGED_INVALID_STATE,
+           "host services before boot-resource publication rejects");
     memset(&region, 0x5A, sizeof(region));
     status = query_region(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1, 0,
                           (uintptr_t)&region, sizeof(region));
@@ -250,6 +335,62 @@ int main(int argc, char **argv)
     expect(install(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
                    (uintptr_t)&publication) == GX_MANAGED_ALREADY_INITIALIZED,
            "repeated publication rejects");
+    expect(start() == GX_MANAGED_INVALID_STATE,
+           "start before host-service publication rejects");
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1, 0) ==
+               GX_MANAGED_INVALID_ARGUMENT,
+           "null host-service table rejects");
+    host_candidate = host_services;
+    host_candidate.Size = GX_MANAGED_KERNEL_HOST_SERVICES_V1_SIZE - 1U;
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_candidate) == GX_MANAGED_INVALID_ARGUMENT,
+           "undersized host-service table rejects");
+    host_candidate = host_services;
+    host_candidate.AbiVersion = GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1 + 1U;
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_candidate) == GX_MANAGED_INVALID_ARGUMENT,
+           "unsupported host-service table ABI rejects");
+    host_candidate = host_services;
+    host_candidate.Architecture = 0;
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_candidate) == GX_MANAGED_INVALID_ARGUMENT,
+           "wrong host-service architecture rejects");
+    host_candidate = host_services;
+    host_candidate.Capabilities |= 1ULL << 63;
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_candidate) == GX_MANAGED_INVALID_ARGUMENT,
+           "unknown host-service capability rejects");
+    host_candidate = host_services;
+    host_candidate.Reserved0 = 1;
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_candidate) == GX_MANAGED_INVALID_ARGUMENT,
+           "nonzero host-service reserved field rejects");
+    host_candidate = host_services;
+    host_candidate.LogUtf8Address = 0;
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_candidate) == GX_MANAGED_INVALID_ARGUMENT,
+           "claimed logging capability with null callback rejects");
+    host_candidate = host_services;
+    host_candidate.MonotonicTimeAddress = 0;
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_candidate) == GX_MANAGED_INVALID_ARGUMENT,
+           "claimed time capability with null callback rejects");
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_services) == GX_MANAGED_OK,
+           "valid host services install succeeds");
+    expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
+                                 (uintptr_t)&host_services) == GX_MANAGED_ALREADY_INITIALIZED,
+           "repeated host services install rejects");
+    expect(start() == GX_MANAGED_OK, "valid start succeeds");
+    expect(start() == GX_MANAGED_ALREADY_INITIALIZED,
+           "repeated start rejects without rerunning");
+    expect(g_log_calls == 3 && g_time_calls == 2,
+           "managed start invoked host logging and time callbacks");
+    expect(g_last_log_length ==
+               sizeof("GXOS_NET10:MANAGED_KERNEL_MONOTONIC_TIME_OK\r\n") - 1U &&
+               memcmp(g_last_log, "GXOS_NET10:MANAGED_KERNEL_MONOTONIC_TIME_OK\r\n",
+                      sizeof("GXOS_NET10:MANAGED_KERNEL_MONOTONIC_TIME_OK\r\n") - 1U) == 0,
+           "managed final host log marker is present");
 
     memset(&repeat_summary, 0xA5, sizeof(repeat_summary));
     status = query_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,

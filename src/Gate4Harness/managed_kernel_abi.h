@@ -23,6 +23,11 @@
 #define GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1_SIZE 48U
 #define GX_MANAGED_KERNEL_BOOT_RESOURCE_MAX_REGIONS 2048U
 #define GX_MANAGED_KERNEL_BOOT_RESOURCE_MAP_ID_UEFI_NORMALIZED_V1 1U
+#define GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_HOST_SERVICES_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_HOST_SERVICES_V1_SIZE 56U
+#define GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE 40U
+#define GX_MANAGED_KERNEL_HOST_LOG_MAX_BYTES 1024U
 
 typedef enum {
     GX_MANAGED_OK = 0U,
@@ -31,13 +36,24 @@ typedef enum {
     GX_MANAGED_BUFFER_TOO_SMALL = 3U,
     GX_MANAGED_NOT_INITIALIZED = 4U,
     GX_MANAGED_ALREADY_INITIALIZED = 5U,
-    GX_MANAGED_OUT_OF_RANGE = 6U
+    GX_MANAGED_OUT_OF_RANGE = 6U,
+    GX_MANAGED_INVALID_STATE = 7U
 } GX_MANAGED_STATUS;
 
 /* Public capabilities describe useful interfaces, not proof markers. */
 enum {
     GX_MANAGED_CAPABILITY_SERVICE_ABI = 1ULL << 0,
     GX_MANAGED_CAPABILITY_SYSTEM_INFORMATION = 1ULL << 1
+};
+
+enum {
+    GX_MANAGED_HOST_CAPABILITY_ABI = 1ULL << 0,
+    GX_MANAGED_HOST_CAPABILITY_LOG_UTF8 = 1ULL << 1,
+    GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME = 1ULL << 2
+};
+
+enum {
+    GX_MANAGED_MONOTONIC_TIME_FLAG_NORMALIZED_FROM_START = 1ULL << 0
 };
 
 enum {
@@ -121,6 +137,27 @@ typedef struct {
     uint64_t DescriptorByteLength;
     uint64_t Reserved;
 } GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint64_t Capabilities;
+    uint64_t LogUtf8Address;
+    uint64_t MonotonicTimeAddress;
+    uint64_t Reserved0;
+    uint64_t Reserved1;
+} GX_MANAGED_KERNEL_HOST_SERVICES_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t Ticks;
+    uint64_t FrequencyHz;
+    uint64_t Flags;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_MONOTONIC_TIME_V1;
 #pragma pack(pop)
 
 _Static_assert(sizeof(GX_MANAGED_KERNEL_INIT_REQUEST_V1) ==
@@ -206,6 +243,42 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1, Descript
                "managed boot resource publication DescriptorByteLength offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1, Reserved) == 40,
                "managed boot resource publication Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_HOST_SERVICES_V1) ==
+                   GX_MANAGED_KERNEL_HOST_SERVICES_V1_SIZE,
+               "managed host services size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, Size) == 0,
+               "managed host services Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, AbiVersion) == 4,
+               "managed host services AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, ServiceVersion) == 8,
+               "managed host services ServiceVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, Architecture) == 12,
+               "managed host services Architecture offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, Capabilities) == 16,
+               "managed host services Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, LogUtf8Address) == 24,
+               "managed host services LogUtf8Address offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, MonotonicTimeAddress) == 32,
+               "managed host services MonotonicTimeAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, Reserved0) == 40,
+               "managed host services Reserved0 offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, Reserved1) == 48,
+               "managed host services Reserved1 offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1) ==
+                   GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE,
+               "managed monotonic time size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, Size) == 0,
+               "managed monotonic time Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, AbiVersion) == 4,
+               "managed monotonic time AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, Ticks) == 8,
+               "managed monotonic time Ticks offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, FrequencyHz) == 16,
+               "managed monotonic time FrequencyHz offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, Flags) == 24,
+               "managed monotonic time Flags offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, Reserved) == 32,
+               "managed monotonic time Reserved offset");
 
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INITIALIZE_ENTRY)(
     uint32_t requested_abi_version, uintptr_t request_address);
@@ -220,6 +293,14 @@ typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_QUERY_BOOT_RESOURC
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_QUERY_MEMORY_REGION_ENTRY)(
     uint32_t requested_abi_version, uint32_t index,
     uintptr_t output_address, uintptr_t output_capacity);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INSTALL_HOST_SERVICES_ENTRY)(
+    uint32_t requested_abi_version, uintptr_t host_services_address);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_START_ENTRY)(void);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_LOG_UTF8_ENTRY)(
+    uintptr_t bytes_address, uintptr_t byte_length, uint32_t flags);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_QUERY_MONOTONIC_TIME_ENTRY)(
+    uint32_t requested_abi_version, uintptr_t output_address,
+    uintptr_t output_capacity);
 
 /* Native callers use this before crossing into managed code. */
 static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_output_buffer(

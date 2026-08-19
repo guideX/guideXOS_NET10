@@ -94,7 +94,7 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE2_PASS') -or
+                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS') -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
                     $text.Contains('GXOS_NET10:PAGE_FAULT_')) { break }
@@ -130,13 +130,35 @@ try {
             'GXOS_NET10:MANAGED_KERNEL_BAD_VERSION_REJECTED',
             'GXOS_NET10:MANAGED_KERNEL_SMALL_BUFFER_REJECTED',
             'GXOS_NET10:MANAGED_KERNEL_PHASE1_PASS',
-            'GXOS_NET10:MANAGED_KERNEL_PHASE2_PASS')) {
+            'GXOS_NET10:MANAGED_KERNEL_PHASE2_PASS',
+            'GXOS_NET10:MANAGED_KERNEL_START_BEFORE_INIT_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_START_BEFORE_PUBLICATION_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_START_BEFORE_HOST_SERVICES_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_LIFECYCLE_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_HOST_SERVICES_INSTALLED',
+            'GXOS_NET10:MANAGED_KERNEL_HOST_SERVICES_REPEAT_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_HOST_LOG_FROM_MANAGED',
+            'GXOS_NET10:MANAGED_KERNEL_HOST_LOG_CALL_OK',
+            'GXOS_NET10:MANAGED_KERNEL_MONOTONIC_TIME_OK',
+            'GXOS_NET10:MANAGED_KERNEL_START_OK',
+            'GXOS_NET10:MANAGED_KERNEL_START_ONCE_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS')) {
             Require ($text.Contains($marker)) "ManagedKernel boot $sequence missing marker: $marker"
         }
         Require (([regex]::Matches($text, 'GXOS_NET10:NATIVEAOT_STARTUP_OK')).Count -eq 1) `
             "ManagedKernel boot $sequence repeated NativeAOT startup."
         Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_INIT_OK')).Count -eq 1) `
             "ManagedKernel boot $sequence repeated managed initialization."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_BOOTSTRAP_OK')).Count -eq 1) `
+            "ManagedKernel boot $sequence repeated ManagedMain bootstrap."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_HOST_LOG_FROM_MANAGED')).Count -eq 1) `
+            "ManagedKernel boot $sequence repeated managed startup logging."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_START_OK')).Count -eq 1) `
+            "ManagedKernel boot $sequence repeated successful start."
+        Require ($text.Contains('GXOS_NET10:MANAGED_KERNEL_HOST_LOG_CALLBACK_COUNT=0x0000000000000003')) `
+            "ManagedKernel boot $sequence did not record three host log callbacks."
+        Require ($text.Contains('GXOS_NET10:MANAGED_KERNEL_HOST_TIME_CALLBACK_COUNT=0x0000000000000002')) `
+            "ManagedKernel boot $sequence did not record two host time callbacks."
         Write-Output ("MANAGED_KERNEL_QEMU_RUN_{0}=PASS bytes={1} sha256={2} serial={3}" -f `
             $sequence, ([Text.Encoding]::UTF8.GetByteCount($text)),
             (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant(), $serial)
