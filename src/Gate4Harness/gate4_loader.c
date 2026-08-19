@@ -33,6 +33,7 @@
 #include "nativeaot_callback_bridge.h"
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
 #include "managed_kernel_abi.h"
+#include "managed_kernel_boot_resources.h"
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
 #include "nativeaot_gc_probe_contract.h"
@@ -44,7 +45,8 @@
     defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
     defined(GXOS_ENABLE_RESUME_THREAD) || \
     defined(GXOS_ENABLE_IS_PROCESS_IN_JOB) || \
-    defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+    defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT) || \
+    defined(GXOS_ENABLE_MANAGED_KERNEL)
 #include "scheduler_foundation.h"
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
@@ -77,7 +79,7 @@
 #define GXOS_NATIVEAOT_THREAD_START_RVA 0x35320U
 #endif
 
-#ifdef GXOS_ENABLE_MANAGED_KERNEL
+#if defined(GXOS_ENABLE_MANAGED_KERNEL) && defined(GXOS_ENABLE_CREATE_THREAD)
 /* The NativeAOT runtime's thread-start routine is payload layout, not ABI.
    Discover it from the validated CreateThread call for the managed-kernel
    payload instead of coupling the reusable loader to a code-layout constant. */
@@ -280,6 +282,14 @@ typedef uint32_t (EFIAPI *ManagedKernelInitializeEntry)(
 typedef uint32_t (EFIAPI *ManagedKernelQuerySystemInfoEntry)(
     uint32_t requested_abi_version, uintptr_t output_address,
     uintptr_t output_capacity);
+typedef uint32_t (EFIAPI *ManagedKernelInstallBootResourcesEntry)(
+    uint32_t requested_abi_version, uintptr_t publication_address);
+typedef uint32_t (EFIAPI *ManagedKernelQueryBootResourcesEntry)(
+    uint32_t requested_abi_version, uintptr_t output_address,
+    uintptr_t output_capacity);
+typedef uint32_t (EFIAPI *ManagedKernelQueryMemoryRegionEntry)(
+    uint32_t requested_abi_version, uint32_t index,
+    uintptr_t output_address, uintptr_t output_capacity);
 #endif
 
 enum {
@@ -366,6 +376,20 @@ static GXOS_PHYSICAL_SNAPSHOT g_memory_physical_snapshot;
 static GXOS_COMMIT_MODEL g_memory_commit_model;
 static GXOS_MEMORY_SNAPSHOT g_memory_snapshot;
 static volatile uint64_t g_memory_accounting_generation;
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+/* This is the immutable, native-owned publication backing. It contains
+   copies of normalized values, never pointers into the UEFI map or ledger. */
+static GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1
+    g_managed_kernel_boot_resource_regions[
+        GX_MANAGED_KERNEL_BOOT_RESOURCE_MAX_REGIONS];
+static GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1
+    g_managed_kernel_boot_resource_summary;
+static GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1
+    g_managed_kernel_boot_resource_publication_storage;
+static GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 *
+    g_managed_kernel_boot_resource_publication;
+static uint32_t g_managed_kernel_boot_resource_snapshot_ready;
+#endif
 static GXOS_VM_PAGING g_vm_paging;
 static GXOS_X64_PAGING_AUDIT g_vm_paging_audit;
 static uint32_t g_vm_paging_audit_complete;
@@ -4070,6 +4094,13 @@ static void zero_bytes(uint8_t *destination, uint64_t count)
     while (count-- != 0) *destination++ = 0;
 }
 
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+static void fill_bytes(uint8_t *destination, uint8_t value, uint64_t count)
+{
+    while (count-- != 0) *destination++ = value;
+}
+#endif
+
 static void copy_bytes(uint8_t *destination, const uint8_t *source, uint64_t count)
 {
     while (count-- != 0) *destination++ = *source++;
@@ -4124,6 +4155,9 @@ typedef struct {
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
     uint32_t managed_kernel_initialize_rva;
     uint32_t managed_kernel_query_system_info_rva;
+    uint32_t managed_kernel_install_boot_resources_rva;
+    uint32_t managed_kernel_query_boot_resources_rva;
+    uint32_t managed_kernel_query_memory_region_rva;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     uint32_t managed_gc_probe_rva;
@@ -10930,6 +10964,328 @@ static void capture_memory_snapshot(void)
     emit_memory_accounting_diagnostics();
 }
 
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+static void prepare_managed_kernel_boot_resources(void)
+{
+    GXOS_MANAGED_BOOT_RESOURCE_NORMALIZATION_STATUS status;
+    zero_bytes((uint8_t *)g_managed_kernel_boot_resource_regions,
+               sizeof(g_managed_kernel_boot_resource_regions));
+    zero_bytes((uint8_t *)&g_managed_kernel_boot_resource_summary,
+               sizeof(g_managed_kernel_boot_resource_summary));
+    status = gxos_managed_kernel_normalize_boot_resources(
+        &g_memory_map, &g_memory_classification,
+        g_managed_kernel_boot_resource_regions,
+        GX_MANAGED_KERNEL_BOOT_RESOURCE_MAX_REGIONS,
+        &g_managed_kernel_boot_resource_summary);
+    if (status != GXOS_MANAGED_BOOT_RESOURCE_NORMALIZATION_OK) {
+        fail("managed-kernel-boot-resource-normalization");
+    }
+    zero_bytes((uint8_t *)&g_managed_kernel_boot_resource_publication_storage,
+               sizeof(g_managed_kernel_boot_resource_publication_storage));
+    g_managed_kernel_boot_resource_publication =
+        &g_managed_kernel_boot_resource_publication_storage;
+    g_managed_kernel_boot_resource_snapshot_ready = 1;
+    serial_text("GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCES_NATIVE_SNAPSHOT_READY\r\n");
+    serial_field_hex("GXOS_NET10:NATIVE_BOOT_RESOURCE_DESCRIPTOR_COUNT=0x",
+                     g_managed_kernel_boot_resource_summary.RegionCount);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVE_BOOT_RESOURCE_TOTAL_PHYSICAL=0x",
+                     g_managed_kernel_boot_resource_summary.TotalPhysicalBytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVE_BOOT_RESOURCE_USABLE_PHYSICAL=0x",
+                     g_managed_kernel_boot_resource_summary.UsablePhysicalBytes);
+    serial_text("\r\n");
+}
+
+static void managed_kernel_set_boot_resource_publication(
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 *publication,
+    const GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1 *summary,
+    const GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 *regions,
+    uint32_t count, uint64_t byte_length)
+{
+    volatile uint8_t *bytes = (volatile uint8_t *)(void *)publication;
+    volatile GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 *target =
+        (volatile GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 *)(void *)publication;
+    uint64_t index;
+    for (index = 0; index != sizeof(*publication); ++index) bytes[index] = 0;
+    target->Size = GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1_SIZE;
+    target->AbiVersion = GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1;
+    target->SummaryAddress = (uint64_t)(uintptr_t)summary;
+    target->DescriptorAddress = (uint64_t)(uintptr_t)regions;
+    target->DescriptorCount = count;
+    target->DescriptorSize = GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1_SIZE;
+    target->DescriptorByteLength = byte_length;
+}
+
+static void managed_kernel_phase2_pre_main(
+    ManagedKernelInitializeEntry initialize,
+    ManagedKernelQuerySystemInfoEntry query_system_info,
+    ManagedKernelInstallBootResourcesEntry install_boot_resources,
+    ManagedKernelQueryBootResourcesEntry query_boot_resources,
+    ManagedKernelQueryMemoryRegionEntry query_memory_region)
+{
+    GX_MANAGED_KERNEL_INIT_REQUEST_V1 request = {0};
+    GX_MANAGED_KERNEL_SYSTEM_INFO_V1 system_info;
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 *publication =
+        g_managed_kernel_boot_resource_publication;
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1 summary;
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1 bad_summary;
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 region;
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 bad_region;
+    uint32_t status;
+    uint32_t full_count;
+    uint64_t full_bytes;
+
+    if (g_managed_kernel_boot_resource_snapshot_ready == 0 ||
+        g_managed_kernel_boot_resource_summary.RegionCount == 0 ||
+        publication == 0) {
+        fail("managed-kernel-boot-resource-snapshot-state");
+    }
+    full_count = g_managed_kernel_boot_resource_summary.RegionCount;
+    full_bytes = (uint64_t)full_count *
+        GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1_SIZE;
+    managed_kernel_set_boot_resource_publication(
+        publication, &g_managed_kernel_boot_resource_summary,
+        g_managed_kernel_boot_resource_regions, full_count, full_bytes);
+
+    fill_bytes((uint8_t *)&system_info, 0xA5, sizeof(system_info));
+    zero_bytes((uint8_t *)&summary, sizeof(summary));
+    zero_bytes((uint8_t *)&region, sizeof(region));
+    status = query_system_info(
+        GX_MANAGED_KERNEL_ABI_V1, (uintptr_t)&system_info, sizeof(system_info));
+    if (status != GX_MANAGED_NOT_INITIALIZED ||
+        system_info.Size != 0xA5A5A5A5U ||
+        query_boot_resources(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        (uintptr_t)&summary, sizeof(summary)) != GX_MANAGED_NOT_INITIALIZED ||
+        query_memory_region(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1, 0,
+                            (uintptr_t)&region, sizeof(region)) !=
+            GX_MANAGED_NOT_INITIALIZED ||
+        install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+                               (uintptr_t)publication) !=
+            GX_MANAGED_NOT_INITIALIZED) {
+        fail("managed-kernel-boot-resource-before-init");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCE_QUERY_BEFORE_INIT_REJECTED\r\n");
+
+    request.Size = GX_MANAGED_KERNEL_INIT_REQUEST_V1_SIZE;
+    request.AbiVersion = GX_MANAGED_KERNEL_ABI_V1;
+    request.Architecture = GX_MANAGED_KERNEL_ARCH_X64;
+    request.Flags = 0;
+    if (initialize(GX_MANAGED_KERNEL_ABI_V1 + 1U, (uintptr_t)&request) !=
+            GX_MANAGED_UNSUPPORTED_ABI) {
+        fail("managed-kernel-phase2-unsupported-init");
+    }
+    if (initialize(GX_MANAGED_KERNEL_ABI_V1, 0) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-phase2-null-init");
+    }
+    request.Size = GX_MANAGED_KERNEL_INIT_REQUEST_V1_SIZE - 1U;
+    if (initialize(GX_MANAGED_KERNEL_ABI_V1, (uintptr_t)&request) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-phase2-malformed-init");
+    }
+    request.Size = GX_MANAGED_KERNEL_INIT_REQUEST_V1_SIZE;
+    if (initialize(GX_MANAGED_KERNEL_ABI_V1, (uintptr_t)&request) !=
+            GX_MANAGED_OK ||
+        initialize(GX_MANAGED_KERNEL_ABI_V1, (uintptr_t)&request) !=
+            GX_MANAGED_ALREADY_INITIALIZED) {
+        fail("managed-kernel-phase2-init");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_INIT_OK\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_ABI_V1_OK\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DOUBLE_INIT_REJECTED\r\n");
+
+    fill_bytes((uint8_t *)&summary, 0xA5, sizeof(summary));
+    fill_bytes((uint8_t *)&region, 0xA5, sizeof(region));
+    if (query_boot_resources(
+            GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+            (uintptr_t)&summary, sizeof(summary)) != GX_MANAGED_NOT_INITIALIZED ||
+        query_memory_region(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1, 0,
+                            (uintptr_t)&region, sizeof(region)) !=
+            GX_MANAGED_NOT_INITIALIZED ||
+        summary.Size != 0xA5A5A5A5U || region.Size != 0xA5A5A5A5U) {
+        fail("managed-kernel-boot-resource-before-publication");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCE_QUERY_BEFORE_PUBLICATION_REJECTED\r\n");
+
+    if (install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1, 0) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-boot-resource-null-publication");
+    }
+    publication->Size = GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1_SIZE - 1U;
+    if (install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+                               (uintptr_t)publication) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-boot-resource-size");
+    }
+    publication->Size = GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1_SIZE;
+    if (install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1 + 1U,
+                               (uintptr_t)publication) !=
+            GX_MANAGED_UNSUPPORTED_ABI) {
+        fail("managed-kernel-boot-resource-abi");
+    }
+    publication->DescriptorByteLength = UINT64_MAX;
+    if (install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+                               (uintptr_t)publication) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-boot-resource-byte-overflow");
+    }
+    publication->DescriptorByteLength = full_bytes;
+    publication->DescriptorCount = GX_MANAGED_KERNEL_BOOT_RESOURCE_MAX_REGIONS + 1U;
+    if (install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+                               (uintptr_t)publication) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-boot-resource-count-bound");
+    }
+    publication->DescriptorCount = 0;
+    publication->DescriptorByteLength = 0;
+    if (install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+                               (uintptr_t)publication) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-boot-resource-zero-count");
+    }
+    publication->DescriptorCount = full_count;
+    publication->DescriptorAddress = UINT64_MAX - 15U;
+    publication->DescriptorByteLength = full_bytes;
+    if (install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+                               (uintptr_t)publication) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-boot-resource-pointer-overflow");
+    }
+    publication->DescriptorAddress = (uint64_t)(uintptr_t)
+        g_managed_kernel_boot_resource_regions;
+
+    bad_summary = g_managed_kernel_boot_resource_summary;
+    bad_summary.RegionCount = 1;
+    bad_region = g_managed_kernel_boot_resource_regions[0];
+    bad_region.BaseAddress = UINT64_MAX - 0x0FU;
+    bad_region.Length = 0x100U;
+    managed_kernel_set_boot_resource_publication(
+        publication, &bad_summary, &bad_region, 1,
+        GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1_SIZE);
+    if (install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+                               (uintptr_t)publication) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-boot-resource-descriptor-overflow");
+    }
+    bad_region = g_managed_kernel_boot_resource_regions[0];
+    bad_region.Length = 0;
+    if (install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+                               (uintptr_t)publication) !=
+            GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-boot-resource-zero-length");
+    }
+
+    managed_kernel_set_boot_resource_publication(
+        publication, &g_managed_kernel_boot_resource_summary,
+        g_managed_kernel_boot_resource_regions, full_count, full_bytes);
+    status = install_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+                                    (uintptr_t)publication);
+    if (status != GX_MANAGED_OK) {
+        serial_field_hex("GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCE_INSTALL_STATUS=0x",
+                         status);
+        serial_text("\r\n");
+        fail("managed-kernel-boot-resource-install");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCES_INSTALLED\r\n");
+}
+
+static int managed_kernel_summary_matches_authority(
+    const GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1 *summary)
+{
+    return summary != 0 &&
+           summary->Size == GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1_SIZE &&
+           summary->AbiVersion == GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1 &&
+           summary->ServiceVersion ==
+               GX_MANAGED_KERNEL_BOOT_RESOURCES_SERVICE_VERSION_V1 &&
+           summary->Architecture == GX_MANAGED_KERNEL_ARCH_X64 &&
+           summary->RegionCount == g_memory_map.descriptor_count &&
+           summary->RegionCount == g_memory_classification.descriptor_count &&
+           summary->ResourceMapIdentity ==
+               GX_MANAGED_KERNEL_BOOT_RESOURCE_MAP_ID_UEFI_NORMALIZED_V1 &&
+           summary->TotalPhysicalBytes ==
+               g_memory_classification.total_ram_like_bytes &&
+           summary->UsablePhysicalBytes ==
+               g_memory_classification.conventional_bytes &&
+           summary->Capabilities ==
+               (GX_MANAGED_BOOT_RESOURCE_CAPABILITY_SUMMARY |
+                GX_MANAGED_BOOT_RESOURCE_CAPABILITY_REGIONS |
+                GX_MANAGED_BOOT_RESOURCE_CAPABILITY_TOTALS) &&
+           summary->Reserved == 0;
+}
+
+static int managed_kernel_region_matches_authority(
+    uint32_t index,
+    const GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 *region)
+{
+    const EFI_MEMORY_DESCRIPTOR *descriptor;
+    const GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 *expected;
+    GXOS_MEMORY_CLASS memory_class;
+    uint64_t length;
+    if (region == 0 || index >= g_memory_map.descriptor_count ||
+        index >= g_managed_kernel_boot_resource_summary.RegionCount) {
+        return 0;
+    }
+    descriptor = gxos_uefi_memory_map_descriptor(&g_memory_map, index);
+    expected = &g_managed_kernel_boot_resource_regions[index];
+    if (descriptor == 0 || descriptor->NumberOfPages == 0 ||
+        descriptor->NumberOfPages > UINT64_MAX / GXOS_MEMORY_PAGE_SIZE) {
+        return 0;
+    }
+    length = descriptor->NumberOfPages * GXOS_MEMORY_PAGE_SIZE;
+    memory_class = gxos_memory_class_for_efi_type(descriptor->Type);
+    return region->Size == expected->Size &&
+           region->AbiVersion == expected->AbiVersion &&
+           region->BaseAddress == descriptor->PhysicalStart &&
+           region->Length == length &&
+           region->Type == (uint32_t)memory_class + 1U &&
+           region->Flags == expected->Flags;
+}
+
+static int managed_kernel_region_equal(
+    const GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 *left,
+    const GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 *right)
+{
+    return left != 0 && right != 0 && left->Size == right->Size &&
+           left->AbiVersion == right->AbiVersion &&
+           left->BaseAddress == right->BaseAddress &&
+           left->Length == right->Length && left->Type == right->Type &&
+           left->Flags == right->Flags;
+}
+
+static void managed_kernel_emit_region_evidence(
+    const char *label, uint32_t index,
+    const GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 *region)
+{
+    serial_text("GXOS_NET10:");
+    serial_text(label);
+    serial_text("_INDEX=0x");
+    serial_hex64(index);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:");
+    serial_text(label);
+    serial_text("_BASE=0x");
+    serial_hex64(region->BaseAddress);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:");
+    serial_text(label);
+    serial_text("_LENGTH=0x");
+    serial_hex64(region->Length);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:");
+    serial_text(label);
+    serial_text("_TYPE=0x");
+    serial_hex64(region->Type);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:");
+    serial_text(label);
+    serial_text("_FLAGS=0x");
+    serial_hex64(region->Flags);
+    serial_text("\r\n");
+}
+#endif
+
 #ifdef GXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX
 static void emit_memory_status_ex_field(const char *name, uint64_t value)
 {
@@ -13301,6 +13657,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
         image->export_size};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION initialize_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION query_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION install_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION boot_resources_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION memory_region_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_STATUS initialize_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInitialize",
@@ -13309,14 +13668,38 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedQuerySystemInfo",
                                    &query_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS install_status =
+        gxos_nativeaot_find_export(&export_image,
+                                   "GxManagedKernelInstallBootResources",
+                                   &install_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS boot_resources_status =
+        gxos_nativeaot_find_export(&export_image,
+                                   "GxManagedQueryBootResources",
+                                   &boot_resources_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS memory_region_status =
+        gxos_nativeaot_find_export(&export_image,
+                                   "GxManagedQueryMemoryRegion",
+                                   &memory_region_resolution);
     if (initialize_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInitialize-export-missing");
     }
     if (query_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedQuerySystemInfo-export-missing");
     }
+    if (install_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelInstallBootResources-export-missing");
+    }
+    if (boot_resources_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedQueryBootResources-export-missing");
+    }
+    if (memory_region_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedQueryMemoryRegion-export-missing");
+    }
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
+    image->managed_kernel_install_boot_resources_rva = install_resolution.rva;
+    image->managed_kernel_query_boot_resources_rva = boot_resources_resolution.rva;
+    image->managed_kernel_query_memory_region_rva = memory_region_resolution.rva;
 }
 #endif
 
@@ -14770,21 +15153,45 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_initialize_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_query_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_boot_resources_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_memory_region_resolution = {0};
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
-    GX_MANAGED_KERNEL_INIT_REQUEST_V1 managed_kernel_init_request = {0};
+    ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
+    ManagedKernelQueryBootResourcesEntry managed_kernel_query_boot_resources;
+    ManagedKernelQueryMemoryRegionEntry managed_kernel_query_memory_region;
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 managed_kernel_boot_resource_publication = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_system_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_repeat_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_small_buffer = {0};
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1 managed_kernel_boot_resource_summary = {0};
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1 managed_kernel_boot_resource_repeat_summary = {0};
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 managed_kernel_memory_region = {0};
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 managed_kernel_memory_region_repeat = {0};
+    GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 managed_kernel_memory_region_small = {0};
+    uint32_t managed_kernel_boot_resource_descriptor_count;
+    uint32_t managed_kernel_boot_resource_middle_index;
+    uint32_t managed_kernel_boot_resource_last_index;
     uint32_t managed_kernel_status;
     uint32_t managed_kernel_repeat_status;
     uint32_t managed_kernel_small_status;
-    uint32_t managed_kernel_preinit_status;
     uint32_t managed_kernel_bad_version_status;
     uint32_t managed_kernel_null_status;
     uint32_t managed_kernel_zero_capacity_status;
-    uint32_t managed_kernel_bad_init_status;
-    uint32_t managed_kernel_double_init_status;
+    uint32_t managed_kernel_boot_resource_status;
+    uint32_t managed_kernel_boot_resource_bad_version_status;
+    uint32_t managed_kernel_boot_resource_null_status;
+    uint32_t managed_kernel_boot_resource_small_status;
+    uint32_t managed_kernel_boot_resource_overflow_status;
+    uint32_t managed_kernel_boot_resource_repeat_status;
+    uint32_t managed_kernel_memory_region_status;
+    uint32_t managed_kernel_memory_region_repeat_status;
+    uint32_t managed_kernel_memory_region_bad_version_status;
+    uint32_t managed_kernel_memory_region_null_status;
+    uint32_t managed_kernel_memory_region_small_status;
+    uint32_t managed_kernel_memory_region_equal_count_status;
+    uint32_t managed_kernel_memory_region_greater_count_status;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
     GXOS_NATIVEAOT_EXPORT_RESOLUTION callback_resolution = {0};
@@ -14986,10 +15393,28 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         image.managed_kernel_query_system_info_rva;
     managed_kernel_query_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_query_system_info_rva);
+    managed_kernel_install_resolution.rva =
+        image.managed_kernel_install_boot_resources_rva;
+    managed_kernel_install_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_install_boot_resources_rva);
+    managed_kernel_boot_resources_resolution.rva =
+        image.managed_kernel_query_boot_resources_rva;
+    managed_kernel_boot_resources_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_query_boot_resources_rva);
+    managed_kernel_memory_region_resolution.rva =
+        image.managed_kernel_query_memory_region_rva;
+    managed_kernel_memory_region_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_query_memory_region_rva);
     managed_kernel_initialize = (ManagedKernelInitializeEntry)
         managed_kernel_initialize_resolution.address;
     managed_kernel_query_system_info = (ManagedKernelQuerySystemInfoEntry)
         managed_kernel_query_resolution.address;
+    managed_kernel_install_boot_resources = (ManagedKernelInstallBootResourcesEntry)
+        managed_kernel_install_resolution.address;
+    managed_kernel_query_boot_resources = (ManagedKernelQueryBootResourcesEntry)
+        managed_kernel_boot_resources_resolution.address;
+    managed_kernel_query_memory_region = (ManagedKernelQueryMemoryRegionEntry)
+        managed_kernel_memory_region_resolution.address;
     serial_text("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT=GxManagedKernelInitialize\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT_RVA=0x",
                      image.managed_kernel_initialize_rva);
@@ -14997,6 +15422,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_KERNEL_QUERY_EXPORT=GxManagedQuerySystemInfo\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_QUERY_EXPORT_RVA=0x",
                      image.managed_kernel_query_system_info_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_INSTALL_BOOT_RESOURCES_EXPORT=GxManagedKernelInstallBootResources\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INSTALL_BOOT_RESOURCES_EXPORT_RVA=0x",
+                     image.managed_kernel_install_boot_resources_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_QUERY_BOOT_RESOURCES_EXPORT=GxManagedQueryBootResources\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_QUERY_BOOT_RESOURCES_EXPORT_RVA=0x",
+                     image.managed_kernel_query_boot_resources_rva);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_QUERY_MEMORY_REGION_EXPORT=GxManagedQueryMemoryRegion\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_QUERY_MEMORY_REGION_EXPORT_RVA=0x",
+                     image.managed_kernel_query_memory_region_rva);
     serial_text("\r\n");
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
@@ -15682,6 +16119,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("\r\n");
 #endif
     capture_memory_snapshot();
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+    prepare_managed_kernel_boot_resources();
+#endif
     g_boot_info_address = (uint64_t)(uintptr_t)&g_boot_info;
     g_boot_info.Magic = GUIDEX_BOOT_MAGIC;
     g_boot_info.Version = GUIDEX_BOOT_VERSION;
@@ -15734,72 +16174,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_ENTRY_COMPLETE\r\n");
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
     activate_nativeaot_tls();
-    managed_kernel_init_request.Size = GX_MANAGED_KERNEL_INIT_REQUEST_V1_SIZE;
-    managed_kernel_init_request.AbiVersion = GX_MANAGED_KERNEL_ABI_V1;
-    managed_kernel_init_request.Architecture = GX_MANAGED_KERNEL_ARCH_X64;
-    managed_kernel_init_request.Flags = 0;
-    managed_kernel_system_info.Size = 0xA5A5A5A5U;
-    managed_kernel_system_info.AbiVersion = 0xA5A5A5A5U;
-    managed_kernel_system_info.ServiceVersion = 0xA5A5A5A5U;
-    managed_kernel_system_info.Architecture = 0xA5A5A5A5U;
-    managed_kernel_system_info.Capabilities = 0xA5A5A5A5A5A5A5A5ULL;
-    managed_kernel_system_info.Reserved = 0xA5A5A5A5A5A5A5A5ULL;
-    if (gxos_managed_kernel_validate_output_buffer(
-            (uintptr_t)&managed_kernel_system_info,
-            sizeof(managed_kernel_system_info)) != GX_MANAGED_OK) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-native-output-preflight");
-    }
-    managed_kernel_preinit_status = managed_kernel_query_system_info(
-        GX_MANAGED_KERNEL_ABI_V1,
-        (uintptr_t)&managed_kernel_system_info,
-        sizeof(managed_kernel_system_info));
-    if (managed_kernel_preinit_status != GX_MANAGED_NOT_INITIALIZED ||
-        managed_kernel_system_info.Size != 0xA5A5A5A5U ||
-        managed_kernel_system_info.AbiVersion != 0xA5A5A5A5U ||
-        managed_kernel_system_info.ServiceVersion != 0xA5A5A5A5U ||
-        managed_kernel_system_info.Architecture != 0xA5A5A5A5U ||
-        managed_kernel_system_info.Capabilities != 0xA5A5A5A5A5A5A5A5ULL ||
-        managed_kernel_system_info.Reserved != 0xA5A5A5A5A5A5A5A5ULL) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-query-before-init");
-    }
-    serial_text("GXOS_NET10:MANAGED_KERNEL_CALL_BEFORE_INIT_REJECTED\r\n");
-
-    managed_kernel_bad_version_status = managed_kernel_initialize(
-        GX_MANAGED_KERNEL_ABI_V1 + 1U, (uintptr_t)&managed_kernel_init_request);
-    if (managed_kernel_bad_version_status != GX_MANAGED_UNSUPPORTED_ABI) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-unsupported-init-abi");
-    }
-    serial_text("GXOS_NET10:MANAGED_KERNEL_BAD_VERSION_REJECTED\r\n");
-
-    managed_kernel_init_request.Size = GX_MANAGED_KERNEL_INIT_REQUEST_V1_SIZE - 1U;
-    managed_kernel_bad_init_status = managed_kernel_initialize(
-        GX_MANAGED_KERNEL_ABI_V1, (uintptr_t)&managed_kernel_init_request);
-    if (managed_kernel_bad_init_status != GX_MANAGED_INVALID_ARGUMENT) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-invalid-init-size");
-    }
-    managed_kernel_init_request.Size = GX_MANAGED_KERNEL_INIT_REQUEST_V1_SIZE;
-
-    managed_kernel_status = managed_kernel_initialize(
-        GX_MANAGED_KERNEL_ABI_V1, (uintptr_t)&managed_kernel_init_request);
-    if (managed_kernel_status != GX_MANAGED_OK) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-initialize");
-    }
-    serial_text("GXOS_NET10:MANAGED_KERNEL_INIT_OK\r\n");
-    serial_text("GXOS_NET10:MANAGED_KERNEL_ABI_V1_OK\r\n");
-
-    managed_kernel_double_init_status = managed_kernel_initialize(
-        GX_MANAGED_KERNEL_ABI_V1, (uintptr_t)&managed_kernel_init_request);
-    if (managed_kernel_double_init_status != GX_MANAGED_ALREADY_INITIALIZED) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-double-init");
-    }
-    serial_text("GXOS_NET10:MANAGED_KERNEL_DOUBLE_INIT_REJECTED\r\n");
-
+    managed_kernel_phase2_pre_main(
+        managed_kernel_initialize, managed_kernel_query_system_info,
+        managed_kernel_install_boot_resources,
+        managed_kernel_query_boot_resources, managed_kernel_query_memory_region);
+    restore_nativeaot_tls();
+    serial_text("GXOS_NET10:MANAGED_KERNEL_SERVICE_ENTRY_BEGIN\r\n");
+    activate_nativeaot_tls();
+    g_phase = PHASE_IN_MANAGED;
+    managed_result = (uint32_t)call_managed_entry(
+        managed_entry, (uintptr_t)&g_boot_info, &rsp_before_call);
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
+    restore_nativeaot_tls();
+    if (managed_result != 0) fail("managed-kernel-service-managed-return-nonzero");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_SERVICE_ENTRY_COMPLETE\r\n");
+    activate_nativeaot_tls();
     managed_kernel_null_status = managed_kernel_query_system_info(
         GX_MANAGED_KERNEL_ABI_V1, 0, sizeof(managed_kernel_system_info));
     managed_kernel_zero_capacity_status = managed_kernel_query_system_info(
@@ -15866,6 +16255,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         restore_nativeaot_tls();
         fail("managed-kernel-query-unsupported-abi");
     }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_BAD_VERSION_REJECTED\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_QUERY_BAD_VERSION_REJECTED\r\n");
 
     managed_kernel_repeat_status = managed_kernel_query_system_info(
@@ -15882,7 +16272,204 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("managed-kernel-repeat-query");
     }
     serial_text("GXOS_NET10:MANAGED_KERNEL_REPEAT_QUERY_OK\r\n");
+
+    managed_kernel_set_boot_resource_publication(
+        &managed_kernel_boot_resource_publication,
+        &g_managed_kernel_boot_resource_summary,
+        g_managed_kernel_boot_resource_regions,
+        g_managed_kernel_boot_resource_summary.RegionCount,
+        (uint64_t)g_managed_kernel_boot_resource_summary.RegionCount *
+            GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1_SIZE);
+    managed_kernel_boot_resource_repeat_status = managed_kernel_install_boot_resources(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        (uintptr_t)&managed_kernel_boot_resource_publication);
+    if (managed_kernel_boot_resource_repeat_status !=
+            GX_MANAGED_ALREADY_INITIALIZED) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-boot-resource-repeat-publication");
+    }
+
+    managed_kernel_boot_resource_summary.Size = 0xC3C3C3C3U;
+    managed_kernel_boot_resource_summary.AbiVersion = 0xC3C3C3C3U;
+    managed_kernel_boot_resource_summary.ServiceVersion = 0xC3C3C3C3U;
+    managed_kernel_boot_resource_summary.Architecture = 0xC3C3C3C3U;
+    managed_kernel_boot_resource_summary.RegionCount = 0xC3C3C3C3U;
+    managed_kernel_boot_resource_summary.ResourceMapIdentity = 0xC3C3C3C3U;
+    managed_kernel_boot_resource_summary.TotalPhysicalBytes = 0xC3C3C3C3C3C3C3C3ULL;
+    managed_kernel_boot_resource_summary.UsablePhysicalBytes = 0xC3C3C3C3C3C3C3C3ULL;
+    managed_kernel_boot_resource_summary.Capabilities = 0xC3C3C3C3C3C3C3C3ULL;
+    managed_kernel_boot_resource_summary.Reserved = 0xC3C3C3C3C3C3C3C3ULL;
+    managed_kernel_boot_resource_bad_version_status = managed_kernel_query_boot_resources(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1 + 1U,
+        (uintptr_t)&managed_kernel_boot_resource_summary,
+        sizeof(managed_kernel_boot_resource_summary));
+    managed_kernel_boot_resource_null_status = managed_kernel_query_boot_resources(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1, 0,
+        sizeof(managed_kernel_boot_resource_summary));
+    managed_kernel_boot_resource_small_status = managed_kernel_query_boot_resources(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        (uintptr_t)&managed_kernel_boot_resource_summary,
+        GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1_SIZE - 1U);
+    managed_kernel_boot_resource_overflow_status = managed_kernel_query_boot_resources(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        UINTPTR_MAX - 15U,
+        GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1_SIZE);
+    if (managed_kernel_boot_resource_bad_version_status != GX_MANAGED_UNSUPPORTED_ABI ||
+        managed_kernel_boot_resource_null_status != GX_MANAGED_INVALID_ARGUMENT ||
+        managed_kernel_boot_resource_small_status != GX_MANAGED_BUFFER_TOO_SMALL ||
+        managed_kernel_boot_resource_overflow_status != GX_MANAGED_INVALID_ARGUMENT ||
+        managed_kernel_boot_resource_summary.Size != 0xC3C3C3C3U ||
+        managed_kernel_boot_resource_summary.RegionCount != 0xC3C3C3C3U ||
+        managed_kernel_boot_resource_summary.Reserved != 0xC3C3C3C3C3C3C3C3ULL) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-boot-resource-summary-negative");
+    }
+
+    managed_kernel_boot_resource_status = managed_kernel_query_boot_resources(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        (uintptr_t)&managed_kernel_boot_resource_summary,
+        sizeof(managed_kernel_boot_resource_summary));
+    if (managed_kernel_boot_resource_status != GX_MANAGED_OK ||
+        !managed_kernel_summary_matches_authority(
+            &managed_kernel_boot_resource_summary)) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-boot-resource-summary");
+    }
+    managed_kernel_boot_resource_descriptor_count =
+        managed_kernel_boot_resource_summary.RegionCount;
+    managed_kernel_boot_resource_middle_index =
+        managed_kernel_boot_resource_descriptor_count / 2U;
+    managed_kernel_boot_resource_last_index =
+        managed_kernel_boot_resource_descriptor_count - 1U;
+    serial_text("GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCES_OK\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_BOOT_RESOURCE_DESCRIPTOR_COUNT=0x",
+                     managed_kernel_boot_resource_descriptor_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_BOOT_RESOURCE_TOTAL_PHYSICAL=0x",
+                     managed_kernel_boot_resource_summary.TotalPhysicalBytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_BOOT_RESOURCE_USABLE_PHYSICAL=0x",
+                     managed_kernel_boot_resource_summary.UsablePhysicalBytes);
+    serial_text("\r\n");
+
+    managed_kernel_boot_resource_repeat_summary.Size = 0x5A5A5A5AU;
+    managed_kernel_boot_resource_repeat_summary.RegionCount = 0x5A5A5A5AU;
+    managed_kernel_boot_resource_repeat_status = managed_kernel_query_boot_resources(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        (uintptr_t)&managed_kernel_boot_resource_repeat_summary,
+        sizeof(managed_kernel_boot_resource_repeat_summary));
+    if (managed_kernel_boot_resource_repeat_status != GX_MANAGED_OK ||
+        !managed_kernel_summary_matches_authority(
+            &managed_kernel_boot_resource_repeat_summary) ||
+        managed_kernel_boot_resource_repeat_summary.Size !=
+            managed_kernel_boot_resource_summary.Size ||
+        managed_kernel_boot_resource_repeat_summary.TotalPhysicalBytes !=
+            managed_kernel_boot_resource_summary.TotalPhysicalBytes) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-boot-resource-repeat-query");
+    }
+
+    managed_kernel_memory_region_status = managed_kernel_query_memory_region(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1, 0,
+        (uintptr_t)&managed_kernel_memory_region,
+        sizeof(managed_kernel_memory_region));
+    if (managed_kernel_memory_region_status != GX_MANAGED_OK ||
+        !managed_kernel_region_matches_authority(
+            0, &managed_kernel_memory_region)) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-memory-region-first");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_MEMORY_REGION_OK\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_MEMORY_REGION_FIRST_OK\r\n");
+    managed_kernel_emit_region_evidence(
+        "MANAGED_KERNEL_MEMORY_REGION_FIRST", 0,
+        &managed_kernel_memory_region);
+    if (managed_kernel_boot_resource_descriptor_count > 2U) {
+        managed_kernel_memory_region_status = managed_kernel_query_memory_region(
+            GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+            managed_kernel_boot_resource_middle_index,
+            (uintptr_t)&managed_kernel_memory_region,
+            sizeof(managed_kernel_memory_region));
+        if (managed_kernel_memory_region_status != GX_MANAGED_OK ||
+            !managed_kernel_region_matches_authority(
+                managed_kernel_boot_resource_middle_index,
+                &managed_kernel_memory_region)) {
+            restore_nativeaot_tls();
+            fail("managed-kernel-memory-region-middle");
+        }
+        serial_text("GXOS_NET10:MANAGED_KERNEL_MEMORY_REGION_MIDDLE_OK\r\n");
+        managed_kernel_emit_region_evidence(
+            "MANAGED_KERNEL_MEMORY_REGION_MIDDLE",
+            managed_kernel_boot_resource_middle_index,
+            &managed_kernel_memory_region);
+    }
+    managed_kernel_memory_region_status = managed_kernel_query_memory_region(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        managed_kernel_boot_resource_last_index,
+        (uintptr_t)&managed_kernel_memory_region,
+        sizeof(managed_kernel_memory_region));
+    if (managed_kernel_memory_region_status != GX_MANAGED_OK ||
+        !managed_kernel_region_matches_authority(
+            managed_kernel_boot_resource_last_index,
+            &managed_kernel_memory_region)) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-memory-region-last");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_MEMORY_REGION_LAST_OK\r\n");
+    managed_kernel_emit_region_evidence(
+        "MANAGED_KERNEL_MEMORY_REGION_LAST",
+        managed_kernel_boot_resource_last_index,
+        &managed_kernel_memory_region);
+
+    managed_kernel_memory_region_repeat_status = managed_kernel_query_memory_region(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        managed_kernel_boot_resource_last_index,
+        (uintptr_t)&managed_kernel_memory_region_repeat,
+        sizeof(managed_kernel_memory_region_repeat));
+    if (managed_kernel_memory_region_repeat_status != GX_MANAGED_OK ||
+        !managed_kernel_region_equal(&managed_kernel_memory_region,
+                                     &managed_kernel_memory_region_repeat)) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-memory-region-repeat");
+    }
+
+    fill_bytes((uint8_t *)&managed_kernel_memory_region_small, 0xA5,
+               sizeof(managed_kernel_memory_region_small));
+    managed_kernel_memory_region_small_status = managed_kernel_query_memory_region(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1, 0,
+        (uintptr_t)&managed_kernel_memory_region_small,
+        GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1_SIZE - 1U);
+    managed_kernel_memory_region_null_status = managed_kernel_query_memory_region(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1, 0, 0,
+        sizeof(managed_kernel_memory_region_small));
+    managed_kernel_memory_region_bad_version_status = managed_kernel_query_memory_region(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1 + 1U, 0,
+        (uintptr_t)&managed_kernel_memory_region_small,
+        sizeof(managed_kernel_memory_region_small));
+    managed_kernel_memory_region_equal_count_status = managed_kernel_query_memory_region(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        managed_kernel_boot_resource_descriptor_count,
+        (uintptr_t)&managed_kernel_memory_region_small,
+        sizeof(managed_kernel_memory_region_small));
+    managed_kernel_memory_region_greater_count_status = managed_kernel_query_memory_region(
+        GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
+        managed_kernel_boot_resource_descriptor_count + 1U,
+        (uintptr_t)&managed_kernel_memory_region_small,
+        sizeof(managed_kernel_memory_region_small));
+    if (managed_kernel_memory_region_small_status != GX_MANAGED_BUFFER_TOO_SMALL ||
+        managed_kernel_memory_region_null_status != GX_MANAGED_INVALID_ARGUMENT ||
+        managed_kernel_memory_region_bad_version_status != GX_MANAGED_UNSUPPORTED_ABI ||
+        managed_kernel_memory_region_equal_count_status != GX_MANAGED_OUT_OF_RANGE ||
+        managed_kernel_memory_region_greater_count_status != GX_MANAGED_OUT_OF_RANGE ||
+        managed_kernel_memory_region_small.Size != 0xA5A5A5A5U ||
+        managed_kernel_memory_region_small.BaseAddress != 0xA5A5A5A5A5A5A5A5ULL) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-memory-region-negative");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCE_NEGATIVE_TESTS_OK\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_MEMORY_MAP_MATCH\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE1_PASS\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE2_PASS\r\n");
     restore_nativeaot_tls();
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK

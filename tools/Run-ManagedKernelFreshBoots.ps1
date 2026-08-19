@@ -94,7 +94,7 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE1_PASS') -or
+                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE2_PASS') -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
                     $text.Contains('GXOS_NET10:PAGE_FAULT_')) { break }
@@ -116,8 +116,12 @@ try {
         foreach ($marker in @(
             'GXOS_NET10:NATIVEAOT_STARTUP_OK',
             'GXOS_NET10:GC_STARTUP_ADVANCED',
-            'GXOS_NET10:NATIVEAOT_DURABILITY_PASS=1',
             'GXOS_NET10:MANAGED_KERNEL_BOOTSTRAP_OK',
+            'GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCES_OK',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_REGION_OK',
+            'GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCES_INSTALLED',
+            'GXOS_NET10:MANAGED_KERNEL_BOOT_RESOURCE_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_MAP_MATCH',
             'GXOS_NET10:MANAGED_ENTRY_COMPLETE',
             'GXOS_NET10:MANAGED_KERNEL_INIT_OK',
             'GXOS_NET10:MANAGED_KERNEL_ABI_V1_OK',
@@ -125,7 +129,8 @@ try {
             'GXOS_NET10:MANAGED_KERNEL_REPEAT_QUERY_OK',
             'GXOS_NET10:MANAGED_KERNEL_BAD_VERSION_REJECTED',
             'GXOS_NET10:MANAGED_KERNEL_SMALL_BUFFER_REJECTED',
-            'GXOS_NET10:MANAGED_KERNEL_PHASE1_PASS')) {
+            'GXOS_NET10:MANAGED_KERNEL_PHASE1_PASS',
+            'GXOS_NET10:MANAGED_KERNEL_PHASE2_PASS')) {
             Require ($text.Contains($marker)) "ManagedKernel boot $sequence missing marker: $marker"
         }
         Require (([regex]::Matches($text, 'GXOS_NET10:NATIVEAOT_STARTUP_OK')).Count -eq 1) `

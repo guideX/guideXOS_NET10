@@ -1,10 +1,12 @@
 # ManagedKernel ABI v1
 
-Phase 1 introduces the first real managed system layer without changing the
-accepted NativeAOT proof payload. The native guideXOS bootstrap/runtime loads
-the separate `gxos-managed-kernel.dll` image, starts NativeAOT once, calls the
-bootstrap `ManagedMain` export, and then invokes ordinary managed-kernel
-services through fixed-layout, versioned contracts.
+Phase 1 introduced the first real managed system layer without changing the
+accepted NativeAOT proof payload. Phase 2 adds the first machine-state service:
+a bounded, immutable view of the normalized boot-time physical-resource map.
+The native guideXOS bootstrap/runtime loads the separate
+`gxos-managed-kernel.dll` image, starts NativeAOT once, calls the bootstrap
+`ManagedMain` export, and then invokes ordinary managed-kernel services through
+fixed-layout, versioned contracts.
 
 ```text
 Native guideXOS bootstrap/runtime
@@ -15,7 +17,13 @@ Native guideXOS bootstrap/runtime
                 |
                 +-- system initialization
                 +-- system-information service
+                +-- boot-resource snapshot service
 ```
+
+The governing design principle is:
+
+> Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
+> versioned view of that truth through the managed-kernel ABI.
 
 `src/ManagedEntryProbe` remains the foundation control. It is retained for
 runtime, scheduler, callback, allocation, and GC regressions. It is not the
@@ -84,6 +92,7 @@ values:
 | `GX_MANAGED_BUFFER_TOO_SMALL` | 3 | The caller supplied less than the v1 output size. |
 | `GX_MANAGED_NOT_INITIALIZED` | 4 | A service was called before managed-kernel initialization. |
 | `GX_MANAGED_ALREADY_INITIALIZED` | 5 | Initialization was requested after readiness was established. |
+| `GX_MANAGED_OUT_OF_RANGE` | 6 | A requested normalized region index is not less than `RegionCount`. |
 
 The native caller receives the status directly. Last-error state is not used
 to communicate managed-kernel service results.
@@ -105,11 +114,17 @@ The valid sequence is:
 4. A valid first call returns `GX_MANAGED_OK` and makes ManagedKernel ready.
 5. A valid later call returns `GX_MANAGED_ALREADY_INITIALIZED`.
 
-Initialization is deliberately separate from NativeAOT process startup and
-does not call `ManagedMain` again. The current scheduler is cooperative and
-single-instance, so initialization is a one-time system lifecycle transition;
-future concurrent callers must be serialized by the native kernel service
-dispatcher before entering this contract.
+For Phase 2, the native loader performs the first `ManagedMain` entry before
+calling reverse-P/Invoke service exports. This preserves the established
+NativeAOT entry/runtime ordering. After that entry returns, native code
+initializes and publishes the boot-resource snapshot, and makes a second
+bounded `ManagedMain` entry so managed code can consume the installed view.
+
+Initialization is deliberately separate from NativeAOT process startup; the
+initialization export itself does not call `ManagedMain`. The current scheduler
+is cooperative and single-instance, so initialization is a one-time system
+lifecycle transition; future concurrent callers must be serialized by the
+native kernel service dispatcher before entering this contract.
 
 ## System-information service
 
@@ -130,6 +145,140 @@ CAPABILITIES=0x0000000000000003
 ```
 
 No canonical guideXOS OS version/build field exists yet, so none is invented.
+
+## Phase 2 boot-resource snapshot service
+
+Native ownership and source of truth
+
+The service is backed by the native `g_memory_map` / `GXOS_UEFI_MEMORY_MAP`
+snapshot and its validated `GXOS_MEMORY_CLASSIFICATION`. The final UEFI map is
+copied into native retained storage by the existing memory-map acquisition
+path; `gxos_uefi_memory_map_parse` validates descriptor size and count, and
+`gxos_uefi_memory_map_classify` supplies normalized class totals. The separate
+`g_memory_ledger` and physical/accounting snapshots describe current native
+allocator/accounting state and are not substituted for the immutable boot map.
+
+Native normalization copies each validated firmware descriptor into the fixed
+native `GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1` array. No UEFI descriptor
+pointer is retained by ManagedKernel. The normalized type is the stable
+guideXOS enum below, not a raw UEFI numeric value:
+
+| Value | Type | Source meaning |
+|---:|---|---|
+| 1 | `CONVENTIONAL` | `GXOS_MEMORY_CLASS_CONVENTIONAL` |
+| 2 | `LOADER_CODE` | `GXOS_MEMORY_CLASS_LOADER_CODE` |
+| 3 | `LOADER_DATA` | `GXOS_MEMORY_CLASS_LOADER_DATA` |
+| 4 | `BOOT_SERVICES_CODE` | `GXOS_MEMORY_CLASS_BOOT_SERVICES_CODE` |
+| 5 | `BOOT_SERVICES_DATA` | `GXOS_MEMORY_CLASS_BOOT_SERVICES_DATA` |
+| 6 | `RUNTIME_SERVICES_CODE` | `GXOS_MEMORY_CLASS_RUNTIME_SERVICES_CODE` |
+| 7 | `RUNTIME_SERVICES_DATA` | `GXOS_MEMORY_CLASS_RUNTIME_SERVICES_DATA` |
+| 8 | `ACPI_RECLAIM` | `GXOS_MEMORY_CLASS_ACPI_RECLAIM` |
+| 9 | `ACPI_NVS` | `GXOS_MEMORY_CLASS_ACPI_NVS` |
+| 10 | `RESERVED` | `GXOS_MEMORY_CLASS_RESERVED` |
+| 11 | `UNUSABLE` | `GXOS_MEMORY_CLASS_UNUSABLE` |
+| 12 | `MMIO` | `GXOS_MEMORY_CLASS_MMIO` |
+| 13 | `MMIO_PORT_SPACE` | `GXOS_MEMORY_CLASS_MMIO_PORT_SPACE` |
+| 14 | `PERSISTENT` | `GXOS_MEMORY_CLASS_PERSISTENT` |
+| 15 | `PAL_CODE` | `GXOS_MEMORY_CLASS_PAL_CODE` |
+| 16 | `UNKNOWN` | `GXOS_MEMORY_CLASS_UNKNOWN` |
+
+The summary reports the exact descriptor count, the verified native
+`total_ram_like_bytes`, the verified conventional/usable total, x64 identity,
+and capabilities `SUMMARY | REGIONS | TOTALS` (`0x7`).
+
+Boot-resource summary layout
+
+`GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1` is 56 bytes, packed to one byte:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | `Size` | `uint32_t` |
+| 4 | `AbiVersion` | `uint32_t` |
+| 8 | `ServiceVersion` | `uint32_t` |
+| 12 | `Architecture` | `uint32_t` |
+| 16 | `RegionCount` | `uint32_t` |
+| 20 | `ResourceMapIdentity` | `uint32_t` |
+| 24 | `TotalPhysicalBytes` | `uint64_t` |
+| 32 | `UsablePhysicalBytes` | `uint64_t` |
+| 40 | `Capabilities` | `uint64_t` |
+| 48 | `Reserved` | `uint64_t` |
+
+Memory-region layout
+
+`GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1` is 32 bytes:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | `Size` | `uint32_t` |
+| 4 | `AbiVersion` | `uint32_t` |
+| 8 | `BaseAddress` | `uint64_t` |
+| 16 | `Length` | `uint64_t` |
+| 24 | `Type` | `uint32_t` |
+| 28 | `Flags` | `uint32_t` |
+
+Publication request layout
+
+`GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1` is 48 bytes. It is a
+caller-owned request containing only primitive ABI data; it is not the public
+resource array:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | `Size` | `uint32_t` |
+| 4 | `AbiVersion` | `uint32_t` |
+| 8 | `SummaryAddress` | `uint64_t` |
+| 16 | `DescriptorAddress` | `uint64_t` |
+| 24 | `DescriptorCount` | `uint32_t` |
+| 28 | `DescriptorSize` | `uint32_t` |
+| 32 | `DescriptorByteLength` | `uint64_t` |
+| 40 | `Reserved` | `uint64_t` |
+
+All three Phase 2 structures use `Pack = 1`, fixed-width fields, and the
+Microsoft x64 calling convention. Native `_Static_assert` checks and managed
+`sizeof`/`Marshal.OffsetOf` checks cover every field shown above.
+
+Publication ABI and lifetime
+
+`GxManagedKernelInstallBootResources(uint32 requestedAbiVersion, uintptr
+publicationAddress)` rejects null requests, unsupported versions, short request
+sizes, zero or over-limit counts, a descriptor size other than 32, mismatched
+byte length, reserved bits, invalid summary fields, invalid region types or
+flags, zero lengths, `BaseAddress + Length` overflow, descriptor-count
+multiplication overflow, and address-plus-length overflow. The maximum is
+`GX_MANAGED_KERNEL_BOOT_RESOURCE_MAX_REGIONS == 2048`, a conservative bound
+well above realistic x64 firmware maps without being an unbounded trust
+surface. Validation completes for every region before any managed publication
+state is changed. A second publication returns
+`GX_MANAGED_ALREADY_INITIALIZED`; it never replaces the first snapshot.
+
+The published arrays and summary are native static storage and remain valid for
+the lifetime of the managed kernel. They are copied values, immutable after
+successful normalization/publication, never stack addresses, never reclaimed,
+and never pointers into transient UEFI boot-services memory. ManagedKernel
+retains only validated native addresses, count, and byte length. It does not
+own or allocate physical pages and does not participate in the native physical
+allocator.
+
+Query ABI and state machine
+
+`GxManagedQueryBootResources(uint32 requestedAbiVersion, uintptr outputAddress,
+uintptr outputCapacity)` returns one complete 56-byte summary. Before
+initialization/publication it returns `GX_MANAGED_NOT_INITIALIZED`; null,
+undersized, unsupported-ABI, or overflowing output arguments fail without
+changing the caller's buffer.
+
+`GxManagedQueryMemoryRegion(uint32 requestedAbiVersion, uint32 index, uintptr
+outputAddress, uintptr outputCapacity)` returns one complete 32-byte descriptor
+only when `index < RegionCount`. Equal-to-count and greater indices return
+`GX_MANAGED_OUT_OF_RANGE`; all failure paths preserve the output sentinel.
+Repeated summary and descriptor queries read the same native snapshot and are
+stable. No mutable backing pointer or managed array is exposed.
+
+Raw UEFI descriptors are intentionally not the managed ABI: their firmware
+layout, descriptor size, attribute bits, and lifetime are firmware contracts,
+not stable guideXOS service semantics. The public contract therefore carries a
+small, explicitly versioned guideXOS normalization with explicit bounds and
+overflow rules.
 
 ## Capability bits
 
@@ -153,9 +302,10 @@ checks at the ABI boundary. Failure paths do not partially initialize or
 partially populate the output structure; the native acceptance path uses
 sentinel-filled buffers to verify this property.
 
-The v1 service writes no bytes beyond 32 bytes, does not retain the output
-pointer, and returns only fixed-width values. The native caller owns the
-storage and may reuse it after return.
+Each v1 query writes only its declared fixed-size output structure (32 bytes
+for system information or a region, 56 bytes for the boot-resource summary),
+does not retain the output pointer, and returns only fixed-width values. The
+native caller owns the storage and may reuse it after return.
 
 ## Payload roles and selection
 
@@ -174,7 +324,9 @@ identity remains governed by its existing acceptance path.
 
 ## Current limitations and deferred work
 
-Phase 1 does not add full corlib integration, GUI, window management,
+Phase 2 does not add general managed physical-page allocation, virtual-memory
+ownership, paging policy, user processes, device drivers, filesystems, GUI
+services, full corlib integration,
 filesystem, networking, sound, drivers, process management, application
 model, thread pool, `Task`, async/await, managed `Thread`, reflection,
 dynamic assemblies, rich marshaling, object RPC, or a full managed-kernel

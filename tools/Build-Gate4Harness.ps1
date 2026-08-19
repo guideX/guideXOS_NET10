@@ -64,6 +64,7 @@ $buildLog = Join-Path $outputDirectory 'harness-build.stdout.log'
 $buildErrorLog = Join-Path $outputDirectory 'harness-build.stderr.log'
 $source = Join-Path $root 'src\Gate4Harness\gate4_loader.c'
 $memoryAccountingSource = Join-Path $root 'src\Gate4Harness\memory_accounting.c'
+$managedKernelBootResourcesSource = Join-Path $root 'src\Gate4Harness\managed_kernel_boot_resources.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
 $virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
@@ -106,11 +107,10 @@ $payload = Join-Path $payloadDirectory $payloadName
 $startupScript = Join-Path $espDirectory 'startup.nsh'
 if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
     if ($PayloadMode -eq 'ManagedKernel') {
-        $managedArtifact = Join-Path $root 'artifacts\managed-kernel\gxos-managed-kernel.dll'
+        $managedArtifact = Join-Path $root 'artifacts\managed-kernel\publish\gxos-managed-kernel.dll'
     } elseif ($requiresCallbackPayload -or $requiresAuthoritativePayload) {
         throw 'Callback and GC builds require an explicit -ManagedArtifact pointing to the intended rebuilt payload.'
-    }
-    if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
+    } elseif ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
         $Scenario -eq 'CreateMemoryResourceNotification' -or
         $Scenario -eq 'CreateMemoryResourceNotificationDisabled' -or
         $Scenario -eq 'CreateThread' -or $Scenario -eq 'CreateThreadDisabled' -or
@@ -136,6 +136,7 @@ if (-not (Test-Path -LiteralPath $nativeAotCallbackBridgeSource)) {
     throw "NativeAOT callback bridge source not found: $nativeAotCallbackBridgeSource"
 }
 if (-not (Test-Path -LiteralPath $memoryAccountingSource)) { throw "Memory accounting source not found: $memoryAccountingSource" }
+if (-not (Test-Path -LiteralPath $managedKernelBootResourcesSource)) { throw "ManagedKernel boot-resource source not found: $managedKernelBootResourcesSource" }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
 if (-not (Test-Path -LiteralPath $virtualQueryCaptureAssembly)) { throw "VirtualQuery capture assembly not found: $virtualQueryCaptureAssembly" }
@@ -1116,6 +1117,20 @@ if ($EnableNativeAotManagedCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT
 if ($EnableNativeAotSchedulerCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK' }
 if ($EnableNativeAotManagedGcProbe) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE' }
 if ($PayloadMode -eq 'ManagedKernel') { $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL' }
+if ($PayloadMode -eq 'ManagedKernel') {
+    $gccArguments += $managedKernelBootResourcesSource
+    if ($Scenario -notin @(
+            'NativeAotEventWait', 'CreateEventW', 'CreateEventWDisabled',
+            'CreateMemoryResourceNotification',
+            'CreateMemoryResourceNotificationDisabled', 'CreateThread',
+            'CreateThreadDisabled', 'SetThreadPriority',
+            'SetThreadPriorityDisabled', 'ResumeThread',
+            'ResumeThreadDisabled', 'IsProcessInJob',
+            'IsProcessInJobDisabled', 'SyntheticScheduler')) {
+        $gccArguments += $schedulerSource
+        $gccArguments += $schedulerAssembly
+    }
+}
 if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }
 if ($Scenario -eq 'SyntheticScheduler') {
     $gccArguments += '-DGXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF'

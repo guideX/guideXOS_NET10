@@ -20,6 +20,25 @@ static void test_layout_and_constants(void)
            "init request size is 16");
     expect(sizeof(GX_MANAGED_KERNEL_SYSTEM_INFO_V1) == 32,
            "system info size is 32");
+    expect(sizeof(GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1) == 56,
+           "boot resource summary size is 56");
+    expect(sizeof(GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1) == 32,
+           "boot resource region size is 32");
+    expect(sizeof(GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1) == 48,
+           "boot resource publication size is 48");
+    expect(offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1,
+                    TotalPhysicalBytes) == 24 &&
+               offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1,
+                        Reserved) == 48,
+           "boot resource summary offsets are stable");
+    expect(offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1, BaseAddress) == 8 &&
+               offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1, Flags) == 28,
+           "boot resource region offsets are stable");
+    expect(offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1,
+                    DescriptorAddress) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1,
+                        DescriptorByteLength) == 32,
+           "boot resource publication offsets are stable");
     expect(offsetof(GX_MANAGED_KERNEL_SYSTEM_INFO_V1, Capabilities) == 16,
            "capabilities offset is 16");
     expect(offsetof(GX_MANAGED_KERNEL_SYSTEM_INFO_V1, Reserved) == 24,
@@ -31,11 +50,20 @@ static void test_layout_and_constants(void)
                GX_MANAGED_UNSUPPORTED_ABI == 2U &&
                GX_MANAGED_BUFFER_TOO_SMALL == 3U &&
                GX_MANAGED_NOT_INITIALIZED == 4U &&
-               GX_MANAGED_ALREADY_INITIALIZED == 5U,
+               GX_MANAGED_ALREADY_INITIALIZED == 5U &&
+               GX_MANAGED_OUT_OF_RANGE == 6U,
            "status constants are stable");
     expect(GX_MANAGED_CAPABILITY_SERVICE_ABI == 1ULL &&
                GX_MANAGED_CAPABILITY_SYSTEM_INFORMATION == 2ULL,
            "capability bits are stable");
+    expect(GX_MANAGED_BOOT_RESOURCE_CAPABILITY_SUMMARY == 1ULL &&
+               GX_MANAGED_BOOT_RESOURCE_CAPABILITY_REGIONS == 2ULL &&
+               GX_MANAGED_BOOT_RESOURCE_CAPABILITY_TOTALS == 4ULL,
+           "boot resource capability bits are stable");
+    expect(GX_MANAGED_BOOT_RESOURCE_TYPE_CONVENTIONAL == 1U &&
+               GX_MANAGED_BOOT_RESOURCE_TYPE_UNKNOWN == 16U &&
+               GX_MANAGED_KERNEL_BOOT_RESOURCE_MAX_REGIONS == 2048U,
+           "boot resource types and bound are stable");
 }
 
 static void test_buffer_validation(void)

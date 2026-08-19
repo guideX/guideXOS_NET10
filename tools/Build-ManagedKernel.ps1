@@ -65,7 +65,7 @@ $objdump = Get-Command objdump -ErrorAction Stop
 $pe = & $objdump.Source '-p' $payload 2>&1
 if ($LASTEXITCODE -ne 0) { throw 'objdump could not inspect the ManagedKernel payload.' }
 $pe | Set-Content -LiteralPath (Join-Path $out 'managed-kernel-pe-report.txt')
-$exports = @($pe | Select-String -Pattern 'ManagedMain|GxManagedKernelInitialize|GxManagedQuerySystemInfo' | ForEach-Object { $_.Line.Trim() })
+$exports = @($pe | Select-String -Pattern 'ManagedMain|GxManagedKernelInitialize|GxManagedKernelInstallBootResources|GxManagedQueryBootResources|GxManagedQueryMemoryRegion|GxManagedQuerySystemInfo' | ForEach-Object { $_.Line.Trim() })
 $exports | Set-Content -LiteralPath (Join-Path $out 'managed-kernel-exports.txt')
 
 Write-Output "MANAGED_KERNEL_PROJECT=$project"
@@ -73,4 +73,4 @@ Write-Output "MANAGED_KERNEL_TOOLCHAIN_SDK=$sdkVersion"
 Write-Output "MANAGED_KERNEL_PAYLOAD=$payload"
 Write-Output "MANAGED_KERNEL_PAYLOAD_SIZE=$size"
 Write-Output "MANAGED_KERNEL_PAYLOAD_SHA256=$hash"
-Write-Output 'MANAGED_KERNEL_EXPORTS=ManagedMain,GxManagedKernelInitialize,GxManagedQuerySystemInfo'
+Write-Output 'MANAGED_KERNEL_EXPORTS=ManagedMain,GxManagedKernelInitialize,GxManagedKernelInstallBootResources,GxManagedQueryBootResources,GxManagedQueryMemoryRegion,GxManagedQuerySystemInfo'

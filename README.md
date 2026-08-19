@@ -24,6 +24,18 @@ The post-initialization managed callback bridge is now proven: the loaded PE exp
 
 The NativeAOT/runtime foundation now includes bounded managed allocation and real GC participation on the main and scheduler-attached worker threads, including survival of a stack-local managed root across collection. See [the scheduler-thread GC proof](docs/NATIVEAOT_GC_SCHEDULER_THREAD.md). The older pre-heap and no-allocation artifacts remain historical controls; they do not define the current merge-gate payload.
 
+ManagedKernel Phase 2 adds the first real native-to-managed machine-state
+service: a bounded, versioned snapshot of the normalized boot-time physical
+resource map. Native `g_memory_map` and `GXOS_MEMORY_CLASSIFICATION` remain
+authoritative; ManagedKernel receives copied fixed-layout summary/region values
+and never owns the native allocator or raw UEFI descriptors. The acceptance
+path validates publication, summary totals, first/middle/final descriptors,
+failure sentinels, repeat-query stability, and three fresh QEMU boots. See
+[the ManagedKernel ABI contract](docs/MANAGED_KERNEL_ABI.md).
+
+Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
+versioned view of that truth through the managed-kernel ABI.
+
 ## Provisional first-image path
 
 ```text
@@ -34,6 +46,8 @@ UEFI firmware
   -> bounded TLS, stack, FLS, handle, virtual-query, and one-thread lock state
   -> exported ManagedMain reverse-P/Invoke entry
   -> managed serial callback and deterministic return
+  -> native publication of the immutable boot-resource snapshot
+  -> bounded ManagedKernel summary/region queries
   -> post-initialization ManagedCallback export with existing runtime state
   -> scheduler-thread reverse-P/Invoke attach
   -> managed allocation and real GC probe
