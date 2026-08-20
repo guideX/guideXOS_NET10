@@ -9,7 +9,7 @@
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
     <StartupObject>Program</StartupObject>
-    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelDeviceInventoryHostTests</PathMap>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelSerialDriverHostTests</PathMap>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\ManagedKernel\ManagedKernel.cs" Link="ManagedKernel.cs" />

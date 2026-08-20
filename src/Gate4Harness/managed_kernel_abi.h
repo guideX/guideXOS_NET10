@@ -53,6 +53,13 @@
 #define GX_MANAGED_KERNEL_PCI_READ_WIDTH_8 1U
 #define GX_MANAGED_KERNEL_PCI_READ_WIDTH_16 2U
 #define GX_MANAGED_KERNEL_PCI_READ_WIDTH_32 4U
+#define GX_MANAGED_KERNEL_SERIAL_SERVICES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_SERIAL_SERVICES_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1_SIZE 32U
+#define GX_MANAGED_KERNEL_SERIAL_SERVICES_V1_SIZE 72U
+#define GX_MANAGED_KERNEL_SERIAL_STATUS_V1_SIZE 32U
+#define GX_MANAGED_KERNEL_SERIAL_MAX_TRANSMIT_BYTES 1024U
+#define GX_MANAGED_KERNEL_SERIAL_TX_POLL_LIMIT 4096U
 
 typedef enum {
     GX_MANAGED_OK = 0U,
@@ -65,7 +72,8 @@ typedef enum {
     GX_MANAGED_INVALID_STATE = 7U,
     GX_MANAGED_RESOURCE_EXHAUSTED = 8U,
     GX_MANAGED_NOT_FOUND = 9U,
-    GX_MANAGED_OWNERSHIP_MISMATCH = 10U
+    GX_MANAGED_OWNERSHIP_MISMATCH = 10U,
+    GX_MANAGED_TIMEOUT = 11U
 } GX_MANAGED_STATUS;
 
 /* Public capabilities describe useful interfaces, not proof markers. */
@@ -104,7 +112,8 @@ enum {
 
 typedef enum {
     GX_MANAGED_DEVICE_KIND_UNKNOWN = 0U,
-    GX_MANAGED_DEVICE_KIND_PCI = 1U
+    GX_MANAGED_DEVICE_KIND_PCI = 1U,
+    GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL = 2U
 } GX_MANAGED_DEVICE_KIND;
 
 enum {
@@ -113,6 +122,22 @@ enum {
 
 enum {
     GX_MANAGED_PCI_CAPABILITY_CONFIG_READ = 1ULL << 0
+};
+
+enum {
+    GX_MANAGED_SERIAL_CAPABILITY_TRANSMIT = 1ULL << 0,
+    GX_MANAGED_SERIAL_CAPABILITY_QUERY_STATUS = 1ULL << 1
+};
+
+enum {
+    GX_MANAGED_SERIAL_STATUS_DEVICE_PRESENT = 1ULL << 0,
+    GX_MANAGED_SERIAL_STATUS_TRANSMITTER_READY = 1ULL << 1
+};
+
+enum {
+    GX_MANAGED_SERIAL_FLAG_NONE = 0U,
+    GX_MANAGED_SERIAL_DEVICE_ID_COM1 = 1U,
+    GX_MANAGED_SERIAL_COM_INDEX_1 = 1U
 };
 
 /* Stable guideXOS meanings. These are not UEFI EFI_MEMORY_TYPE values. */
@@ -315,6 +340,41 @@ typedef struct {
     uint64_t Value;
     uint64_t Reserved1;
 } GX_MANAGED_KERNEL_PCI_READ_RESULT_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t DeviceKind;
+    uint32_t DeviceId;
+    uint64_t Capabilities;
+    uint32_t ComIndex;
+    uint32_t Reserved;
+} GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint64_t Capabilities;
+    uint32_t DeviceKind;
+    uint32_t DeviceId;
+    uint32_t ComIndex;
+    uint32_t MaxTransmitBytes;
+    uint64_t TransmitAddress;
+    uint64_t QueryStatusAddress;
+    uint64_t Reserved0;
+    uint64_t Reserved1;
+} GX_MANAGED_KERNEL_SERIAL_SERVICES_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t Status;
+    uint32_t Reserved0;
+    uint64_t Capabilities;
+    uint64_t Reserved1;
+} GX_MANAGED_KERNEL_SERIAL_STATUS_V1;
 #pragma pack(pop)
 
 _Static_assert(sizeof(GX_MANAGED_KERNEL_INIT_REQUEST_V1) ==
@@ -613,6 +673,59 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Value) == 16,
                "managed PCI read result Value offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Reserved1) == 24,
                "managed PCI read result Reserved1 offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1) ==
+                   GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1_SIZE,
+               "managed serial platform device size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1, Size) == 0,
+               "managed serial platform device Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1, AbiVersion) == 4,
+               "managed serial platform device AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1, DeviceKind) == 8,
+               "managed serial platform device DeviceKind offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1, DeviceId) == 12,
+               "managed serial platform device DeviceId offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1, Capabilities) == 16,
+               "managed serial platform device Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1, ComIndex) == 24,
+               "managed serial platform device ComIndex offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1, Reserved) == 28,
+               "managed serial platform device Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1) ==
+                   GX_MANAGED_KERNEL_SERIAL_SERVICES_V1_SIZE,
+               "managed serial services size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, Size) == 0,
+               "managed serial services Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, AbiVersion) == 4,
+               "managed serial services AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, ServiceVersion) == 8,
+               "managed serial services ServiceVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, Architecture) == 12,
+               "managed serial services Architecture offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, Capabilities) == 16,
+               "managed serial services Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, DeviceKind) == 24,
+               "managed serial services DeviceKind offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, DeviceId) == 28,
+               "managed serial services DeviceId offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, ComIndex) == 32,
+               "managed serial services ComIndex offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, MaxTransmitBytes) == 36,
+               "managed serial services MaxTransmitBytes offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, TransmitAddress) == 40,
+               "managed serial services TransmitAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, QueryStatusAddress) == 48,
+               "managed serial services QueryStatusAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, Reserved0) == 56,
+               "managed serial services Reserved0 offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1, Reserved1) == 64,
+               "managed serial services Reserved1 offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_SERIAL_STATUS_V1) ==
+                   GX_MANAGED_KERNEL_SERIAL_STATUS_V1_SIZE,
+               "managed serial status size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_STATUS_V1, Status) == 8,
+               "managed serial status Status offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_STATUS_V1, Capabilities) == 16,
+               "managed serial status Capabilities offset");
 
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INITIALIZE_ENTRY)(
     uint32_t requested_abi_version, uintptr_t request_address);
@@ -660,6 +773,12 @@ typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INSTALL_PCI_SERVIC
     uint32_t requested_abi_version, uintptr_t services_address);
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_RUN_PHASE7_ENTRY)(void);
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_RUN_PHASE7_ACCOUNTING_ENTRY)(void);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_SERIAL_TRANSMIT_ENTRY)(
+    uint32_t device_id, uintptr_t buffer_address, uint32_t byte_length,
+    uint32_t flags);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_SERIAL_QUERY_STATUS_ENTRY)(
+    uint32_t requested_abi_version, uint32_t device_id,
+    uintptr_t result_address, uintptr_t result_capacity);
 
 /* Native callers use this before crossing into managed code. */
 static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_output_buffer(

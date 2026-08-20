@@ -68,6 +68,7 @@ $managedKernelBootResourcesSource = Join-Path $root 'src\Gate4Harness\managed_ke
 $managedKernelHostServicesSource = Join-Path $root 'src\Gate4Harness\managed_kernel_host_services.c'
 $managedKernelMemorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_memory.c'
 $managedKernelDeviceInventorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_device_inventory.c'
+$managedKernelSerialSource = Join-Path $root 'src\Gate4Harness\managed_kernel_serial.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
 $virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
@@ -143,6 +144,7 @@ if (-not (Test-Path -LiteralPath $managedKernelBootResourcesSource)) { throw "Ma
 if (-not (Test-Path -LiteralPath $managedKernelHostServicesSource)) { throw "ManagedKernel host-service source not found: $managedKernelHostServicesSource" }
 if (-not (Test-Path -LiteralPath $managedKernelMemorySource)) { throw "ManagedKernel memory-service source not found: $managedKernelMemorySource" }
 if (-not (Test-Path -LiteralPath $managedKernelDeviceInventorySource)) { throw "ManagedKernel device-inventory source not found: $managedKernelDeviceInventorySource" }
+if (-not (Test-Path -LiteralPath $managedKernelSerialSource)) { throw "ManagedKernel serial-service source not found: $managedKernelSerialSource" }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
 if (-not (Test-Path -LiteralPath $virtualQueryCaptureAssembly)) { throw "VirtualQuery capture assembly not found: $virtualQueryCaptureAssembly" }
@@ -1127,16 +1129,69 @@ if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelBootResourcesSource
     $gccArguments += $managedKernelHostServicesSource
     $gccArguments += $managedKernelDeviceInventorySource
-    if ($Scenario -notin @(
-            'NativeAotEventWait', 'CreateEventW', 'CreateEventWDisabled',
-            'CreateMemoryResourceNotification',
-            'CreateMemoryResourceNotificationDisabled', 'CreateThread',
-            'CreateThreadDisabled', 'SetThreadPriority',
-            'SetThreadPriorityDisabled', 'ResumeThread',
-            'ResumeThreadDisabled', 'IsProcessInJob',
-            'IsProcessInJobDisabled', 'SyntheticScheduler')) {
-        $gccArguments += $schedulerSource
-        $gccArguments += $schedulerAssembly
+    $gccArguments += $managedKernelSerialSource
+    if ($Scenario -ne 'NativeAotEventWait') {
+        # ManagedKernel is an allocation-enabled NativeAOT payload.  Keep its
+        # startup/runtime import surface on the already-proven bounded harness
+        # contracts instead of allowing the loader to fail-fast at the first CRT
+        # bootstrap import.  NativeAotEventWait already adds this complete set
+        # through its scenario-specific path above.
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
+        $gccArguments += '-DGXOS_ENABLE_SLIST'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
+        $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRCMP'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRLEN'
+        $gccArguments += '-DGXOS_ENABLE_GETENV'
+        $gccArguments += '-DGXOS_ENABLE_CRT_STRICMP'
+        $gccArguments += '-DGXOS_ENABLE_SYSTEM_INFO'
+        $gccArguments += '-DGXOS_ENABLE_NUMA_HIGHEST_NODE'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_GROUP_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESS_AFFINITY'
+        $gccArguments += '-DGXOS_ENABLE_QUERY_INFORMATION_JOB_OBJECT'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE'
+        $gccArguments += '-DGXOS_ENABLE_GET_MODULE_HANDLE_EX'
+        $gccArguments += '-DGXOS_ENABLE_GET_PROC_ADDRESS'
+        $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT_REGISTER'
+        $gccArguments += '-DGXOS_ENABLE_CRT_MALLOC'
+        $gccArguments += '-DGXOS_ENABLE_VECTORED_EXCEPTION_HANDLER'
+        $gccArguments += '-DGXOS_ENABLE_CREATE_EVENT_W'
+        $gccArguments += $createEventSource
+        $gccArguments += '-DGXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION'
+        $gccArguments += $createMemoryResourceNotificationSource
+        $gccArguments += '-DGXOS_ENABLE_CREATE_THREAD'
+        $gccArguments += $createThreadSource
+        $gccArguments += $createThreadEntryAssembly
+        $gccArguments += '-DGXOS_ENABLE_SET_THREAD_PRIORITY'
+        $gccArguments += $setThreadPrioritySource
+        $gccArguments += $setThreadPriorityEntryAssembly
+        $gccArguments += '-DGXOS_ENABLE_RESUME_THREAD'
+        $gccArguments += (Join-Path $root 'src\Gate4Harness\resume_thread_entry.S')
+        $gccArguments += '-DGXOS_ENABLE_IS_PROCESS_IN_JOB'
+        $gccArguments += $isProcessInJobEntryAssembly
+        $gccArguments += '-DGXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX'
+        $gccArguments += '-DGXOS_ENABLE_VIRTUAL_MEMORY'
+        $gccArguments += '-DGXOS_ENABLE_PROCESSOR_TOPOLOGY'
+        $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_EVENT_WAIT'
+        $gccArguments += $eventApiSource
+        $gccArguments += $standardHandleSource
+        $gccArguments += $writeFileSource
+        $gccArguments += $writeFileEntryAssembly
+        $gccArguments += $comApiSource
+        $gccArguments += $multibyteSource
+        $gccArguments += $multibyteAssembly
+        $gccArguments += (Join-Path $root 'src\Gate4Harness\crt_malloc.c')
+        if ($Scenario -notin @(
+                'NativeAotEventWait', 'CreateEventW', 'CreateEventWDisabled',
+                'CreateMemoryResourceNotification',
+                'CreateMemoryResourceNotificationDisabled', 'CreateThread',
+                'CreateThreadDisabled', 'SetThreadPriority',
+                'SetThreadPriorityDisabled', 'ResumeThread',
+                'ResumeThreadDisabled', 'IsProcessInJob',
+                'IsProcessInJobDisabled', 'SyntheticScheduler')) {
+            $gccArguments += $schedulerSource
+            $gccArguments += $schedulerAssembly
+        }
     }
 }
 if ($AssumeUnspecifiedTimezoneUtc) { $gccArguments += '-DGXOS_ASSUME_UNSPECIFIED_TIMEZONE_UTC' }

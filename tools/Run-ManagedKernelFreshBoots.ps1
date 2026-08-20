@@ -105,7 +105,7 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE7_PASS') -or
+                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE8_PASS') -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
                     $text.Contains('GXOS_NET10:PAGE_FAULT_')) { break }
@@ -193,6 +193,39 @@ try {
             'GXOS_NET10:MANAGED_KERNEL_DRIVER_ACCOUNTING_RESTORED',
             'GXOS_NET10:MANAGED_KERNEL_DRIVER_NATIVE_ACCOUNTING_OK',
             'GXOS_NET10:MANAGED_KERNEL_PHASE7_PASS',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_NATIVE_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_SERVICES_INSTALLED',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_DEVICE_BOUND',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_DRIVER_INIT_OK',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_DRIVER_START_OK',
+            'MANAGED_SERIAL_DRIVER_TX_FROM_CSHARP',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_DRIVER_TX_OK',
+            'MANAGED_SERIAL_DRIVER_TX_AFTER_RUNTIME',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_DRIVER_RUNTIME_SURVIVAL_OK',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_DRIVER_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_DRIVER_STOP_OK',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_DRIVER_ACCOUNTING_RESTORED',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_NATIVE_ACCOUNTING_OK',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_BASELINE_LIVE=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_BASELINE_PHYSICAL=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_BASELINE_COMMIT=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_BASELINE_VIRTUAL=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_BASELINE_RESERVATIONS=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_BASELINE_COMMITMENTS=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_BASELINE_RESERVED=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_BASELINE_COMMITTED=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_BASELINE_REGIONS=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_AFTER_LIVE=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_AFTER_PHYSICAL=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_AFTER_COMMIT=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_AFTER_VIRTUAL=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_AFTER_RESERVATIONS=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_AFTER_COMMITMENTS=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_AFTER_RESERVED=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_AFTER_COMMITTED=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_ACCOUNTING_AFTER_REGIONS=',
+            'GXOS_NET10:MANAGED_KERNEL_SERIAL_DRIVER_OPERATIONAL_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PHASE8_PASS',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_CONTEXT_INITIALIZED=1',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_SERVICES_INSTALLED',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_BEFORE_START_REJECTED',
@@ -270,6 +303,14 @@ try {
         }
         Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_PHASE7_PASS')).Count -eq 1) `
             "ManagedKernel boot $sequence repeated or omitted the Phase 7 pass marker."
+        Require (([regex]::Matches($text, 'MANAGED_SERIAL_DRIVER_TX_FROM_CSHARP')).Count -eq 1) `
+            "ManagedKernel boot $sequence did not produce exactly one first driver-origin marker."
+        Require (([regex]::Matches($text, 'MANAGED_SERIAL_DRIVER_TX_AFTER_RUNTIME')).Count -eq 1) `
+            "ManagedKernel boot $sequence did not produce exactly one post-runtime driver-origin marker."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_PHASE8_PASS')).Count -eq 1) `
+            "ManagedKernel boot $sequence repeated or omitted the Phase 8 pass marker."
+        Require ($text.Contains('GXOS_NET10:MANAGED_KERNEL_SERIAL_SERVICE_TX_SUCCESS_COUNT=0x0000000000000002')) `
+            "ManagedKernel boot $sequence did not report two successful serial service transmissions."
         Write-Output ("MANAGED_KERNEL_QEMU_RUN_{0}=PASS bytes={1} sha256={2} serial={3}" -f `
             $sequence, ([Text.Encoding]::UTF8.GetByteCount($text)),
             (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant(), $serial)

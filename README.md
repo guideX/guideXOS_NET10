@@ -95,6 +95,18 @@ across runtime/GC activity, and left with `ResourceCount == 0`; no PCI write,
 BAR probe, MMIO, interrupt, DMA, or hardware initialization path is present.
 See [the Phase 7 driver-binding contract](docs/MANAGED_KERNEL_DRIVER_BINDING.md).
 
+ManagedKernel Phase 8 crosses the next boundary with the first real managed
+hardware driver: `ManagedSerialDriver` owns policy and operational state for
+the native-authoritative COM1 platform device. A separate 72-byte Serial
+Services v1 table exposes only bounded transmit and normalized readiness; the
+native side retains all raw port-I/O authority. The managed driver uses a
+two-page KernelArena, emits independent raw COM1 markers before and after
+GC/scheduler/time/memory/inventory/PCI activity, runs deterministic negative
+paths, and proves controlled teardown/accounting restoration before retaining
+one operational instance. Three fresh ManagedKernel QEMU boots and the
+ManagedEntryProbe durability control are covered by the Phase 8 acceptance
+scripts. See [the first managed hardware driver contract](docs/MANAGED_KERNEL_SERIAL_DRIVER.md).
+
 Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
 versioned view of that truth through the managed-kernel ABI.
 
@@ -120,6 +132,7 @@ UEFI firmware
   -> native PCI Services v1 installation with immutable-inventory BDF checks
   -> managed driver registry freeze, deterministic binding, and read-only
      config truth comparison
+  -> managed COM1 serial driver through Serial Services v1
   -> post-initialization ManagedCallback export with existing runtime state
   -> scheduler-thread reverse-P/Invoke attach
   -> managed allocation and real GC probe

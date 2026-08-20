@@ -39,6 +39,21 @@ static void test_layout_and_constants(void)
                sizeof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1) ==
                GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE,
            "PCI services and read result have stable sizes");
+    expect(sizeof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1) == 32 &&
+               sizeof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1) == 72 &&
+               sizeof(GX_MANAGED_KERNEL_SERIAL_STATUS_V1) == 32,
+           "serial platform, service, and status sizes are stable");
+    expect(offsetof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1,
+                    Capabilities) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1,
+                        ComIndex) == 24 &&
+               offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1,
+                        TransmitAddress) == 40 &&
+               offsetof(GX_MANAGED_KERNEL_SERIAL_SERVICES_V1,
+                        QueryStatusAddress) == 48 &&
+               offsetof(GX_MANAGED_KERNEL_SERIAL_STATUS_V1,
+                        Capabilities) == 16,
+           "serial ABI offsets are stable");
     expect(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Capabilities) == 16 &&
                offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1,
                         ConfigReadAddress) == 24 &&
@@ -117,7 +132,8 @@ static void test_layout_and_constants(void)
                GX_MANAGED_INVALID_STATE == 7U &&
                GX_MANAGED_RESOURCE_EXHAUSTED == 8U &&
                GX_MANAGED_NOT_FOUND == 9U &&
-               GX_MANAGED_OWNERSHIP_MISMATCH == 10U,
+               GX_MANAGED_OWNERSHIP_MISMATCH == 10U &&
+               GX_MANAGED_TIMEOUT == 11U,
            "status constants are stable");
     expect(GX_MANAGED_CAPABILITY_SERVICE_ABI == 1ULL &&
                GX_MANAGED_CAPABILITY_SYSTEM_INFORMATION == 2ULL,
@@ -144,10 +160,20 @@ static void test_layout_and_constants(void)
            "boot resource types and bound are stable");
     expect(GX_MANAGED_DEVICE_KIND_UNKNOWN == 0U &&
                GX_MANAGED_DEVICE_KIND_PCI == 1U &&
+               GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL == 2U &&
                GX_MANAGED_DEVICE_FLAG_PCI_MULTIFUNCTION == 1U &&
                GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES == 256U &&
                GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_RESOURCES == 1024U,
            "device inventory enums and bounds are stable");
+    expect(GX_MANAGED_KERNEL_SERIAL_SERVICES_ABI_V1 == 1U &&
+               GX_MANAGED_KERNEL_SERIAL_SERVICES_VERSION_V1 == 1U &&
+               GX_MANAGED_SERIAL_CAPABILITY_TRANSMIT == 1ULL &&
+               GX_MANAGED_SERIAL_CAPABILITY_QUERY_STATUS == 2ULL &&
+               GX_MANAGED_SERIAL_DEVICE_ID_COM1 == 1U &&
+               GX_MANAGED_SERIAL_COM_INDEX_1 == 1U &&
+               GX_MANAGED_KERNEL_SERIAL_MAX_TRANSMIT_BYTES == 1024U &&
+               GX_MANAGED_KERNEL_SERIAL_TX_POLL_LIMIT == 4096U,
+           "serial capability and transfer bounds are stable");
 }
 
 static void test_buffer_validation(void)

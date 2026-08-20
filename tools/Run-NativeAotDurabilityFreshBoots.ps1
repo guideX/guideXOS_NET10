@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory = $true)] [string]$GateDirectory,
     [Parameter(Mandatory = $true)] [string]$EvidenceDirectory,
     [int]$RunCount = 3,
-    [int]$TimeoutSeconds = 120
+    [int]$TimeoutSeconds = 120,
+    [string]$SourcePayloadPath = '',
+    [string]$PayloadSha256 = ''
 )
 
 Set-StrictMode -Version Latest
@@ -14,8 +16,16 @@ $gate = [IO.Path]::GetFullPath($GateDirectory)
 $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 $efi = Join-Path $gate 'ESP\EFI\BOOT\BOOTX64.EFI'
 $builtPayload = Join-Path $gate 'ESP\GXOS\gxos-managed-entry-probe.dll'
-$sourcePayload = Join-Path $root 'artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll'
-$expectedHash = '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837'
+$sourcePayload = if ([string]::IsNullOrWhiteSpace($SourcePayloadPath)) {
+    Join-Path $root 'artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll'
+} else {
+    [IO.Path]::GetFullPath($SourcePayloadPath)
+}
+$expectedHash = if ([string]::IsNullOrWhiteSpace($PayloadSha256)) {
+    '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837'
+} else {
+    $PayloadSha256.ToUpperInvariant()
+}
 
 function Require([bool]$condition, [string]$message) {
     if (!$condition) { throw $message }

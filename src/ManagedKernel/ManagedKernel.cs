@@ -399,7 +399,8 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.AbiVersion)).ToInt32() == 4 &&
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Width)).ToInt32() == 8 &&
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Value)).ToInt32() == 16 &&
-               Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Reserved1)).ToInt32() == 24;
+               Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Reserved1)).ToInt32() == 24 &&
+               ManagedKernelSerialLayout.IsValid();
     }
 }
 
@@ -536,7 +537,7 @@ internal static unsafe class ManagedKernelContract
     private static bool IsInitialized =>
         s_lifecycleState != (int)LifecycleState.BootstrapAvailable;
 
-    private static bool IsRangeValid(nuint address, nuint length)
+    internal static bool IsRangeValid(nuint address, nuint length)
     {
         return address != 0 && length != 0 &&
                address <= nuint.MaxValue - length;
@@ -1031,6 +1032,27 @@ internal static unsafe class ManagedKernelContract
         }
         s_lifecycleState = (int)LifecycleState.Started;
         return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallSerialServices")]
+    internal static uint InstallSerialServices(uint requestedAbiVersion,
+                                                nuint servicesAddress,
+                                                nuint deviceAddress)
+    {
+        return ManagedSerialDriverSubsystem.Install(
+            requestedAbiVersion, servicesAddress, deviceAddress);
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase8Accounting")]
+    internal static uint RunPhase8Accounting()
+    {
+        return ManagedSerialDriverSubsystem.RunAccounting();
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase8")]
+    internal static uint RunPhase8()
+    {
+        return ManagedSerialDriverSubsystem.Run();
     }
 
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallDeviceInventory")]
