@@ -244,6 +244,35 @@ internal struct GxManagedKernelDeviceInventoryPublicationV1
     internal ulong Reserved;
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelPciServicesV1
+{
+    internal const uint ExpectedSize = 48;
+    internal const ulong CapabilityConfigRead = 1UL << 0;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint ServiceVersion;
+    internal uint Architecture;
+    internal ulong Capabilities;
+    internal ulong ConfigReadAddress;
+    internal ulong Reserved0;
+    internal ulong Reserved1;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelPciReadResultV1
+{
+    internal const uint ExpectedSize = 32;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint Width;
+    internal uint Reserved0;
+    internal ulong Value;
+    internal ulong Reserved1;
+}
+
 internal static unsafe class ManagedKernelLayout
 {
     internal static bool IsValid()
@@ -262,6 +291,8 @@ internal static unsafe class ManagedKernelLayout
                sizeof(GxManagedKernelDeviceInventorySummaryV1) == 40 &&
                sizeof(GxManagedKernelDeviceV1) == 48 &&
                sizeof(GxManagedKernelDeviceInventoryPublicationV1) == 48 &&
+               sizeof(GxManagedKernelPciServicesV1) == 48 &&
+               sizeof(GxManagedKernelPciReadResultV1) == 32 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Magic)).ToInt32() == 0 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Version)).ToInt32() == 4 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Size)).ToInt32() == 6 &&
@@ -355,7 +386,20 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorCount)).ToInt32() == 24 &&
                Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorSize)).ToInt32() == 28 &&
                Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorByteLength)).ToInt32() == 32 &&
-               Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.Reserved)).ToInt32() == 40;
+               Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.Reserved)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.Size)).ToInt32() == 0 &&
+               Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.AbiVersion)).ToInt32() == 4 &&
+               Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.ServiceVersion)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.Architecture)).ToInt32() == 12 &&
+               Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.Capabilities)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.ConfigReadAddress)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.Reserved0)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.Reserved1)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Size)).ToInt32() == 0 &&
+               Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.AbiVersion)).ToInt32() == 4 &&
+               Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Width)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Value)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Reserved1)).ToInt32() == 24;
     }
 }
 
@@ -423,6 +467,12 @@ internal static unsafe class ManagedKernelContract
         GxManagedKernelDeviceInventorySummaryV1.CapabilitySummary |
         GxManagedKernelDeviceInventorySummaryV1.CapabilityDevices |
         GxManagedKernelDeviceInventorySummaryV1.CapabilityImmutableBootSnapshot;
+    private const uint PciServicesAbiVersionV1 = 1;
+    private const uint PciServicesServiceVersionV1 = 1;
+    private const ulong PciServicesKnownCapabilities =
+        GxManagedKernelPciServicesV1.CapabilityConfigRead;
+    private const ulong PciServicesRequiredCapabilities =
+        GxManagedKernelPciServicesV1.CapabilityConfigRead;
     internal const ulong MemoryPageSize = 4096;
     internal const uint MemoryMaxPagesPerAllocation = 256;
     internal const uint MemoryMaxLiveAllocations = 16;
@@ -458,6 +508,13 @@ internal static unsafe class ManagedKernelContract
     private static nuint s_memoryReleasePagesAddress;
     private static int s_deviceInventoryInstalled;
     private static ManagedDeviceInventory? s_deviceInventory;
+    private static int s_pciServicesInstalled;
+    private static ulong s_pciCapabilities;
+    private static nuint s_pciConfigReadAddress;
+    private static int s_pciReadBeforeInstallNegativeLogged;
+    private static int s_phase7Run;
+    private static int s_phase7AccountingRun;
+    private static ManagedDriverRegistry? s_driverRegistry;
     private static int s_phase4Run;
     private static int s_phase5Run;
     private static int s_phase6Run;
@@ -469,8 +526,12 @@ internal static unsafe class ManagedKernelContract
     internal static nuint MemoryReleasePagesAddress => s_memoryReleasePagesAddress;
     internal static bool DeviceInventoryInstalled => s_deviceInventoryInstalled != 0;
     internal static bool HostServicesInstalled => s_hostServicesInstalled != 0;
+    internal static bool PciServicesInstalled => s_pciServicesInstalled != 0;
+    internal static nuint PciConfigReadAddress => s_pciConfigReadAddress;
     internal static ManagedDeviceInventory? OperationalDeviceInventory =>
         s_deviceInventory;
+    internal static ManagedDriverRegistry? OperationalDriverRegistry =>
+        s_driverRegistry;
 
     private static bool IsInitialized =>
         s_lifecycleState != (int)LifecycleState.BootstrapAvailable;
@@ -1067,6 +1128,309 @@ internal static unsafe class ManagedKernelContract
 
         s_deviceInventory = candidate;
         s_deviceInventoryInstalled = 1;
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallPciServices")]
+    internal static uint InstallPciServices(uint requestedAbiVersion,
+                                             nuint servicesAddress)
+    {
+        GxManagedKernelPciServicesV1 services;
+        if (requestedAbiVersion != PciServicesAbiVersionV1)
+        {
+            return UnsupportedAbi;
+        }
+        if (!IsInitialized || s_deviceInventoryInstalled == 0 ||
+            s_deviceInventory == null)
+        {
+            return NotInitialized;
+        }
+        if (s_pciServicesInstalled != 0) return AlreadyInitialized;
+        if (s_lifecycleState != (int)LifecycleState.Started ||
+            servicesAddress == 0 ||
+            !IsRangeValid(servicesAddress,
+                (nuint)GxManagedKernelPciServicesV1.ExpectedSize))
+        {
+            return s_lifecycleState != (int)LifecycleState.Started
+                ? InvalidState : InvalidArgument;
+        }
+        if (!s_deviceInventory.TryGetDevice(0, out ManagedDevice first) ||
+            PciConfiguration.TryRead8(in first, 0, out _))
+        {
+            return InvalidState;
+        }
+        if (s_pciReadBeforeInstallNegativeLogged == 0 &&
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PCI_READ_BEFORE_INSTALL_REJECTED\r\n"u8))
+        {
+            return InvalidState;
+        }
+        s_pciReadBeforeInstallNegativeLogged = 1;
+
+        services = *(GxManagedKernelPciServicesV1*)servicesAddress;
+        if (services.Size != GxManagedKernelPciServicesV1.ExpectedSize ||
+            services.AbiVersion != PciServicesAbiVersionV1 ||
+            services.ServiceVersion != PciServicesServiceVersionV1 ||
+            services.Architecture != ArchitectureX64 ||
+            (services.Capabilities & ~PciServicesKnownCapabilities) != 0 ||
+            (services.Capabilities & PciServicesRequiredCapabilities) !=
+                PciServicesRequiredCapabilities ||
+            services.ConfigReadAddress == 0 || services.Reserved0 != 0 ||
+            services.Reserved1 != 0)
+        {
+            return InvalidArgument;
+        }
+        s_pciCapabilities = services.Capabilities;
+        s_pciConfigReadAddress = (nuint)services.ConfigReadAddress;
+        s_pciServicesInstalled = 1;
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PCI_SERVICES_INSTALLED\r\n"u8))
+        {
+            s_pciServicesInstalled = 0;
+            s_pciCapabilities = 0;
+            s_pciConfigReadAddress = 0;
+            return InvalidState;
+        }
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase7")]
+    internal static uint RunPhase7()
+    {
+        ManagedDriverRegistry? registry = null;
+        ManagedDevice selected = default;
+        ManagedDriverBindingInfo selectedBinding = default;
+        uint selectedIndex = 0;
+        bool selectedFound = false;
+        if (!IsInitialized || s_lifecycleState != (int)LifecycleState.Started)
+        {
+            return IsInitialized ? InvalidState : NotInitialized;
+        }
+        if (s_phase7Run != 0) return AlreadyInitialized;
+        if (s_pciServicesInstalled == 0 || s_deviceInventoryInstalled == 0 ||
+            s_deviceInventory == null ||
+            !PciConfiguration.IsAvailable || !s_deviceInventory.ValidateInvariants())
+        {
+            return InvalidState;
+        }
+        if (!ManagedDriverRegistry.TryRunPrecedenceTests(
+                Phase4KernelMemoryProvider.Instance))
+        {
+            return InvalidState;
+        }
+        registry = ManagedDriverRegistry.Create(Phase4KernelMemoryProvider.Instance);
+        if (registry == null) return ResourceExhausted;
+
+        ManagedDriverDefinition hostBridge = new(
+            0x7101, 0x48425247, 100,
+            new[] { new ManagedDriverMatchRule(
+                ManagedDriverMatchType.ExactVendorDevice,
+                vendorId: 0x8086, deviceId: 0x29C0) });
+        ManagedDriverDefinition displayPolicy = new(
+            0x7102, 0x44495350, 10,
+            new[] { new ManagedDriverMatchRule(
+                ManagedDriverMatchType.Class, classCode: 0x03) });
+        if (!registry.TryRegister(in hostBridge) ||
+            !registry.TryRegister(in displayPolicy) ||
+            !registry.TryFreeze() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_REGISTRY_OK\r\n"u8) ||
+            !registry.TryBind(s_deviceInventory) ||
+            !registry.ValidateInvariants())
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_BIND_OK\r\n"u8))
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+        for (uint index = 0; index != s_deviceInventory.DeviceCount; ++index)
+        {
+            if (!registry.TryGetBinding(index, out ManagedDriverBindingInfo binding) ||
+                binding.State != ManagedDriverBindingState.Bound ||
+                !s_deviceInventory.TryGetDevice(index, out ManagedDevice device)) continue;
+            selectedIndex = index;
+            selected = device;
+            selectedBinding = binding;
+            selectedFound = true;
+            break;
+        }
+        if (!selectedFound || registry.BoundDeviceCount == 0 ||
+            registry.UnboundDeviceCount == 0)
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_UNBOUND_OK\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_SELECTED_BDF=0x"u8,
+                ((ulong)selected.Segment << 32) | ((ulong)selected.Bus << 24) |
+                ((ulong)selected.Device << 16) | ((ulong)selected.Function << 8)) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_SELECTED_SEGMENT=0x"u8,
+                                    selected.Segment) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_SELECTED_BUS=0x"u8,
+                                    selected.Bus) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_SELECTED_DEVICE_NUMBER=0x"u8,
+                                    selected.Device) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_SELECTED_FUNCTION=0x"u8,
+                                    selected.Function) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_SELECTED_ID=0x"u8,
+                                    selectedBinding.DriverId) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_NAME_TOKEN=0x"u8,
+                                    selectedBinding.NameToken) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_MATCH_TYPE=0x"u8,
+                                    (uint)selectedBinding.MatchType) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_SPECIFICITY=0x"u8,
+                                    selectedBinding.Specificity) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_PRIORITY=0x"u8,
+                                    unchecked((uint)selectedBinding.Priority)) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_VENDOR=0x"u8,
+                                    selected.VendorId) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_DEVICE=0x"u8,
+                                    selected.DeviceId) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_CLASS=0x"u8,
+                ((ulong)selected.ClassCode << 16) |
+                ((ulong)selected.Subclass << 8) | selected.ProgrammingInterface) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_BOUND_COUNT=0x"u8,
+                                    registry.BoundDeviceCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_UNBOUND_COUNT=0x"u8,
+                                    registry.UnboundDeviceCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_ARENA_CHUNKS=0x"u8,
+                                    registry.Metrics.BackingChunkCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_ARENA_PAGES=0x"u8,
+                registry.Metrics.TotalBackingBytes / KernelArena.PageSize) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DRIVER_ARENA_LIVE_ALLOCATIONS=0x"u8,
+                                    registry.Metrics.LiveAllocationCount))
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+        if (registry.TryRegister(in hostBridge) ||
+            registry.TryBind(s_deviceInventory) ||
+            registry.TryGetBinding(s_deviceInventory.DeviceCount, out _) ||
+            !registry.ValidateInvariants() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_NEGATIVE_TESTS_OK\r\n"u8))
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+
+        if (!PciConfiguration.TryRead16(in selected, 0, out ushort vendor) ||
+            !PciConfiguration.TryRead16(in selected, 2, out ushort deviceId) ||
+            !PciConfiguration.TryRead8(in selected, 8, out byte revision) ||
+            !PciConfiguration.TryRead8(in selected, 0x0B, out byte classCode) ||
+            !PciConfiguration.TryRead8(in selected, 0x0A, out byte subclass) ||
+            !PciConfiguration.TryRead8(in selected, 0x09, out byte progIf) ||
+            !PciConfiguration.TryRead8(in selected, 0x0E, out byte headerType) ||
+            vendor != selected.VendorId || deviceId != selected.DeviceId ||
+            revision != selected.RevisionId || classCode != selected.ClassCode ||
+            subclass != selected.Subclass || progIf != selected.ProgrammingInterface ||
+            headerType != selected.HeaderType)
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PCI_CONFIG_READ_OK\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_PCI_VENDOR_READ=0x"u8,
+                                    vendor) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_PCI_DEVICE_READ=0x"u8,
+                                    deviceId) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_PCI_CLASS_READ=0x"u8,
+                ((ulong)classCode << 16) | ((ulong)subclass << 8) | progIf) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PCI_CONFIG_MATCH_OK\r\n"u8))
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+
+        bool negativeReads =
+            !PciConfiguration.TryReadForValidation(in selected, 1, 2, out _) &&
+            !PciConfiguration.TryReadForValidation(in selected, 256, 1, out _) &&
+            !PciConfiguration.TryReadForValidation(in selected, 0, 3, out _) &&
+            !PciConfiguration.TryReadForValidation(in selected, 0xFD, 4, out _);
+        ManagedDevice unknown = default;
+        negativeReads = negativeReads &&
+            !PciConfiguration.TryRead8(in unknown, 0, out _);
+        if (!negativeReads ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PCI_NEGATIVE_TESTS_OK\r\n"u8))
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_PRECEDENCE_OK\r\n"u8))
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+
+        if (!ManagedKernelContract.TryQueryMonotonicTime(out _) ||
+            !KernelMemory.TryAllocate(1, 0, out KernelMemoryRegion runtimeRegion))
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+        byte* runtimeBytes = (byte*)(nuint)runtimeRegion.VirtualAddress;
+        runtimeBytes[0] = 0x7B;
+        GC.Collect();
+        GC.KeepAlive(s_driverRegistry);
+        if (runtimeBytes[0] != 0x7B || !KernelMemory.TryRelease(in runtimeRegion) ||
+            !registry.ValidateInvariants() ||
+            !PciConfiguration.TryRead16(in selected, 0, out ushort vendorAgain) ||
+            vendorAgain != vendor || !registry.IsDeviceBound(selectedIndex))
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_RUNTIME_SURVIVAL_OK\r\n"u8))
+        {
+            registry.Destroy();
+            return InvalidState;
+        }
+        s_driverRegistry = registry;
+        s_phase7Run = 1;
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase7Accounting")]
+    internal static uint RunPhase7Accounting()
+    {
+        KernelArenaMetrics baselineMetrics;
+        KernelArenaMetrics afterMetrics;
+        ManagedDriverBindingInfo binding;
+        ManagedDevice accountingDevice;
+        if (!IsInitialized || s_lifecycleState != (int)LifecycleState.Started)
+        {
+            return IsInitialized ? InvalidState : NotInitialized;
+        }
+        if (s_phase7Run == 0 || s_phase7AccountingRun != 0 ||
+            s_driverRegistry == null || !s_driverRegistry.ValidateInvariants())
+        {
+            return InvalidState;
+        }
+        baselineMetrics = s_driverRegistry.Metrics;
+        if (!s_driverRegistry.ValidateInvariants() ||
+            !s_driverRegistry.TryGetBinding(0, out binding) ||
+            !s_deviceInventory.TryGetDevice(0, out accountingDevice) ||
+            !PciConfiguration.TryRead16(in accountingDevice, 0, out _) ||
+            !s_driverRegistry.ValidateInvariants())
+        {
+            return InvalidState;
+        }
+        afterMetrics = s_driverRegistry.Metrics;
+        if (baselineMetrics.LiveAllocationCount != afterMetrics.LiveAllocationCount ||
+            baselineMetrics.BackingChunkCount != afterMetrics.BackingChunkCount ||
+            baselineMetrics.TotalBackingBytes != afterMetrics.TotalBackingBytes ||
+            baselineMetrics.LiveRequestedBytes != afterMetrics.LiveRequestedBytes ||
+            baselineMetrics.FreeBytes != afterMetrics.FreeBytes ||
+            baselineMetrics.LargestFreeBlock != afterMetrics.LargestFreeBlock ||
+            binding.State != ManagedDriverBindingState.Bound ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_ACCOUNTING_RESTORED\r\n"u8))
+        {
+            return InvalidState;
+        }
+        s_phase7AccountingRun = 1;
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE7_PASS\r\n"u8))
+        {
+            return InvalidState;
+        }
         return ManagedOk;
     }
 

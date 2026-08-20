@@ -36,6 +36,13 @@ typedef uint32_t (*GXOS_MANAGED_KERNEL_PCI_CONFIG_READ32)(
     void *context, uint16_t segment, uint8_t bus, uint8_t device,
     uint8_t function, uint8_t offset);
 
+typedef struct {
+    const GXOS_MANAGED_KERNEL_PCI_DEVICE_INPUT *devices;
+    uint32_t device_count;
+    GXOS_MANAGED_KERNEL_PCI_CONFIG_READ32 read32;
+    void *read_context;
+} GXOS_MANAGED_KERNEL_PCI_ACCESS_CONTEXT;
+
 GXOS_MANAGED_KERNEL_DEVICE_INVENTORY_STATUS
 gxos_managed_kernel_discover_pci_devices(
     GXOS_MANAGED_KERNEL_PCI_CONFIG_READ32 read32,
@@ -47,6 +54,14 @@ gxos_managed_kernel_discover_pci_devices(
 uint32_t gxos_managed_kernel_pci_config_read32(
     void *context, uint16_t segment, uint8_t bus, uint8_t device,
     uint8_t function, uint8_t offset);
+
+/* Safe v1 service callback. It only reads the conventional 256-byte PCI
+   configuration header and only for a BDF present in the immutable native
+   discovery snapshot supplied in context. */
+uint32_t gxos_managed_kernel_pci_config_read_v1(
+    void *context, uint32_t segment, uint32_t bus, uint32_t device,
+    uint32_t function, uint32_t offset, uint32_t width,
+    uintptr_t result_address, uintptr_t result_capacity);
 
 GXOS_MANAGED_KERNEL_DEVICE_INVENTORY_STATUS
 gxos_managed_kernel_normalize_device_inventory(

@@ -162,15 +162,111 @@ static void test_rejection_paths(void)
            "unknown device flags are rejected");
 }
 
+static void test_pci_config_service(void)
+{
+    FIXTURE_CONTEXT fixture = {
+        {
+            {0, 0, 0, 0x8086, 0x29C0, 2, 0x06, 0x00, 0x00, 0x80},
+            {0, 1, 0, 0x1234, 0x5678, 1, 0x03, 0x00, 0x00, 0x00}
+        },
+        2
+    };
+    GXOS_MANAGED_KERNEL_PCI_DEVICE_INPUT snapshot[2] = {
+        {0, 0, 0, 0, 0x80, 0x8086, 0x29C0, 2, 0x06, 0x00, 0x00, 0},
+        {0, 1, 0, 0, 0x00, 0x1234, 0x5678, 1, 0x03, 0x00, 0x00, 0}
+    };
+    GXOS_MANAGED_KERNEL_PCI_ACCESS_CONTEXT access = {
+        snapshot, 2, fixture_read32, &fixture
+    };
+    GX_MANAGED_KERNEL_PCI_READ_RESULT_V1 result;
+    GX_MANAGED_KERNEL_PCI_READ_RESULT_V1 sentinel;
+
+    sentinel.Size = 0xA5A5A5A5U;
+    sentinel.AbiVersion = 0xA5A5A5A5U;
+    sentinel.Width = 0xA5A5A5A5U;
+    sentinel.Reserved0 = 0xA5A5A5A5U;
+    sentinel.Value = 0xA5A5A5A5A5A5A5A5ULL;
+    sentinel.Reserved1 = 0xA5A5A5A5A5A5A5A5ULL;
+
+    result = sentinel;
+    expect(gxos_managed_kernel_pci_config_read_v1(
+               &access, 0, 0, 0, 0, 0,
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_16,
+               (uintptr_t)&result, sizeof(result)) == GX_MANAGED_OK &&
+               result.Size == GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE &&
+               result.AbiVersion == GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1 &&
+               result.Width == GX_MANAGED_KERNEL_PCI_READ_WIDTH_16 &&
+               result.Value == 0x8086,
+           "PCI v1 wrapper reads a validated vendor word");
+    result = sentinel;
+    expect(gxos_managed_kernel_pci_config_read_v1(
+               &access, 0, 0, 0, 0, 0x08,
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_32,
+               (uintptr_t)&result, sizeof(result)) == GX_MANAGED_OK &&
+               result.Value == 0x06000002U,
+           "PCI v1 wrapper reads a validated class dword");
+
+    result = sentinel;
+    expect(gxos_managed_kernel_pci_config_read_v1(
+               &access, 0, 7, 0, 0, 0,
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_8,
+               (uintptr_t)&result, sizeof(result)) == GX_MANAGED_NOT_FOUND &&
+               memcmp(&result, &sentinel, sizeof(result)) == 0,
+           "PCI v1 wrapper rejects an unknown BDF without writing output");
+    result = sentinel;
+    expect(gxos_managed_kernel_pci_config_read_v1(
+               &access, 1, 0, 0, 0, 0,
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_8,
+               (uintptr_t)&result, sizeof(result)) == GX_MANAGED_NOT_FOUND &&
+               memcmp(&result, &sentinel, sizeof(result)) == 0,
+           "PCI v1 wrapper rejects a segment outside the immutable snapshot");
+    result = sentinel;
+    expect(gxos_managed_kernel_pci_config_read_v1(
+               &access, 0, 0, 0, 0, 1,
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_16,
+               (uintptr_t)&result, sizeof(result)) == GX_MANAGED_INVALID_ARGUMENT &&
+               memcmp(&result, &sentinel, sizeof(result)) == 0,
+           "PCI v1 wrapper rejects misaligned word reads");
+    result = sentinel;
+    expect(gxos_managed_kernel_pci_config_read_v1(
+               &access, 0, 0, 0, 0, 0xFD,
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_32,
+               (uintptr_t)&result, sizeof(result)) == GX_MANAGED_INVALID_ARGUMENT &&
+               memcmp(&result, &sentinel, sizeof(result)) == 0,
+           "PCI v1 wrapper rejects reads beyond conventional config space");
+    result = sentinel;
+    expect(gxos_managed_kernel_pci_config_read_v1(
+               &access, 0, 0, 0, 0, 0, 3,
+               (uintptr_t)&result, sizeof(result)) == GX_MANAGED_INVALID_ARGUMENT &&
+               memcmp(&result, &sentinel, sizeof(result)) == 0,
+           "PCI v1 wrapper rejects unsupported widths");
+    result = sentinel;
+    expect(gxos_managed_kernel_pci_config_read_v1(
+               &access, 0, 0, 0, 0, 0,
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_8,
+               (uintptr_t)&result,
+               GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE - 1U) ==
+               GX_MANAGED_BUFFER_TOO_SMALL &&
+               memcmp(&result, &sentinel, sizeof(result)) == 0,
+           "PCI v1 wrapper rejects an undersized result buffer");
+    expect(gxos_managed_kernel_pci_config_read_v1(
+               &access, 0, 0, 0, 0, 0,
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_8, 0, sizeof(result)) ==
+               GX_MANAGED_INVALID_ARGUMENT,
+           "PCI v1 wrapper rejects a null result pointer");
+}
+
 int main(void)
 {
     test_discovery_and_normalization();
     test_rejection_paths();
+    test_pci_config_service();
     if (g_failures != 0) {
         printf("MANAGED_KERNEL_DEVICE_INVENTORY_HOST_TESTS=FAILED failures=%u\n",
                g_failures);
         return 1;
     }
+    printf("MANAGED_KERNEL_PCI_CONFIG_HOST_TESTS=PASSED\n");
     printf("MANAGED_KERNEL_DEVICE_INVENTORY_HOST_TESTS=PASSED\n");
     return 0;
 }

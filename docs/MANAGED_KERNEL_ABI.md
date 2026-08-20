@@ -682,6 +682,29 @@ proof and are diagnostic rather than leak criteria. The fresh-boot acceptance
 requires all managed and native Phase 5 markers on three independent QEMU
 processes, with the staged payload remaining byte-identical on every boot.
 
+## Phase 7: managed driver binding and PCI read-only access
+
+Phase 7 adds a separately versioned 48-byte PCI Services v1 table and a
+32-byte fixed PCI read result. The service supports only conventional 256-byte
+configuration space and widths 8/16/32 bits, with natural alignment required
+for 16- and 32-bit reads. It validates offset-plus-width bounds, preserves
+failure sentinels, and checks every requested segment/BDF against the immutable
+native Phase 6 inventory before using the existing native CF8/CFC dword-read
+mechanism. There is no PCI write callback. Phase 6 `ResourceCount == 0` is
+unchanged because Phase 7 does not probe BAR sizes.
+
+The managed `PciConfiguration` wrapper accepts an inventory-owned
+`ManagedDevice`, not an arbitrary native address. The managed driver registry
+is bounded and arena-backed, with maximums of 8 drivers, 4 rules per driver,
+and 16 total rules. It supports exact vendor/device, class/subclass/prog-if,
+class/subclass, and class-only rules. Specificity outranks priority; equal
+specificity uses explicit priority and then registration order. The registry
+freezes before binding, stores at most one driver per device, preserves
+unmatched devices as unbound, and validates all binding/arena invariants.
+
+For the complete Phase 7 safety and policy contract, see
+[MANAGED_KERNEL_DRIVER_BINDING.md](MANAGED_KERNEL_DRIVER_BINDING.md).
+
 The Phase 3 acceptance rule remains deliberately narrow: add the smallest
 versioned Host Services v1 surface, keep the normal transition deterministic,
 and preserve every previously proven behavior. “Do not reinterpret existing

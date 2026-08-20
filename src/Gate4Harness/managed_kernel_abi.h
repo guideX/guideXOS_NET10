@@ -45,6 +45,14 @@
 #define GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1_SIZE 48U
 #define GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES 256U
 #define GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_RESOURCES 1024U
+#define GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_PCI_SERVICES_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_PCI_SERVICES_V1_SIZE 48U
+#define GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE 32U
+#define GX_MANAGED_KERNEL_PCI_CONFIG_SPACE_SIZE 256U
+#define GX_MANAGED_KERNEL_PCI_READ_WIDTH_8 1U
+#define GX_MANAGED_KERNEL_PCI_READ_WIDTH_16 2U
+#define GX_MANAGED_KERNEL_PCI_READ_WIDTH_32 4U
 
 typedef enum {
     GX_MANAGED_OK = 0U,
@@ -101,6 +109,10 @@ typedef enum {
 
 enum {
     GX_MANAGED_DEVICE_FLAG_PCI_MULTIFUNCTION = 1U << 0
+};
+
+enum {
+    GX_MANAGED_PCI_CAPABILITY_CONFIG_READ = 1ULL << 0
 };
 
 /* Stable guideXOS meanings. These are not UEFI EFI_MEMORY_TYPE values. */
@@ -283,6 +295,26 @@ typedef struct {
     uint64_t DescriptorByteLength;
     uint64_t Reserved;
 } GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint64_t Capabilities;
+    uint64_t ConfigReadAddress;
+    uint64_t Reserved0;
+    uint64_t Reserved1;
+} GX_MANAGED_KERNEL_PCI_SERVICES_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t Width;
+    uint32_t Reserved0;
+    uint64_t Value;
+    uint64_t Reserved1;
+} GX_MANAGED_KERNEL_PCI_READ_RESULT_V1;
 #pragma pack(pop)
 
 _Static_assert(sizeof(GX_MANAGED_KERNEL_INIT_REQUEST_V1) ==
@@ -549,6 +581,38 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, Descr
                "managed device inventory publication DescriptorByteLength offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, Reserved) == 40,
                "managed device inventory publication Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_PCI_SERVICES_V1) ==
+                   GX_MANAGED_KERNEL_PCI_SERVICES_V1_SIZE,
+               "managed PCI services size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Size) == 0,
+               "managed PCI services Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, AbiVersion) == 4,
+               "managed PCI services AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, ServiceVersion) == 8,
+               "managed PCI services ServiceVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Architecture) == 12,
+               "managed PCI services Architecture offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Capabilities) == 16,
+               "managed PCI services Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, ConfigReadAddress) == 24,
+               "managed PCI services ConfigReadAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Reserved0) == 32,
+               "managed PCI services Reserved0 offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Reserved1) == 40,
+               "managed PCI services Reserved1 offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1) ==
+                   GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE,
+               "managed PCI read result size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Size) == 0,
+               "managed PCI read result Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, AbiVersion) == 4,
+               "managed PCI read result AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Width) == 8,
+               "managed PCI read result Width offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Value) == 16,
+               "managed PCI read result Value offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Reserved1) == 24,
+               "managed PCI read result Reserved1 offset");
 
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INITIALIZE_ENTRY)(
     uint32_t requested_abi_version, uintptr_t request_address);
@@ -588,6 +652,14 @@ enum {
 };
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_RUN_PHASE5_ENTRY)(
     uint32_t stage);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_PCI_CONFIG_READ_ENTRY)(
+    uint32_t segment, uint32_t bus, uint32_t device, uint32_t function,
+    uint32_t offset, uint32_t width, uintptr_t result_address,
+    uintptr_t result_capacity);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INSTALL_PCI_SERVICES_ENTRY)(
+    uint32_t requested_abi_version, uintptr_t services_address);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_RUN_PHASE7_ENTRY)(void);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_RUN_PHASE7_ACCOUNTING_ENTRY)(void);
 
 /* Native callers use this before crossing into managed code. */
 static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_output_buffer(

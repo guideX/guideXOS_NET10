@@ -84,6 +84,17 @@ negative installs, byte-for-byte query parity, GC/runtime survival, temporary
 teardown, accounting restoration, and persistent inventory operability. See
 [the Phase 6 ABI and inventory contract](docs/MANAGED_KERNEL_ABI.md#phase-6-managed-platform-and-device-inventory).
 
+ManagedKernel Phase 7 adds managed driver-selection policy plus a separately
+versioned, strictly read-only PCI configuration service. Native guideXOS keeps
+the CF8/CFC hardware mechanism and validates every request against the
+immutable Phase 6 inventory; ManagedKernel owns bounded driver definitions,
+deterministic specificity/priority/registration-order precedence, freeze and
+binding state, and arena-backed policy tables. Real QEMU devices are matched,
+read through the managed wrapper, compared against inventory truth, exercised
+across runtime/GC activity, and left with `ResourceCount == 0`; no PCI write,
+BAR probe, MMIO, interrupt, DMA, or hardware initialization path is present.
+See [the Phase 7 driver-binding contract](docs/MANAGED_KERNEL_DRIVER_BINDING.md).
+
 Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
 versioned view of that truth through the managed-kernel ABI.
 
@@ -106,6 +117,9 @@ UEFI firmware
      multi-arena, negative-path, and destroy proof
   -> native read-only PCI identity snapshot
   -> managed Phase 6 device inventory, indexed queries, and teardown proof
+  -> native PCI Services v1 installation with immutable-inventory BDF checks
+  -> managed driver registry freeze, deterministic binding, and read-only
+     config truth comparison
   -> post-initialization ManagedCallback export with existing runtime state
   -> scheduler-thread reverse-P/Invoke attach
   -> managed allocation and real GC probe

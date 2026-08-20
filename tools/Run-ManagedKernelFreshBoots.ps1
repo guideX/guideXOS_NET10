@@ -105,7 +105,7 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE6_PASS') -or
+                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE7_PASS') -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
                     $text.Contains('GXOS_NET10:PAGE_FAULT_')) { break }
@@ -173,6 +173,26 @@ try {
             'GXOS_NET10:MANAGED_KERNEL_DEVICE_ACCOUNTING_RESTORED',
             'GXOS_NET10:MANAGED_KERNEL_DEVICE_OPERATIONAL_SURVIVAL_OK',
             'GXOS_NET10:MANAGED_KERNEL_PHASE6_PASS',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_READ_BEFORE_INSTALL_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_SERVICES_INSTALLED',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_NATIVE_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_CONFIG_READ_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_CONFIG_MATCH_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_REGISTRY_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_BIND_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_UNBOUND_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_BOUND_COUNT=',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_UNBOUND_COUNT=',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_ARENA_CHUNKS=',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_ARENA_PAGES=',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_ARENA_LIVE_ALLOCATIONS=',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_PRECEDENCE_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_RUNTIME_SURVIVAL_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_ACCOUNTING_RESTORED',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_NATIVE_ACCOUNTING_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PHASE7_PASS',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_CONTEXT_INITIALIZED=1',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_SERVICES_INSTALLED',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_BEFORE_START_REJECTED',
@@ -231,6 +251,25 @@ try {
             "ManagedKernel boot $sequence repeated or omitted the Phase 5 pass marker."
         Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_PHASE6_PASS')).Count -eq 1) `
             "ManagedKernel boot $sequence repeated or omitted the Phase 6 pass marker."
+        foreach ($phase7Marker in @(
+            'GXOS_NET10:MANAGED_KERNEL_PCI_READ_BEFORE_INSTALL_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_SERVICES_INSTALLED',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_NATIVE_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_CONFIG_READ_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_CONFIG_MATCH_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PCI_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_REGISTRY_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_BIND_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_UNBOUND_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_PRECEDENCE_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_RUNTIME_SURVIVAL_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_ACCOUNTING_RESTORED',
+            'GXOS_NET10:MANAGED_KERNEL_DRIVER_NATIVE_ACCOUNTING_OK')) {
+            Require (([regex]::Matches($text, [regex]::Escape($phase7Marker))).Count -eq 1) `
+                "ManagedKernel boot $sequence repeated or omitted Phase 7 marker: $phase7Marker."
+        }
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_PHASE7_PASS')).Count -eq 1) `
+            "ManagedKernel boot $sequence repeated or omitted the Phase 7 pass marker."
         Write-Output ("MANAGED_KERNEL_QEMU_RUN_{0}=PASS bytes={1} sha256={2} serial={3}" -f `
             $sequence, ([Text.Encoding]::UTF8.GetByteCount($text)),
             (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant(), $serial)

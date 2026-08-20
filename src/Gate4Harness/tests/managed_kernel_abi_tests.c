@@ -34,6 +34,18 @@ static void test_layout_and_constants(void)
                sizeof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1) == 56 &&
                sizeof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1) == 56,
            "memory services and descriptors have stable sizes");
+    expect(sizeof(GX_MANAGED_KERNEL_PCI_SERVICES_V1) ==
+               GX_MANAGED_KERNEL_PCI_SERVICES_V1_SIZE &&
+               sizeof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1) ==
+               GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE,
+           "PCI services and read result have stable sizes");
+    expect(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Capabilities) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1,
+                        ConfigReadAddress) == 24 &&
+               offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Reserved1) == 40 &&
+               offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Value) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Reserved1) == 24,
+           "PCI service offsets are stable");
     expect(sizeof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1) == 40 &&
                sizeof(GX_MANAGED_KERNEL_DEVICE_V1) == 48 &&
                sizeof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1) == 48,
@@ -114,6 +126,14 @@ static void test_layout_and_constants(void)
                GX_MANAGED_HOST_CAPABILITY_LOG_UTF8 == 2ULL &&
                GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME == 4ULL,
            "host service capability bits are stable");
+    expect(GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1 == 1U &&
+               GX_MANAGED_KERNEL_PCI_SERVICES_VERSION_V1 == 1U &&
+               GX_MANAGED_PCI_CAPABILITY_CONFIG_READ == 1ULL &&
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_8 == 1U &&
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_16 == 2U &&
+               GX_MANAGED_KERNEL_PCI_READ_WIDTH_32 == 4U &&
+               GX_MANAGED_KERNEL_PCI_CONFIG_SPACE_SIZE == 256U,
+           "PCI service versions, capability, widths, and bound are stable");
     expect(GX_MANAGED_BOOT_RESOURCE_CAPABILITY_SUMMARY == 1ULL &&
                GX_MANAGED_BOOT_RESOURCE_CAPABILITY_REGIONS == 2ULL &&
                GX_MANAGED_BOOT_RESOURCE_CAPABILITY_TOTALS == 4ULL,

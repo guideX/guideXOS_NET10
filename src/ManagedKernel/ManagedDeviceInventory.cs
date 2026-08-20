@@ -5,10 +5,19 @@ namespace GuideXOS.Net10.ManagedKernel;
 internal readonly struct ManagedDevice
 {
     private readonly GxManagedKernelDeviceV1 _descriptor;
+    private readonly ulong _inventoryArenaIdentity;
 
     internal ManagedDevice(in GxManagedKernelDeviceV1 descriptor)
     {
         _descriptor = descriptor;
+        _inventoryArenaIdentity = 0;
+    }
+
+    internal ManagedDevice(in GxManagedKernelDeviceV1 descriptor,
+                           ulong inventoryArenaIdentity)
+    {
+        _descriptor = descriptor;
+        _inventoryArenaIdentity = inventoryArenaIdentity;
     }
 
     internal ushort Segment => _descriptor.Segment;
@@ -25,6 +34,8 @@ internal readonly struct ManagedDevice
     internal uint Flags => _descriptor.Flags;
     internal uint ResourceStartIndex => _descriptor.ResourceStartIndex;
     internal uint ResourceCount => _descriptor.ResourceCount;
+    internal bool HasInventoryOwnership => _inventoryArenaIdentity != 0;
+    internal ulong InventoryArenaIdentity => _inventoryArenaIdentity;
 
     internal bool HasSamePciLocation(in ManagedDevice other)
     {
@@ -71,6 +82,7 @@ internal unsafe sealed class ManagedDeviceInventory
 
     internal uint DeviceCount => _destroyed ? 0U : _deviceCount;
     internal uint ResourceCount => 0U;
+    internal ulong ArenaIdentity => _destroyed ? 0UL : _arena.ArenaIdentity;
     internal KernelArenaMetrics Metrics => _destroyed
         ? default : _arena.GetMetrics();
     internal bool IsDestroyed => _destroyed;
@@ -204,7 +216,7 @@ internal unsafe sealed class ManagedDeviceInventory
     {
         device = default;
         if (_destroyed || index >= _deviceCount) return false;
-        device = new ManagedDevice(in _devices[index]);
+        device = new ManagedDevice(in _devices[index], _arena.ArenaIdentity);
         return true;
     }
 
@@ -227,7 +239,7 @@ internal unsafe sealed class ManagedDeviceInventory
         for (uint index = 0; index != _deviceCount; ++index)
         {
             if (_bdfIndex[index] != key) continue;
-            result = new ManagedDevice(in _devices[index]);
+            result = new ManagedDevice(in _devices[index], _arena.ArenaIdentity);
             return true;
         }
         return false;
@@ -242,10 +254,23 @@ internal unsafe sealed class ManagedDeviceInventory
         for (uint index = 0; index != _deviceCount; ++index)
         {
             if ((_classIndex[index] & 0xFFFF00U) != prefix) continue;
-            result = new ManagedDevice(in _devices[index]);
+            result = new ManagedDevice(in _devices[index], _arena.ArenaIdentity);
             return true;
         }
         return false;
+    }
+
+    internal bool IsOwnedDevice(in ManagedDevice device)
+    {
+        return !_destroyed && device.HasInventoryOwnership &&
+               device.InventoryArenaIdentity == _arena.ArenaIdentity &&
+               TryFindPciDevice(device.Segment, device.Bus, device.Device,
+                                device.Function, out ManagedDevice current) &&
+               current.VendorId == device.VendorId &&
+               current.DeviceId == device.DeviceId &&
+               current.ClassCode == device.ClassCode &&
+               current.Subclass == device.Subclass &&
+               current.ProgrammingInterface == device.ProgrammingInterface;
     }
 
     internal bool TryGetResource(uint index, out uint deviceIndex)

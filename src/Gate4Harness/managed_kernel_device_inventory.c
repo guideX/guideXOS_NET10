@@ -170,6 +170,82 @@ uint32_t gxos_managed_kernel_pci_config_read32(
 #endif
 }
 
+static int gxos_pci_access_context_contains(
+    const GXOS_MANAGED_KERNEL_PCI_ACCESS_CONTEXT *context,
+    uint32_t segment, uint32_t bus, uint32_t device, uint32_t function)
+{
+    uint32_t index;
+    if (context == 0 || context->devices == 0 || context->read32 == 0 ||
+        context->device_count == 0U ||
+        context->device_count > GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES) {
+        return 0;
+    }
+    for (index = 0; index != context->device_count; ++index) {
+        const GXOS_MANAGED_KERNEL_PCI_DEVICE_INPUT *candidate =
+            &context->devices[index];
+        if (candidate->segment == segment && candidate->bus == bus &&
+            candidate->device == device && candidate->function == function) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint32_t gxos_managed_kernel_pci_config_read_v1(
+    void *opaque, uint32_t segment, uint32_t bus, uint32_t device,
+    uint32_t function, uint32_t offset, uint32_t width,
+    uintptr_t result_address, uintptr_t result_capacity)
+{
+    const GXOS_MANAGED_KERNEL_PCI_ACCESS_CONTEXT *context =
+        (const GXOS_MANAGED_KERNEL_PCI_ACCESS_CONTEXT *)opaque;
+    uint32_t aligned_offset;
+    uint32_t raw;
+    uint32_t value;
+    GX_MANAGED_KERNEL_PCI_READ_RESULT_V1 result;
+
+    if (result_address == 0 || result_capacity <
+            GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE ||
+        result_capacity > UINTPTR_MAX - result_address) {
+        return result_address == 0 ? GX_MANAGED_INVALID_ARGUMENT :
+            (result_capacity < GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE
+                ? GX_MANAGED_BUFFER_TOO_SMALL : GX_MANAGED_INVALID_ARGUMENT);
+    }
+    if (segment > UINT16_MAX || bus > UINT8_MAX || device >= 32U ||
+        function >= 8U || (width != GX_MANAGED_KERNEL_PCI_READ_WIDTH_8 &&
+        width != GX_MANAGED_KERNEL_PCI_READ_WIDTH_16 &&
+        width != GX_MANAGED_KERNEL_PCI_READ_WIDTH_32)) {
+        return GX_MANAGED_INVALID_ARGUMENT;
+    }
+    if (offset >= GX_MANAGED_KERNEL_PCI_CONFIG_SPACE_SIZE ||
+        offset > UINT32_MAX - width ||
+        offset + width > GX_MANAGED_KERNEL_PCI_CONFIG_SPACE_SIZE ||
+        (width == GX_MANAGED_KERNEL_PCI_READ_WIDTH_16 && (offset & 1U) != 0U) ||
+        (width == GX_MANAGED_KERNEL_PCI_READ_WIDTH_32 && (offset & 3U) != 0U)) {
+        return GX_MANAGED_INVALID_ARGUMENT;
+    }
+    if (!gxos_pci_access_context_contains(context, segment, bus, device,
+                                          function)) {
+        return GX_MANAGED_NOT_FOUND;
+    }
+
+    aligned_offset = offset & 0xFCU;
+    raw = context->read32(context->read_context, (uint16_t)segment,
+                          (uint8_t)bus, (uint8_t)device, (uint8_t)function,
+                          (uint8_t)aligned_offset);
+    value = width == GX_MANAGED_KERNEL_PCI_READ_WIDTH_32
+        ? raw
+        : (raw >> ((offset & 3U) * 8U));
+    if (width == GX_MANAGED_KERNEL_PCI_READ_WIDTH_16) value &= 0xFFFFU;
+    result.Size = GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE;
+    result.AbiVersion = GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1;
+    result.Width = width;
+    result.Reserved0 = 0;
+    result.Value = value;
+    result.Reserved1 = 0;
+    *(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1 *)(uintptr_t)result_address = result;
+    return GX_MANAGED_OK;
+}
+
 GXOS_MANAGED_KERNEL_DEVICE_INVENTORY_STATUS
 gxos_managed_kernel_normalize_device_inventory(
     const GXOS_MANAGED_KERNEL_PCI_DEVICE_INPUT *inputs,

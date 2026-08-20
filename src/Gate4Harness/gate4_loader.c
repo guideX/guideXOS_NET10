@@ -309,6 +309,10 @@ typedef uint32_t (EFIAPI *ManagedKernelQueryDeviceEntry)(
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase4Entry)(void);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase5Entry)(uint32_t stage);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase6Entry)(void);
+typedef uint32_t (EFIAPI *ManagedKernelInstallPciServicesEntry)(
+    uint32_t requested_abi_version, uintptr_t services_address);
+typedef uint32_t (EFIAPI *ManagedKernelRunPhase7Entry)(void);
+typedef uint32_t (EFIAPI *ManagedKernelRunPhase7AccountingEntry)(void);
 #endif
 
 enum {
@@ -428,6 +432,21 @@ static GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1
 static GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1 *
     g_managed_kernel_device_inventory_publication;
 static uint32_t g_managed_kernel_device_inventory_snapshot_ready;
+static GXOS_MANAGED_KERNEL_PCI_ACCESS_CONTEXT
+    g_managed_kernel_pci_access_context;
+static GX_MANAGED_KERNEL_PCI_SERVICES_V1 g_managed_kernel_pci_services;
+#endif
+
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_config_read_service(
+    uint32_t segment, uint32_t bus, uint32_t device, uint32_t function,
+    uint32_t offset, uint32_t width, uintptr_t result_address,
+    uintptr_t result_capacity)
+{
+    return gxos_managed_kernel_pci_config_read_v1(
+        &g_managed_kernel_pci_access_context, segment, bus, device, function,
+        offset, width, result_address, result_capacity);
+}
 #endif
 static GXOS_VM_PAGING g_vm_paging;
 static GXOS_X64_PAGING_AUDIT g_vm_paging_audit;
@@ -4319,6 +4338,9 @@ typedef struct {
     uint32_t managed_kernel_run_phase4_rva;
     uint32_t managed_kernel_run_phase5_rva;
     uint32_t managed_kernel_run_phase6_rva;
+    uint32_t managed_kernel_install_pci_services_rva;
+    uint32_t managed_kernel_run_phase7_rva;
+    uint32_t managed_kernel_run_phase7_accounting_rva;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     uint32_t managed_gc_probe_rva;
@@ -11222,6 +11244,25 @@ static void prepare_managed_kernel_device_inventory(void)
         device_count == 0U) {
         fail("managed-kernel-device-normalization");
     }
+    zero_bytes((uint8_t *)&g_managed_kernel_pci_access_context,
+               sizeof(g_managed_kernel_pci_access_context));
+    g_managed_kernel_pci_access_context.devices = g_managed_kernel_pci_devices;
+    g_managed_kernel_pci_access_context.device_count = device_count;
+    g_managed_kernel_pci_access_context.read32 =
+        gxos_managed_kernel_pci_config_read32;
+    g_managed_kernel_pci_access_context.read_context = 0;
+    zero_bytes((uint8_t *)&g_managed_kernel_pci_services,
+               sizeof(g_managed_kernel_pci_services));
+    g_managed_kernel_pci_services.Size = GX_MANAGED_KERNEL_PCI_SERVICES_V1_SIZE;
+    g_managed_kernel_pci_services.AbiVersion =
+        GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1;
+    g_managed_kernel_pci_services.ServiceVersion =
+        GX_MANAGED_KERNEL_PCI_SERVICES_VERSION_V1;
+    g_managed_kernel_pci_services.Architecture = GX_MANAGED_KERNEL_ARCH_X64;
+    g_managed_kernel_pci_services.Capabilities =
+        GX_MANAGED_PCI_CAPABILITY_CONFIG_READ;
+    g_managed_kernel_pci_services.ConfigReadAddress =
+        (uint64_t)(uintptr_t)&managed_kernel_pci_config_read_service;
     descriptor_bytes = (uint64_t)device_count * GX_MANAGED_KERNEL_DEVICE_V1_SIZE;
     zero_bytes((uint8_t *)&g_managed_kernel_device_inventory_publication_storage,
                sizeof(g_managed_kernel_device_inventory_publication_storage));
@@ -11811,6 +11852,133 @@ static void managed_kernel_phase6_inventory(
     }
     serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_OPERATIONAL_SURVIVAL_OK\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE6_PASS\r\n");
+}
+
+static int managed_kernel_pci_result_equal(
+    const GX_MANAGED_KERNEL_PCI_READ_RESULT_V1 *left,
+    const GX_MANAGED_KERNEL_PCI_READ_RESULT_V1 *right)
+{
+    const uint8_t *left_bytes = (const uint8_t *)left;
+    const uint8_t *right_bytes = (const uint8_t *)right;
+    uint32_t index;
+    for (index = 0; index != GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE; ++index) {
+        if (left_bytes[index] != right_bytes[index]) return 0;
+    }
+    return 1;
+}
+
+static void managed_kernel_phase7_binding(
+    ManagedKernelInstallPciServicesEntry install_pci_services,
+    ManagedKernelRunPhase7Entry run_phase7,
+    ManagedKernelRunPhase7AccountingEntry run_phase7_accounting)
+{
+    GX_MANAGED_KERNEL_PCI_SERVICES_V1 bad_services;
+    GX_MANAGED_KERNEL_PCI_READ_RESULT_V1 result;
+    GX_MANAGED_KERNEL_PCI_READ_RESULT_V1 sentinel;
+    GX_MANAGED_KERNEL_PCI_CONFIG_READ_ENTRY read_config;
+    uint32_t baseline_live;
+    uint64_t baseline_physical;
+    uint64_t baseline_commit;
+    uint64_t baseline_virtual;
+    uint32_t baseline_reservations;
+    uint32_t baseline_commitments;
+    uint64_t baseline_reserved;
+    uint64_t baseline_committed;
+    uint32_t baseline_regions;
+
+    if (install_pci_services == 0 || run_phase7 == 0 ||
+        run_phase7_accounting == 0 ||
+        g_managed_kernel_device_inventory_snapshot_ready == 0) {
+        fail("managed-kernel-phase7-precondition");
+    }
+    if (install_pci_services(GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1, 0) !=
+            GX_MANAGED_INVALID_ARGUMENT ||
+        install_pci_services(GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1 + 1U,
+                             (uintptr_t)&g_managed_kernel_pci_services) !=
+            GX_MANAGED_UNSUPPORTED_ABI) {
+        fail("managed-kernel-pci-service-negative-install");
+    }
+    bad_services = g_managed_kernel_pci_services;
+    bad_services.Capabilities |= 1ULL << 1;
+    if (install_pci_services(GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1,
+                             (uintptr_t)&bad_services) != GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-pci-unsupported-capability");
+    }
+    bad_services = g_managed_kernel_pci_services;
+    bad_services.Reserved0 = 1;
+    if (install_pci_services(GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1,
+                             (uintptr_t)&bad_services) != GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-pci-reserved-rejection");
+    }
+    if (install_pci_services(GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1,
+                             (uintptr_t)&g_managed_kernel_pci_services) !=
+            GX_MANAGED_OK ||
+        install_pci_services(GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1,
+                             (uintptr_t)&g_managed_kernel_pci_services) !=
+            GX_MANAGED_ALREADY_INITIALIZED) {
+        fail("managed-kernel-pci-service-install");
+    }
+
+    read_config = (GX_MANAGED_KERNEL_PCI_CONFIG_READ_ENTRY)(uintptr_t)
+        g_managed_kernel_pci_services.ConfigReadAddress;
+    sentinel.Size = 0xA5A5A5A5U;
+    sentinel.AbiVersion = 0xA5A5A5A5U;
+    sentinel.Width = 0xA5A5A5A5U;
+    sentinel.Reserved0 = 0xA5A5A5A5U;
+    sentinel.Value = 0xA5A5A5A5A5A5A5A5ULL;
+    sentinel.Reserved1 = 0xA5A5A5A5A5A5A5A5ULL;
+    result = sentinel;
+    if (read_config(0, 0, 0, 0, 0, GX_MANAGED_KERNEL_PCI_READ_WIDTH_16,
+                    (uintptr_t)&result, sizeof(result)) != GX_MANAGED_OK ||
+        result.Value != g_managed_kernel_device_descriptors[0].VendorId ||
+        result.Width != GX_MANAGED_KERNEL_PCI_READ_WIDTH_16) {
+        fail("managed-kernel-pci-native-read");
+    }
+    result = sentinel;
+    if (read_config(255, 31, 7, 7, 0, GX_MANAGED_KERNEL_PCI_READ_WIDTH_8,
+                    (uintptr_t)&result, sizeof(result)) != GX_MANAGED_NOT_FOUND ||
+        !managed_kernel_pci_result_equal(&result, &sentinel) ||
+        read_config(0, 0, 0, 0, 0, 3, (uintptr_t)&result, sizeof(result)) !=
+            GX_MANAGED_INVALID_ARGUMENT ||
+        !managed_kernel_pci_result_equal(&result, &sentinel) ||
+        read_config(0, 0, 0, 0, 1, GX_MANAGED_KERNEL_PCI_READ_WIDTH_16,
+                    (uintptr_t)&result, sizeof(result)) != GX_MANAGED_INVALID_ARGUMENT ||
+        read_config(0, 0, 0, 0, 256, GX_MANAGED_KERNEL_PCI_READ_WIDTH_8,
+                    (uintptr_t)&result, sizeof(result)) != GX_MANAGED_INVALID_ARGUMENT ||
+        read_config(0, 0, 0, 0, 0, GX_MANAGED_KERNEL_PCI_READ_WIDTH_8,
+                    (uintptr_t)&result, sizeof(result) - 1U) != GX_MANAGED_BUFFER_TOO_SMALL ||
+        read_config(0, 0, 0, 0, 0, GX_MANAGED_KERNEL_PCI_READ_WIDTH_8,
+                    0, sizeof(result)) != GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-pci-negative-reads");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PCI_NATIVE_NEGATIVE_TESTS_OK\r\n");
+    if (run_phase7() != GX_MANAGED_OK ||
+        run_phase7() != GX_MANAGED_ALREADY_INITIALIZED) {
+        fail("managed-kernel-phase7-run");
+    }
+
+    baseline_live = g_memory_ledger.live_count;
+    baseline_physical = g_memory_ledger.physical_bytes;
+    baseline_commit = g_memory_ledger.commit_bytes;
+    baseline_virtual = g_memory_ledger.virtual_reservation_bytes;
+    baseline_reservations = g_memory_virtual_arena.reservation_count;
+    baseline_commitments = g_memory_virtual_arena.commitment_count;
+    baseline_reserved = g_memory_virtual_arena.total_reserved_bytes;
+    baseline_committed = g_memory_virtual_arena.total_committed_bytes;
+    baseline_regions = g_memory_vm_regions.live_count;
+    if (run_phase7_accounting() != GX_MANAGED_OK ||
+        g_memory_ledger.live_count != baseline_live ||
+        g_memory_ledger.physical_bytes != baseline_physical ||
+        g_memory_ledger.commit_bytes != baseline_commit ||
+        g_memory_ledger.virtual_reservation_bytes != baseline_virtual ||
+        g_memory_virtual_arena.reservation_count != baseline_reservations ||
+        g_memory_virtual_arena.commitment_count != baseline_commitments ||
+        g_memory_virtual_arena.total_reserved_bytes != baseline_reserved ||
+        g_memory_virtual_arena.total_committed_bytes != baseline_committed ||
+        g_memory_vm_regions.live_count != baseline_regions) {
+        fail("managed-kernel-driver-accounting-restore");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_NATIVE_ACCOUNTING_OK\r\n");
 }
 
 static void managed_kernel_phase4_memory(
@@ -14700,6 +14868,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase4_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase5_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase6_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION install_pci_services_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase7_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase7_accounting_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_STATUS initialize_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInitialize",
@@ -14751,6 +14922,15 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_STATUS run_phase6_status =
         gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase6",
                                    &run_phase6_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS install_pci_services_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelInstallPciServices",
+                                   &install_pci_services_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS run_phase7_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase7",
+                                   &run_phase7_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS run_phase7_accounting_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase7Accounting",
+                                   &run_phase7_accounting_resolution);
     if (initialize_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInitialize-export-missing");
     }
@@ -14793,6 +14973,15 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     if (run_phase6_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelRunPhase6-export-missing");
     }
+    if (install_pci_services_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelInstallPciServices-export-missing");
+    }
+    if (run_phase7_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelRunPhase7-export-missing");
+    }
+    if (run_phase7_accounting_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelRunPhase7Accounting-export-missing");
+    }
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
     image->managed_kernel_install_boot_resources_rva = install_resolution.rva;
@@ -14811,6 +15000,11 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     image->managed_kernel_run_phase4_rva = run_phase4_resolution.rva;
     image->managed_kernel_run_phase5_rva = run_phase5_resolution.rva;
     image->managed_kernel_run_phase6_rva = run_phase6_resolution.rva;
+    image->managed_kernel_install_pci_services_rva =
+        install_pci_services_resolution.rva;
+    image->managed_kernel_run_phase7_rva = run_phase7_resolution.rva;
+    image->managed_kernel_run_phase7_accounting_rva =
+        run_phase7_accounting_resolution.rva;
 }
 #endif
 
@@ -16276,6 +16470,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase4_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase5_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase6_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_pci_services_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase7_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase7_accounting_resolution = {0};
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
     ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
@@ -16290,6 +16487,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     ManagedKernelRunPhase4Entry managed_kernel_run_phase4;
     ManagedKernelRunPhase5Entry managed_kernel_run_phase5;
     ManagedKernelRunPhase6Entry managed_kernel_run_phase6;
+    ManagedKernelInstallPciServicesEntry managed_kernel_install_pci_services;
+    ManagedKernelRunPhase7Entry managed_kernel_run_phase7;
+    ManagedKernelRunPhase7AccountingEntry managed_kernel_run_phase7_accounting;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 managed_kernel_boot_resource_publication = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_system_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_repeat_info = {0};
@@ -16565,6 +16765,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     managed_kernel_run_phase6_resolution.rva = image.managed_kernel_run_phase6_rva;
     managed_kernel_run_phase6_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_run_phase6_rva);
+    managed_kernel_install_pci_services_resolution.rva =
+        image.managed_kernel_install_pci_services_rva;
+    managed_kernel_install_pci_services_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_install_pci_services_rva);
+    managed_kernel_run_phase7_resolution.rva = image.managed_kernel_run_phase7_rva;
+    managed_kernel_run_phase7_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_phase7_rva);
+    managed_kernel_run_phase7_accounting_resolution.rva =
+        image.managed_kernel_run_phase7_accounting_rva;
+    managed_kernel_run_phase7_accounting_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_phase7_accounting_rva);
     managed_kernel_initialize = (ManagedKernelInitializeEntry)
         managed_kernel_initialize_resolution.address;
     managed_kernel_query_system_info = (ManagedKernelQuerySystemInfoEntry)
@@ -16596,6 +16807,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_run_phase5_resolution.address;
     managed_kernel_run_phase6 = (ManagedKernelRunPhase6Entry)
         managed_kernel_run_phase6_resolution.address;
+    managed_kernel_install_pci_services = (ManagedKernelInstallPciServicesEntry)
+        managed_kernel_install_pci_services_resolution.address;
+    managed_kernel_run_phase7 = (ManagedKernelRunPhase7Entry)
+        managed_kernel_run_phase7_resolution.address;
+    managed_kernel_run_phase7_accounting = (ManagedKernelRunPhase7AccountingEntry)
+        managed_kernel_run_phase7_accounting_resolution.address;
     serial_text("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT=GxManagedKernelInitialize\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT_RVA=0x",
                      image.managed_kernel_initialize_rva);
@@ -17683,6 +17900,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_install_device_inventory,
         managed_kernel_query_device_inventory_summary,
         managed_kernel_query_device, managed_kernel_run_phase6);
+    restore_nativeaot_tls();
+    activate_nativeaot_tls();
+    managed_kernel_phase7_binding(
+        managed_kernel_install_pci_services, managed_kernel_run_phase7,
+        managed_kernel_run_phase7_accounting);
     restore_nativeaot_tls();
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
