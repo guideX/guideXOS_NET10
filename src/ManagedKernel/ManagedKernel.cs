@@ -367,6 +367,7 @@ internal static unsafe class ManagedKernelContract
     private static nuint s_memoryAllocatePagesAddress;
     private static nuint s_memoryReleasePagesAddress;
     private static int s_phase4Run;
+    private static int s_phase5Run;
 
     internal static bool IsStarted =>
         s_lifecycleState == (int)LifecycleState.Started;
@@ -893,6 +894,29 @@ internal static unsafe class ManagedKernelContract
         return ManagedOk;
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase5")]
+    internal static uint RunPhase5(uint stage)
+    {
+        if (!IsInitialized || s_lifecycleState != (int)LifecycleState.Started)
+        {
+            return IsInitialized ? InvalidState : NotInitialized;
+        }
+        if (s_phase5Run != 0)
+        {
+            return AlreadyInitialized;
+        }
+        if (!MemoryServicesInstalled || stage == 0 || stage > 5)
+        {
+            return InvalidState;
+        }
+        uint status = KernelArenaProof.RunStage(stage);
+        if (status == ManagedOk && stage == 5)
+        {
+            s_phase5Run = 1;
+        }
+        return status;
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "GxManagedQuerySystemInfo")]
     internal static uint QuerySystemInfo(uint requestedAbiVersion,
                                          nuint outputAddress,
@@ -1009,24 +1033,14 @@ internal static unsafe class ManagedKernelContract
     }
 }
 
-internal struct KernelMemoryRegion
-{
-    internal ulong AllocationId;
-    internal ulong VirtualAddress;
-    internal ulong ByteLength;
-    internal ulong PageCount;
-    internal ulong PageSize;
-    internal uint Flags;
-}
-
 internal static unsafe class KernelMemory
 {
     private const uint MemoryAbiVersionV1 = 1;
 
-    private static bool IsInstalled =>
+    internal static bool IsInstalled =>
         ManagedKernelContract.MemoryServicesInstalled;
 
-    private static bool IsValidRegion(in KernelMemoryRegion region)
+    internal static bool IsValidRegion(in KernelMemoryRegion region)
     {
         return region.AllocationId != 0 && region.VirtualAddress != 0 &&
                region.ByteLength != 0 && region.PageCount != 0 &&
@@ -1069,8 +1083,8 @@ internal static unsafe class KernelMemory
         return true;
     }
 
-    private static bool TryAllocate(ulong pageCount, uint flags,
-                                    out KernelMemoryRegion region)
+    internal static bool TryAllocate(ulong pageCount, uint flags,
+                                     out KernelMemoryRegion region)
     {
         GxManagedKernelMemoryAllocationV1 result = default;
         region = default;
@@ -1137,7 +1151,7 @@ internal static unsafe class KernelMemory
         };
     }
 
-    private static bool TryRelease(in KernelMemoryRegion region)
+    internal static bool TryRelease(in KernelMemoryRegion region)
     {
         GxManagedKernelMemoryReleaseV1 request;
         if (!IsValidRegion(in region)) return false;
@@ -1220,6 +1234,31 @@ internal static unsafe class KernelMemory
             return false;
         }
         return true;
+    }
+}
+
+internal sealed class Phase4KernelMemoryProvider : IKernelMemoryProvider
+{
+    internal static readonly Phase4KernelMemoryProvider Instance =
+        new Phase4KernelMemoryProvider();
+
+    public bool IsAvailable => ManagedKernelContract.IsStarted &&
+                               KernelMemory.IsInstalled;
+
+    public bool TryAllocate(ulong pageCount, uint flags,
+                            out KernelMemoryRegion region)
+    {
+        return KernelMemory.TryAllocate(pageCount, flags, out region);
+    }
+
+    public bool IsValidRegion(in KernelMemoryRegion region)
+    {
+        return KernelMemory.IsValidRegion(in region);
+    }
+
+    public bool TryRelease(in KernelMemoryRegion region)
+    {
+        return KernelMemory.TryRelease(in region);
     }
 }
 

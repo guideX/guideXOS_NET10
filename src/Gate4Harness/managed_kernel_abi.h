@@ -436,6 +436,15 @@ typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_MEMORY_ALLOCATE_PA
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_MEMORY_RELEASE_PAGES_ENTRY)(
     uintptr_t request_address, uintptr_t request_capacity);
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_RUN_PHASE4_ENTRY)(void);
+enum {
+    GX_MANAGED_KERNEL_PHASE5_STAGE_CREATE = 1,
+    GX_MANAGED_KERNEL_PHASE5_STAGE_REUSE = 2,
+    GX_MANAGED_KERNEL_PHASE5_STAGE_GROWTH = 3,
+    GX_MANAGED_KERNEL_PHASE5_STAGE_NEGATIVE = 4,
+    GX_MANAGED_KERNEL_PHASE5_STAGE_DESTROY = 5
+};
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_RUN_PHASE5_ENTRY)(
+    uint32_t stage);
 
 /* Native callers use this before crossing into managed code. */
 static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_output_buffer(

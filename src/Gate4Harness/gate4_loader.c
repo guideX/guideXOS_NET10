@@ -298,6 +298,7 @@ typedef uint32_t (EFIAPI *ManagedKernelStartEntry)(void);
 typedef uint32_t (EFIAPI *ManagedKernelInstallMemoryServicesEntry)(
     uint32_t requested_abi_version, uintptr_t memory_services_address);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase4Entry)(void);
+typedef uint32_t (EFIAPI *ManagedKernelRunPhase5Entry)(uint32_t stage);
 #endif
 
 enum {
@@ -4292,6 +4293,7 @@ typedef struct {
     uint32_t managed_kernel_install_memory_services_rva;
     uint32_t managed_kernel_start_rva;
     uint32_t managed_kernel_run_phase4_rva;
+    uint32_t managed_kernel_run_phase5_rva;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     uint32_t managed_gc_probe_rva;
@@ -10148,7 +10150,14 @@ static void initialize_nativeaot_tls(const PE_IMAGE *image, EFI_BOOT_SERVICES *b
     gs_area = (uint8_t *)(uintptr_t)g_gs_area;
     zero_bytes(gs_area, EFI_PAGE_SIZE);
     __asm__ volatile ("mov %%rsp, %0" : "=r"(rsp));
-    g_stack_lower = rsp & ~((uint64_t)EFI_PAGE_SIZE - 1);
+    /* Keep the checksum probe page below the active loader frame. The
+       ManagedKernel export table grows during later phases, so the page
+       containing the current RSP is legitimately reused by deeper loader
+       calls before the private-root proof completes. */
+    if ((rsp & ~((uint64_t)EFI_PAGE_SIZE - 1)) < EFI_PAGE_SIZE) {
+        fail("stack-probe-page-underflow");
+    }
+    g_stack_lower = (rsp & ~((uint64_t)EFI_PAGE_SIZE - 1)) - EFI_PAGE_SIZE;
     g_stack_upper = g_stack_lower + 0x100000;
     teb_area = (uint8_t *)(uintptr_t)g_teb_area;
     zero_bytes(teb_area, EFI_PAGE_SIZE);
@@ -10382,13 +10391,16 @@ static void vm_verify_existing_mappings(
 {
     uint32_t index;
     for (index = 0; index != count; ++index) {
-        GXOS_VM_MAPPING after;
+        GXOS_VM_MAPPING after = {0};
+        GXOS_VM_PAGING_STATUS query_status = gxos_vm_paging_query(
+            &g_vm_paging, addresses[index], &after);
+        uint64_t checksum = addresses[index] == 0 ? 0 :
+            vm_probe_checksum(addresses[index]);
         if (addresses[index] == 0 || before[index].present == 0 ||
-            gxos_vm_paging_query(&g_vm_paging, addresses[index], &after) !=
-                GXOS_VM_PAGING_STATUS_OK ||
+            query_status != GXOS_VM_PAGING_STATUS_OK ||
             after.physical_base != before[index].physical_base ||
             after.page_size != before[index].page_size ||
-            vm_probe_checksum(addresses[index]) != checksums[index]) {
+            checksum != checksums[index]) {
             fail("vm-existing-mapping-changed");
         }
     }
@@ -11730,6 +11742,219 @@ static void managed_kernel_phase4_memory(
     serial_text("GXOS_NET10:MANAGED_KERNEL_MEMORY_RELEASE_OK\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_MEMORY_ACCOUNTING_RESTORED\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE4_PASS\r\n");
+}
+
+typedef struct {
+    uint32_t physical_count;
+    uint64_t physical_pages;
+    uint64_t physical_bytes;
+    uint64_t physical_commit_bytes;
+    uint32_t reservation_count;
+    uint64_t reserved_bytes;
+    uint64_t reservation_committed_bytes;
+    uint32_t commitment_count;
+    uint64_t commitment_pages;
+    uint64_t commitment_bytes;
+    uint32_t context_live_count;
+    uint64_t context_live_pages;
+    uint64_t context_bytes;
+} GXOS_MANAGED_KERNEL_PHASE5_OWNER_SNAPSHOT;
+
+static void managed_kernel_phase5_capture_owned_state(
+    GXOS_MANAGED_KERNEL_PHASE5_OWNER_SNAPSHOT *snapshot)
+{
+    uint32_t index;
+    if (snapshot == 0) fail("managed-kernel-phase5-snapshot-null");
+    zero_bytes((uint8_t *)snapshot, sizeof(*snapshot));
+
+    for (index = 0; index != GXOS_PHYSICAL_LEDGER_CAPACITY; ++index) {
+        const GXOS_PHYSICAL_ALLOCATION *allocation =
+            &g_memory_ledger.entries[index];
+        if (!allocation->live ||
+            allocation->allocation_class != GXOS_MEMORY_ALLOCATION_MANAGED_KERNEL ||
+            allocation->owner != GXOS_MEMORY_OWNER_MANAGED_KERNEL) {
+            continue;
+        }
+        snapshot->physical_count++;
+        snapshot->physical_pages += allocation->pages;
+        snapshot->physical_bytes += allocation->physical_impact_bytes;
+        snapshot->physical_commit_bytes += allocation->commit_impact_bytes;
+    }
+
+    for (index = 0; index != GXOS_VM_MAX_RESERVATIONS; ++index) {
+        const GXOS_VM_RESERVATION *reservation =
+            &g_memory_virtual_arena.reservations[index];
+        if (!reservation->live ||
+            reservation->kind != GXOS_MEMORY_ALLOCATION_MANAGED_KERNEL ||
+            reservation->owner != GXOS_MEMORY_OWNER_MANAGED_KERNEL) {
+            continue;
+        }
+        snapshot->reservation_count++;
+        snapshot->reserved_bytes += reservation->bytes;
+        snapshot->reservation_committed_bytes += reservation->committed_bytes;
+    }
+
+    for (index = 0; index != GXOS_VM_MAX_COMMITMENTS; ++index) {
+        const GXOS_VM_COMMITMENT *commitment =
+            &g_memory_virtual_arena.commitments[index];
+        const GXOS_VM_RESERVATION *reservation;
+        if (!commitment->live ||
+            commitment->reservation_slot >= GXOS_VM_MAX_RESERVATIONS) {
+            continue;
+        }
+        reservation = &g_memory_virtual_arena.reservations[
+            commitment->reservation_slot];
+        if (!reservation->live ||
+            reservation->kind != GXOS_MEMORY_ALLOCATION_MANAGED_KERNEL ||
+            reservation->owner != GXOS_MEMORY_OWNER_MANAGED_KERNEL) {
+            continue;
+        }
+        snapshot->commitment_count++;
+        snapshot->commitment_pages += commitment->page_count;
+        snapshot->commitment_bytes += commitment->bytes;
+    }
+
+    for (index = 0; index != GXOS_MANAGED_KERNEL_MEMORY_SLOT_COUNT; ++index) {
+        const GXOS_MANAGED_KERNEL_MEMORY_ALLOCATION *allocation =
+            &g_managed_kernel_memory.allocations[index];
+        if (!allocation->live) continue;
+        snapshot->context_live_count++;
+        snapshot->context_live_pages += allocation->page_count;
+        snapshot->context_bytes += allocation->byte_length;
+    }
+}
+
+static void managed_kernel_phase5_expect_native_state(
+    uint32_t expected_chunks,
+    uint64_t expected_pages,
+    const char *marker)
+{
+    GXOS_MANAGED_KERNEL_PHASE5_OWNER_SNAPSHOT snapshot;
+    uint64_t expected_page_bytes = expected_pages * GXOS_VM_PAGE_SIZE;
+    managed_kernel_phase5_capture_owned_state(&snapshot);
+    if (snapshot.physical_count != expected_pages ||
+        snapshot.physical_pages != expected_pages ||
+        snapshot.physical_bytes != expected_page_bytes ||
+        snapshot.physical_commit_bytes != expected_page_bytes ||
+        snapshot.reservation_count != expected_chunks ||
+        snapshot.reserved_bytes != expected_page_bytes ||
+        snapshot.reservation_committed_bytes != expected_page_bytes ||
+        snapshot.commitment_count != expected_pages ||
+        snapshot.commitment_pages != expected_pages ||
+        snapshot.commitment_bytes != expected_page_bytes ||
+        snapshot.context_live_count != expected_chunks ||
+        snapshot.context_live_pages != expected_pages ||
+        snapshot.context_bytes != expected_page_bytes ||
+        !gxos_managed_kernel_memory_validate(&g_managed_kernel_memory) ||
+        !gxos_physical_ledger_validate(&g_memory_ledger) ||
+        !gxos_vm_arena_validate(&g_memory_virtual_arena) ||
+        !gxos_vm_region_ledger_validate(&g_memory_vm_regions)) {
+        fail("managed-kernel-phase5-native-accounting");
+    }
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_OWNER_CHUNKS=0x",
+                     expected_chunks);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_OWNER_PAGES=0x",
+                     expected_pages);
+    serial_text("\r\n");
+    serial_text(marker);
+}
+
+static void managed_kernel_phase5_arena(
+    ManagedKernelRunPhase5Entry run_phase5)
+{
+    GXOS_MANAGED_KERNEL_PHASE5_OWNER_SNAPSHOT baseline_owned;
+    GXOS_MANAGED_KERNEL_PHASE5_OWNER_SNAPSHOT final_owned;
+
+    if (run_phase5 == 0 || !g_managed_kernel_memory_service_installed ||
+        !gxos_managed_kernel_memory_has_no_live_allocations(
+            &g_managed_kernel_memory) ||
+        !gxos_managed_kernel_memory_validate(&g_managed_kernel_memory)) {
+        fail("managed-kernel-phase5-precondition");
+    }
+    managed_kernel_phase5_capture_owned_state(&baseline_owned);
+    if (baseline_owned.physical_count != 0 ||
+        baseline_owned.physical_pages != 0 ||
+        baseline_owned.physical_bytes != 0 ||
+        baseline_owned.physical_commit_bytes != 0 ||
+        baseline_owned.reservation_count != 0 ||
+        baseline_owned.reserved_bytes != 0 ||
+        baseline_owned.reservation_committed_bytes != 0 ||
+        baseline_owned.commitment_count != 0 ||
+        baseline_owned.commitment_pages != 0 ||
+        baseline_owned.commitment_bytes != 0 ||
+        baseline_owned.context_live_count != 0 ||
+        baseline_owned.context_live_pages != 0 ||
+        baseline_owned.context_bytes != 0) {
+        fail("managed-kernel-phase5-owned-precondition");
+    }
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_ARENA_BASELINE_OWNER_CHUNKS=0x",
+                     g_managed_kernel_memory.live_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_ARENA_BASELINE_OWNER_PAGES=0x",
+                     g_managed_kernel_memory.live_pages);
+    serial_text("\r\n");
+    gxos_managed_kernel_memory_set_operational(&g_managed_kernel_memory, 1);
+
+    if (run_phase5(GX_MANAGED_KERNEL_PHASE5_STAGE_CREATE) != GX_MANAGED_OK) {
+        fail("managed-kernel-phase5-create");
+    }
+    managed_kernel_phase5_expect_native_state(
+        1, 2,
+        "GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_FIRST_BACKING_OK\r\n");
+
+    if (run_phase5(GX_MANAGED_KERNEL_PHASE5_STAGE_REUSE) != GX_MANAGED_OK) {
+        fail("managed-kernel-phase5-reuse");
+    }
+    managed_kernel_phase5_expect_native_state(
+        1, 2,
+        "GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_MANAGED_ONLY_UNCHANGED\r\n");
+
+    if (run_phase5(GX_MANAGED_KERNEL_PHASE5_STAGE_GROWTH) != GX_MANAGED_OK) {
+        fail("managed-kernel-phase5-growth");
+    }
+    managed_kernel_phase5_expect_native_state(
+        3, 7,
+        "GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_GROWTH_OK\r\n");
+
+    if (run_phase5(GX_MANAGED_KERNEL_PHASE5_STAGE_NEGATIVE) != GX_MANAGED_OK) {
+        fail("managed-kernel-phase5-negative");
+    }
+    managed_kernel_phase5_expect_native_state(
+        3, 7,
+        "GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_NEGATIVE_UNCHANGED\r\n");
+
+    if (run_phase5(GX_MANAGED_KERNEL_PHASE5_STAGE_DESTROY) != GX_MANAGED_OK) {
+        fail("managed-kernel-phase5-destroy");
+    }
+    managed_kernel_phase5_capture_owned_state(&final_owned);
+    if (final_owned.physical_count != baseline_owned.physical_count ||
+        final_owned.physical_pages != baseline_owned.physical_pages ||
+        final_owned.physical_bytes != baseline_owned.physical_bytes ||
+        final_owned.physical_commit_bytes != baseline_owned.physical_commit_bytes ||
+        final_owned.reservation_count != baseline_owned.reservation_count ||
+        final_owned.reserved_bytes != baseline_owned.reserved_bytes ||
+        final_owned.reservation_committed_bytes !=
+            baseline_owned.reservation_committed_bytes ||
+        final_owned.commitment_count != baseline_owned.commitment_count ||
+        final_owned.commitment_pages != baseline_owned.commitment_pages ||
+        final_owned.commitment_bytes != baseline_owned.commitment_bytes ||
+        final_owned.context_live_count != baseline_owned.context_live_count ||
+        final_owned.context_live_pages != baseline_owned.context_live_pages ||
+        final_owned.context_bytes != baseline_owned.context_bytes ||
+        g_managed_kernel_memory.live_count != 0 ||
+        g_managed_kernel_memory.live_pages != 0 ||
+        !gxos_managed_kernel_memory_has_no_live_allocations(
+            &g_managed_kernel_memory) ||
+        !gxos_managed_kernel_memory_validate(&g_managed_kernel_memory) ||
+        !gxos_physical_ledger_validate(&g_memory_ledger) ||
+        !gxos_vm_arena_validate(&g_memory_virtual_arena) ||
+        !gxos_vm_region_ledger_validate(&g_memory_vm_regions)) {
+        fail("managed-kernel-phase5-accounting-restore");
+    }
+    gxos_managed_kernel_memory_set_operational(&g_managed_kernel_memory, 0);
+    serial_text("GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_ACCOUNTING_RESTORED\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE5_PASS\r\n");
 }
 
 static int managed_kernel_summary_matches_authority(
@@ -14205,6 +14430,7 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_memory_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION start_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase4_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase5_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_STATUS initialize_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInitialize",
@@ -14239,6 +14465,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_STATUS run_phase4_status =
         gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase4",
                                    &run_phase4_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS run_phase5_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase5",
+                                   &run_phase5_resolution);
     if (initialize_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInitialize-export-missing");
     }
@@ -14266,6 +14495,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     if (run_phase4_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelRunPhase4-export-missing");
     }
+    if (run_phase5_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelRunPhase5-export-missing");
+    }
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
     image->managed_kernel_install_boot_resources_rva = install_resolution.rva;
@@ -14277,6 +14509,7 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
         install_memory_services_resolution.rva;
     image->managed_kernel_start_rva = start_resolution.rva;
     image->managed_kernel_run_phase4_rva = run_phase4_resolution.rva;
+    image->managed_kernel_run_phase5_rva = run_phase5_resolution.rva;
 }
 #endif
 
@@ -15737,6 +15970,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_memory_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_start_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase4_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase5_resolution = {0};
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
     ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
@@ -15746,6 +15980,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     ManagedKernelInstallMemoryServicesEntry managed_kernel_install_memory_services;
     ManagedKernelStartEntry managed_kernel_start;
     ManagedKernelRunPhase4Entry managed_kernel_run_phase4;
+    ManagedKernelRunPhase5Entry managed_kernel_run_phase5;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 managed_kernel_boot_resource_publication = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_system_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_repeat_info = {0};
@@ -16004,6 +16239,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     managed_kernel_run_phase4_resolution.rva = image.managed_kernel_run_phase4_rva;
     managed_kernel_run_phase4_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_run_phase4_rva);
+    managed_kernel_run_phase5_resolution.rva = image.managed_kernel_run_phase5_rva;
+    managed_kernel_run_phase5_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_phase5_rva);
     managed_kernel_initialize = (ManagedKernelInitializeEntry)
         managed_kernel_initialize_resolution.address;
     managed_kernel_query_system_info = (ManagedKernelQuerySystemInfoEntry)
@@ -16023,6 +16261,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_start_resolution.address;
     managed_kernel_run_phase4 = (ManagedKernelRunPhase4Entry)
         managed_kernel_run_phase4_resolution.address;
+    managed_kernel_run_phase5 = (ManagedKernelRunPhase5Entry)
+        managed_kernel_run_phase5_resolution.address;
     serial_text("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT=GxManagedKernelInitialize\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT_RVA=0x",
                      image.managed_kernel_initialize_rva);
@@ -17100,6 +17340,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS\r\n");
     activate_nativeaot_tls();
     managed_kernel_phase4_memory(managed_kernel_run_phase4);
+    restore_nativeaot_tls();
+    activate_nativeaot_tls();
+    managed_kernel_phase5_arena(managed_kernel_run_phase5);
     restore_nativeaot_tls();
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK

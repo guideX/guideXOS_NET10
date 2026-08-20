@@ -57,6 +57,19 @@ arena, commitment, and VM-region state; whole-process counters remain
 diagnostic because the EventWait runtime/GC profile may add unrelated live
 runtime state during the proof.
 
+ManagedKernel Phase 5 adds the bounded managed `KernelArena` policy above the
+Phase 4 native page mechanism. Arena metadata is kept in fixed managed control
+arrays outside the unmanaged kernel buffers; allocations use first-fit,
+alignment-aware splitting, same-chunk coalescing, bounded growth, exact
+descriptor validation, rollback on growth failure, and explicit destroy.
+The default policy is 2-page initial backing, 2-page growth, at most 4 chunks,
+8 total pages, 24 live allocations, and 64 block records. Arena buffers are
+not NativeAOT GC objects and do not participate in the managed heap. Host tests
+and three fresh QEMU boots prove reuse, fragmentation, growth, GC/runtime
+survival, negative paths, arena isolation, and exact ManagedKernel-owned native
+accounting restoration. The native harness intentionally does not require
+unrelated whole-process runtime/GC counters to return to their earlier values.
+
 Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
 versioned view of that truth through the managed-kernel ABI.
 
@@ -75,7 +88,8 @@ UEFI firmware
   -> native ManagedKernel memory-services installation
   -> native Host Services v1 installation
   -> managed kernel start with bounded host logging and monotonic time
-  -> managed page allocation, pattern, GC, multi-allocation, and release proof
+  -> managed page allocation and Phase 5 arena policy, pattern, GC, growth,
+     multi-arena, negative-path, and destroy proof
   -> post-initialization ManagedCallback export with existing runtime state
   -> scheduler-thread reverse-P/Invoke attach
   -> managed allocation and real GC probe

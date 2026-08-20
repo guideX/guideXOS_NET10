@@ -18,7 +18,8 @@ Native guideXOS bootstrap/runtime
                 +-- system initialization
                 +-- system-information service
                 +-- boot-resource snapshot service
-                +-- managed memory service (Phase 4)
+                +-- native page-backed managed memory service (Phase 4)
+                +-- managed KernelArena policy (Phase 5)
 ```
 
 The governing design principle is:
@@ -602,7 +603,83 @@ restoration. The fresh-boot script requires all Phase 4 markers on three
 independent QEMU processes and rejects any leaked QEMU process owned by the
 gate run.
 
-The Phase 3 acceptance rule is deliberately narrow: add the smallest
+## Phase 5: Managed kernel arena policy
+
+Phase 4 provides the native page mechanism. Phase 5 implements allocation
+policy in managed C# above that mechanism. The existing 72-byte memory-services
+table and page callbacks remain unchanged; Phase 5 adds no second physical
+allocator and does not widen the public ABI version. `GxManagedKernelRunPhase5`
+is a staged proof export, not a general-purpose runtime API.
+
+Arena allocations are unmanaged kernel buffers controlled by ManagedKernel.
+They are not NativeAOT GC objects and do not participate in the managed heap.
+The returned storage is native virtual memory backed by Phase 4 managed-owner
+pages. Managed C# keeps bounded control metadata in fixed arrays outside those
+buffers: chunk records, a linked first-fit block list, and exact allocation
+records. Metadata is never placed in the arena payload, so a buffer overrun
+cannot rewrite the allocator's control records through the returned pointer.
+
+### Arena policy and descriptor identity
+
+The default bounded policy is:
+
+| Policy | Default |
+|---|---:|
+| Initial backing | 2 pages |
+| Growth backing | 2 pages, or the safe page-rounded request when larger |
+| Maximum backing chunks | 4 |
+| Maximum total backing | 8 pages |
+| Maximum live allocations | 24 |
+| Maximum block records | 64 |
+| Maximum alignment | 4096 bytes |
+
+The managed descriptor carries arena identity, opaque allocation ID, virtual
+address, requested and reserved lengths, alignment, chunk identity, and a
+descriptor cookie. A free first validates the arena identity, live ID, exact
+descriptor geometry, chunk, and cookie. Stale, duplicate, wrong-arena, wrong-
+address, and wrong-length releases are rejected without changing native or
+managed state.
+
+Allocation searches existing free blocks first. It honors power-of-two
+alignment up to 4096 bytes, splits leading alignment padding and trailing free
+space when bounded metadata is available, and coalesces adjacent free blocks
+within a chunk. If no existing block fits, the arena grows through the Phase 4
+page provider. Page-count rounding and aggregate limits are overflow-checked;
+any unexpected post-growth failure releases the newly acquired native chunk
+and restores the pre-growth arena state. Empty chunks are retained until
+explicit `Destroy`, which requires zero live allocations and then releases
+every backing chunk through the original native descriptor.
+
+`ValidateInvariants` checks chunk bounds and provider ownership, exact block
+coverage and link ordering, free-block coalescing, allocation-record identity,
+unique live IDs, and live allocation/block agreement. The host proof also
+injects duplicate-ID, out-of-range, split/coalesce, allocation-cap, growth-
+failure, and two-arena isolation cases.
+
+### Managed and native proof stages
+
+The staged proof runs only after `GxManagedKernelStart` and covers:
+
+1. create a two-page arena, allocate aligned buffers, and verify non-overlap;
+2. first-fit reuse, fragmentation, and coalescing without another native page
+   allocation;
+3. multi-chunk growth, a second arena, monotonic time, managed allocation,
+   collection, and pattern survival across runtime activity;
+4. invalid configuration, invalid size/alignment, wrong ownership, wrong
+   geometry, live-destroy rejection, double-free rejection, and pattern
+   preservation;
+5. exact release and destroy of both arenas, including managed-owned native
+   accounting restoration.
+
+The native harness scans only `MANAGED_KERNEL`-owned physical ledger entries,
+VM reservations, VM commitments, and the ManagedKernel registry/context at
+each stage. It also validates the whole native substrate. Whole-process
+NativeAOT/runtime counters may retain unrelated allocations made by the GC
+proof and are diagnostic rather than leak criteria. The fresh-boot acceptance
+requires all managed and native Phase 5 markers on three independent QEMU
+processes, with the staged payload remaining byte-identical on every boot.
+
+The Phase 3 acceptance rule remains deliberately narrow: add the smallest
 versioned Host Services v1 surface, keep the normal transition deterministic,
 and preserve every previously proven behavior. “Do not reinterpret existing
 proof as permission to rewrite the loader's established contracts.”

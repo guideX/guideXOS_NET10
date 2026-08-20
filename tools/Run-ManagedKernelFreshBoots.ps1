@@ -105,7 +105,7 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE4_PASS') -or
+                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE5_PASS') -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
                     $text.Contains('GXOS_NET10:PAGE_FAULT_')) { break }
@@ -164,7 +164,23 @@ try {
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_MULTI_ALLOC_OK',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_RELEASE_OK',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_ACCOUNTING_RESTORED',
-            'GXOS_NET10:MANAGED_KERNEL_PHASE4_PASS')) {
+            'GXOS_NET10:MANAGED_KERNEL_PHASE4_PASS',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_CREATED',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_ALLOC_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_ALIGNMENT_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_REUSE_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_FRAGMENTATION_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_COALESCE_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_GROWTH_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_RUNTIME_SURVIVAL_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_DESTROY_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_FIRST_BACKING_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_MANAGED_ONLY_UNCHANGED',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_GROWTH_OK',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_NEGATIVE_UNCHANGED',
+            'GXOS_NET10:MANAGED_KERNEL_ARENA_NATIVE_ACCOUNTING_RESTORED',
+            'GXOS_NET10:MANAGED_KERNEL_PHASE5_PASS')) {
             Require ($text.Contains($marker)) "ManagedKernel boot $sequence missing marker: $marker"
         }
         Require (([regex]::Matches($text, 'GXOS_NET10:NATIVEAOT_STARTUP_OK')).Count -eq 1) `
@@ -181,14 +197,19 @@ try {
             "ManagedKernel boot $sequence did not record three host log callbacks."
         Require ($text.Contains('GXOS_NET10:MANAGED_KERNEL_HOST_TIME_CALLBACK_COUNT=0x0000000000000002')) `
             "ManagedKernel boot $sequence did not record two host time callbacks."
-        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_MEMORY_ALLOC_OK')).Count -eq 2) `
+        $phase5Start = $text.IndexOf('GXOS_NET10:MANAGED_KERNEL_ARENA_BASELINE_OWNER_CHUNKS')
+        Require ($phase5Start -gt 0) "ManagedKernel boot $sequence omitted the Phase 5 baseline marker."
+        $phase4Text = $text.Substring(0, $phase5Start)
+        Require (([regex]::Matches($phase4Text, 'GXOS_NET10:MANAGED_KERNEL_MEMORY_ALLOC_OK')).Count -eq 2) `
             "ManagedKernel boot $sequence did not complete exactly two managed allocations."
-        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_MEMORY_ALLOC_OWNER=MANAGED_KERNEL')).Count -eq 2) `
+        Require (([regex]::Matches($phase4Text, 'GXOS_NET10:MANAGED_KERNEL_MEMORY_ALLOC_OWNER=MANAGED_KERNEL')).Count -eq 2) `
             "ManagedKernel boot $sequence did not prove both allocations use the ManagedKernel owner."
         Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_MEMORY_RELEASE_OK')).Count -eq 2) `
             "ManagedKernel boot $sequence did not record both managed and native release confirmations."
         Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_PHASE4_PASS')).Count -eq 1) `
             "ManagedKernel boot $sequence repeated or omitted the Phase 4 pass marker."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_PHASE5_PASS')).Count -eq 1) `
+            "ManagedKernel boot $sequence repeated or omitted the Phase 5 pass marker."
         Write-Output ("MANAGED_KERNEL_QEMU_RUN_{0}=PASS bytes={1} sha256={2} serial={3}" -f `
             $sequence, ([Text.Encoding]::UTF8.GetByteCount($text)),
             (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant(), $serial)
