@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)] [string]$EvidenceDirectory,
     [Parameter(Mandatory = $true)] [string]$PayloadSha256,
     [int]$RunCount = 3,
-    [int]$TimeoutSeconds = 120
+    [int]$TimeoutSeconds = 120,
+    [int]$ExpectedCallbackCount = 2
 )
 
 Set-StrictMode -Version Latest
@@ -15,6 +16,7 @@ $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 $efi = Join-Path $gate 'ESP\EFI\BOOT\BOOTX64.EFI'
 $payload = Join-Path $gate 'ESP\GXOS\gxos-managed-entry-probe.dll'
 $expectedHash = $PayloadSha256.ToUpperInvariant()
+$expectedCallbackCountHex = '0x{0:X16}' -f $ExpectedCallbackCount
 
 function Require([bool]$condition, [string]$message) {
     if (!$condition) { throw $message }
@@ -62,7 +64,19 @@ function Stop-OwnedQemu([System.Diagnostics.Process]$process) {
     }
 }
 
+function Get-OwnedQemu {
+    $scope = @($gate, $evidence)
+    return @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'" |
+        Where-Object {
+            $commandLine = [string]$_.CommandLine
+            $scope | Where-Object {
+                $commandLine.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            } | Select-Object -First 1
+        })
+}
+
 Require ($RunCount -ge 3) 'At least three fresh boots are required.'
+Require ($ExpectedCallbackCount -gt 0) 'Expected callback count must be positive.'
 Require ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
     'Callback harness or payload is missing.'
 Require ($expectedHash -match '^[0-9A-F]{64}$') 'Payload SHA-256 must be 64 hex characters.'
@@ -82,15 +96,15 @@ $ovmf = Join-Path $share 'edk2-x86_64-code.fd'
 $varsTemplate = Join-Path $share 'edk2-i386-vars.fd'
 Require ((Test-Path -LiteralPath $ovmf) -and (Test-Path -LiteralPath $varsTemplate)) `
     'OVMF firmware is required.'
-Require (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count -eq 0) `
-    'A pre-existing QEMU process is present.'
+Require (@(Get-OwnedQemu).Count -eq 0) `
+    'A QEMU process already owns the callback gate/evidence paths.'
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
 
 $owned = @()
 try {
     for ($sequence = 1; $sequence -le $RunCount; $sequence++) {
-        Require (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count -eq 0) `
-            "QEMU already exists before fresh callback boot $sequence."
+        Require (@(Get-OwnedQemu).Count -eq 0) `
+            "A QEMU process already owns the callback gate/evidence paths before fresh callback boot $sequence."
         $run = Join-Path $evidence ("runs\run-{0}" -f $sequence)
         New-Item -ItemType Directory -Force -Path $run | Out-Null
         $code = Join-Path $run 'edk2-code.fd'
@@ -116,7 +130,7 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:MANAGED_CALLBACK_2_OK') -or
+                if ($text.Contains("GXOS_NET10:MANAGED_CALLBACK_COUNT=$expectedCallbackCountHex") -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=')) { break }
                 if ($process.HasExited) { break }
@@ -141,7 +155,7 @@ try {
             'GXOS_NET10:MANAGED_ENTRY_COMPLETE',
             'GXOS_NET10:MANAGED_CALLBACK_1_OK',
             'GXOS_NET10:MANAGED_CALLBACK_2_OK',
-            'GXOS_NET10:MANAGED_CALLBACK_COUNT=0x0000000000000002',
+            "GXOS_NET10:MANAGED_CALLBACK_COUNT=$expectedCallbackCountHex",
             'GXOS_NET10:MANAGED_CALLBACK_PROCESS_INITIALIZATION_CALLS=0x0000000000000001',
             'GXOS_NET10:NATIVEAOT_DURABILITY_PASS=1')) {
             Require ($text.Contains($marker)) "run $sequence missing marker: $marker"
@@ -150,6 +164,9 @@ try {
             "run $sequence repeated NativeAOT startup marker"
         Require ((Get-Count $text 'GXOS_NET10:GC_STARTUP_ADVANCED') -eq 1) `
             "run $sequence repeated GC startup marker"
+        Require ((Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_COUNT=') -eq
+                 [uint64]$ExpectedCallbackCount) `
+            "run $sequence managed callback count is incorrect"
         Require ($text.IndexOf('GXOS_NET10:MANAGED_ENTRY_COMPLETE') -lt
                  $text.IndexOf('GXOS_NET10:MANAGED_CALLBACK_1_BEGIN')) `
             "run $sequence callback began before managed entry completion"
@@ -189,7 +206,7 @@ try {
 } finally {
     foreach ($process in $owned) { Stop-OwnedQemu $process }
 }
-Require (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count -eq 0) `
-    'QEMU cleanup failed.'
+Require (@(Get-OwnedQemu).Count -eq 0) `
+    'Owned QEMU cleanup failed.'
 Write-Output "NATIVEAOT_MANAGED_CALLBACK_PAYLOAD_SHA256=$expectedHash"
 Write-Output "NATIVEAOT_MANAGED_CALLBACK_RUNS=$RunCount"

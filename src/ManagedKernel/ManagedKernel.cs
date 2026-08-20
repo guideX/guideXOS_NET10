@@ -128,6 +128,60 @@ internal struct GxManagedKernelMonotonicTimeV1
     internal ulong Reserved;
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelMemoryServicesV1
+{
+    internal const uint ExpectedSize = 72;
+    internal const ulong CapabilityAbi = 1UL << 0;
+    internal const ulong CapabilityAllocatePages = 1UL << 1;
+    internal const ulong CapabilityReleasePages = 1UL << 2;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint ServiceVersion;
+    internal uint Architecture;
+    internal ulong Capabilities;
+    internal ulong PageSize;
+    internal ulong AllocatePagesAddress;
+    internal ulong ReleasePagesAddress;
+    internal uint MaxPagesPerAllocation;
+    internal uint MaxLiveAllocations;
+    internal ulong MaxTotalPages;
+    internal ulong Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelMemoryAllocationV1
+{
+    internal const uint ExpectedSize = 56;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal ulong AllocationId;
+    internal ulong VirtualAddress;
+    internal ulong ByteLength;
+    internal ulong PageCount;
+    internal ulong PageSize;
+    internal uint Flags;
+    internal uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelMemoryReleaseV1
+{
+    internal const uint ExpectedSize = 56;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal ulong AllocationId;
+    internal ulong VirtualAddress;
+    internal ulong ByteLength;
+    internal ulong PageCount;
+    internal ulong PageSize;
+    internal uint Flags;
+    internal uint Reserved;
+}
+
 internal static unsafe class ManagedKernelLayout
 {
     internal static bool IsValid()
@@ -140,6 +194,9 @@ internal static unsafe class ManagedKernelLayout
                sizeof(GxManagedKernelBootResourcePublicationV1) == 48 &&
                sizeof(GxManagedKernelHostServicesV1) == 56 &&
                sizeof(GxManagedKernelMonotonicTimeV1) == 40 &&
+               sizeof(GxManagedKernelMemoryServicesV1) == 72 &&
+               sizeof(GxManagedKernelMemoryAllocationV1) == 56 &&
+               sizeof(GxManagedKernelMemoryReleaseV1) == 56 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Magic)).ToInt32() == 0 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Version)).ToInt32() == 4 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Size)).ToInt32() == 6 &&
@@ -194,7 +251,28 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Ticks)).ToInt32() == 8 &&
                Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.FrequencyHz)).ToInt32() == 16 &&
                Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Flags)).ToInt32() == 24 &&
-               Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Reserved)).ToInt32() == 32;
+               Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Reserved)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryServicesV1>(nameof(GxManagedKernelMemoryServicesV1.Size)).ToInt32() == 0 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryServicesV1>(nameof(GxManagedKernelMemoryServicesV1.AbiVersion)).ToInt32() == 4 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryServicesV1>(nameof(GxManagedKernelMemoryServicesV1.PageSize)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryServicesV1>(nameof(GxManagedKernelMemoryServicesV1.AllocatePagesAddress)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryServicesV1>(nameof(GxManagedKernelMemoryServicesV1.ReleasePagesAddress)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryServicesV1>(nameof(GxManagedKernelMemoryServicesV1.MaxPagesPerAllocation)).ToInt32() == 48 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryServicesV1>(nameof(GxManagedKernelMemoryServicesV1.MaxLiveAllocations)).ToInt32() == 52 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryServicesV1>(nameof(GxManagedKernelMemoryServicesV1.MaxTotalPages)).ToInt32() == 56 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryServicesV1>(nameof(GxManagedKernelMemoryServicesV1.Reserved)).ToInt32() == 64 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryAllocationV1>(nameof(GxManagedKernelMemoryAllocationV1.AllocationId)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryAllocationV1>(nameof(GxManagedKernelMemoryAllocationV1.VirtualAddress)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryAllocationV1>(nameof(GxManagedKernelMemoryAllocationV1.ByteLength)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryAllocationV1>(nameof(GxManagedKernelMemoryAllocationV1.PageCount)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryAllocationV1>(nameof(GxManagedKernelMemoryAllocationV1.PageSize)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryAllocationV1>(nameof(GxManagedKernelMemoryAllocationV1.Flags)).ToInt32() == 48 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.AllocationId)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.VirtualAddress)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.ByteLength)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.PageCount)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.PageSize)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.Flags)).ToInt32() == 48;
     }
 }
 
@@ -208,6 +286,9 @@ internal static unsafe class ManagedKernelContract
     internal const uint AlreadyInitialized = 5;
     internal const uint OutOfRange = 6;
     internal const uint InvalidState = 7;
+    internal const uint ResourceExhausted = 8;
+    internal const uint NotFound = 9;
+    internal const uint OwnershipMismatch = 10;
 
     private const uint AbiVersionV1 = 1;
     private const uint ArchitectureX64 = 0x8664;
@@ -244,6 +325,18 @@ internal static unsafe class ManagedKernelContract
         GxManagedKernelHostServicesV1.CapabilityLogUtf8;
     private const ulong MonotonicTimeKnownFlags =
         GxManagedKernelMonotonicTimeV1.FlagNormalizedFromStart;
+    private const uint MemoryServicesAbiVersionV1 = 1;
+    private const uint MemoryServicesServiceVersionV1 = 1;
+    private const ulong MemoryServicesKnownCapabilities =
+        GxManagedKernelMemoryServicesV1.CapabilityAbi |
+        GxManagedKernelMemoryServicesV1.CapabilityAllocatePages |
+        GxManagedKernelMemoryServicesV1.CapabilityReleasePages;
+    private const ulong MemoryServicesRequiredCapabilities =
+        MemoryServicesKnownCapabilities;
+    internal const ulong MemoryPageSize = 4096;
+    internal const uint MemoryMaxPagesPerAllocation = 256;
+    internal const uint MemoryMaxLiveAllocations = 16;
+    internal const ulong MemoryMaxTotalPages = 1024;
 
     private enum LifecycleState
     {
@@ -265,6 +358,21 @@ internal static unsafe class ManagedKernelContract
     private static ulong s_hostCapabilities;
     private static nuint s_hostLogUtf8Address;
     private static nuint s_hostMonotonicTimeAddress;
+    private static int s_memoryServicesInstalled;
+    private static ulong s_memoryCapabilities;
+    private static ulong s_memoryPageSize;
+    private static uint s_memoryMaxPagesPerAllocation;
+    private static uint s_memoryMaxLiveAllocations;
+    private static ulong s_memoryMaxTotalPages;
+    private static nuint s_memoryAllocatePagesAddress;
+    private static nuint s_memoryReleasePagesAddress;
+    private static int s_phase4Run;
+
+    internal static bool IsStarted =>
+        s_lifecycleState == (int)LifecycleState.Started;
+    internal static bool MemoryServicesInstalled => s_memoryServicesInstalled != 0;
+    internal static nuint MemoryAllocatePagesAddress => s_memoryAllocatePagesAddress;
+    internal static nuint MemoryReleasePagesAddress => s_memoryReleasePagesAddress;
 
     private static bool IsInitialized =>
         s_lifecycleState != (int)LifecycleState.BootstrapAvailable;
@@ -546,6 +654,59 @@ internal static unsafe class ManagedKernelContract
         return ManagedOk;
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallMemoryServices")]
+    internal static uint InstallMemoryServices(uint requestedAbiVersion,
+                                                nuint memoryServicesAddress)
+    {
+        GxManagedKernelMemoryServicesV1 services;
+        if (requestedAbiVersion != MemoryServicesAbiVersionV1)
+        {
+            return UnsupportedAbi;
+        }
+        if (!IsInitialized)
+        {
+            return NotInitialized;
+        }
+        if (s_memoryServicesInstalled != 0)
+        {
+            return AlreadyInitialized;
+        }
+        if (s_lifecycleState != (int)LifecycleState.EnvironmentInstalling ||
+            memoryServicesAddress == 0 ||
+            !IsRangeValid(memoryServicesAddress,
+                          (nuint)GxManagedKernelMemoryServicesV1.ExpectedSize))
+        {
+            return s_lifecycleState != (int)LifecycleState.EnvironmentInstalling
+                ? InvalidState : InvalidArgument;
+        }
+        services = *(GxManagedKernelMemoryServicesV1*)memoryServicesAddress;
+        if (services.Size != GxManagedKernelMemoryServicesV1.ExpectedSize ||
+            services.AbiVersion != MemoryServicesAbiVersionV1 ||
+            services.ServiceVersion != MemoryServicesServiceVersionV1 ||
+            services.Architecture != ArchitectureX64 ||
+            (services.Capabilities & ~MemoryServicesKnownCapabilities) != 0 ||
+            (services.Capabilities & MemoryServicesRequiredCapabilities) !=
+                MemoryServicesRequiredCapabilities ||
+            services.PageSize != MemoryPageSize ||
+            services.MaxPagesPerAllocation != MemoryMaxPagesPerAllocation ||
+            services.MaxLiveAllocations != MemoryMaxLiveAllocations ||
+            services.MaxTotalPages != MemoryMaxTotalPages ||
+            services.AllocatePagesAddress == 0 ||
+            services.ReleasePagesAddress == 0 || services.Reserved != 0)
+        {
+            return InvalidArgument;
+        }
+        s_memoryCapabilities = services.Capabilities;
+        s_memoryPageSize = services.PageSize;
+        s_memoryMaxPagesPerAllocation = services.MaxPagesPerAllocation;
+        s_memoryMaxLiveAllocations = services.MaxLiveAllocations;
+        s_memoryMaxTotalPages = services.MaxTotalPages;
+        s_memoryAllocatePagesAddress = (nuint)services.AllocatePagesAddress;
+        s_memoryReleasePagesAddress = (nuint)services.ReleasePagesAddress;
+        s_memoryServicesInstalled = 1;
+        return ManagedOk;
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallHostServices")]
     internal static uint InstallHostServices(uint requestedAbiVersion,
                                               nuint hostServicesAddress)
@@ -677,6 +838,7 @@ internal static unsafe class ManagedKernelContract
         }
         if (s_lifecycleState != (int)LifecycleState.Ready ||
             s_bootResourcesPublished == 0 || s_hostServicesInstalled == 0 ||
+            s_memoryServicesInstalled == 0 ||
             (s_hostCapabilities & RequiredHostServicesCapabilities) !=
                 RequiredHostServicesCapabilities ||
             !PublishedBootResourcesRemainStable())
@@ -709,6 +871,25 @@ internal static unsafe class ManagedKernelContract
             return InvalidState;
         }
         s_lifecycleState = (int)LifecycleState.Started;
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase4")]
+    internal static uint RunPhase4()
+    {
+        if (!IsInitialized || s_lifecycleState != (int)LifecycleState.Started)
+        {
+            return IsInitialized ? InvalidState : NotInitialized;
+        }
+        if (s_phase4Run != 0)
+        {
+            return AlreadyInitialized;
+        }
+        if (!KernelMemory.RunProof())
+        {
+            return InvalidState;
+        }
+        s_phase4Run = 1;
         return ManagedOk;
     }
 
@@ -825,6 +1006,220 @@ internal static unsafe class ManagedKernelContract
         }
         *(GxManagedKernelBootResourceRegionV1*)outputAddress = region;
         return ManagedOk;
+    }
+}
+
+internal struct KernelMemoryRegion
+{
+    internal ulong AllocationId;
+    internal ulong VirtualAddress;
+    internal ulong ByteLength;
+    internal ulong PageCount;
+    internal ulong PageSize;
+    internal uint Flags;
+}
+
+internal static unsafe class KernelMemory
+{
+    private const uint MemoryAbiVersionV1 = 1;
+
+    private static bool IsInstalled =>
+        ManagedKernelContract.MemoryServicesInstalled;
+
+    private static bool IsValidRegion(in KernelMemoryRegion region)
+    {
+        return region.AllocationId != 0 && region.VirtualAddress != 0 &&
+               region.ByteLength != 0 && region.PageCount != 0 &&
+               region.PageSize == ManagedKernelContract.MemoryPageSize &&
+               region.Flags == 0 &&
+               region.PageCount <= ulong.MaxValue / region.PageSize &&
+               region.ByteLength == region.PageCount * region.PageSize &&
+               region.ByteLength <= (ulong)nuint.MaxValue &&
+               (nuint)region.VirtualAddress <=
+                   nuint.MaxValue - (nuint)region.ByteLength;
+    }
+
+    private static byte Pattern(ulong index, byte seed)
+    {
+        ulong value = unchecked(index * 0x9E3779B97F4A7C15UL +
+                                 ((ulong)seed << 32) + 0xD1B54A32D192ED03UL);
+        return (byte)(value ^ (value >> 17) ^ (value >> 41));
+    }
+
+    private static void Fill(in KernelMemoryRegion region, byte seed)
+    {
+        byte* address = (byte*)(nuint)region.VirtualAddress;
+        ulong index = 0;
+        while (index != region.ByteLength)
+        {
+            address[(nuint)index] = Pattern(index, seed);
+            index++;
+        }
+    }
+
+    private static bool Verify(in KernelMemoryRegion region, byte seed)
+    {
+        byte* address = (byte*)(nuint)region.VirtualAddress;
+        ulong index = 0;
+        while (index != region.ByteLength)
+        {
+            if (address[(nuint)index] != Pattern(index, seed)) return false;
+            index++;
+        }
+        return true;
+    }
+
+    private static bool TryAllocate(ulong pageCount, uint flags,
+                                    out KernelMemoryRegion region)
+    {
+        GxManagedKernelMemoryAllocationV1 result = default;
+        region = default;
+        if (!IsInstalled || !ManagedKernelContract.IsStarted ||
+            pageCount == 0 || pageCount >
+                ManagedKernelContract.MemoryMaxPagesPerAllocation ||
+            flags != 0 || ManagedKernelContract.MemoryAllocatePagesAddress == 0)
+        {
+            return false;
+        }
+        delegate* unmanaged<ulong, uint, nuint, nuint, uint> callback =
+            (delegate* unmanaged<ulong, uint, nuint, nuint, uint>)
+                ManagedKernelContract.MemoryAllocatePagesAddress;
+        uint status;
+        GxManagedKernelMemoryAllocationV1* resultAddress = &result;
+        status = callback(pageCount, flags, (nuint)resultAddress,
+                          (nuint)GxManagedKernelMemoryAllocationV1.ExpectedSize);
+        if (status != ManagedKernelContract.ManagedOk ||
+            result.Size != GxManagedKernelMemoryAllocationV1.ExpectedSize ||
+            result.AbiVersion != MemoryAbiVersionV1 || result.PageCount != pageCount ||
+            result.PageSize != ManagedKernelContract.MemoryPageSize ||
+            result.Flags != flags || result.Reserved != 0)
+        {
+            return false;
+        }
+        region.AllocationId = result.AllocationId;
+        region.VirtualAddress = result.VirtualAddress;
+        region.ByteLength = result.ByteLength;
+        region.PageCount = result.PageCount;
+        region.PageSize = result.PageSize;
+        region.Flags = result.Flags;
+        return IsValidRegion(in region);
+    }
+
+    private static uint CallRelease(in GxManagedKernelMemoryReleaseV1 request)
+    {
+        if (!IsInstalled || ManagedKernelContract.MemoryReleasePagesAddress == 0)
+        {
+            return ManagedKernelContract.InvalidState;
+        }
+        delegate* unmanaged<nuint, nuint, uint> callback =
+            (delegate* unmanaged<nuint, nuint, uint>)
+                ManagedKernelContract.MemoryReleasePagesAddress;
+        GxManagedKernelMemoryReleaseV1 local = request;
+        GxManagedKernelMemoryReleaseV1* requestAddress = &local;
+        return callback((nuint)requestAddress,
+                        (nuint)GxManagedKernelMemoryReleaseV1.ExpectedSize);
+    }
+
+    private static GxManagedKernelMemoryReleaseV1 ReleaseRequest(
+        in KernelMemoryRegion region)
+    {
+        return new GxManagedKernelMemoryReleaseV1
+        {
+            Size = GxManagedKernelMemoryReleaseV1.ExpectedSize,
+            AbiVersion = MemoryAbiVersionV1,
+            AllocationId = region.AllocationId,
+            VirtualAddress = region.VirtualAddress,
+            ByteLength = region.ByteLength,
+            PageCount = region.PageCount,
+            PageSize = region.PageSize,
+            Flags = region.Flags,
+            Reserved = 0
+        };
+    }
+
+    private static bool TryRelease(in KernelMemoryRegion region)
+    {
+        GxManagedKernelMemoryReleaseV1 request;
+        if (!IsValidRegion(in region)) return false;
+        request = ReleaseRequest(in region);
+        return CallRelease(in request) ==
+            ManagedKernelContract.ManagedOk;
+    }
+
+    private static bool TryWrongReleases(in KernelMemoryRegion region)
+    {
+        GxManagedKernelMemoryReleaseV1 request = ReleaseRequest(in region);
+        request.VirtualAddress++;
+        if (CallRelease(in request) != ManagedKernelContract.OwnershipMismatch) return false;
+        request = ReleaseRequest(in region);
+        request.PageCount++;
+        if (CallRelease(in request) != ManagedKernelContract.OwnershipMismatch) return false;
+        request = ReleaseRequest(in region);
+        request.AllocationId++;
+        if (CallRelease(in request) != ManagedKernelContract.NotFound) return false;
+        request = ReleaseRequest(in region);
+        request.Size = GxManagedKernelMemoryReleaseV1.ExpectedSize - 1;
+        if (CallRelease(in request) != ManagedKernelContract.InvalidArgument) return false;
+        return true;
+    }
+
+    internal static bool RunProof()
+    {
+        KernelMemoryRegion first;
+        KernelMemoryRegion second;
+        byte[] gcActivity;
+        if (!TryAllocate(4, 0, out first) || !IsValidRegion(in first)) return false;
+        Fill(in first, 0x31);
+        if (!Verify(in first, 0x31)) return false;
+        if (!TryWrongReleases(in first)) return false;
+        if (!ManagedKernelContract.TryQueryMonotonicTime(out _)) return false;
+        gcActivity = new byte[4096];
+        gcActivity[0] = 0x5A;
+        GC.Collect();
+        GC.KeepAlive(gcActivity);
+        if (!Verify(in first, 0x31)) return false;
+        byte* firstAddress = (byte*)(nuint)first.VirtualAddress;
+        firstAddress[0] = 0xA1;
+        firstAddress[(nuint)(first.PageSize - 1)] = 0xA2;
+        firstAddress[(nuint)first.PageSize] = 0xA3;
+        firstAddress[(nuint)(first.ByteLength - 1)] = 0xA4;
+        if (firstAddress[0] != 0xA1 ||
+            firstAddress[(nuint)(first.PageSize - 1)] != 0xA2 ||
+            firstAddress[(nuint)first.PageSize] != 0xA3 ||
+            firstAddress[(nuint)(first.ByteLength - 1)] != 0xA4)
+        {
+            return false;
+        }
+        Fill(in first, 0x31);
+        if (!Verify(in first, 0x31) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MEMORY_PATTERN_OK\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MEMORY_RUNTIME_SURVIVAL_OK\r\n"u8))
+        {
+            return false;
+        }
+        if (!TryAllocate(3, 0, out second) || !IsValidRegion(in second) ||
+            second.AllocationId == first.AllocationId ||
+            second.VirtualAddress == first.VirtualAddress ||
+            second.VirtualAddress > ulong.MaxValue - second.ByteLength ||
+            first.VirtualAddress > ulong.MaxValue - first.ByteLength ||
+            second.VirtualAddress < first.VirtualAddress + first.ByteLength &&
+                first.VirtualAddress < second.VirtualAddress + second.ByteLength)
+        {
+            return false;
+        }
+        Fill(in second, 0x72);
+        if (!Verify(in second, 0x72) || !Verify(in first, 0x31) ||
+            !TryRelease(in second) || !Verify(in first, 0x31) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MEMORY_MULTI_ALLOC_OK\r\n"u8) ||
+            !TryRelease(in first) || TryRelease(in first))
+        {
+            return false;
+        }
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MEMORY_RELEASE_OK\r\n"u8))
+        {
+            return false;
+        }
+        return true;
     }
 }
 

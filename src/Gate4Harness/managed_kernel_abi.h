@@ -28,6 +28,16 @@
 #define GX_MANAGED_KERNEL_HOST_SERVICES_V1_SIZE 56U
 #define GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE 40U
 #define GX_MANAGED_KERNEL_HOST_LOG_MAX_BYTES 1024U
+#define GX_MANAGED_KERNEL_MEMORY_SERVICES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_MEMORY_SERVICES_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_MEMORY_SERVICES_V1_SIZE 72U
+#define GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1_SIZE 56U
+#define GX_MANAGED_KERNEL_MEMORY_RELEASE_V1_SIZE 56U
+#define GX_MANAGED_KERNEL_MEMORY_MAX_PAGES_PER_ALLOCATION 256U
+#define GX_MANAGED_KERNEL_MEMORY_MAX_LIVE_ALLOCATIONS 16U
+#define GX_MANAGED_KERNEL_MEMORY_MAX_TOTAL_PAGES 1024U
+#define GX_MANAGED_KERNEL_MEMORY_PAGE_SIZE 4096U
+#define GX_MANAGED_KERNEL_MEMORY_FLAG_NONE 0U
 
 typedef enum {
     GX_MANAGED_OK = 0U,
@@ -37,7 +47,10 @@ typedef enum {
     GX_MANAGED_NOT_INITIALIZED = 4U,
     GX_MANAGED_ALREADY_INITIALIZED = 5U,
     GX_MANAGED_OUT_OF_RANGE = 6U,
-    GX_MANAGED_INVALID_STATE = 7U
+    GX_MANAGED_INVALID_STATE = 7U,
+    GX_MANAGED_RESOURCE_EXHAUSTED = 8U,
+    GX_MANAGED_NOT_FOUND = 9U,
+    GX_MANAGED_OWNERSHIP_MISMATCH = 10U
 } GX_MANAGED_STATUS;
 
 /* Public capabilities describe useful interfaces, not proof markers. */
@@ -54,6 +67,12 @@ enum {
 
 enum {
     GX_MANAGED_MONOTONIC_TIME_FLAG_NORMALIZED_FROM_START = 1ULL << 0
+};
+
+enum {
+    GX_MANAGED_MEMORY_CAPABILITY_ABI = 1ULL << 0,
+    GX_MANAGED_MEMORY_CAPABILITY_ALLOCATE_PAGES = 1ULL << 1,
+    GX_MANAGED_MEMORY_CAPABILITY_RELEASE_PAGES = 1ULL << 2
 };
 
 enum {
@@ -158,6 +177,45 @@ typedef struct {
     uint64_t Flags;
     uint64_t Reserved;
 } GX_MANAGED_KERNEL_MONOTONIC_TIME_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint64_t Capabilities;
+    uint64_t PageSize;
+    uint64_t AllocatePagesAddress;
+    uint64_t ReleasePagesAddress;
+    uint32_t MaxPagesPerAllocation;
+    uint32_t MaxLiveAllocations;
+    uint64_t MaxTotalPages;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_MEMORY_SERVICES_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t AllocationId;
+    uint64_t VirtualAddress;
+    uint64_t ByteLength;
+    uint64_t PageCount;
+    uint64_t PageSize;
+    uint32_t Flags;
+    uint32_t Reserved;
+} GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t AllocationId;
+    uint64_t VirtualAddress;
+    uint64_t ByteLength;
+    uint64_t PageCount;
+    uint64_t PageSize;
+    uint32_t Flags;
+    uint32_t Reserved;
+} GX_MANAGED_KERNEL_MEMORY_RELEASE_V1;
 #pragma pack(pop)
 
 _Static_assert(sizeof(GX_MANAGED_KERNEL_INIT_REQUEST_V1) ==
@@ -279,6 +337,75 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, Flags) == 24,
                "managed monotonic time Flags offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, Reserved) == 32,
                "managed monotonic time Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1) ==
+                   GX_MANAGED_KERNEL_MEMORY_SERVICES_V1_SIZE,
+               "managed memory services size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, Size) == 0,
+               "managed memory services Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, AbiVersion) == 4,
+               "managed memory services AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, ServiceVersion) == 8,
+               "managed memory services ServiceVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, Architecture) == 12,
+               "managed memory services Architecture offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, Capabilities) == 16,
+               "managed memory services Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, PageSize) == 24,
+               "managed memory services PageSize offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, AllocatePagesAddress) == 32,
+               "managed memory services AllocatePagesAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, ReleasePagesAddress) == 40,
+               "managed memory services ReleasePagesAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, MaxPagesPerAllocation) == 48,
+               "managed memory services MaxPagesPerAllocation offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, MaxLiveAllocations) == 52,
+               "managed memory services MaxLiveAllocations offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, MaxTotalPages) == 56,
+               "managed memory services MaxTotalPages offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, Reserved) == 64,
+               "managed memory services Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1) ==
+                   GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1_SIZE,
+               "managed memory allocation size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, Size) == 0,
+               "managed memory allocation Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, AbiVersion) == 4,
+               "managed memory allocation AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, AllocationId) == 8,
+               "managed memory allocation AllocationId offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, VirtualAddress) == 16,
+               "managed memory allocation VirtualAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, ByteLength) == 24,
+               "managed memory allocation ByteLength offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, PageCount) == 32,
+               "managed memory allocation PageCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, PageSize) == 40,
+               "managed memory allocation PageSize offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, Flags) == 48,
+               "managed memory allocation Flags offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, Reserved) == 52,
+               "managed memory allocation Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1) ==
+                   GX_MANAGED_KERNEL_MEMORY_RELEASE_V1_SIZE,
+               "managed memory release size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, Size) == 0,
+               "managed memory release Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, AbiVersion) == 4,
+               "managed memory release AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, AllocationId) == 8,
+               "managed memory release AllocationId offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, VirtualAddress) == 16,
+               "managed memory release VirtualAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, ByteLength) == 24,
+               "managed memory release ByteLength offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, PageCount) == 32,
+               "managed memory release PageCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, PageSize) == 40,
+               "managed memory release PageSize offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, Flags) == 48,
+               "managed memory release Flags offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, Reserved) == 52,
+               "managed memory release Reserved offset");
 
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INITIALIZE_ENTRY)(
     uint32_t requested_abi_version, uintptr_t request_address);
@@ -301,6 +428,14 @@ typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_LOG_UTF8_ENTRY)(
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_QUERY_MONOTONIC_TIME_ENTRY)(
     uint32_t requested_abi_version, uintptr_t output_address,
     uintptr_t output_capacity);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INSTALL_MEMORY_SERVICES_ENTRY)(
+    uint32_t requested_abi_version, uintptr_t memory_services_address);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_MEMORY_ALLOCATE_PAGES_ENTRY)(
+    uint64_t page_count, uint32_t flags, uintptr_t output_address,
+    uintptr_t output_capacity);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_MEMORY_RELEASE_PAGES_ENTRY)(
+    uintptr_t request_address, uintptr_t request_capacity);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_RUN_PHASE4_ENTRY)(void);
 
 /* Native callers use this before crossing into managed code. */
 static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_output_buffer(
@@ -337,6 +472,32 @@ static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_memory_region_outpu
         return GX_MANAGED_BUFFER_TOO_SMALL;
     }
     if (output_capacity > UINTPTR_MAX - output_address) {
+        return GX_MANAGED_INVALID_ARGUMENT;
+    }
+    return GX_MANAGED_OK;
+}
+
+static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_memory_allocation_output_buffer(
+    uintptr_t output_address, uintptr_t output_capacity)
+{
+    if (output_address == 0) return GX_MANAGED_INVALID_ARGUMENT;
+    if (output_capacity < GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1_SIZE) {
+        return GX_MANAGED_BUFFER_TOO_SMALL;
+    }
+    if (output_capacity > UINTPTR_MAX - output_address) {
+        return GX_MANAGED_INVALID_ARGUMENT;
+    }
+    return GX_MANAGED_OK;
+}
+
+static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_memory_release_input_buffer(
+    uintptr_t request_address, uintptr_t request_capacity)
+{
+    if (request_address == 0) return GX_MANAGED_INVALID_ARGUMENT;
+    if (request_capacity < GX_MANAGED_KERNEL_MEMORY_RELEASE_V1_SIZE) {
+        return GX_MANAGED_BUFFER_TOO_SMALL;
+    }
+    if (request_capacity > UINTPTR_MAX - request_address) {
         return GX_MANAGED_INVALID_ARGUMENT;
     }
     return GX_MANAGED_OK;

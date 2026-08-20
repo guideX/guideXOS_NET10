@@ -505,7 +505,7 @@ const char *gxos_memory_allocation_class_name(
         "IMAGE", "PAYLOAD_STAGING", "IMPORT_STUB", "TLS_VECTOR",
         "TLS_BLOCK", "GS", "TEB", "MAIN_STACK", "SCHEDULER_STACK",
         "SCHEDULER_PAGE", "MEMORY_MAP", "PERSISTENT_POOL", "PAGE_TABLE",
-        "VM_DATA", "OTHER"
+        "VM_DATA", "MANAGED_KERNEL", "OTHER"
     };
     if ((uint32_t)allocation_class >= GXOS_MEMORY_ALLOCATION_COUNT) return "INVALID";
     return names[allocation_class];
@@ -515,7 +515,7 @@ const char *gxos_memory_owner_name(GXOS_MEMORY_OWNER owner)
 {
     static const char *const names[GXOS_MEMORY_OWNER_COUNT] = {
         "LOADER", "NATIVEAOT", "IMPORTS", "TLS", "SCHEDULER", "CRT",
-        "MEMORY_ACCOUNTING", "PAGING", "VM", "OTHER"
+        "MEMORY_ACCOUNTING", "PAGING", "VM", "MANAGED_KERNEL", "OTHER"
     };
     if ((uint32_t)owner >= GXOS_MEMORY_OWNER_COUNT) return "INVALID";
     return names[owner];

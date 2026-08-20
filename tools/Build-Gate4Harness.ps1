@@ -66,6 +66,7 @@ $source = Join-Path $root 'src\Gate4Harness\gate4_loader.c'
 $memoryAccountingSource = Join-Path $root 'src\Gate4Harness\memory_accounting.c'
 $managedKernelBootResourcesSource = Join-Path $root 'src\Gate4Harness\managed_kernel_boot_resources.c'
 $managedKernelHostServicesSource = Join-Path $root 'src\Gate4Harness\managed_kernel_host_services.c'
+$managedKernelMemorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_memory.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
 $virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
@@ -139,6 +140,7 @@ if (-not (Test-Path -LiteralPath $nativeAotCallbackBridgeSource)) {
 if (-not (Test-Path -LiteralPath $memoryAccountingSource)) { throw "Memory accounting source not found: $memoryAccountingSource" }
 if (-not (Test-Path -LiteralPath $managedKernelBootResourcesSource)) { throw "ManagedKernel boot-resource source not found: $managedKernelBootResourcesSource" }
 if (-not (Test-Path -LiteralPath $managedKernelHostServicesSource)) { throw "ManagedKernel host-service source not found: $managedKernelHostServicesSource" }
+if (-not (Test-Path -LiteralPath $managedKernelMemorySource)) { throw "ManagedKernel memory-service source not found: $managedKernelMemorySource" }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
 if (-not (Test-Path -LiteralPath $virtualQueryCaptureAssembly)) { throw "VirtualQuery capture assembly not found: $virtualQueryCaptureAssembly" }
@@ -252,7 +254,7 @@ $gccArguments = @(
     '-nostdlib', '-Wl,--entry,efi_main', '-Wl,--subsystem,10',
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
     '-Wl,--no-insert-timestamp',
-    '-o', $efi, $source, $memoryAccountingSource, $vmSubstrateSource, $timeSource, $performanceSource,
+    '-o', $efi, $source, $memoryAccountingSource, $vmSubstrateSource, $managedKernelMemorySource, $timeSource, $performanceSource,
     $exceptionSource, $exceptionAssembly, $vectoredHandlerSource,
     $virtualMemorySource,
     $virtualQueryCaptureAssembly,

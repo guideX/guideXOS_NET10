@@ -18,6 +18,7 @@ Native guideXOS bootstrap/runtime
                 +-- system initialization
                 +-- system-information service
                 +-- boot-resource snapshot service
+                +-- managed memory service (Phase 4)
 ```
 
 The governing design principle is:
@@ -330,10 +331,10 @@ services, full corlib integration,
 filesystem, networking, sound, drivers, process management, application
 model, thread pool, `Task`, async/await, managed `Thread`, reflection,
 dynamic assemblies, rich marshaling, object RPC, or a full managed-kernel
-port. The ABI currently exposes the bounded Phase 2 resource-map service and
-Phase 3 Host Services v1 (logger plus optional monotonic time), and remains
-x64 only. Additional services should follow this versioned, size-checked,
-capability-negotiated pattern.
+port. The ABI currently exposes the bounded Phase 2 resource-map service,
+Phase 3 Host Services v1 (logger plus optional monotonic time), and the Phase
+4 managed memory service. It remains x64 only. Additional services should
+follow this versioned, size-checked, capability-negotiated pattern.
 
 ## Phase 3: Managed kernel lifecycle and Host Services v1
 
@@ -346,6 +347,7 @@ the ordered exports below:
 BootstrapAvailable
         --GxManagedKernelInitialize--> Initialized
         --GxManagedKernelInstallBootResources--> EnvironmentInstalling
+        --GxManagedKernelInstallMemoryServices--> EnvironmentInstalling
         --GxManagedKernelInstallHostServices--> Ready
         --GxManagedKernelStart--> Started
 ```
@@ -355,8 +357,8 @@ BootstrapAvailable
 `Initialized`, Host Services installation only from
 `EnvironmentInstalling`, and start only from `Ready`. An out-of-order
 operation returns `GX_MANAGED_INVALID_STATE`; a repeated initialize,
-resource publication, or Host Services installation returns
-`GX_MANAGED_ALREADY_INITIALIZED`. A repeated start also returns
+resource publication, memory-service installation, or Host Services installation
+returns `GX_MANAGED_ALREADY_INITIALIZED`. A repeated start also returns
 `GX_MANAGED_ALREADY_INITIALIZED`, without re-running callbacks. The loader's
 negative vectors exercise these boundaries before the successful transition.
 
@@ -462,6 +464,143 @@ runtime state has been activated. The native logger path is the existing
 `delegate* unmanaged` call from the loaded NativeAOT image. This preserves
 the established callback ABI and monotonic-source decisions instead of
 introducing a second bridge or clock.
+
+## Phase 4: Managed memory services
+
+Phase 4 adds a native-owned, page-based allocation service for ManagedKernel.
+It is a separate versioned table; the established Host Services v1 table is
+unchanged at 56 bytes. The native loader remains authoritative for physical
+allocation, virtual-address reservation, paging mappings, region ownership,
+and accounting. ManagedKernel receives only a fixed descriptor and an opaque
+allocation ID.
+
+### Memory service table
+
+`GX_MANAGED_KERNEL_MEMORY_SERVICES_V1` is packed and 72 bytes. The loader
+installs it while the lifecycle is `EnvironmentInstalling`; ManagedKernel
+requires it before `GxManagedKernelStart` can succeed. The table is caller-owned
+input and ManagedKernel copies only primitive values and callback addresses.
+
+| Offset | Field | Type | Meaning |
+|---:|---|---|---|
+| 0 | `Size` | `uint32_t` | Must equal 72. |
+| 4 | `AbiVersion` | `uint32_t` | Memory service ABI v1. |
+| 8 | `ServiceVersion` | `uint32_t` | Memory service version v1. |
+| 12 | `Architecture` | `uint32_t` | x64 (`0x8664`). |
+| 16 | `Capabilities` | `uint64_t` | ABI, allocate-pages, and release-pages bits. |
+| 24 | `PageSize` | `uint64_t` | Must equal 4096 bytes. |
+| 32 | `AllocatePagesAddress` | `uintptr_t` | Native allocation callback. |
+| 40 | `ReleasePagesAddress` | `uintptr_t` | Native release callback. |
+| 48 | `MaxPagesPerAllocation` | `uint32_t` | 256 pages. |
+| 52 | `MaxLiveAllocations` | `uint32_t` | 16 live allocations. |
+| 56 | `MaxTotalPages` | `uint64_t` | 1024 aggregate live pages. |
+| 64 | `Reserved` | `uint64_t` | Must be zero. |
+
+The v1 callback signatures are:
+
+```text
+uint32_t allocate_pages(uint64_t page_count, uint32_t flags,
+                        uintptr_t output_address,
+                        uintptr_t output_capacity);
+uint32_t release_pages(uintptr_t request_address,
+                       uintptr_t request_capacity);
+```
+
+The ABI accepts only `flags == 0`. All counts, byte lengths, and pointer
+ranges are checked before a callback writes caller-owned storage. The native
+loader uses sentinel-filled outputs in its negative vectors to prove that
+rejected calls do not partially populate a descriptor.
+
+### Allocation and release descriptors
+
+`GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1` and
+`GX_MANAGED_KERNEL_MEMORY_RELEASE_V1` are both packed 56-byte structures.
+The release structure repeats the allocation identity and exact geometry;
+there is no implicit free, finalizer ownership, or managed object handle.
+
+| Offset | Field | Type | Meaning |
+|---:|---|---|---|
+| 0 | `Size` | `uint32_t` | Must be at least 56 for a v1 call. |
+| 4 | `AbiVersion` | `uint32_t` | Memory service ABI v1. |
+| 8 | `AllocationId` | `uint64_t` | Native-generated nonzero opaque token. |
+| 16 | `VirtualAddress` | `uint64_t` | Page-aligned mapped virtual base. |
+| 24 | `ByteLength` | `uint64_t` | Exactly `PageCount * PageSize`. |
+| 32 | `PageCount` | `uint64_t` | Requested page count. |
+| 40 | `PageSize` | `uint64_t` | 4096 bytes. |
+| 48 | `Flags` | `uint32_t` | Zero in v1. |
+| 52 | `Reserved` | `uint32_t` | Zero. |
+
+The native registry matches release requests by `AllocationId` first, then
+requires exact virtual address, byte length, page count, page size, and flags.
+An unknown ID returns `GX_MANAGED_NOT_FOUND`; a known ID with altered geometry
+returns `GX_MANAGED_OWNERSHIP_MISMATCH`; a second release returns
+`GX_MANAGED_NOT_FOUND` after the first release clears the registry entry.
+
+### Native ownership and transaction boundaries
+
+Each allocation is a transaction over the existing native substrates:
+
+1. Reserve a range in the existing 1 GiB VM arena with allocation class and
+   owner `MANAGED_KERNEL`.
+2. Commit every 4096-byte page through the existing paging/physical allocator,
+   recording physical ledger entries with allocation class and owner
+   `MANAGED_KERNEL`.
+3. Register one private, committed, read-write region in the VM region ledger.
+4. Publish the descriptor and registry slot only after all prior steps pass.
+
+Any reservation, commit, physical-page, or region-registration failure rolls
+back the reservation and all pages acquired by that transaction. The output
+descriptor is untouched on failure. Release first validates the complete
+reservation, commitment, mapping, physical-ledger, and region-ledger record;
+then unregisters the region, unmaps and frees each page, releases the virtual
+reservation, and clears the registry slot. The loader compares physical
+ledger live count/bytes, commit bytes, arena reservation/commitment counters,
+and VM region count before and after the proof.
+
+The public allocation service does not replace the existing dynamic native
+allocator and does not expose its internal VM or physical-ledger pointers.
+It is bounded independently at 16 live allocations and 1024 aggregate pages
+(4 MiB at the fixed page size). The native implementation uses the existing
+authoritative UEFI page callbacks; no second physical allocator is introduced.
+
+### Managed proof and lifecycle
+
+`GxManagedKernelRunPhase4` is callable only after `Start`, runs once, and is
+not a general-purpose runtime API. The managed wrapper uses only primitive
+fixed-layout descriptors and direct unmanaged function pointers. Its proof:
+
+- allocates four pages, fills and verifies every byte with a deterministic
+  pattern, and rejects wrong address/count/ID/size release requests;
+- queries monotonic time after allocation, creates managed GC activity,
+  collects, and verifies the native region again;
+- writes and reads the first byte, last byte of the first page, first byte of
+  the second page, and final byte of the region;
+- allocates a distinct three-page region, verifies both live regions, releases
+  the second, verifies the first remains intact, then explicitly releases the
+  first and proves a second release fails.
+
+The managed proof emits `MANAGED_KERNEL_MEMORY_PATTERN_OK`,
+`MANAGED_KERNEL_MEMORY_RUNTIME_SURVIVAL_OK`, and
+`MANAGED_KERNEL_MEMORY_MULTI_ALLOC_OK`. The native acceptance path emits the
+owner, page geometry, accounting baseline/restoration, negative-test, release,
+and `MANAGED_KERNEL_PHASE4_PASS` markers.
+
+The accounting assertion is scoped to the ManagedKernel service. Its registry,
+managed-owner physical pages, managed-owner arena reservations and commitments,
+and managed-owned VM-region state must return exactly to their pre-proof values.
+The serial log also records whole-process physical/commit counters for
+diagnostics, but the `NativeAotEventWait` profile can legitimately retain
+unrelated NativeAOT runtime or GC allocations made while the proof runs; those
+global counters are therefore not treated as ManagedKernel leaks.
+
+Host coverage is provided by `managed_kernel_abi_tests.c`,
+`managed_kernel_memory_tests.c`, and the updated managed service-host test.
+The memory host test injects an allocation failure after partial progress and
+checks sentinel preservation plus exact accounting rollback, then exercises
+multiple allocations, ownership mismatches, double release, and baseline
+restoration. The fresh-boot script requires all Phase 4 markers on three
+independent QEMU processes and rejects any leaked QEMU process owned by the
+gate run.
 
 The Phase 3 acceptance rule is deliberately narrow: add the smallest
 versioned Host Services v1 surface, keep the normal transition deterministic,

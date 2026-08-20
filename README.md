@@ -42,6 +42,21 @@ fixed-size, capability-negotiated native callbacks. The normal path calls
 proves three fresh EventWait-profile QEMU boots. The ManagedEntryProbe remains
 the separate foundation control payload.
 
+ManagedKernel Phase 4 adds a separate 72-byte versioned memory-services table
+and a native authoritative page allocator. The service uses the existing VM
+arena, paging, physical-page ledger, and VM-region ledger with explicit
+`MANAGED_KERNEL` owner/class accounting. Allocation is bounded to 256 pages
+per request, 16 live allocations, and 1024 total live pages; every allocation
+returns a native opaque ID and requires an exact explicit release. Host tests
+cover transactional rollback and accounting restoration, while the managed
+proof covers full-region patterns, boundary writes, GC/runtime survival,
+multiple allocations, ownership-mismatch rejection, and double-release
+rejection. The Phase 4 acceptance path requires three fresh QEMU boots.
+The acceptance baseline is exact for all ManagedKernel-owned registry, physical,
+arena, commitment, and VM-region state; whole-process counters remain
+diagnostic because the EventWait runtime/GC profile may add unrelated live
+runtime state during the proof.
+
 Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
 versioned view of that truth through the managed-kernel ABI.
 
@@ -57,8 +72,10 @@ UEFI firmware
   -> managed serial callback and deterministic return
   -> native publication of the immutable boot-resource snapshot
   -> bounded ManagedKernel summary/region queries
+  -> native ManagedKernel memory-services installation
   -> native Host Services v1 installation
   -> managed kernel start with bounded host logging and monotonic time
+  -> managed page allocation, pattern, GC, multi-allocation, and release proof
   -> post-initialization ManagedCallback export with existing runtime state
   -> scheduler-thread reverse-P/Invoke attach
   -> managed allocation and real GC probe

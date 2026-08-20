@@ -43,6 +43,17 @@ function Stop-OwnedQemu([System.Diagnostics.Process]$process) {
     }
 }
 
+function Get-OwnedQemu {
+    $scope = @($gate, $evidence)
+    return @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'" |
+        Where-Object {
+            $commandLine = [string]$_.CommandLine
+            $scope | Where-Object {
+                $commandLine.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            } | Select-Object -First 1
+        })
+}
+
 Require ($RunCount -ge 3) 'Three fresh ManagedKernel boots are required.'
 Require ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
     'ManagedKernel EFI or payload is missing.'
@@ -60,15 +71,15 @@ $share = Join-Path (Split-Path -Parent $qemu) 'share'
 $ovmf = Join-Path $share 'edk2-x86_64-code.fd'
 $varsTemplate = Join-Path $share 'edk2-i386-vars.fd'
 Require ((Test-Path -LiteralPath $ovmf) -and (Test-Path -LiteralPath $varsTemplate)) 'OVMF firmware is required.'
-Require (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count -eq 0) `
-    'A pre-existing QEMU process is present.'
+Require (@(Get-OwnedQemu).Count -eq 0) `
+    'A QEMU process already owns the ManagedKernel gate/evidence paths.'
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
 
 $owned = @()
 try {
     for ($sequence = 1; $sequence -le $RunCount; $sequence++) {
-        Require (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count -eq 0) `
-            "QEMU already exists before ManagedKernel boot $sequence."
+        Require (@(Get-OwnedQemu).Count -eq 0) `
+            "A QEMU process already owns the ManagedKernel gate/evidence paths before boot $sequence."
         $run = Join-Path $evidence ("runs\run-{0}" -f $sequence)
         New-Item -ItemType Directory -Force -Path $run | Out-Null
         $code = Join-Path $run 'edk2-code.fd'
@@ -94,7 +105,7 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS') -or
+                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE4_PASS') -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
                     $text.Contains('GXOS_NET10:PAGE_FAULT_')) { break }
@@ -142,7 +153,18 @@ try {
             'GXOS_NET10:MANAGED_KERNEL_MONOTONIC_TIME_OK',
             'GXOS_NET10:MANAGED_KERNEL_START_OK',
             'GXOS_NET10:MANAGED_KERNEL_START_ONCE_OK',
-            'GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS')) {
+            'GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_CONTEXT_INITIALIZED=1',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_SERVICES_INSTALLED',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_BEFORE_START_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_ALLOC_OWNER=MANAGED_KERNEL',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_PATTERN_OK',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_RUNTIME_SURVIVAL_OK',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_MULTI_ALLOC_OK',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_RELEASE_OK',
+            'GXOS_NET10:MANAGED_KERNEL_MEMORY_ACCOUNTING_RESTORED',
+            'GXOS_NET10:MANAGED_KERNEL_PHASE4_PASS')) {
             Require ($text.Contains($marker)) "ManagedKernel boot $sequence missing marker: $marker"
         }
         Require (([regex]::Matches($text, 'GXOS_NET10:NATIVEAOT_STARTUP_OK')).Count -eq 1) `
@@ -159,6 +181,14 @@ try {
             "ManagedKernel boot $sequence did not record three host log callbacks."
         Require ($text.Contains('GXOS_NET10:MANAGED_KERNEL_HOST_TIME_CALLBACK_COUNT=0x0000000000000002')) `
             "ManagedKernel boot $sequence did not record two host time callbacks."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_MEMORY_ALLOC_OK')).Count -eq 2) `
+            "ManagedKernel boot $sequence did not complete exactly two managed allocations."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_MEMORY_ALLOC_OWNER=MANAGED_KERNEL')).Count -eq 2) `
+            "ManagedKernel boot $sequence did not prove both allocations use the ManagedKernel owner."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_MEMORY_RELEASE_OK')).Count -eq 2) `
+            "ManagedKernel boot $sequence did not record both managed and native release confirmations."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_PHASE4_PASS')).Count -eq 1) `
+            "ManagedKernel boot $sequence repeated or omitted the Phase 4 pass marker."
         Write-Output ("MANAGED_KERNEL_QEMU_RUN_{0}=PASS bytes={1} sha256={2} serial={3}" -f `
             $sequence, ([Text.Encoding]::UTF8.GetByteCount($text)),
             (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant(), $serial)
@@ -166,7 +196,7 @@ try {
 } finally {
     foreach ($process in $owned) { Stop-OwnedQemu $process }
 }
-Require (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count -eq 0) 'QEMU cleanup failed.'
+Require (@(Get-OwnedQemu).Count -eq 0) 'Owned QEMU cleanup failed.'
 Write-Output "MANAGED_KERNEL_PAYLOAD_SHA256=$expectedHash"
 Write-Output "MANAGED_KERNEL_PAYLOAD_SIZE=$PayloadSize"
 Write-Output "MANAGED_KERNEL_QEMU_RUNS=$RunCount"

@@ -54,6 +54,25 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI test_monotonic_time(
     return GX_MANAGED_OK;
 }
 
+static uint32_t GX_MANAGED_KERNEL_MS_ABI test_memory_allocate_pages(
+    uint64_t page_count, uint32_t flags, uintptr_t output_address,
+    uintptr_t output_capacity)
+{
+    (void)page_count;
+    (void)flags;
+    (void)output_address;
+    (void)output_capacity;
+    return GX_MANAGED_INVALID_STATE;
+}
+
+static uint32_t GX_MANAGED_KERNEL_MS_ABI test_memory_release_pages(
+    uintptr_t request_address, uintptr_t request_capacity)
+{
+    (void)request_address;
+    (void)request_capacity;
+    return GX_MANAGED_INVALID_STATE;
+}
+
 static void expect(int condition, const char *message)
 {
     if (!condition) {
@@ -93,6 +112,7 @@ int main(int argc, char **argv)
     FARPROC query_boot_resources_proc;
     FARPROC query_region_proc;
     FARPROC install_host_services_proc;
+    FARPROC install_memory_services_proc;
     FARPROC start_proc;
     GX_MANAGED_KERNEL_INITIALIZE_ENTRY initialize;
     GX_MANAGED_KERNEL_QUERY_SYSTEM_INFO_ENTRY query;
@@ -100,6 +120,7 @@ int main(int argc, char **argv)
     GX_MANAGED_KERNEL_QUERY_BOOT_RESOURCES_ENTRY query_boot_resources;
     GX_MANAGED_KERNEL_QUERY_MEMORY_REGION_ENTRY query_region;
     GX_MANAGED_KERNEL_INSTALL_HOST_SERVICES_ENTRY install_host_services;
+    GX_MANAGED_KERNEL_INSTALL_MEMORY_SERVICES_ENTRY install_memory_services;
     GX_MANAGED_KERNEL_START_ENTRY start;
     GX_MANAGED_KERNEL_INIT_REQUEST_V1 request = {
         GX_MANAGED_KERNEL_INIT_REQUEST_V1_SIZE,
@@ -118,6 +139,7 @@ int main(int argc, char **argv)
     GX_MANAGED_KERNEL_BOOT_RESOURCE_REGION_V1 bad_region;
     GX_MANAGED_KERNEL_HOST_SERVICES_V1 host_services;
     GX_MANAGED_KERNEL_HOST_SERVICES_V1 host_candidate;
+    GX_MANAGED_KERNEL_MEMORY_SERVICES_V1 memory_services;
     uint32_t status;
     uint32_t index;
     const char *payload = argc > 1
@@ -135,6 +157,7 @@ int main(int argc, char **argv)
     query_boot_resources_proc = GetProcAddress(module, "GxManagedQueryBootResources");
     query_region_proc = GetProcAddress(module, "GxManagedQueryMemoryRegion");
     install_host_services_proc = GetProcAddress(module, "GxManagedKernelInstallHostServices");
+    install_memory_services_proc = GetProcAddress(module, "GxManagedKernelInstallMemoryServices");
     start_proc = GetProcAddress(module, "GxManagedKernelStart");
     initialize = NULL;
     query = NULL;
@@ -148,6 +171,7 @@ int main(int argc, char **argv)
     query_boot_resources = NULL;
     query_region = NULL;
     install_host_services = NULL;
+    install_memory_services = NULL;
     start = NULL;
     if (install_proc != NULL) memcpy(&install, &install_proc, sizeof(install));
     if (query_boot_resources_proc != NULL) {
@@ -161,6 +185,10 @@ int main(int argc, char **argv)
         memcpy(&install_host_services, &install_host_services_proc,
                sizeof(install_host_services));
     }
+    if (install_memory_services_proc != NULL) {
+        memcpy(&install_memory_services, &install_memory_services_proc,
+               sizeof(install_memory_services));
+    }
     if (start_proc != NULL) memcpy(&start, &start_proc, sizeof(start));
     expect(initialize != NULL, "initialization export discovered");
     expect(query != NULL, "system-info export discovered");
@@ -168,10 +196,12 @@ int main(int argc, char **argv)
     expect(query_boot_resources != NULL, "boot-resource summary export discovered");
     expect(query_region != NULL, "memory-region export discovered");
     expect(install_host_services != NULL, "host-service installation export discovered");
+    expect(install_memory_services != NULL, "memory-service installation export discovered");
     expect(start != NULL, "start export discovered");
     if (initialize == NULL || query == NULL || install == NULL ||
         query_boot_resources == NULL || query_region == NULL ||
-        install_host_services == NULL || start == NULL) {
+        install_host_services == NULL || install_memory_services == NULL ||
+        start == NULL) {
         FreeLibrary(module);
         return 1;
     }
@@ -225,6 +255,24 @@ int main(int argc, char **argv)
                                  GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME;
     host_services.LogUtf8Address = (uint64_t)(uintptr_t)test_log_utf8;
     host_services.MonotonicTimeAddress = (uint64_t)(uintptr_t)test_monotonic_time;
+    memset(&memory_services, 0, sizeof(memory_services));
+    memory_services.Size = GX_MANAGED_KERNEL_MEMORY_SERVICES_V1_SIZE;
+    memory_services.AbiVersion = GX_MANAGED_KERNEL_MEMORY_SERVICES_ABI_V1;
+    memory_services.ServiceVersion = GX_MANAGED_KERNEL_MEMORY_SERVICES_VERSION_V1;
+    memory_services.Architecture = GX_MANAGED_KERNEL_ARCH_X64;
+    memory_services.Capabilities = GX_MANAGED_MEMORY_CAPABILITY_ABI |
+                                   GX_MANAGED_MEMORY_CAPABILITY_ALLOCATE_PAGES |
+                                   GX_MANAGED_MEMORY_CAPABILITY_RELEASE_PAGES;
+    memory_services.PageSize = GX_MANAGED_KERNEL_MEMORY_PAGE_SIZE;
+    memory_services.AllocatePagesAddress =
+        (uint64_t)(uintptr_t)test_memory_allocate_pages;
+    memory_services.ReleasePagesAddress =
+        (uint64_t)(uintptr_t)test_memory_release_pages;
+    memory_services.MaxPagesPerAllocation =
+        GX_MANAGED_KERNEL_MEMORY_MAX_PAGES_PER_ALLOCATION;
+    memory_services.MaxLiveAllocations =
+        GX_MANAGED_KERNEL_MEMORY_MAX_LIVE_ALLOCATIONS;
+    memory_services.MaxTotalPages = GX_MANAGED_KERNEL_MEMORY_MAX_TOTAL_PAGES;
 
     memset(&repeat_summary, 0xA5, sizeof(repeat_summary));
     status = query_boot_resources(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1,
@@ -247,6 +295,9 @@ int main(int argc, char **argv)
     expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1, 0) ==
                GX_MANAGED_NOT_INITIALIZED,
            "host services before initialization rejects");
+    expect(install_memory_services(GX_MANAGED_KERNEL_MEMORY_SERVICES_ABI_V1, 0) ==
+               GX_MANAGED_NOT_INITIALIZED,
+           "memory services before initialization rejects");
 
     memset(&info, 0xA5, sizeof(info));
     status = query(GX_MANAGED_KERNEL_ABI_V1, (uintptr_t)&info, sizeof(info));
@@ -277,6 +328,9 @@ int main(int argc, char **argv)
     expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1,
                                  (uintptr_t)&host_services) == GX_MANAGED_INVALID_STATE,
            "host services before boot-resource publication rejects");
+    expect(install_memory_services(GX_MANAGED_KERNEL_MEMORY_SERVICES_ABI_V1,
+                                   (uintptr_t)&memory_services) == GX_MANAGED_INVALID_STATE,
+           "memory services before boot-resource publication rejects");
     memset(&region, 0x5A, sizeof(region));
     status = query_region(GX_MANAGED_KERNEL_BOOT_RESOURCES_ABI_V1, 0,
                           (uintptr_t)&region, sizeof(region));
@@ -337,6 +391,12 @@ int main(int argc, char **argv)
            "repeated publication rejects");
     expect(start() == GX_MANAGED_INVALID_STATE,
            "start before host-service publication rejects");
+    expect(install_memory_services(GX_MANAGED_KERNEL_MEMORY_SERVICES_ABI_V1,
+                                   (uintptr_t)&memory_services) == GX_MANAGED_OK,
+           "valid memory services install succeeds");
+    expect(install_memory_services(GX_MANAGED_KERNEL_MEMORY_SERVICES_ABI_V1,
+                                   (uintptr_t)&memory_services) == GX_MANAGED_ALREADY_INITIALIZED,
+           "repeated memory services install rejects");
     expect(install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1, 0) ==
                GX_MANAGED_INVALID_ARGUMENT,
            "null host-service table rejects");

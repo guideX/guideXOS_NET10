@@ -30,6 +30,10 @@ static void test_layout_and_constants(void)
            "host services v1 size is 56");
     expect(sizeof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1) == 40,
            "monotonic time v1 size is 40");
+    expect(sizeof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1) == 72 &&
+               sizeof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1) == 56 &&
+               sizeof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1) == 56,
+           "memory services and descriptors have stable sizes");
     expect(offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1,
                     TotalPhysicalBytes) == 24 &&
                offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1,
@@ -56,6 +60,20 @@ static void test_layout_and_constants(void)
                offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, FrequencyHz) == 16 &&
                offsetof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1, Reserved) == 32,
            "monotonic time offsets are stable");
+    expect(offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1, PageSize) == 24 &&
+               offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1,
+                        AllocatePagesAddress) == 32 &&
+               offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1,
+                        ReleasePagesAddress) == 40 &&
+               offsetof(GX_MANAGED_KERNEL_MEMORY_SERVICES_V1,
+                        MaxTotalPages) == 56,
+           "memory services offsets are stable");
+    expect(offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, AllocationId) == 8 &&
+               offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, VirtualAddress) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, ByteLength) == 24 &&
+               offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, PageCount) == 32 &&
+               offsetof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1, PageSize) == 40,
+           "memory allocation offsets are stable");
     expect(GX_MANAGED_KERNEL_ABI_V1 == 1U &&
                GX_MANAGED_KERNEL_SERVICE_VERSION_V1 == 1U,
            "ABI and service version are v1");
@@ -65,7 +83,10 @@ static void test_layout_and_constants(void)
                GX_MANAGED_NOT_INITIALIZED == 4U &&
                GX_MANAGED_ALREADY_INITIALIZED == 5U &&
                GX_MANAGED_OUT_OF_RANGE == 6U &&
-               GX_MANAGED_INVALID_STATE == 7U,
+               GX_MANAGED_INVALID_STATE == 7U &&
+               GX_MANAGED_RESOURCE_EXHAUSTED == 8U &&
+               GX_MANAGED_NOT_FOUND == 9U &&
+               GX_MANAGED_OWNERSHIP_MISMATCH == 10U,
            "status constants are stable");
     expect(GX_MANAGED_CAPABILITY_SERVICE_ABI == 1ULL &&
                GX_MANAGED_CAPABILITY_SYSTEM_INFORMATION == 2ULL,
@@ -101,6 +122,18 @@ static void test_buffer_validation(void)
     expect(gxos_managed_kernel_validate_output_buffer(
                (uintptr_t)1, 32) == GX_MANAGED_OK,
            "bounded output range is accepted");
+    expect(gxos_managed_kernel_validate_memory_allocation_output_buffer(
+               (uintptr_t)1, GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1_SIZE) ==
+               GX_MANAGED_OK,
+           "memory allocation output range is accepted");
+    expect(gxos_managed_kernel_validate_memory_allocation_output_buffer(
+               (uintptr_t)1, GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1_SIZE - 1U) ==
+               GX_MANAGED_BUFFER_TOO_SMALL,
+           "memory allocation undersized output is rejected");
+    expect(gxos_managed_kernel_validate_memory_release_input_buffer(
+               UINTPTR_MAX - 15U, GX_MANAGED_KERNEL_MEMORY_RELEASE_V1_SIZE) ==
+               GX_MANAGED_INVALID_ARGUMENT,
+           "memory release wrapping input is rejected");
 }
 
 int main(void)
