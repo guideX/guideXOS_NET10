@@ -182,6 +182,68 @@ internal struct GxManagedKernelMemoryReleaseV1
     internal uint Reserved;
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelDeviceInventorySummaryV1
+{
+    internal const uint ExpectedSize = 40;
+    internal const ulong CapabilitySummary = 1UL << 0;
+    internal const ulong CapabilityDevices = 1UL << 1;
+    internal const ulong CapabilityImmutableBootSnapshot = 1UL << 2;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint ServiceVersion;
+    internal uint Architecture;
+    internal uint DeviceCount;
+    internal uint ResourceCount;
+    internal ulong Capabilities;
+    internal ulong Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelDeviceV1
+{
+    internal const uint ExpectedSize = 48;
+    internal const uint DeviceKindPci = 1;
+    internal const uint FlagPciMultifunction = 1U << 0;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint DeviceKind;
+    internal uint Flags;
+    internal ushort Segment;
+    internal byte Bus;
+    internal byte Device;
+    internal byte Function;
+    internal byte ReservedLocation;
+    internal ushort VendorId;
+    internal ushort DeviceId;
+    internal byte RevisionId;
+    internal byte ClassCode;
+    internal byte Subclass;
+    internal byte ProgrammingInterface;
+    internal byte HeaderType;
+    internal byte ReservedClass;
+    internal uint ResourceStartIndex;
+    internal uint ResourceCount;
+    internal ulong Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelDeviceInventoryPublicationV1
+{
+    internal const uint ExpectedSize = 48;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal nuint SummaryAddress;
+    internal nuint DescriptorAddress;
+    internal uint DescriptorCount;
+    internal uint DescriptorSize;
+    internal nuint DescriptorByteLength;
+    internal ulong Reserved;
+}
+
 internal static unsafe class ManagedKernelLayout
 {
     internal static bool IsValid()
@@ -197,6 +259,9 @@ internal static unsafe class ManagedKernelLayout
                sizeof(GxManagedKernelMemoryServicesV1) == 72 &&
                sizeof(GxManagedKernelMemoryAllocationV1) == 56 &&
                sizeof(GxManagedKernelMemoryReleaseV1) == 56 &&
+               sizeof(GxManagedKernelDeviceInventorySummaryV1) == 40 &&
+               sizeof(GxManagedKernelDeviceV1) == 48 &&
+               sizeof(GxManagedKernelDeviceInventoryPublicationV1) == 48 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Magic)).ToInt32() == 0 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Version)).ToInt32() == 4 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Size)).ToInt32() == 6 &&
@@ -272,7 +337,25 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.ByteLength)).ToInt32() == 24 &&
                Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.PageCount)).ToInt32() == 32 &&
                Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.PageSize)).ToInt32() == 40 &&
-               Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.Flags)).ToInt32() == 48;
+               Marshal.OffsetOf<GxManagedKernelMemoryReleaseV1>(nameof(GxManagedKernelMemoryReleaseV1.Flags)).ToInt32() == 48 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventorySummaryV1>(nameof(GxManagedKernelDeviceInventorySummaryV1.Size)).ToInt32() == 0 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventorySummaryV1>(nameof(GxManagedKernelDeviceInventorySummaryV1.DeviceCount)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventorySummaryV1>(nameof(GxManagedKernelDeviceInventorySummaryV1.ResourceCount)).ToInt32() == 20 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventorySummaryV1>(nameof(GxManagedKernelDeviceInventorySummaryV1.Capabilities)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventorySummaryV1>(nameof(GxManagedKernelDeviceInventorySummaryV1.Reserved)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceV1>(nameof(GxManagedKernelDeviceV1.DeviceKind)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceV1>(nameof(GxManagedKernelDeviceV1.Segment)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceV1>(nameof(GxManagedKernelDeviceV1.VendorId)).ToInt32() == 22 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceV1>(nameof(GxManagedKernelDeviceV1.ClassCode)).ToInt32() == 27 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceV1>(nameof(GxManagedKernelDeviceV1.ResourceStartIndex)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceV1>(nameof(GxManagedKernelDeviceV1.ResourceCount)).ToInt32() == 36 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceV1>(nameof(GxManagedKernelDeviceV1.Reserved)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.SummaryAddress)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorAddress)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorCount)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorSize)).ToInt32() == 28 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorByteLength)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.Reserved)).ToInt32() == 40;
     }
 }
 
@@ -333,6 +416,13 @@ internal static unsafe class ManagedKernelContract
         GxManagedKernelMemoryServicesV1.CapabilityReleasePages;
     private const ulong MemoryServicesRequiredCapabilities =
         MemoryServicesKnownCapabilities;
+    private const uint DeviceInventoryAbiVersionV1 = 1;
+    private const uint DeviceInventoryServiceVersionV1 = 1;
+    private const uint DeviceInventoryMaxDevices = 256;
+    private const ulong DeviceInventoryCapabilities =
+        GxManagedKernelDeviceInventorySummaryV1.CapabilitySummary |
+        GxManagedKernelDeviceInventorySummaryV1.CapabilityDevices |
+        GxManagedKernelDeviceInventorySummaryV1.CapabilityImmutableBootSnapshot;
     internal const ulong MemoryPageSize = 4096;
     internal const uint MemoryMaxPagesPerAllocation = 256;
     internal const uint MemoryMaxLiveAllocations = 16;
@@ -366,14 +456,21 @@ internal static unsafe class ManagedKernelContract
     private static ulong s_memoryMaxTotalPages;
     private static nuint s_memoryAllocatePagesAddress;
     private static nuint s_memoryReleasePagesAddress;
+    private static int s_deviceInventoryInstalled;
+    private static ManagedDeviceInventory? s_deviceInventory;
     private static int s_phase4Run;
     private static int s_phase5Run;
+    private static int s_phase6Run;
 
     internal static bool IsStarted =>
         s_lifecycleState == (int)LifecycleState.Started;
     internal static bool MemoryServicesInstalled => s_memoryServicesInstalled != 0;
     internal static nuint MemoryAllocatePagesAddress => s_memoryAllocatePagesAddress;
     internal static nuint MemoryReleasePagesAddress => s_memoryReleasePagesAddress;
+    internal static bool DeviceInventoryInstalled => s_deviceInventoryInstalled != 0;
+    internal static bool HostServicesInstalled => s_hostServicesInstalled != 0;
+    internal static ManagedDeviceInventory? OperationalDeviceInventory =>
+        s_deviceInventory;
 
     private static bool IsInitialized =>
         s_lifecycleState != (int)LifecycleState.BootstrapAvailable;
@@ -875,6 +972,200 @@ internal static unsafe class ManagedKernelContract
         return ManagedOk;
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallDeviceInventory")]
+    internal static uint InstallDeviceInventory(uint requestedAbiVersion,
+                                                  nuint publicationAddress)
+    {
+        ManagedDeviceInventory? candidate;
+        ManagedDevice first;
+        ManagedDevice selected;
+        bool classQuery;
+
+        if (requestedAbiVersion != DeviceInventoryAbiVersionV1)
+        {
+            return UnsupportedAbi;
+        }
+        if (!IsInitialized)
+        {
+            return NotInitialized;
+        }
+        if (s_deviceInventoryInstalled != 0)
+        {
+            return AlreadyInitialized;
+        }
+        if (s_lifecycleState != (int)LifecycleState.Started ||
+            s_memoryServicesInstalled == 0)
+        {
+            return InvalidState;
+        }
+        if (publicationAddress == 0 ||
+            !IsRangeValid(publicationAddress,
+                (nuint)GxManagedKernelDeviceInventoryPublicationV1.ExpectedSize))
+        {
+            return InvalidArgument;
+        }
+        if (!ManagedDeviceInventory.TryCreateFromPublication(
+                  Phase4KernelMemoryProvider.Instance, publicationAddress,
+                  out candidate) || candidate == null)
+        {
+            return InvalidArgument;
+        }
+        if (!candidate.TryGetDevice(0, out first) ||
+            !candidate.ValidateInvariants())
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_ARENA_CREATE_REJECTED\r\n"u8);
+            candidate.Destroy();
+            return InvalidState;
+        }
+        classQuery = candidate.TryFindFirstByClass(0x06, 0x00, out selected);
+        if (!classQuery)
+        {
+            classQuery = candidate.TryFindFirstByClass(
+                first.ClassCode, first.Subclass, out selected);
+        }
+        if (!classQuery || !candidate.TryRunRuntimeSurvival())
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_RUNTIME_REJECTED\r\n"u8);
+            candidate.Destroy();
+            return InvalidState;
+        }
+
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_INVENTORY_INSTALLED\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_COUNT_OK\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DEVICE_COUNT=0x"u8,
+                                    candidate.DeviceCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DEVICE_RESOURCE_COUNT=0x"u8,
+                                    candidate.ResourceCount) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_UNIQUENESS_OK\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_ARENA_OK\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DEVICE_ARENA_PAGES=0x"u8,
+                                    candidate.Metrics.TotalBackingBytes / KernelArena.PageSize) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DEVICE_ARENA_CHUNKS=0x"u8,
+                                    candidate.Metrics.BackingChunkCount) ||
+            !candidate.TryFindPciDevice(first.Segment, first.Bus, first.Device,
+                                        first.Function, out ManagedDevice firstAgain) ||
+            firstAgain.VendorId != first.VendorId ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_LOOKUP_OK\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_CLASS_QUERY_OK\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_MULTIPLE_QUERY_OK\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DEVICE_SELECTED_BDF=0x"u8,
+                ((ulong)selected.Segment << 32) | ((ulong)selected.Bus << 24) |
+                ((ulong)selected.Device << 16) | ((ulong)selected.Function << 8)) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DEVICE_SELECTED_VENDOR=0x"u8,
+                                    selected.VendorId) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DEVICE_SELECTED_DEVICE=0x"u8,
+                                    selected.DeviceId) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_DEVICE_SELECTED_CLASS=0x"u8,
+                ((ulong)selected.ClassCode << 16) |
+                ((ulong)selected.Subclass << 8) | selected.ProgrammingInterface) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_RESOURCE_DATA_UNAVAILABLE\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_RUNTIME_SURVIVAL_OK\r\n"u8))
+        {
+            candidate.Destroy();
+            return InvalidState;
+        }
+
+        s_deviceInventory = candidate;
+        s_deviceInventoryInstalled = 1;
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedQueryDeviceInventorySummary")]
+    internal static uint QueryDeviceInventorySummary(uint requestedAbiVersion,
+                                                       nuint outputAddress,
+                                                       nuint outputCapacity)
+    {
+        if (requestedAbiVersion != DeviceInventoryAbiVersionV1)
+        {
+            return UnsupportedAbi;
+        }
+        if (!IsInitialized || s_deviceInventoryInstalled == 0 ||
+            s_deviceInventory == null)
+        {
+            return NotInitialized;
+        }
+        if (outputAddress == 0) return InvalidArgument;
+        if (outputCapacity < GxManagedKernelDeviceInventorySummaryV1.ExpectedSize)
+        {
+            return BufferTooSmall;
+        }
+        if (!IsRangeValid(outputAddress, outputCapacity)) return InvalidArgument;
+        *(GxManagedKernelDeviceInventorySummaryV1*)outputAddress =
+            new GxManagedKernelDeviceInventorySummaryV1
+            {
+                Size = GxManagedKernelDeviceInventorySummaryV1.ExpectedSize,
+                AbiVersion = DeviceInventoryAbiVersionV1,
+                ServiceVersion = DeviceInventoryServiceVersionV1,
+                Architecture = ArchitectureX64,
+                DeviceCount = s_deviceInventory.DeviceCount,
+                ResourceCount = s_deviceInventory.ResourceCount,
+                Capabilities = DeviceInventoryCapabilities,
+                Reserved = 0
+            };
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedQueryDevice")]
+    internal static uint QueryDevice(uint requestedAbiVersion, uint index,
+                                      nuint outputAddress, nuint outputCapacity)
+    {
+        GxManagedKernelDeviceV1 descriptor;
+        if (requestedAbiVersion != DeviceInventoryAbiVersionV1)
+        {
+            return UnsupportedAbi;
+        }
+        if (!IsInitialized || s_deviceInventoryInstalled == 0 ||
+            s_deviceInventory == null)
+        {
+            return NotInitialized;
+        }
+        if (index >= s_deviceInventory.DeviceCount) return OutOfRange;
+        if (outputAddress == 0) return InvalidArgument;
+        if (outputCapacity < GxManagedKernelDeviceV1.ExpectedSize)
+        {
+            return BufferTooSmall;
+        }
+        if (!IsRangeValid(outputAddress, outputCapacity) ||
+            !s_deviceInventory.TryGetDescriptor(index, out descriptor))
+        {
+            return InvalidArgument;
+        }
+        *(GxManagedKernelDeviceV1*)outputAddress = descriptor;
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase6")]
+    internal static uint RunPhase6()
+    {
+        ManagedDeviceInventory? testInventory = null;
+        if (!IsInitialized || s_lifecycleState != (int)LifecycleState.Started)
+        {
+            return IsInitialized ? InvalidState : NotInitialized;
+        }
+        if (s_phase6Run != 0) return AlreadyInitialized;
+        if (s_deviceInventoryInstalled == 0 || s_deviceInventory == null)
+        {
+            return InvalidState;
+        }
+        if (!s_deviceInventory.TryGetDevice(s_deviceInventory.DeviceCount,
+                                            out _) &&
+            s_deviceInventory.TryCreateTestCopy(
+                Phase4KernelMemoryProvider.Instance, out testInventory) &&
+            testInventory != null && testInventory.ValidateInvariants() &&
+            testInventory.Destroy() && s_deviceInventory.ValidateInvariants() &&
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_NEGATIVE_TESTS_OK\r\n"u8) &&
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DEVICE_TEARDOWN_OK\r\n"u8))
+        {
+            s_phase6Run = 1;
+            return ManagedOk;
+        }
+        if (testInventory != null && !testInventory.IsDestroyed)
+        {
+            testInventory.Destroy();
+        }
+        return InvalidState;
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase4")]
     internal static uint RunPhase4()
     {
@@ -1274,6 +1565,23 @@ internal static unsafe class KernelLog
     internal static bool Write(ReadOnlySpan<byte> utf8)
     {
         return ManagedKernelContract.TryInvokeHostLog(utf8);
+    }
+
+    internal static bool WriteHexLine(ReadOnlySpan<byte> prefix, ulong value)
+    {
+        Span<byte> buffer = stackalloc byte[128];
+        ReadOnlySpan<byte> digits = "0123456789ABCDEF"u8;
+        if (prefix.Length > 108) return false;
+        prefix.CopyTo(buffer);
+        for (int index = 0; index != 16; ++index)
+        {
+            int shift = (15 - index) * 4;
+            buffer[prefix.Length + index] =
+                digits[(int)((value >> shift) & 0xFUL)];
+        }
+        buffer[prefix.Length + 16] = (byte)'\r';
+        buffer[prefix.Length + 17] = (byte)'\n';
+        return Write(buffer[..(prefix.Length + 18)]);
     }
 }
 

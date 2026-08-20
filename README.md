@@ -70,6 +70,20 @@ survival, negative paths, arena isolation, and exact ManagedKernel-owned native
 accounting restoration. The native harness intentionally does not require
 unrelated whole-process runtime/GC counters to return to their earlier values.
 
+ManagedKernel Phase 6 adds the first managed platform/device inventory. The
+native loader is authoritative for a read-only PCI configuration-space snapshot
+of segment-0 BDF identity, vendor/device/revision, class data, and header type;
+no synthetic devices are introduced and no BAR probing writes hardware. A
+40-byte summary, 48-byte device descriptor, and 48-byte publication record are
+versioned and bounded to 256 devices. ManagedKernel copies the immutable native
+snapshot into three arena-backed buffers, validates BDF uniqueness, supports
+index/BDF/class queries, and explicitly reports resource data unavailable in
+v1 because reliable BAR lengths are not yet obtained read-only. Native and
+managed host vectors plus three fresh EventWait-profile QEMU boots prove
+negative installs, byte-for-byte query parity, GC/runtime survival, temporary
+teardown, accounting restoration, and persistent inventory operability. See
+[the Phase 6 ABI and inventory contract](docs/MANAGED_KERNEL_ABI.md#phase-6-managed-platform-and-device-inventory).
+
 Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
 versioned view of that truth through the managed-kernel ABI.
 
@@ -90,6 +104,8 @@ UEFI firmware
   -> managed kernel start with bounded host logging and monotonic time
   -> managed page allocation and Phase 5 arena policy, pattern, GC, growth,
      multi-arena, negative-path, and destroy proof
+  -> native read-only PCI identity snapshot
+  -> managed Phase 6 device inventory, indexed queries, and teardown proof
   -> post-initialization ManagedCallback export with existing runtime state
   -> scheduler-thread reverse-P/Invoke attach
   -> managed allocation and real GC probe

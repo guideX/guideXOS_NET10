@@ -38,6 +38,13 @@
 #define GX_MANAGED_KERNEL_MEMORY_MAX_TOTAL_PAGES 1024U
 #define GX_MANAGED_KERNEL_MEMORY_PAGE_SIZE 4096U
 #define GX_MANAGED_KERNEL_MEMORY_FLAG_NONE 0U
+#define GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1 1U
+#define GX_MANAGED_KERNEL_DEVICE_INVENTORY_SERVICE_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1_SIZE 40U
+#define GX_MANAGED_KERNEL_DEVICE_V1_SIZE 48U
+#define GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1_SIZE 48U
+#define GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES 256U
+#define GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_RESOURCES 1024U
 
 typedef enum {
     GX_MANAGED_OK = 0U,
@@ -79,6 +86,21 @@ enum {
     GX_MANAGED_BOOT_RESOURCE_CAPABILITY_SUMMARY = 1ULL << 0,
     GX_MANAGED_BOOT_RESOURCE_CAPABILITY_REGIONS = 1ULL << 1,
     GX_MANAGED_BOOT_RESOURCE_CAPABILITY_TOTALS = 1ULL << 2
+};
+
+enum {
+    GX_MANAGED_DEVICE_INVENTORY_CAPABILITY_SUMMARY = 1ULL << 0,
+    GX_MANAGED_DEVICE_INVENTORY_CAPABILITY_DEVICES = 1ULL << 1,
+    GX_MANAGED_DEVICE_INVENTORY_CAPABILITY_IMMUTABLE_BOOT_SNAPSHOT = 1ULL << 2
+};
+
+typedef enum {
+    GX_MANAGED_DEVICE_KIND_UNKNOWN = 0U,
+    GX_MANAGED_DEVICE_KIND_PCI = 1U
+} GX_MANAGED_DEVICE_KIND;
+
+enum {
+    GX_MANAGED_DEVICE_FLAG_PCI_MULTIFUNCTION = 1U << 0
 };
 
 /* Stable guideXOS meanings. These are not UEFI EFI_MEMORY_TYPE values. */
@@ -216,6 +238,51 @@ typedef struct {
     uint32_t Flags;
     uint32_t Reserved;
 } GX_MANAGED_KERNEL_MEMORY_RELEASE_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint32_t DeviceCount;
+    uint32_t ResourceCount;
+    uint64_t Capabilities;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t DeviceKind;
+    uint32_t Flags;
+    uint16_t Segment;
+    uint8_t Bus;
+    uint8_t Device;
+    uint8_t Function;
+    uint8_t ReservedLocation;
+    uint16_t VendorId;
+    uint16_t DeviceId;
+    uint8_t RevisionId;
+    uint8_t ClassCode;
+    uint8_t Subclass;
+    uint8_t ProgrammingInterface;
+    uint8_t HeaderType;
+    uint8_t ReservedClass;
+    uint32_t ResourceStartIndex;
+    uint32_t ResourceCount;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_DEVICE_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t SummaryAddress;
+    uint64_t DescriptorAddress;
+    uint32_t DescriptorCount;
+    uint32_t DescriptorSize;
+    uint64_t DescriptorByteLength;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1;
 #pragma pack(pop)
 
 _Static_assert(sizeof(GX_MANAGED_KERNEL_INIT_REQUEST_V1) ==
@@ -406,6 +473,82 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, Flags) == 48,
                "managed memory release Flags offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1, Reserved) == 52,
                "managed memory release Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1) ==
+                   GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1_SIZE,
+               "managed device inventory summary size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1, Size) == 0,
+               "managed device inventory summary Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1, AbiVersion) == 4,
+               "managed device inventory summary AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1, ServiceVersion) == 8,
+               "managed device inventory summary ServiceVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1, Architecture) == 12,
+               "managed device inventory summary Architecture offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1, DeviceCount) == 16,
+               "managed device inventory summary DeviceCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1, ResourceCount) == 20,
+               "managed device inventory summary ResourceCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1, Capabilities) == 24,
+               "managed device inventory summary Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1, Reserved) == 32,
+               "managed device inventory summary Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_DEVICE_V1) == GX_MANAGED_KERNEL_DEVICE_V1_SIZE,
+               "managed device descriptor size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, Size) == 0,
+               "managed device Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, AbiVersion) == 4,
+               "managed device AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, DeviceKind) == 8,
+               "managed device DeviceKind offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, Flags) == 12,
+               "managed device Flags offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, Segment) == 16,
+               "managed device Segment offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, Bus) == 18,
+               "managed device Bus offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, Device) == 19,
+               "managed device Device offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, Function) == 20,
+               "managed device Function offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, VendorId) == 22,
+               "managed device VendorId offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, DeviceId) == 24,
+               "managed device DeviceId offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, RevisionId) == 26,
+               "managed device RevisionId offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, ClassCode) == 27,
+               "managed device ClassCode offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, Subclass) == 28,
+               "managed device Subclass offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, ProgrammingInterface) == 29,
+               "managed device ProgrammingInterface offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, HeaderType) == 30,
+               "managed device HeaderType offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, ResourceStartIndex) == 32,
+               "managed device ResourceStartIndex offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, ResourceCount) == 36,
+               "managed device ResourceCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, Reserved) == 40,
+               "managed device Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1) ==
+                   GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1_SIZE,
+               "managed device inventory publication size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, Size) == 0,
+               "managed device inventory publication Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, AbiVersion) == 4,
+               "managed device inventory publication AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, SummaryAddress) == 8,
+               "managed device inventory publication SummaryAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, DescriptorAddress) == 16,
+               "managed device inventory publication DescriptorAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, DescriptorCount) == 24,
+               "managed device inventory publication DescriptorCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, DescriptorSize) == 28,
+               "managed device inventory publication DescriptorSize offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, DescriptorByteLength) == 32,
+               "managed device inventory publication DescriptorByteLength offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, Reserved) == 40,
+               "managed device inventory publication Reserved offset");
 
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INITIALIZE_ENTRY)(
     uint32_t requested_abi_version, uintptr_t request_address);

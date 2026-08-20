@@ -67,6 +67,7 @@ $memoryAccountingSource = Join-Path $root 'src\Gate4Harness\memory_accounting.c'
 $managedKernelBootResourcesSource = Join-Path $root 'src\Gate4Harness\managed_kernel_boot_resources.c'
 $managedKernelHostServicesSource = Join-Path $root 'src\Gate4Harness\managed_kernel_host_services.c'
 $managedKernelMemorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_memory.c'
+$managedKernelDeviceInventorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_device_inventory.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
 $virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
@@ -141,6 +142,7 @@ if (-not (Test-Path -LiteralPath $memoryAccountingSource)) { throw "Memory accou
 if (-not (Test-Path -LiteralPath $managedKernelBootResourcesSource)) { throw "ManagedKernel boot-resource source not found: $managedKernelBootResourcesSource" }
 if (-not (Test-Path -LiteralPath $managedKernelHostServicesSource)) { throw "ManagedKernel host-service source not found: $managedKernelHostServicesSource" }
 if (-not (Test-Path -LiteralPath $managedKernelMemorySource)) { throw "ManagedKernel memory-service source not found: $managedKernelMemorySource" }
+if (-not (Test-Path -LiteralPath $managedKernelDeviceInventorySource)) { throw "ManagedKernel device-inventory source not found: $managedKernelDeviceInventorySource" }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
 if (-not (Test-Path -LiteralPath $virtualQueryCaptureAssembly)) { throw "VirtualQuery capture assembly not found: $virtualQueryCaptureAssembly" }
@@ -1124,6 +1126,7 @@ if ($PayloadMode -eq 'ManagedKernel') { $gccArguments += '-DGXOS_ENABLE_MANAGED_
 if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelBootResourcesSource
     $gccArguments += $managedKernelHostServicesSource
+    $gccArguments += $managedKernelDeviceInventorySource
     if ($Scenario -notin @(
             'NativeAotEventWait', 'CreateEventW', 'CreateEventWDisabled',
             'CreateMemoryResourceNotification',

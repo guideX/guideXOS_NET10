@@ -105,7 +105,7 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE5_PASS') -or
+                if ($text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE6_PASS') -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
                     $text.Contains('GXOS_NET10:PAGE_FAULT_')) { break }
@@ -154,6 +154,25 @@ try {
             'GXOS_NET10:MANAGED_KERNEL_START_OK',
             'GXOS_NET10:MANAGED_KERNEL_START_ONCE_OK',
             'GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_NATIVE_SNAPSHOT_READY',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_DISCOVERY=PCI_CONFIG_READ_ONLY',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_QUERY_BEFORE_INSTALL_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_NEGATIVE_INSTALLS_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_INSTALL_REPEAT_REJECTED',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_QUERY_MATCH_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_INVENTORY_INSTALLED',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_COUNT_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_UNIQUENESS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_ARENA_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_LOOKUP_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_CLASS_QUERY_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_RESOURCE_DATA_UNAVAILABLE',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_RUNTIME_SURVIVAL_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_NEGATIVE_TESTS_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_TEARDOWN_OK',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_ACCOUNTING_RESTORED',
+            'GXOS_NET10:MANAGED_KERNEL_DEVICE_OPERATIONAL_SURVIVAL_OK',
+            'GXOS_NET10:MANAGED_KERNEL_PHASE6_PASS',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_CONTEXT_INITIALIZED=1',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_SERVICES_INSTALLED',
             'GXOS_NET10:MANAGED_KERNEL_MEMORY_BEFORE_START_REJECTED',
@@ -210,6 +229,8 @@ try {
             "ManagedKernel boot $sequence repeated or omitted the Phase 4 pass marker."
         Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_PHASE5_PASS')).Count -eq 1) `
             "ManagedKernel boot $sequence repeated or omitted the Phase 5 pass marker."
+        Require (([regex]::Matches($text, 'GXOS_NET10:MANAGED_KERNEL_PHASE6_PASS')).Count -eq 1) `
+            "ManagedKernel boot $sequence repeated or omitted the Phase 6 pass marker."
         Write-Output ("MANAGED_KERNEL_QEMU_RUN_{0}=PASS bytes={1} sha256={2} serial={3}" -f `
             $sequence, ([Text.Encoding]::UTF8.GetByteCount($text)),
             (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant(), $serial)

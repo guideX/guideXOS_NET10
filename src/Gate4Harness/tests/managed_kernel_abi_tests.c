@@ -34,6 +34,25 @@ static void test_layout_and_constants(void)
                sizeof(GX_MANAGED_KERNEL_MEMORY_ALLOCATION_V1) == 56 &&
                sizeof(GX_MANAGED_KERNEL_MEMORY_RELEASE_V1) == 56,
            "memory services and descriptors have stable sizes");
+    expect(sizeof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1) == 40 &&
+               sizeof(GX_MANAGED_KERNEL_DEVICE_V1) == 48 &&
+               sizeof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1) == 48,
+           "device inventory structures have stable sizes");
+    expect(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1,
+                    DeviceCount) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1,
+                        Capabilities) == 24,
+           "device inventory summary offsets are stable");
+    expect(offsetof(GX_MANAGED_KERNEL_DEVICE_V1, Segment) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_DEVICE_V1, VendorId) == 22 &&
+               offsetof(GX_MANAGED_KERNEL_DEVICE_V1, ClassCode) == 27 &&
+               offsetof(GX_MANAGED_KERNEL_DEVICE_V1, ResourceCount) == 36,
+           "device descriptor offsets are stable");
+    expect(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1,
+                    DescriptorAddress) == 16 &&
+               offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1,
+                        DescriptorByteLength) == 32,
+           "device inventory publication offsets are stable");
     expect(offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1,
                     TotalPhysicalBytes) == 24 &&
                offsetof(GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1,
@@ -103,6 +122,12 @@ static void test_layout_and_constants(void)
                GX_MANAGED_BOOT_RESOURCE_TYPE_UNKNOWN == 16U &&
                GX_MANAGED_KERNEL_BOOT_RESOURCE_MAX_REGIONS == 2048U,
            "boot resource types and bound are stable");
+    expect(GX_MANAGED_DEVICE_KIND_UNKNOWN == 0U &&
+               GX_MANAGED_DEVICE_KIND_PCI == 1U &&
+               GX_MANAGED_DEVICE_FLAG_PCI_MULTIFUNCTION == 1U &&
+               GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES == 256U &&
+               GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_RESOURCES == 1024U,
+           "device inventory enums and bounds are stable");
 }
 
 static void test_buffer_validation(void)

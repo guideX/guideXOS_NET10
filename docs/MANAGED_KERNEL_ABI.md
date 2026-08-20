@@ -20,7 +20,10 @@ Native guideXOS bootstrap/runtime
                 +-- boot-resource snapshot service
                 +-- native page-backed managed memory service (Phase 4)
                 +-- managed KernelArena policy (Phase 5)
+                +-- native PCI identity snapshot and managed inventory (Phase 6)
 ```
+
+Phase 6 details are specified in [MANAGED_KERNEL_DEVICE_INVENTORY.md](MANAGED_KERNEL_DEVICE_INVENTORY.md).
 
 The governing design principle is:
 

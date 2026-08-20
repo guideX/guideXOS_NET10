@@ -36,6 +36,7 @@
 #include "managed_kernel_boot_resources.h"
 #include "managed_kernel_host_services.h"
 #include "managed_kernel_memory.h"
+#include "managed_kernel_device_inventory.h"
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
 #include "nativeaot_gc_probe_contract.h"
@@ -297,8 +298,17 @@ typedef uint32_t (EFIAPI *ManagedKernelInstallHostServicesEntry)(
 typedef uint32_t (EFIAPI *ManagedKernelStartEntry)(void);
 typedef uint32_t (EFIAPI *ManagedKernelInstallMemoryServicesEntry)(
     uint32_t requested_abi_version, uintptr_t memory_services_address);
+typedef uint32_t (EFIAPI *ManagedKernelInstallDeviceInventoryEntry)(
+    uint32_t requested_abi_version, uintptr_t publication_address);
+typedef uint32_t (EFIAPI *ManagedKernelQueryDeviceInventorySummaryEntry)(
+    uint32_t requested_abi_version, uintptr_t output_address,
+    uintptr_t output_capacity);
+typedef uint32_t (EFIAPI *ManagedKernelQueryDeviceEntry)(
+    uint32_t requested_abi_version, uint32_t index, uintptr_t output_address,
+    uintptr_t output_capacity);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase4Entry)(void);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase5Entry)(uint32_t stage);
+typedef uint32_t (EFIAPI *ManagedKernelRunPhase6Entry)(void);
 #endif
 
 enum {
@@ -407,6 +417,17 @@ static GXOS_MANAGED_KERNEL_MEMORY_CONTEXT g_managed_kernel_memory;
 static GXOS_VM_UEFI_PAGE_CONTEXT g_vm_managed_page_context;
 static uint32_t g_managed_kernel_memory_service_installed;
 static uint32_t g_managed_kernel_memory_prestart_negative_tests;
+static GXOS_MANAGED_KERNEL_PCI_DEVICE_INPUT
+    g_managed_kernel_pci_devices[GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES];
+static GX_MANAGED_KERNEL_DEVICE_V1
+    g_managed_kernel_device_descriptors[GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES];
+static GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1
+    g_managed_kernel_device_inventory_summary;
+static GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1
+    g_managed_kernel_device_inventory_publication_storage;
+static GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1 *
+    g_managed_kernel_device_inventory_publication;
+static uint32_t g_managed_kernel_device_inventory_snapshot_ready;
 #endif
 static GXOS_VM_PAGING g_vm_paging;
 static GXOS_X64_PAGING_AUDIT g_vm_paging_audit;
@@ -4291,9 +4312,13 @@ typedef struct {
     uint32_t managed_kernel_query_memory_region_rva;
     uint32_t managed_kernel_install_host_services_rva;
     uint32_t managed_kernel_install_memory_services_rva;
+    uint32_t managed_kernel_install_device_inventory_rva;
+    uint32_t managed_kernel_query_device_inventory_summary_rva;
+    uint32_t managed_kernel_query_device_rva;
     uint32_t managed_kernel_start_rva;
     uint32_t managed_kernel_run_phase4_rva;
     uint32_t managed_kernel_run_phase5_rva;
+    uint32_t managed_kernel_run_phase6_rva;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     uint32_t managed_gc_probe_rva;
@@ -11167,6 +11192,65 @@ static void prepare_managed_kernel_boot_resources(void)
     serial_text("\r\n");
 }
 
+static void prepare_managed_kernel_device_inventory(void)
+{
+    GXOS_MANAGED_KERNEL_DEVICE_INVENTORY_STATUS status;
+    uint32_t device_count = 0;
+    uint64_t descriptor_bytes;
+
+    zero_bytes((uint8_t *)g_managed_kernel_pci_devices,
+               sizeof(g_managed_kernel_pci_devices));
+    zero_bytes((uint8_t *)g_managed_kernel_device_descriptors,
+               sizeof(g_managed_kernel_device_descriptors));
+    zero_bytes((uint8_t *)&g_managed_kernel_device_inventory_summary,
+               sizeof(g_managed_kernel_device_inventory_summary));
+    status = gxos_managed_kernel_discover_pci_devices(
+        gxos_managed_kernel_pci_config_read32, 0,
+        g_managed_kernel_pci_devices,
+        GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES, &device_count);
+    if (status != GXOS_MANAGED_KERNEL_DEVICE_INVENTORY_OK) {
+        fail("managed-kernel-device-discovery");
+    }
+    status = gxos_managed_kernel_normalize_device_inventory(
+        g_managed_kernel_pci_devices, device_count,
+        g_managed_kernel_device_descriptors,
+        GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES,
+        &g_managed_kernel_device_inventory_summary);
+    if (status != GXOS_MANAGED_KERNEL_DEVICE_INVENTORY_OK ||
+        g_managed_kernel_device_inventory_summary.DeviceCount != device_count ||
+        g_managed_kernel_device_inventory_summary.ResourceCount != 0U ||
+        device_count == 0U) {
+        fail("managed-kernel-device-normalization");
+    }
+    descriptor_bytes = (uint64_t)device_count * GX_MANAGED_KERNEL_DEVICE_V1_SIZE;
+    zero_bytes((uint8_t *)&g_managed_kernel_device_inventory_publication_storage,
+               sizeof(g_managed_kernel_device_inventory_publication_storage));
+    g_managed_kernel_device_inventory_publication =
+        &g_managed_kernel_device_inventory_publication_storage;
+    g_managed_kernel_device_inventory_publication->Size =
+        GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1_SIZE;
+    g_managed_kernel_device_inventory_publication->AbiVersion =
+        GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1;
+    g_managed_kernel_device_inventory_publication->SummaryAddress =
+        (uint64_t)(uintptr_t)&g_managed_kernel_device_inventory_summary;
+    g_managed_kernel_device_inventory_publication->DescriptorAddress =
+        (uint64_t)(uintptr_t)g_managed_kernel_device_descriptors;
+    g_managed_kernel_device_inventory_publication->DescriptorCount = device_count;
+    g_managed_kernel_device_inventory_publication->DescriptorSize =
+        GX_MANAGED_KERNEL_DEVICE_V1_SIZE;
+    g_managed_kernel_device_inventory_publication->DescriptorByteLength =
+        descriptor_bytes;
+    g_managed_kernel_device_inventory_snapshot_ready = 1;
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_NATIVE_SNAPSHOT_READY\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_DISCOVERY=PCI_CONFIG_READ_ONLY\r\n");
+    serial_field_hex("GXOS_NET10:NATIVE_DEVICE_COUNT=0x",
+                     g_managed_kernel_device_inventory_summary.DeviceCount);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:NATIVE_RESOURCE_COUNT=0x",
+                     g_managed_kernel_device_inventory_summary.ResourceCount);
+    serial_text("\r\n");
+}
+
 static void managed_kernel_set_boot_resource_publication(
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 *publication,
     const GX_MANAGED_KERNEL_BOOT_RESOURCE_SUMMARY_V1 *summary,
@@ -11546,6 +11630,187 @@ static void managed_kernel_phase3_host_services_and_start(
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_HOST_TIME_CALLBACK_COUNT=0x",
                      g_managed_kernel_host_time_calls);
     serial_text("\r\n");
+}
+
+static int managed_kernel_device_descriptor_equal(
+    const GX_MANAGED_KERNEL_DEVICE_V1 *left,
+    const GX_MANAGED_KERNEL_DEVICE_V1 *right)
+{
+    const uint8_t *left_bytes = (const uint8_t *)left;
+    const uint8_t *right_bytes = (const uint8_t *)right;
+    uint32_t index;
+    for (index = 0; index != GX_MANAGED_KERNEL_DEVICE_V1_SIZE; ++index) {
+        if (left_bytes[index] != right_bytes[index]) return 0;
+    }
+    return 1;
+}
+
+static void managed_kernel_phase6_inventory(
+    ManagedKernelInstallDeviceInventoryEntry install_device_inventory,
+    ManagedKernelQueryDeviceInventorySummaryEntry query_summary,
+    ManagedKernelQueryDeviceEntry query_device,
+    ManagedKernelRunPhase6Entry run_phase6)
+{
+    GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1 bad_publication;
+    GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1 summary = {0};
+    GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1 repeat_summary = {0};
+    GX_MANAGED_KERNEL_DEVICE_V1 device = {0};
+    GX_MANAGED_KERNEL_DEVICE_V1 repeat_device = {0};
+    uint32_t index;
+    uint32_t status;
+    uint32_t baseline_live;
+    uint64_t baseline_physical;
+    uint64_t baseline_commit;
+    uint64_t baseline_virtual;
+    uint32_t baseline_reservations;
+    uint32_t baseline_commitments;
+    uint64_t baseline_reserved;
+    uint64_t baseline_committed;
+    uint32_t baseline_regions;
+
+    if (install_device_inventory == 0 || query_summary == 0 ||
+        query_device == 0 || run_phase6 == 0 ||
+        g_managed_kernel_device_inventory_snapshot_ready == 0) {
+        fail("managed-kernel-device-inventory-precondition");
+    }
+
+    fill_bytes((uint8_t *)&summary, 0xA5, sizeof(summary));
+    status = query_summary(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1,
+                           (uintptr_t)&summary, sizeof(summary));
+    if (status != GX_MANAGED_NOT_INITIALIZED || summary.Size != 0xA5A5A5A5U) {
+        fail("managed-kernel-device-query-before-install");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_QUERY_BEFORE_INSTALL_REJECTED\r\n");
+
+    status = install_device_inventory(
+        GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1, 0);
+    if (status != GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-device-null-install");
+    }
+    bad_publication = *g_managed_kernel_device_inventory_publication;
+    bad_publication.Size = GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1_SIZE - 1U;
+    if (install_device_inventory(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1,
+                                 (uintptr_t)&bad_publication) !=
+        GX_MANAGED_INVALID_ARGUMENT) {
+        fail("managed-kernel-device-small-publication");
+    }
+    if (install_device_inventory(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1 + 1U,
+                                 (uintptr_t)g_managed_kernel_device_inventory_publication) !=
+        GX_MANAGED_UNSUPPORTED_ABI) {
+        fail("managed-kernel-device-bad-version");
+    }
+    fill_bytes((uint8_t *)&summary, 0xA5, sizeof(summary));
+    if (query_summary(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1,
+                      (uintptr_t)&summary, sizeof(summary)) !=
+            GX_MANAGED_NOT_INITIALIZED || summary.DeviceCount != 0xA5A5A5A5U) {
+        fail("managed-kernel-device-query-after-failed-install");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_NEGATIVE_INSTALLS_REJECTED\r\n");
+
+    gxos_managed_kernel_memory_set_operational(&g_managed_kernel_memory, 1);
+
+    if (install_device_inventory(
+            GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1,
+            (uintptr_t)g_managed_kernel_device_inventory_publication) != GX_MANAGED_OK ||
+        install_device_inventory(
+            GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1,
+            (uintptr_t)g_managed_kernel_device_inventory_publication) !=
+            GX_MANAGED_ALREADY_INITIALIZED) {
+        fail("managed-kernel-device-install");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_INSTALL_REPEAT_REJECTED\r\n");
+
+    baseline_live = g_memory_ledger.live_count;
+    baseline_physical = g_memory_ledger.physical_bytes;
+    baseline_commit = g_memory_ledger.commit_bytes;
+    baseline_virtual = g_memory_ledger.virtual_reservation_bytes;
+    baseline_reservations = g_memory_virtual_arena.reservation_count;
+    baseline_commitments = g_memory_virtual_arena.commitment_count;
+    baseline_reserved = g_memory_virtual_arena.total_reserved_bytes;
+    baseline_committed = g_memory_virtual_arena.total_committed_bytes;
+    baseline_regions = g_memory_vm_regions.live_count;
+
+    if (query_summary(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1,
+                      (uintptr_t)&summary, sizeof(summary)) != GX_MANAGED_OK ||
+        summary.Size != GX_MANAGED_KERNEL_DEVICE_INVENTORY_SUMMARY_V1_SIZE ||
+        summary.AbiVersion != GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1 ||
+        summary.ServiceVersion != GX_MANAGED_KERNEL_DEVICE_INVENTORY_SERVICE_VERSION_V1 ||
+        summary.Architecture != GX_MANAGED_KERNEL_ARCH_X64 ||
+        summary.DeviceCount != g_managed_kernel_device_inventory_summary.DeviceCount ||
+        summary.ResourceCount != 0U ||
+        summary.Capabilities !=
+            (GX_MANAGED_DEVICE_INVENTORY_CAPABILITY_SUMMARY |
+             GX_MANAGED_DEVICE_INVENTORY_CAPABILITY_DEVICES |
+             GX_MANAGED_DEVICE_INVENTORY_CAPABILITY_IMMUTABLE_BOOT_SNAPSHOT) ||
+        summary.Reserved != 0) {
+        fail("managed-kernel-device-summary");
+    }
+    serial_field_hex("GXOS_NET10:MANAGED_DEVICE_COUNT=0x", summary.DeviceCount);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_RESOURCE_COUNT=0x", summary.ResourceCount);
+    serial_text("\r\n");
+
+    for (index = 0; index != summary.DeviceCount; ++index) {
+        fill_bytes((uint8_t *)&device, 0xA5, sizeof(device));
+        if (query_device(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1, index,
+                         (uintptr_t)&device, sizeof(device)) != GX_MANAGED_OK ||
+            !managed_kernel_device_descriptor_equal(
+                &device, &g_managed_kernel_device_descriptors[index])) {
+            fail("managed-kernel-device-descriptor-match");
+        }
+    }
+    if (query_device(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1,
+                     summary.DeviceCount, (uintptr_t)&device, sizeof(device)) !=
+            GX_MANAGED_OUT_OF_RANGE ||
+        query_device(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1 + 1U, 0,
+                     (uintptr_t)&device, sizeof(device)) != GX_MANAGED_UNSUPPORTED_ABI ||
+        query_device(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1, 0, 0,
+                     sizeof(device)) != GX_MANAGED_INVALID_ARGUMENT ||
+        query_device(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1, 0,
+                     (uintptr_t)&device, sizeof(device) - 1U) !=
+                     GX_MANAGED_BUFFER_TOO_SMALL) {
+        fail("managed-kernel-device-query-negative");
+    }
+    if (query_device(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1, 0,
+                     (uintptr_t)&repeat_device, sizeof(repeat_device)) !=
+            GX_MANAGED_OK ||
+        !managed_kernel_device_descriptor_equal(
+            &repeat_device, &g_managed_kernel_device_descriptors[0]) ||
+        query_summary(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1,
+                      (uintptr_t)&repeat_summary, sizeof(repeat_summary)) !=
+            GX_MANAGED_OK ||
+        repeat_summary.DeviceCount != summary.DeviceCount ||
+        repeat_summary.ResourceCount != summary.ResourceCount) {
+        fail("managed-kernel-device-repeat-query");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_QUERY_MATCH_OK\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_RESOURCE_DATA_UNAVAILABLE\r\n");
+
+    status = run_phase6();
+    if (status != GX_MANAGED_OK ||
+        g_memory_ledger.live_count != baseline_live ||
+        g_memory_ledger.physical_bytes != baseline_physical ||
+        g_memory_ledger.commit_bytes != baseline_commit ||
+        g_memory_ledger.virtual_reservation_bytes != baseline_virtual ||
+        g_memory_virtual_arena.reservation_count != baseline_reservations ||
+        g_memory_virtual_arena.commitment_count != baseline_commitments ||
+        g_memory_virtual_arena.total_reserved_bytes != baseline_reserved ||
+        g_memory_virtual_arena.total_committed_bytes != baseline_committed ||
+        g_memory_vm_regions.live_count != baseline_regions) {
+        fail("managed-kernel-device-accounting-restore");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_ACCOUNTING_RESTORED\r\n");
+    if (query_summary(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1,
+                      (uintptr_t)&repeat_summary, sizeof(repeat_summary)) !=
+            GX_MANAGED_OK || repeat_summary.DeviceCount != summary.DeviceCount ||
+        query_device(GX_MANAGED_KERNEL_DEVICE_INVENTORY_ABI_V1, 0,
+                     (uintptr_t)&repeat_device, sizeof(repeat_device)) != GX_MANAGED_OK ||
+        !managed_kernel_device_descriptor_equal(
+            &repeat_device, &g_managed_kernel_device_descriptors[0])) {
+        fail("managed-kernel-device-operational-survival");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_OPERATIONAL_SURVIVAL_OK\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE6_PASS\r\n");
 }
 
 static void managed_kernel_phase4_memory(
@@ -14428,9 +14693,13 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION memory_region_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_host_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_memory_services_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION install_device_inventory_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION query_device_inventory_summary_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION query_device_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION start_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase4_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase5_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase6_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_STATUS initialize_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInitialize",
@@ -14459,6 +14728,17 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInstallMemoryServices",
                                    &install_memory_services_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS install_device_inventory_status =
+        gxos_nativeaot_find_export(&export_image,
+                                   "GxManagedKernelInstallDeviceInventory",
+                                   &install_device_inventory_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS query_device_inventory_summary_status =
+        gxos_nativeaot_find_export(&export_image,
+                                   "GxManagedQueryDeviceInventorySummary",
+                                   &query_device_inventory_summary_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS query_device_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedQueryDevice",
+                                   &query_device_resolution);
     GXOS_NATIVEAOT_EXPORT_STATUS start_status =
         gxos_nativeaot_find_export(&export_image, "GxManagedKernelStart",
                                    &start_resolution);
@@ -14468,6 +14748,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_STATUS run_phase5_status =
         gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase5",
                                    &run_phase5_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS run_phase6_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase6",
+                                   &run_phase6_resolution);
     if (initialize_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInitialize-export-missing");
     }
@@ -14492,11 +14775,23 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     if (install_memory_services_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInstallMemoryServices-export-missing");
     }
+    if (install_device_inventory_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelInstallDeviceInventory-export-missing");
+    }
+    if (query_device_inventory_summary_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedQueryDeviceInventorySummary-export-missing");
+    }
+    if (query_device_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedQueryDevice-export-missing");
+    }
     if (run_phase4_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelRunPhase4-export-missing");
     }
     if (run_phase5_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelRunPhase5-export-missing");
+    }
+    if (run_phase6_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelRunPhase6-export-missing");
     }
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
@@ -14507,9 +14802,15 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
         install_host_services_resolution.rva;
     image->managed_kernel_install_memory_services_rva =
         install_memory_services_resolution.rva;
+    image->managed_kernel_install_device_inventory_rva =
+        install_device_inventory_resolution.rva;
+    image->managed_kernel_query_device_inventory_summary_rva =
+        query_device_inventory_summary_resolution.rva;
+    image->managed_kernel_query_device_rva = query_device_resolution.rva;
     image->managed_kernel_start_rva = start_resolution.rva;
     image->managed_kernel_run_phase4_rva = run_phase4_resolution.rva;
     image->managed_kernel_run_phase5_rva = run_phase5_resolution.rva;
+    image->managed_kernel_run_phase6_rva = run_phase6_resolution.rva;
 }
 #endif
 
@@ -15968,9 +16269,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_memory_region_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_host_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_memory_services_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_device_inventory_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_query_device_inventory_summary_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_query_device_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_start_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase4_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase5_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase6_resolution = {0};
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
     ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
@@ -15978,9 +16283,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     ManagedKernelQueryMemoryRegionEntry managed_kernel_query_memory_region;
     ManagedKernelInstallHostServicesEntry managed_kernel_install_host_services;
     ManagedKernelInstallMemoryServicesEntry managed_kernel_install_memory_services;
+    ManagedKernelInstallDeviceInventoryEntry managed_kernel_install_device_inventory;
+    ManagedKernelQueryDeviceInventorySummaryEntry managed_kernel_query_device_inventory_summary;
+    ManagedKernelQueryDeviceEntry managed_kernel_query_device;
     ManagedKernelStartEntry managed_kernel_start;
     ManagedKernelRunPhase4Entry managed_kernel_run_phase4;
     ManagedKernelRunPhase5Entry managed_kernel_run_phase5;
+    ManagedKernelRunPhase6Entry managed_kernel_run_phase6;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 managed_kernel_boot_resource_publication = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_system_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_repeat_info = {0};
@@ -16233,6 +16542,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         image.managed_kernel_install_memory_services_rva;
     managed_kernel_install_memory_services_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_install_memory_services_rva);
+    managed_kernel_install_device_inventory_resolution.rva =
+        image.managed_kernel_install_device_inventory_rva;
+    managed_kernel_install_device_inventory_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_install_device_inventory_rva);
+    managed_kernel_query_device_inventory_summary_resolution.rva =
+        image.managed_kernel_query_device_inventory_summary_rva;
+    managed_kernel_query_device_inventory_summary_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_query_device_inventory_summary_rva);
+    managed_kernel_query_device_resolution.rva = image.managed_kernel_query_device_rva;
+    managed_kernel_query_device_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_query_device_rva);
     managed_kernel_start_resolution.rva = image.managed_kernel_start_rva;
     managed_kernel_start_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_start_rva);
@@ -16242,6 +16562,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     managed_kernel_run_phase5_resolution.rva = image.managed_kernel_run_phase5_rva;
     managed_kernel_run_phase5_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_run_phase5_rva);
+    managed_kernel_run_phase6_resolution.rva = image.managed_kernel_run_phase6_rva;
+    managed_kernel_run_phase6_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_phase6_rva);
     managed_kernel_initialize = (ManagedKernelInitializeEntry)
         managed_kernel_initialize_resolution.address;
     managed_kernel_query_system_info = (ManagedKernelQuerySystemInfoEntry)
@@ -16257,12 +16580,22 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     managed_kernel_install_memory_services =
         (ManagedKernelInstallMemoryServicesEntry)
         managed_kernel_install_memory_services_resolution.address;
+    managed_kernel_install_device_inventory =
+        (ManagedKernelInstallDeviceInventoryEntry)
+        managed_kernel_install_device_inventory_resolution.address;
+    managed_kernel_query_device_inventory_summary =
+        (ManagedKernelQueryDeviceInventorySummaryEntry)
+        managed_kernel_query_device_inventory_summary_resolution.address;
+    managed_kernel_query_device = (ManagedKernelQueryDeviceEntry)
+        managed_kernel_query_device_resolution.address;
     managed_kernel_start = (ManagedKernelStartEntry)
         managed_kernel_start_resolution.address;
     managed_kernel_run_phase4 = (ManagedKernelRunPhase4Entry)
         managed_kernel_run_phase4_resolution.address;
     managed_kernel_run_phase5 = (ManagedKernelRunPhase5Entry)
         managed_kernel_run_phase5_resolution.address;
+    managed_kernel_run_phase6 = (ManagedKernelRunPhase6Entry)
+        managed_kernel_run_phase6_resolution.address;
     serial_text("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT=GxManagedKernelInitialize\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT_RVA=0x",
                      image.managed_kernel_initialize_rva);
@@ -16977,6 +17310,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     capture_memory_snapshot();
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
     prepare_managed_kernel_boot_resources();
+    prepare_managed_kernel_device_inventory();
 #endif
     g_boot_info_address = (uint64_t)(uintptr_t)&g_boot_info;
     g_boot_info.Magic = GUIDEX_BOOT_MAGIC;
@@ -17343,6 +17677,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     restore_nativeaot_tls();
     activate_nativeaot_tls();
     managed_kernel_phase5_arena(managed_kernel_run_phase5);
+    restore_nativeaot_tls();
+    activate_nativeaot_tls();
+    managed_kernel_phase6_inventory(
+        managed_kernel_install_device_inventory,
+        managed_kernel_query_device_inventory_summary,
+        managed_kernel_query_device, managed_kernel_run_phase6);
     restore_nativeaot_tls();
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
