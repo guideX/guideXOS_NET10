@@ -70,6 +70,7 @@ $managedKernelMemorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_me
 $managedKernelDeviceInventorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_device_inventory.c'
 $managedKernelSerialSource = Join-Path $root 'src\Gate4Harness\managed_kernel_serial.c'
 $managedKernelInterruptSource = Join-Path $root 'src\Gate4Harness\managed_kernel_interrupt.c'
+$managedKernelDriverWorkerSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_worker.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
 $virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
@@ -150,6 +151,9 @@ if (-not (Test-Path -LiteralPath $managedKernelSerialSource)) { throw "ManagedKe
 if (-not (Test-Path -LiteralPath $managedKernelInterruptSource) -or
     -not (Test-Path -LiteralPath $serialInterruptAssembly)) {
     throw "ManagedKernel interrupt sources not found: $managedKernelInterruptSource / $serialInterruptAssembly"
+}
+if (-not (Test-Path -LiteralPath $managedKernelDriverWorkerSource)) {
+    throw "ManagedKernel driver-worker source not found: $managedKernelDriverWorkerSource"
 }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
@@ -1137,6 +1141,7 @@ if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelDeviceInventorySource
     $gccArguments += $managedKernelSerialSource
     $gccArguments += $managedKernelInterruptSource
+    $gccArguments += $managedKernelDriverWorkerSource
     if ($Scenario -ne 'NativeAotEventWait') {
         # ManagedKernel is an allocation-enabled NativeAOT payload.  Keep its
         # startup/runtime import surface on the already-proven bounded harness

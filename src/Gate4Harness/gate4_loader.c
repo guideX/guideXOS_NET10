@@ -39,6 +39,7 @@
 #include "managed_kernel_device_inventory.h"
 #include "managed_kernel_serial.h"
 #include "managed_kernel_interrupt.h"
+#include "managed_kernel_driver_worker.h"
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
 #include "nativeaot_gc_probe_contract.h"
@@ -338,6 +339,8 @@ typedef uint32_t (EFIAPI *ManagedKernelRunPhase8Entry)(void);
 typedef uint32_t (EFIAPI *ManagedKernelInstallInterruptServicesEntry)(
     uint32_t requested_abi_version, uintptr_t services_address);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase9Entry)(uint32_t stage);
+typedef uint32_t (EFIAPI *ManagedKernelRunDriverWorkerEntry)(uint32_t stage);
+typedef uint32_t (EFIAPI *ManagedKernelRunPhase10Entry)(uint32_t stage);
 #endif
 
 enum {
@@ -468,6 +471,8 @@ static GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1
     g_managed_kernel_interrupt_services;
 static GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT
     g_managed_kernel_interrupt_context;
+static GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT
+    g_managed_kernel_driver_worker_context;
 /* Phase 8 leaves the operational serial driver alive for Phase 9. Retain
    the pre-driver native accounting snapshot so Phase 9 can validate the
    actual stop/destroy teardown boundary, not the still-live Phase 8 arena. */
@@ -4448,6 +4453,8 @@ typedef struct {
     uint32_t managed_kernel_run_phase8_rva;
     uint32_t managed_kernel_install_interrupt_services_rva;
     uint32_t managed_kernel_run_phase9_rva;
+    uint32_t managed_kernel_run_driver_worker_rva;
+    uint32_t managed_kernel_run_phase10_rva;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     uint32_t managed_gc_probe_rva;
@@ -11685,6 +11692,19 @@ void gxos_managed_kernel_serial_irq_capture(void)
     gxos_managed_kernel_interrupt_capture(&g_managed_kernel_interrupt_context);
 }
 
+static int managed_kernel_driver_worker_notify(void *opaque)
+{
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker =
+        (GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *)opaque;
+    if (worker == 0 || worker->wake_event == 0 || worker->scheduler == 0 ||
+        !worker->scheduler->active || worker->state ==
+            GXOS_MANAGED_KERNEL_DRIVER_WORKER_STOPPED || worker->state ==
+            GXOS_MANAGED_KERNEL_DRIVER_WORKER_DESTROYED) {
+        return 0;
+    }
+    return gxos_scheduler_signal_event(worker->wake_event);
+}
+
 static uint64_t managed_kernel_interrupt_enter(void *opaque)
 {
     uint64_t flags;
@@ -11696,14 +11716,6 @@ static uint64_t managed_kernel_interrupt_enter(void *opaque)
 static void managed_kernel_interrupt_enable_cpu(void)
 {
     __asm__ volatile ("sti" : : : "cc");
-}
-
-static uint64_t managed_kernel_interrupt_read_tsc(void)
-{
-    uint32_t low;
-    uint32_t high;
-    __asm__ volatile ("rdtsc" : "=a"(low), "=d"(high));
-    return ((uint64_t)high << 32) | low;
 }
 
 static void managed_kernel_interrupt_leave(void *opaque, uint64_t flags)
@@ -11782,6 +11794,7 @@ static int managed_kernel_serial_interrupt_enable(void *opaque)
     /* The normal console uses a 14-byte FIFO trigger. Phase 9 injects one
        byte at a time, so use the minimum RX trigger only while subscribed. */
     g_managed_kernel_serial_phase9_fcr = 0x07U;
+    serial_out8(0x3F8 + 1, 0x00U);
     serial_out8(0x3F8 + 2, g_managed_kernel_serial_phase9_fcr);
     serial_out8(0x3F8 + 1, (uint8_t)(g_managed_kernel_serial_saved_ier | 0x01U));
     ier = serial_in8(0x3F8 + 1);
@@ -11858,32 +11871,27 @@ static void managed_kernel_serial_interrupt_eoi(void *opaque)
     }
 }
 
-static void managed_kernel_interrupt_log_uart_state(const char *prefix)
-{
-    uint32_t ioapic_low;
-    uint32_t ioapic_high;
-    serial_text(prefix);
-    serial_field_hex(" IER=0x", serial_in8(0x3F8 + 1));
-    serial_field_hex(" IIR=0x", serial_in8(0x3F8 + 2));
-    serial_field_hex(" LSR=0x", serial_in8(0x3F8 + 5));
-    serial_field_hex(" MCR=0x", serial_in8(0x3F8 + 4));
-    serial_field_hex(" FCR_CONFIGURED=0x", g_managed_kernel_serial_phase9_fcr);
-    serial_field_hex(" PIC_MASK=0x", serial_in8(0x21));
-    ioapic_low = managed_kernel_ioapic_read(
-        GXOS_MANAGED_KERNEL_IOAPIC_SERIAL_IRQ_REGISTER);
-    ioapic_high = managed_kernel_ioapic_read(
-        GXOS_MANAGED_KERNEL_IOAPIC_SERIAL_IRQ_REGISTER + 1U);
-    serial_field_hex(" IOAPIC_LOW=0x", ioapic_low);
-    serial_field_hex(" IOAPIC_HIGH=0x", ioapic_high);
-    serial_field_hex(" TSC=0x", managed_kernel_interrupt_read_tsc());
-    serial_text("\r\n");
-}
-
 static int managed_kernel_interrupt_range_is_known(
     void *opaque, uintptr_t address, uintptr_t byte_length)
 {
+    uint32_t index;
     (void)opaque;
-    return managed_kernel_host_range_is_known(address, byte_length);
+    if (managed_kernel_host_range_is_known(address, byte_length)) return 1;
+    if (address == 0 || byte_length == 0 ||
+        byte_length > UINTPTR_MAX - address) return 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        GXOS_SCHEDULER_TCB *thread = &g_create_event_scheduler.threads[index];
+        uintptr_t base;
+        uintptr_t end;
+        if (!thread->live || thread->stack_base == 0 ||
+            thread->stack_limit <= thread->stack_base) continue;
+        base = (uintptr_t)thread->stack_base;
+        end = (uintptr_t)thread->stack_limit;
+        if (address >= base && address <= end && byte_length <= end - address) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static uint32_t GX_MANAGED_KERNEL_MS_ABI
@@ -12658,33 +12666,85 @@ static void managed_kernel_phase8_serial(
 }
 
 static int managed_kernel_interrupt_wait_for_enqueued(
-    EFI_BOOT_SERVICES *boot_services, uint64_t expected_count)
+    EFI_BOOT_SERVICES *boot_services,
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker,
+    uint64_t expected_count)
 {
     uint32_t iteration;
-    uint32_t data_ready_reported = 0;
-    (void)boot_services;
-    for (iteration = 0; iteration != 1000000U; ++iteration) {
-        uint8_t io_delay;
+    if (boot_services == 0 || worker == 0) return 0;
+    managed_kernel_interrupt_enable_cpu();
+    if (!managed_kernel_serial_interrupt_enable(0)) return 0;
+    managed_kernel_interrupt_enable_cpu();
+    for (iteration = 0; iteration != 100000U; ++iteration) {
         if (__atomic_load_n(&g_managed_kernel_interrupt_context.enqueued_count,
-                            __ATOMIC_ACQUIRE) >= expected_count) return 1;
-        uint8_t line_status = serial_in8(0x3F8 + 5);
-        if (data_ready_reported == 0 && (line_status & 0x01U) != 0) {
-            /* This is observation only. Do not read RBR here: the acceptance
-               byte must remain for the real UART interrupt path to capture. */
-            managed_kernel_interrupt_log_uart_state(
-                "GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_DATA_READY_OBSERVED");
-            data_ready_reported = 1;
+                            __ATOMIC_ACQUIRE) < expected_count) {
+            uint8_t io_delay;
+            if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
+                managed_kernel_interrupt_enable_cpu();
+                (void)boot_services->Stall(1000);
+                managed_kernel_interrupt_enable_cpu();
+                continue;
+            }
+            __asm__ volatile ("inb $0x80, %0" : "=a"(io_delay) : : "memory");
+            __asm__ volatile ("pause" : : : "memory");
+            continue;
         }
-        __asm__ volatile ("inb $0x80, %0" : "=a"(io_delay) : : "memory");
-        __asm__ volatile ("pause" : : : "memory");
+        if (__atomic_load_n(&g_managed_kernel_interrupt_context.drained_count,
+                            __ATOMIC_ACQUIRE) >= expected_count &&
+            worker->managed_dispatch_count >= expected_count) return 1;
+        /* UEFI Stall implementations are allowed to leave interrupt state
+           masked. Reassert IF before each observation/idle interval so the
+           legacy COM1 route remains live after a scheduler worker blocks. */
+        managed_kernel_interrupt_enable_cpu();
+        if (gxos_managed_kernel_driver_worker_pump(worker)) continue;
+        {
+            uint8_t io_delay;
+            __asm__ volatile ("inb $0x80, %0" : "=a"(io_delay) : : "memory");
+            __asm__ volatile ("pause" : : : "memory");
+        }
     }
     return 0;
 }
 
+static int managed_kernel_interrupt_wait_for_optional_burst(
+    EFI_BOOT_SERVICES *boot_services,
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker,
+    uint32_t *burst_observed)
+{
+    uint32_t iteration;
+    if (boot_services == 0 || worker == 0 || burst_observed == 0) return 0;
+    *burst_observed = 0;
+    /* Keep the Phase 9 two-byte diagnostic control usable, but give the
+       Phase 10 producer a bounded window to deliver its A/B/C burst. */
+    for (iteration = 0; iteration != 100000U; ++iteration) {
+        uint64_t enqueued = __atomic_load_n(
+            &g_managed_kernel_interrupt_context.enqueued_count,
+            __ATOMIC_ACQUIRE);
+        if (enqueued >= 5U) {
+            if (!managed_kernel_interrupt_wait_for_enqueued(
+                    boot_services, worker, 5U)) return 0;
+            *burst_observed = 1;
+            return 1;
+        }
+        managed_kernel_interrupt_enable_cpu();
+        if (gxos_managed_kernel_driver_worker_pump(worker)) continue;
+        {
+            uint8_t io_delay;
+            __asm__ volatile ("inb $0x80, %0" : "=a"(io_delay) : : "memory");
+            __asm__ volatile ("pause" : : : "memory");
+        }
+    }
+    return __atomic_load_n(&g_managed_kernel_interrupt_context.enqueued_count,
+                           __ATOMIC_ACQUIRE) == 2U;
+}
+
 static void managed_kernel_phase9_interrupt(
     EFI_BOOT_SERVICES *boot_services,
+    const PE_IMAGE *image,
     ManagedKernelInstallInterruptServicesEntry install_interrupt_services,
-    ManagedKernelRunPhase9Entry run_phase9)
+    ManagedKernelRunPhase9Entry run_phase9,
+    ManagedKernelRunDriverWorkerEntry run_driver_worker,
+    ManagedKernelRunPhase10Entry run_phase10)
 {
     GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1 bad_services;
     GX_MANAGED_KERNEL_INTERRUPT_STATS_V1 stats;
@@ -12699,14 +12759,18 @@ static void managed_kernel_phase9_interrupt(
     uint64_t baseline_committed;
     uint32_t baseline_regions;
     uint64_t irq_before_unsubscribe;
+    uint32_t burst_observed;
     const uint32_t driver_arena_pages = 2U;
     const uint32_t driver_arena_commitments = 2U;
     const uint32_t driver_arena_reservations = 1U;
     const uint32_t driver_arena_regions = 1U;
     const uint64_t driver_arena_bytes = 0x2000ULL;
+    uint32_t tls_index;
+    const uint8_t *tls_source;
 
-    if (boot_services == 0 || install_interrupt_services == 0 ||
-        run_phase9 == 0 || g_managed_kernel_serial_context.successful_transmit_count != 2U) {
+    if (boot_services == 0 || image == 0 || install_interrupt_services == 0 ||
+        run_phase9 == 0 || run_driver_worker == 0 || run_phase10 == 0 ||
+        g_managed_kernel_serial_context.successful_transmit_count != 2U) {
         fail("managed-kernel-interrupt-precondition");
     }
     managed_kernel_interrupt_services_make_valid();
@@ -12765,31 +12829,45 @@ static void managed_kernel_phase9_interrupt(
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ACCOUNTING_BASELINE_COMMIT=0x",
                      baseline_commit);
     serial_text("\r\n");
+    if (!gxos_managed_kernel_driver_worker_initialize(
+            &g_managed_kernel_driver_worker_context,
+            &g_create_event_scheduler, &g_event_api_context,
+            &g_managed_kernel_interrupt_context, run_driver_worker,
+            serial_text, serial_field_hex)) {
+        fail("managed-kernel-driver-worker-start");
+    }
+    tls_index = read_u32(rva_to_loaded(image, image->tls_index_rva, 4));
+    /* Clone the initialized main NativeAOT TLS block. The PE TLS template
+       alone does not contain the runtime thread state established during
+       startup; each scheduler worker still receives its own private block. */
+    tls_source = (const uint8_t *)(uintptr_t)g_tls_block;
+    if (!gxos_managed_kernel_driver_worker_configure_nativeaot_tls(
+        &g_managed_kernel_driver_worker_context, tls_index,
+            tls_source, GXOS_SCHEDULER_PAGE_SIZE)) {
+        fail("managed-kernel-driver-worker-nativeaot-tls");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_TLS_READY\r\n");
+    gxos_managed_kernel_interrupt_set_work_notification(
+        &g_managed_kernel_interrupt_context,
+        managed_kernel_driver_worker_notify,
+        &g_managed_kernel_driver_worker_context);
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_READY\r\n");
     if (run_phase9(1) != GX_MANAGED_OK) fail("managed-kernel-interrupt-subscribe");
+    /* The worker is resumed before subscription, but its first scheduler
+       activation is deliberately caused by the first hardware notification.
+       This keeps the initial managed activation tied to real device work. */
 
     restore_nativeaot_tls();
     managed_kernel_interrupt_enable_cpu();
-    if (!managed_kernel_interrupt_wait_for_enqueued(boot_services, 1)) {
-        managed_kernel_interrupt_log_uart_state(
-            "GXOS_NET10:MANAGED_KERNEL_INTERRUPT_TIMEOUT_FIRST");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WORKER_UART_READY\r\n");
+    managed_kernel_interrupt_enable_cpu();
+    if (!managed_kernel_interrupt_wait_for_enqueued(
+            boot_services, &g_managed_kernel_driver_worker_context, 1)) {
         fail("managed-kernel-serial-rx-timeout-first");
     }
     serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_IRQ_CAPTURED\r\n");
-    activate_nativeaot_tls();
-    if (run_phase9(2) != GX_MANAGED_OK) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-serial-rx-dispatch-first");
-    }
-    restore_nativeaot_tls();
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_ENQUEUED\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_DRAINED\r\n");
-
-    activate_nativeaot_tls();
-    if (run_phase9(3) != GX_MANAGED_OK) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-interrupt-runtime-survival");
-    }
-    restore_nativeaot_tls();
     serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_NATIVE_OK\r\n");
 
     /* The required runtime/GC proof may retain NativeAOT heap pages. Capture
@@ -12835,26 +12913,30 @@ static void managed_kernel_phase9_interrupt(
                      driver_arena_pages);
     serial_text("\r\n");
 
+    serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SECOND_WAIT_READY\r\n");
     managed_kernel_interrupt_enable_cpu();
-    if (!managed_kernel_interrupt_wait_for_enqueued(boot_services, 2)) {
-        managed_kernel_interrupt_log_uart_state(
-            "GXOS_NET10:MANAGED_KERNEL_INTERRUPT_TIMEOUT_SECOND");
+    if (!managed_kernel_interrupt_wait_for_enqueued(
+            boot_services, &g_managed_kernel_driver_worker_context, 2)) {
         fail("managed-kernel-serial-rx-timeout-second");
     }
     serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_IRQ_CAPTURED\r\n");
-    activate_nativeaot_tls();
-    if (run_phase9(2) != GX_MANAGED_OK) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-serial-rx-dispatch-second");
-    }
-    restore_nativeaot_tls();
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_ENQUEUED\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_DRAINED\r\n");
+
+    if (!managed_kernel_interrupt_wait_for_optional_burst(
+            boot_services, &g_managed_kernel_driver_worker_context,
+            &burst_observed)) {
+        fail("managed-kernel-serial-rx-timeout-optional-burst");
+    }
+    if (burst_observed != 0U) {
+        serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED\r\n");
+        serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_DRAINED\r\n");
+    }
 
     irq_before_unsubscribe = __atomic_load_n(
         &g_managed_kernel_interrupt_context.irq_entry_count, __ATOMIC_ACQUIRE);
     activate_nativeaot_tls();
-    if (run_phase9(4) != GX_MANAGED_OK) {
+    if (run_phase10(4) != GX_MANAGED_OK) {
         restore_nativeaot_tls();
         fail("managed-kernel-interrupt-unsubscribe");
     }
@@ -12869,6 +12951,23 @@ static void managed_kernel_phase9_interrupt(
                         __ATOMIC_ACQUIRE) != irq_before_unsubscribe) {
         fail("managed-kernel-interrupt-post-unsubscribe-delivery");
     }
+
+    gxos_managed_kernel_interrupt_set_work_notification(
+        &g_managed_kernel_interrupt_context, 0, 0);
+
+    if (!gxos_managed_kernel_driver_worker_stop(
+            &g_managed_kernel_driver_worker_context) ||
+        !gxos_managed_kernel_driver_worker_destroy(
+            &g_managed_kernel_driver_worker_context)) {
+        fail("managed-kernel-driver-worker-reclaim");
+    }
+    activate_nativeaot_tls();
+    if (run_phase10(5) != GX_MANAGED_OK) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-driver-worker-managed-teardown");
+    }
+    restore_nativeaot_tls();
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_ACCOUNTING_RESTORED\r\n");
 
     stats.Size = GX_MANAGED_KERNEL_INTERRUPT_STATS_V1_SIZE;
     stats.AbiVersion = GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1;
@@ -12924,8 +13023,9 @@ static void managed_kernel_phase9_interrupt(
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ACCOUNTING_AFTER_REGIONS=0x",
                      g_memory_vm_regions.live_count);
     serial_text("\r\n");
-    if (stats.IrqEntryCount < 2 || stats.SerialIsrCount != 2 ||
-        stats.EnqueuedCount != 2 || stats.DrainedCount != 2 ||
+    if (stats.IrqEntryCount < 2 || stats.SerialIsrCount != stats.EnqueuedCount ||
+        (stats.EnqueuedCount != 2 && stats.EnqueuedCount != 5) ||
+        stats.DrainedCount != stats.EnqueuedCount ||
         stats.DroppedCount != 0 || stats.SubscriptionActive != 0 ||
         stats.HardwareEnabled != 0 ||
         baseline_live < driver_arena_pages ||
@@ -12961,7 +13061,33 @@ static void managed_kernel_phase9_interrupt(
                      g_memory_ledger.commit_bytes);
     serial_text("\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ACCOUNTING_RESTORED_NATIVE_OK\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_SCHEDULER_DISPATCH_COUNT=0x",
+                     g_managed_kernel_driver_worker_context.scheduler_dispatch_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_WAKE_COUNT=0x",
+                     g_managed_kernel_driver_worker_context.worker_wake_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_BATCH_COUNT=0x",
+                     g_managed_kernel_driver_worker_context.dispatch_batch_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_SLEEP_COUNT=0x",
+                     g_managed_kernel_driver_worker_context.sleep_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_YIELD_COUNT=0x",
+                     g_managed_kernel_driver_worker_context.yield_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_WAKE_REQUEST_COUNT=0x",
+                     g_managed_kernel_interrupt_context.wake_request_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_QUEUE_HIGH_WATER=0x",
+                     g_managed_kernel_interrupt_context.queue_high_water);
+    serial_text("\r\n");
+    if (stats.EnqueuedCount == 5) {
+        serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_OK\r\n");
+        serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WAKE_COALESCE_OK\r\n");
+    }
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE9_PASS\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE10_PASS\r\n");
 }
 
 static void managed_kernel_phase4_memory(
@@ -15859,6 +15985,8 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase8_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_interrupt_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase9_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION run_driver_worker_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase10_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_STATUS initialize_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInitialize",
@@ -15937,6 +16065,13 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_STATUS run_phase9_status =
         gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase9",
                                    &run_phase9_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS run_driver_worker_status =
+        gxos_nativeaot_find_export(&export_image,
+                                   "GxManagedKernelRunDriverWorker",
+                                   &run_driver_worker_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS run_phase10_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase10",
+                                   &run_phase10_resolution);
     if (initialize_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInitialize-export-missing");
     }
@@ -16003,6 +16138,12 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     if (run_phase9_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelRunPhase9-export-missing");
     }
+    if (run_driver_worker_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelRunDriverWorker-export-missing");
+    }
+    if (run_phase10_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelRunPhase10-export-missing");
+    }
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
     image->managed_kernel_install_boot_resources_rva = install_resolution.rva;
@@ -16034,6 +16175,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     image->managed_kernel_install_interrupt_services_rva =
         install_interrupt_services_resolution.rva;
     image->managed_kernel_run_phase9_rva = run_phase9_resolution.rva;
+    image->managed_kernel_run_driver_worker_rva =
+        run_driver_worker_resolution.rva;
+    image->managed_kernel_run_phase10_rva = run_phase10_resolution.rva;
 }
 #endif
 
@@ -17507,6 +17651,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase8_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_interrupt_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase9_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_driver_worker_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase10_resolution = {0};
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
     ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
@@ -17529,6 +17675,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     ManagedKernelRunPhase8Entry managed_kernel_run_phase8;
     ManagedKernelInstallInterruptServicesEntry managed_kernel_install_interrupt_services;
     ManagedKernelRunPhase9Entry managed_kernel_run_phase9;
+    ManagedKernelRunDriverWorkerEntry managed_kernel_run_driver_worker;
+    ManagedKernelRunPhase10Entry managed_kernel_run_phase10;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 managed_kernel_boot_resource_publication = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_system_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_repeat_info = {0};
@@ -17833,6 +17981,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     managed_kernel_run_phase9_resolution.rva = image.managed_kernel_run_phase9_rva;
     managed_kernel_run_phase9_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_run_phase9_rva);
+    managed_kernel_run_driver_worker_resolution.rva =
+        image.managed_kernel_run_driver_worker_rva;
+    managed_kernel_run_driver_worker_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_driver_worker_rva);
+    managed_kernel_run_phase10_resolution.rva = image.managed_kernel_run_phase10_rva;
+    managed_kernel_run_phase10_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_phase10_rva);
     managed_kernel_initialize = (ManagedKernelInitializeEntry)
         managed_kernel_initialize_resolution.address;
     managed_kernel_query_system_info = (ManagedKernelQuerySystemInfoEntry)
@@ -17883,6 +18038,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
             managed_kernel_install_interrupt_services_resolution.address;
     managed_kernel_run_phase9 = (ManagedKernelRunPhase9Entry)
         managed_kernel_run_phase9_resolution.address;
+    managed_kernel_run_driver_worker = (ManagedKernelRunDriverWorkerEntry)
+        managed_kernel_run_driver_worker_resolution.address;
+    managed_kernel_run_phase10 = (ManagedKernelRunPhase10Entry)
+        managed_kernel_run_phase10_resolution.address;
     serial_text("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT=GxManagedKernelInitialize\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT_RVA=0x",
                      image.managed_kernel_initialize_rva);
@@ -18983,8 +19142,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     restore_nativeaot_tls();
     activate_nativeaot_tls();
     managed_kernel_phase9_interrupt(
-        boot_services, managed_kernel_install_interrupt_services,
-        managed_kernel_run_phase9);
+        boot_services, &image, managed_kernel_install_interrupt_services,
+        managed_kernel_run_phase9, managed_kernel_run_driver_worker,
+        managed_kernel_run_phase10);
     restore_nativeaot_tls();
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK

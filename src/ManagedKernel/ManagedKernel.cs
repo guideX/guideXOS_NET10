@@ -997,12 +997,28 @@ internal static unsafe class ManagedKernelContract
         {
             return AlreadyInitialized;
         }
-        if (s_lifecycleState != (int)LifecycleState.Ready ||
-            s_bootResourcesPublished == 0 || s_hostServicesInstalled == 0 ||
-            s_memoryServicesInstalled == 0 ||
-            (s_hostCapabilities & RequiredHostServicesCapabilities) !=
-                RequiredHostServicesCapabilities ||
-            !PublishedBootResourcesRemainStable())
+        if (s_lifecycleState != (int)LifecycleState.Ready)
+        {
+            return InvalidState;
+        }
+        if (s_bootResourcesPublished == 0)
+        {
+            return InvalidState;
+        }
+        if (s_hostServicesInstalled == 0)
+        {
+            return InvalidState;
+        }
+        if (s_memoryServicesInstalled == 0)
+        {
+            return InvalidState;
+        }
+        if ((s_hostCapabilities & RequiredHostServicesCapabilities) !=
+            RequiredHostServicesCapabilities)
+        {
+            return InvalidState;
+        }
+        if (!PublishedBootResourcesRemainStable())
         {
             return InvalidState;
         }
@@ -1068,6 +1084,18 @@ internal static unsafe class ManagedKernelContract
     internal static uint RunPhase9(uint stage)
     {
         return ManagedSerialDriverSubsystem.RunPhase9(stage);
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunDriverWorker")]
+    internal static uint RunDriverWorker(uint stage)
+    {
+        return ManagedSerialDriverSubsystem.RunDriverWorker(stage);
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase10")]
+    internal static uint RunPhase10(uint stage)
+    {
+        return ManagedSerialDriverSubsystem.RunPhase10(stage);
     }
 
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallDeviceInventory")]

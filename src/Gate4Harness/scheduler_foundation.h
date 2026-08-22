@@ -340,6 +340,7 @@ void gxos_scheduler_main_block(GXOS_SCHEDULER_HANDLE event,
                                GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot,
                                int32_t *wait_result);
 void gxos_scheduler_main_dispatch(GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot);
+int gxos_scheduler_worker_yield(void);
 void gxos_scheduler_worker_wait(GXOS_SCHEDULER_HANDLE event,
                                 GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot,
                                 int32_t *wait_result);

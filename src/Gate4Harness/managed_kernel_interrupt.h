@@ -15,6 +15,7 @@ typedef int (*GXOS_MANAGED_KERNEL_INTERRUPT_DISABLE)(void *context);
 typedef int (*GXOS_MANAGED_KERNEL_INTERRUPT_SOURCE)(
     void *context, uint8_t *payload_byte, uint32_t *status);
 typedef void (*GXOS_MANAGED_KERNEL_INTERRUPT_EOI)(void *context);
+typedef int (*GXOS_MANAGED_KERNEL_INTERRUPT_WORK_NOTIFY)(void *context);
 
 typedef struct {
     uint32_t device_kind;
@@ -32,6 +33,9 @@ typedef struct {
     volatile uint64_t enqueued_count;
     volatile uint64_t drained_count;
     volatile uint64_t dropped_count;
+    volatile uint32_t work_pending;
+    volatile uint64_t wake_request_count;
+    volatile uint32_t queue_high_water;
     GXOS_MANAGED_KERNEL_INTERRUPT_RANGE_VALIDATOR range_is_known;
     GXOS_MANAGED_KERNEL_INTERRUPT_CRITICAL_ENTER critical_enter;
     GXOS_MANAGED_KERNEL_INTERRUPT_CRITICAL_LEAVE critical_leave;
@@ -39,7 +43,9 @@ typedef struct {
     GXOS_MANAGED_KERNEL_INTERRUPT_DISABLE disable_hardware;
     GXOS_MANAGED_KERNEL_INTERRUPT_SOURCE capture_source;
     GXOS_MANAGED_KERNEL_INTERRUPT_EOI send_eoi;
+    GXOS_MANAGED_KERNEL_INTERRUPT_WORK_NOTIFY work_notify;
     void *hardware_context;
+    void *work_context;
     GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1 events[
         GX_MANAGED_KERNEL_INTERRUPT_QUEUE_CAPACITY];
 } GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT;
@@ -56,6 +62,16 @@ void gxos_managed_kernel_interrupt_initialize(
     GXOS_MANAGED_KERNEL_INTERRUPT_EOI send_eoi, void *hardware_context);
 
 void gxos_managed_kernel_interrupt_capture(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context);
+
+void gxos_managed_kernel_interrupt_set_work_notification(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_INTERRUPT_WORK_NOTIFY notify,
+    void *work_context);
+
+/* Called by the managed worker after a bounded dispatch.  A nonzero result
+   means that another bounded activation must be scheduled. */
+int gxos_managed_kernel_interrupt_rearm_work(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context);
 
 uint32_t GX_MANAGED_KERNEL_MS_ABI gxos_managed_kernel_interrupt_subscribe_v1(

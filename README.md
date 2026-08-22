@@ -112,25 +112,32 @@ still using COM1 as the narrowly scoped platform device. The native substrate
 audit found no guideXOS-owned generic IRQ/APIC layer, so the implementation
 uses the existing firmware/legacy PIC layout: COM1 IRQ4 is temporarily gated
 at vector `0x24`, the native ISR captures into a static eight-record queue, and
-managed code drains only at explicit safe points. The 88-byte Interrupt
+the managed dispatcher validates bounded records. The 88-byte Interrupt
 Services v1 ABI exposes subscribe, unsubscribe, bounded drain, and stats; it
 does not expose raw IRQ, PIC, IDT, or port-I/O authority. The raw gate performs
 no managed call, allocation, or logging. The original Phase 8 `-serial file:`
-backend remains the output-only control path; the Phase 9 acceptance runner
-uses a bidirectional TCP chardev socket and writes raw `R`, then `S`, and `Z`
-after unsubscribe. The transport proof observed UART `LSR.DATA_READY` for
-`0x52`, and the hardware proof reached `PHASE9_PASS` on three fresh QEMU
-boots. During acceptance, legacy PIC IRQ4 is masked so the existing IOAPIC
-route owns vector `0x24`; the saved PIC/IOAPIC/IDT state is restored on
-unsubscribe. See [the Phase 9 interrupt and deferred-delivery contract](docs/MANAGED_KERNEL_INTERRUPT_DRIVER.md).
+backend remains the output-only control path; the Phase 9 compatibility
+control uses a bidirectional TCP chardev socket and writes raw `R`, then `S`,
+and `Z` after unsubscribe. See [the Phase 9 interrupt contract](docs/MANAGED_KERNEL_INTERRUPT_DRIVER.md).
+
+ManagedKernel Phase 10 adds the scheduler-driven managed driver worker. A
+single cooperative scheduler TCB, stack, TEB/GS, TLS/FLS state, and auto-reset
+event are reused; the IRQ path only enqueues primitive records and requests a
+coalesced wake. The worker is armed before subscription but performs its first
+managed activation only after real device work is signaled; its private TLS
+block is seeded from the initialized NativeAOT main-thread TLS state. The
+worker performs bounded batches, explicit cooperative yield/rescheduling when
+work remains, per-record validation/routing, runtime and GC survival, burst
+delivery, unsubscribe, and complete native/managed teardown. Three fresh boots
+are driven by
+`Run-ManagedKernelPhase10FreshBoots.ps1`; the contract and limitations are in
+[the Phase 10 managed driver execution document](docs/MANAGED_KERNEL_DRIVER_EXECUTION.md).
 
 The Phase 9 host vectors are `Run-ManagedKernelInterruptNativeHostTests.ps1`
-and `Run-ManagedKernelInterruptHostTests.ps1`. The real-hardware acceptance
-runner is `Run-ManagedKernelPhase9FreshBoots.ps1`; it requires three fresh
-QEMU boots, records serial, injection, timeline, and command-line hashes, and
-requires exact native IRQ/queue/accounting counters on every boot. The final
-acceptance evidence is under
-`artifacts/phase9-final-acceptance-evidence-20260822-final4`.
+and `Run-ManagedKernelInterruptHostTests.ps1`. The Phase 10 worker model
+vector is `Run-ManagedKernelDriverWorkerHostTests.ps1`; its real-hardware
+acceptance runner requires three fresh QEMU boots and records serial,
+injection, timeline, command-line, payload, and firmware identity hashes.
 
 Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
 versioned view of that truth through the managed-kernel ABI.

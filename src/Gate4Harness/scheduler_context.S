@@ -348,6 +348,65 @@ gxos_scheduler_capture_worker_sentinels:
     ret
 
 .p2align 4
+.globl gxos_scheduler_worker_yield
+gxos_scheduler_worker_yield:
+    subq    $456, %rsp
+    movq    %rbx, 120(%rsp)
+    movq    %rbp, 128(%rsp)
+    movq    %rsi, 136(%rsp)
+    movq    %rdi, 144(%rsp)
+    movq    %r12, 152(%rsp)
+    movq    %r13, 160(%rsp)
+    movq    %r14, 168(%rsp)
+    movq    %r15, 176(%rsp)
+    pushfq
+    popq    %r10
+    movabsq $0xFFFFFFFFFFFFF9FF, %r11
+    andq    %r11, %r10
+    movq    %r10, 184(%rsp)
+    stmxcsr 192(%rsp)
+    fnstcw  196(%rsp)
+    movdqu  %xmm6, 200(%rsp)
+    movdqu  %xmm7, 216(%rsp)
+    movdqu  %xmm8, 232(%rsp)
+    movdqu  %xmm9, 248(%rsp)
+    movdqu  %xmm10, 264(%rsp)
+    movdqu  %xmm11, 280(%rsp)
+    movdqu  %xmm12, 296(%rsp)
+    movdqu  %xmm13, 312(%rsp)
+    movdqu  %xmm14, 328(%rsp)
+    movdqu  %xmm15, 344(%rsp)
+    leaq    64(%rsp), %rdx
+    call    gxos_scheduler_prepare_yield
+    testl   %eax, %eax
+    jz      gxos_scheduler_worker_yield_failed
+    call    gxos_scheduler_pending_plan
+    movq    (%rax), %rcx
+    movq    8(%rax), %rdx
+    call    gxos_scheduler_context_switch
+    movl    $1, %eax
+    jmp     gxos_scheduler_worker_yield_restore
+gxos_scheduler_worker_yield_failed:
+    xorl    %eax, %eax
+gxos_scheduler_worker_yield_restore:
+    movq    120(%rsp), %rbx
+    movq    128(%rsp), %rbp
+    movq    136(%rsp), %rsi
+    movq    144(%rsp), %rdi
+    movq    152(%rsp), %r12
+    movq    160(%rsp), %r13
+    movq    168(%rsp), %r14
+    movq    176(%rsp), %r15
+    ldmxcsr 192(%rsp)
+    fldcw   196(%rsp)
+    movq    184(%rsp), %r10
+    pushq   %r10
+    popfq
+    cld
+    addq    $456, %rsp
+    ret
+
+.p2align 4
 .globl gxos_scheduler_main_dispatch
 gxos_scheduler_main_dispatch:
     subq    $456, %rsp

@@ -315,6 +315,22 @@ internal unsafe sealed class ManagedSerialDriver
         return true;
     }
 
+    internal bool TryHandleReceive(in GxManagedKernelInterruptEventV1 value)
+    {
+        if (_state != ManagedSerialDriverState.Started ||
+            _receiveState != ManagedSerialReceiveState.Subscribed ||
+            value.DeviceKind != _device.DeviceKind ||
+            value.DeviceId != _device.DeviceId || value.Sequence == 0 ||
+            (_receiveCount != 0 && value.Sequence != _lastReceiveSequence + 1))
+        {
+            return false;
+        }
+        _lastReceiveSequence = value.Sequence;
+        _lastReceiveByte = value.PayloadByte;
+        _receiveCount++;
+        return true;
+    }
+
     internal bool TryRunReceiveRuntimeArenaProof()
     {
         KernelArenaAllocation allocation;
@@ -412,6 +428,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
     private static GxManagedKernelInterruptServicesV1 s_interruptServices;
     private static ManagedInterruptDispatcher? s_interruptDispatcher;
     private static ManagedSerialDriver? s_operationalDriver;
+    private static ManagedDriverWorker? s_driverWorker;
 
     internal static bool Installed => s_installed != 0;
 
@@ -729,6 +746,173 @@ internal static unsafe class ManagedSerialDriverSubsystem
             s_phase9State = 5;
             if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_NEGATIVE_TESTS_OK\r\n"u8) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ACCOUNTING_RESTORED\r\n"u8))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            return ManagedKernelContract.ManagedOk;
+        }
+        return ManagedKernelContract.InvalidArgument;
+    }
+
+    internal static uint RunDriverWorker(uint stage)
+    {
+        ManagedSerialDriver? driver = s_operationalDriver;
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        if (!ManagedKernelContract.IsStarted || s_interruptInstalled == 0 ||
+            s_run == 0 || driver == null || dispatcher == null)
+        {
+            return ManagedKernelContract.InvalidState;
+        }
+        if (stage == 1)
+        {
+            if (s_driverWorker != null || (s_phase9State != 0 && s_phase9State != 1))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            s_driverWorker = new ManagedDriverWorker(dispatcher, driver);
+            if (!s_driverWorker.Start() ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_CREATED\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_STARTED\r\n"u8))
+            {
+                s_driverWorker = null;
+                return ManagedKernelContract.InvalidState;
+            }
+            return ManagedKernelContract.ManagedOk;
+        }
+        if (stage == 2)
+        {
+            uint delivered;
+            uint rejected;
+            if (s_driverWorker == null ||
+                (s_phase9State != 1 && s_phase9State != 2 &&
+                 s_phase9State != 3 && s_phase9State != 4) ||
+                !s_driverWorker.Dispatch(out delivered, out rejected))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            if (rejected != 0 &&
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_REJECTED_EVENT\r\n"u8))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            if (delivered != 0 &&
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORK_DISPATCH_OK\r\n"u8))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            if (driver.ReceiveCount == 1 && s_phase9State == 1)
+            {
+                s_phase9State = 2;
+                if (!KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_FROM_HARDWARE_OK\r\n"u8))
+                {
+                    return ManagedKernelContract.InvalidState;
+                }
+                /* Runtime survival is deliberately executed by the same
+                   scheduler-runnable managed worker activation, between the
+                   first and second hardware deliveries. */
+                return RunPhase10(3);
+            }
+            if (driver.ReceiveCount >= 2 && s_phase9State == 3)
+            {
+                s_phase9State = 4;
+                return KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK\r\n"u8)
+                    ? ManagedKernelContract.ManagedOk
+                    : ManagedKernelContract.InvalidState;
+            }
+            return ManagedKernelContract.ManagedOk;
+        }
+        return ManagedKernelContract.InvalidArgument;
+    }
+
+    internal static uint RunPhase10(uint stage)
+    {
+        ManagedSerialDriver? driver = s_operationalDriver;
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        ManagedDriverWorker? worker = s_driverWorker;
+        if (!ManagedKernelContract.IsStarted || s_interruptInstalled == 0 ||
+            s_run == 0 || driver == null || dispatcher == null || worker == null)
+        {
+            return ManagedKernelContract.InvalidState;
+        }
+        if (stage == 3)
+        {
+            KernelMemoryRegion region = default;
+            bool live = false;
+            bool valid = s_phase9State == 2 && driver.ReceiveCount == 1 &&
+                         worker.State == ManagedDriverWorkerState.Running &&
+                         ManagedKernelContract.TryInvokeHostLog(
+                             "GXOS_NET10:MANAGED_KERNEL_PHASE10_RUNTIME_ACTIVITY\r\n"u8) &&
+                         ManagedKernelContract.TryQueryMonotonicTime(out _) &&
+                         driver.TryRunReceiveRuntimeArenaProof() &&
+                         KernelMemory.TryAllocate(1, 0, out region);
+            if (!valid) return ManagedKernelContract.InvalidState;
+            live = true;
+            byte* address = (byte*)(nuint)region.VirtualAddress;
+            address[0] = 0xC6;
+            byte[] gcActivity = new byte[2048];
+            gcActivity[0] = 0x7E;
+            GC.Collect();
+            GC.KeepAlive(gcActivity);
+            valid = address[0] == 0xC6 &&
+                    ManagedKernelContract.OperationalDeviceInventory != null &&
+                    ManagedKernelContract.OperationalDeviceInventory.ValidateInvariants() &&
+                    ManagedKernelContract.OperationalDriverRegistry != null &&
+                    ManagedKernelContract.OperationalDriverRegistry.ValidateInvariants();
+            if (ManagedKernelContract.OperationalDeviceInventory != null &&
+                ManagedKernelContract.OperationalDeviceInventory.DeviceCount != 0 &&
+                ManagedKernelContract.OperationalDeviceInventory.TryGetDevice(0,
+                    out ManagedDevice device))
+            {
+                valid = valid && PciConfiguration.TryRead16(in device, 0, out _);
+            }
+            if (!KernelMemory.TryRelease(in region)) valid = false;
+            live = false;
+            if (!valid || !driver.TryWrite(
+                    "MANAGED_SERIAL_DRIVER_TX_PHASE10_RUNTIME\r\n"u8) ||
+                !KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_RUNTIME_SURVIVAL_OK\r\n"u8) ||
+                !KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_OK\r\n"u8))
+            {
+                if (live) KernelMemory.TryRelease(in region);
+                return ManagedKernelContract.InvalidState;
+            }
+            s_phase9State = 3;
+            return ManagedKernelContract.ManagedOk;
+        }
+        if (stage == 4)
+        {
+            if (s_phase9State != 4 ||
+                worker.State != ManagedDriverWorkerState.Running ||
+                !driver.TryUnsubscribeReceive(dispatcher) ||
+                !worker.BeginStop() ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBE_OK\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_STOPPING\r\n"u8))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            return ManagedKernelContract.ManagedOk;
+        }
+        if (stage == 5)
+        {
+            if (worker.State != ManagedDriverWorkerState.Stopping ||
+                !worker.CompleteStop() || !driver.TryStop() ||
+                !driver.Destroy() || !worker.Destroy())
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            s_driverWorker = null;
+            s_operationalDriver = null;
+            s_run = 0;
+            s_phase9State = 5;
+            if (!KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_ACCOUNTING_RESTORED\r\n"u8) ||
+                !KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_INTERRUPT_NEGATIVE_TESTS_OK\r\n"u8) ||
+                !KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ACCOUNTING_RESTORED\r\n"u8))
             {
                 return ManagedKernelContract.InvalidState;
             }

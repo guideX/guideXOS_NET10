@@ -76,6 +76,9 @@ void gxos_managed_kernel_interrupt_initialize(
     store_u64(&context->enqueued_count, 0);
     store_u64(&context->drained_count, 0);
     store_u64(&context->dropped_count, 0);
+    store_u32(&context->work_pending, 0);
+    store_u64(&context->wake_request_count, 0);
+    store_u32(&context->queue_high_water, 0);
     context->range_is_known = range_is_known;
     context->critical_enter = critical_enter;
     context->critical_leave = critical_leave;
@@ -83,7 +86,9 @@ void gxos_managed_kernel_interrupt_initialize(
     context->disable_hardware = disable_hardware;
     context->capture_source = capture_source;
     context->send_eoi = send_eoi;
+    context->work_notify = 0;
     context->hardware_context = hardware_context;
+    context->work_context = 0;
     for (index = 0; index != GX_MANAGED_KERNEL_INTERRUPT_QUEUE_CAPACITY;
          ++index) {
         context->events[index].Size = 0;
@@ -99,6 +104,37 @@ void gxos_managed_kernel_interrupt_initialize(
         context->events[index].Status = 0;
         context->events[index].Timestamp = 0;
     }
+}
+
+void gxos_managed_kernel_interrupt_set_work_notification(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_INTERRUPT_WORK_NOTIFY notify,
+    void *work_context)
+{
+    if (context == 0) return;
+    context->work_context = work_context;
+    context->work_notify = notify;
+    store_u32(&context->work_pending, 0);
+}
+
+int gxos_managed_kernel_interrupt_rearm_work(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context)
+{
+    uint64_t flags;
+    uint32_t read_index;
+    uint32_t write_index;
+    int pending;
+    if (!gxos_managed_kernel_interrupt_validate(context) ||
+        context->critical_enter == 0 || context->critical_leave == 0) {
+        return 0;
+    }
+    flags = context->critical_enter(context->hardware_context);
+    read_index = load_u32(&context->read_index);
+    write_index = load_u32(&context->write_index);
+    pending = read_index != write_index;
+    if (!pending) store_u32(&context->work_pending, 0);
+    context->critical_leave(context->hardware_context, flags);
+    return pending;
 }
 
 void gxos_managed_kernel_interrupt_capture(
@@ -150,6 +186,30 @@ void gxos_managed_kernel_interrupt_capture(
         next_index = write_index + 1U;
         store_u32(&context->write_index, next_index);
         __atomic_add_fetch(&context->enqueued_count, 1, __ATOMIC_RELAXED);
+        {
+            uint32_t depth = next_index - read_index;
+            uint32_t high_water = load_u32(&context->queue_high_water);
+            while (depth > high_water &&
+                   !__atomic_compare_exchange_n(&context->queue_high_water,
+                       &high_water, depth, 0, __ATOMIC_RELAXED,
+                       __ATOMIC_RELAXED)) {
+                /* The queue is single-producer in the ISR path; this loop is
+                   only a bounded diagnostic update. */
+            }
+        }
+        if (context->work_notify != 0 &&
+            __atomic_exchange_n(&context->work_pending, 1,
+                                __ATOMIC_ACQ_REL) == 0U) {
+            if (context->work_notify(context->work_context)) {
+                __atomic_add_fetch(&context->wake_request_count, 1,
+                                   __ATOMIC_RELAXED);
+            } else {
+                /* A failed notification must not strand the coalescing bit;
+                   the next captured event may retry the wake request. */
+                __atomic_store_n(&context->work_pending, 0,
+                                 __ATOMIC_RELEASE);
+            }
+        }
     }
     context->send_eoi(context->hardware_context);
 }

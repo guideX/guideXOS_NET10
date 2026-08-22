@@ -196,6 +196,49 @@ internal unsafe sealed class ManagedInterruptDispatcher
         return true;
     }
 
+    /* Worker path: drain one bounded ABI batch and contain malformed or stale
+       records individually.  The legacy TryDispatch method remains strict
+       for the Phase 9 diagnostic control. */
+    internal bool TryDispatchBatch(ManagedSerialDriver driver,
+                                   out uint delivered, out uint rejected)
+    {
+        Span<GxManagedKernelInterruptEventV1> events =
+            stackalloc GxManagedKernelInterruptEventV1[(int)_services.MaxDrainValue];
+        uint drained = 0;
+        delivered = 0;
+        rejected = 0;
+        delegate* unmanaged<uint, nuint, uint, nuint, nuint, uint> drain =
+            (delegate* unmanaged<uint, nuint, uint, nuint, nuint, uint>)
+                (nuint)_services.DrainAddress;
+        fixed (GxManagedKernelInterruptEventV1* eventAddress = events)
+        {
+            uint result = drain(_services.AbiVersion, (nuint)eventAddress,
+                                (uint)(sizeof(GxManagedKernelInterruptEventV1) * events.Length),
+                                (nuint)(&drained), sizeof(uint));
+            if (result != ManagedKernelContract.ManagedOk ||
+                drained > (uint)events.Length) return false;
+        }
+        for (uint index = 0; index != drained; ++index)
+        {
+            ref GxManagedKernelInterruptEventV1 value = ref events[(int)index];
+            if (value.Size != GxManagedKernelInterruptEventV1.ExpectedSize ||
+                value.AbiVersion != GxManagedKernelInterruptEventV1.AbiVersionCurrent ||
+                value.EventType != GxManagedKernelInterruptEventV1.EventTypeSerialReceive ||
+                value.DeviceKind != GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial ||
+                value.DeviceId != GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1 ||
+                value.Flags != GxManagedKernelInterruptEventV1.EventFlagHardwareCapture ||
+                value.PayloadLength != 1 || value.Reserved0 != 0 ||
+                value.Timestamp != 0 || value.Sequence == 0 ||
+                !driver.TryHandleReceive(in value))
+            {
+                rejected++;
+                continue;
+            }
+            delivered++;
+        }
+        return true;
+    }
+
     internal bool TryQueryStats(out GxManagedKernelInterruptStatsV1 stats)
     {
         stats = default;
