@@ -20,7 +20,10 @@ $gcc = Get-Command gcc -ErrorAction SilentlyContinue
 if (-not $gcc) { throw 'gcc is required for platform time tests.' }
 $defines = @()
 if ($WrongEpoch) { $defines += '-DGXOS_TEST_WRONG_EPOCH' }
-& $gcc.Source '-std=c11','-Wall','-Wextra','-Werror','-O2','-I', (Join-Path $root 'src\Gate4Harness'), $defines, '-o', $exe, $source, $test
+$gccArguments = @(
+    '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2',
+    '-I', (Join-Path $root 'src\Gate4Harness')) + $defines + @('-o', $exe, $source, $test)
+& $gcc.Source @gccArguments
 if ($LASTEXITCODE -ne 0) { throw "Platform time test compile failed: $LASTEXITCODE" }
 & $exe
 if ($ExpectFailure) {

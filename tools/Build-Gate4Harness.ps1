@@ -69,6 +69,7 @@ $managedKernelHostServicesSource = Join-Path $root 'src\Gate4Harness\managed_ker
 $managedKernelMemorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_memory.c'
 $managedKernelDeviceInventorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_device_inventory.c'
 $managedKernelSerialSource = Join-Path $root 'src\Gate4Harness\managed_kernel_serial.c'
+$managedKernelInterruptSource = Join-Path $root 'src\Gate4Harness\managed_kernel_interrupt.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
 $virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
@@ -77,6 +78,7 @@ $timeSource = Join-Path $root 'src\Gate4Harness\platform_time.c'
 $performanceSource = Join-Path $root 'src\Gate4Harness\platform_performance.c'
 $exceptionSource = Join-Path $root 'src\Gate4Harness\exception_context.c'
 $exceptionAssembly = Join-Path $root 'src\Gate4Harness\exception_entry.S'
+$serialInterruptAssembly = Join-Path $root 'src\Gate4Harness\serial_irq_entry.S'
 $vectoredHandlerSource = Join-Path $root 'src\Gate4Harness\vectored_handler.c'
 $schedulerSource = Join-Path $root 'src\Gate4Harness\scheduler_foundation.c'
 $schedulerAssembly = Join-Path $root 'src\Gate4Harness\scheduler_context.S'
@@ -145,6 +147,10 @@ if (-not (Test-Path -LiteralPath $managedKernelHostServicesSource)) { throw "Man
 if (-not (Test-Path -LiteralPath $managedKernelMemorySource)) { throw "ManagedKernel memory-service source not found: $managedKernelMemorySource" }
 if (-not (Test-Path -LiteralPath $managedKernelDeviceInventorySource)) { throw "ManagedKernel device-inventory source not found: $managedKernelDeviceInventorySource" }
 if (-not (Test-Path -LiteralPath $managedKernelSerialSource)) { throw "ManagedKernel serial-service source not found: $managedKernelSerialSource" }
+if (-not (Test-Path -LiteralPath $managedKernelInterruptSource) -or
+    -not (Test-Path -LiteralPath $serialInterruptAssembly)) {
+    throw "ManagedKernel interrupt sources not found: $managedKernelInterruptSource / $serialInterruptAssembly"
+}
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
 if (-not (Test-Path -LiteralPath $virtualQueryCaptureAssembly)) { throw "VirtualQuery capture assembly not found: $virtualQueryCaptureAssembly" }
@@ -259,7 +265,7 @@ $gccArguments = @(
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
     '-Wl,--no-insert-timestamp',
     '-o', $efi, $source, $memoryAccountingSource, $vmSubstrateSource, $managedKernelMemorySource, $timeSource, $performanceSource,
-    $exceptionSource, $exceptionAssembly, $vectoredHandlerSource,
+    $exceptionSource, $exceptionAssembly, $serialInterruptAssembly, $vectoredHandlerSource,
     $virtualMemorySource,
     $virtualQueryCaptureAssembly,
     (Join-Path $root 'src\Gate4Harness\crt_onexit.c'),
@@ -1130,6 +1136,7 @@ if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelHostServicesSource
     $gccArguments += $managedKernelDeviceInventorySource
     $gccArguments += $managedKernelSerialSource
+    $gccArguments += $managedKernelInterruptSource
     if ($Scenario -ne 'NativeAotEventWait') {
         # ManagedKernel is an allocation-enabled NativeAOT payload.  Keep its
         # startup/runtime import surface on the already-proven bounded harness

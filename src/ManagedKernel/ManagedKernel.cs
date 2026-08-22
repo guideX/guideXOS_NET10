@@ -400,7 +400,8 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Width)).ToInt32() == 8 &&
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Value)).ToInt32() == 16 &&
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Reserved1)).ToInt32() == 24 &&
-               ManagedKernelSerialLayout.IsValid();
+                ManagedKernelSerialLayout.IsValid() &&
+                ManagedInterruptLayout.IsValid();
     }
 }
 
@@ -1053,6 +1054,20 @@ internal static unsafe class ManagedKernelContract
     internal static uint RunPhase8()
     {
         return ManagedSerialDriverSubsystem.Run();
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallInterruptServices")]
+    internal static uint InstallInterruptServices(uint requestedAbiVersion,
+                                                   nuint servicesAddress)
+    {
+        return ManagedSerialDriverSubsystem.InstallInterruptServices(
+            requestedAbiVersion, servicesAddress);
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase9")]
+    internal static uint RunPhase9(uint stage)
+    {
+        return ManagedSerialDriverSubsystem.RunPhase9(stage);
     }
 
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallDeviceInventory")]

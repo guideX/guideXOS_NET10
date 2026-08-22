@@ -107,6 +107,31 @@ one operational instance. Three fresh ManagedKernel QEMU boots and the
 ManagedEntryProbe durability control are covered by the Phase 8 acceptance
 scripts. See [the first managed hardware driver contract](docs/MANAGED_KERNEL_SERIAL_DRIVER.md).
 
+ManagedKernel Phase 9 adds the first native interrupt-capture implementation,
+still using COM1 as the narrowly scoped platform device. The native substrate
+audit found no guideXOS-owned generic IRQ/APIC layer, so the implementation
+uses the existing firmware/legacy PIC layout: COM1 IRQ4 is temporarily gated
+at vector `0x24`, the native ISR captures into a static eight-record queue, and
+managed code drains only at explicit safe points. The 88-byte Interrupt
+Services v1 ABI exposes subscribe, unsubscribe, bounded drain, and stats; it
+does not expose raw IRQ, PIC, IDT, or port-I/O authority. The raw gate performs
+no managed call, allocation, or logging. The original Phase 8 `-serial file:`
+backend remains the output-only control path; the Phase 9 acceptance runner
+uses a bidirectional TCP chardev socket and writes raw `R`, then `S`, and `Z`
+after unsubscribe. The transport proof observed UART `LSR.DATA_READY` for
+`0x52`, and the hardware proof reached `PHASE9_PASS` on three fresh QEMU
+boots. During acceptance, legacy PIC IRQ4 is masked so the existing IOAPIC
+route owns vector `0x24`; the saved PIC/IOAPIC/IDT state is restored on
+unsubscribe. See [the Phase 9 interrupt and deferred-delivery contract](docs/MANAGED_KERNEL_INTERRUPT_DRIVER.md).
+
+The Phase 9 host vectors are `Run-ManagedKernelInterruptNativeHostTests.ps1`
+and `Run-ManagedKernelInterruptHostTests.ps1`. The real-hardware acceptance
+runner is `Run-ManagedKernelPhase9FreshBoots.ps1`; it requires three fresh
+QEMU boots, records serial, injection, timeline, and command-line hashes, and
+requires exact native IRQ/queue/accounting counters on every boot. The final
+acceptance evidence is under
+`artifacts/phase9-final-acceptance-evidence-20260822-final4`.
+
 Native guideXOS owns physical-memory truth. ManagedKernel receives a bounded,
 versioned view of that truth through the managed-kernel ABI.
 
@@ -133,6 +158,9 @@ UEFI firmware
   -> managed driver registry freeze, deterministic binding, and read-only
      config truth comparison
   -> managed COM1 serial driver through Serial Services v1
+  -> native COM1 IRQ4 capture at vector 0x24
+  -> fixed native receive queue and managed safe-point drain
+  -> managed serial receive validation, runtime proof, and unsubscribe
   -> post-initialization ManagedCallback export with existing runtime state
   -> scheduler-thread reverse-P/Invoke attach
   -> managed allocation and real GC probe

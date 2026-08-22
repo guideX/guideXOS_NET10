@@ -9,7 +9,7 @@
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
     <StartupObject>Program</StartupObject>
-    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelDeviceInventoryHostTests</PathMap>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelInterruptHostTests</PathMap>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\ManagedKernel\ManagedKernel.cs" Link="ManagedKernel.cs" />
@@ -18,7 +18,7 @@
     <Compile Include="..\ManagedKernel\ManagedDeviceInventory.cs" Link="ManagedDeviceInventory.cs" />
     <Compile Include="..\ManagedKernel\ManagedDriverBinding.cs" Link="ManagedDriverBinding.cs" />
     <Compile Include="..\ManagedKernel\ManagedPciConfiguration.cs" Link="ManagedPciConfiguration.cs" />
-    <Compile Include="..\ManagedKernel\ManagedSerialDriver.cs" Link="ManagedSerialDriver.cs" />
     <Compile Include="..\ManagedKernel\ManagedInterruptDispatcher.cs" Link="ManagedInterruptDispatcher.cs" />
+    <Compile Include="..\ManagedKernel\ManagedSerialDriver.cs" Link="ManagedSerialDriver.cs" />
   </ItemGroup>
 </Project>

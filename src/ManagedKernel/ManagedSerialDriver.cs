@@ -98,6 +98,13 @@ internal enum ManagedSerialDriverState : uint
     Disposed = 4
 }
 
+internal enum ManagedSerialReceiveState : uint
+{
+    NotSubscribed = 0,
+    Subscribed = 1,
+    Stopped = 2
+}
+
 internal unsafe sealed class ManagedSerialDriver
 {
     internal const uint DriverId = 0x8201;
@@ -109,6 +116,11 @@ internal unsafe sealed class ManagedSerialDriver
     private readonly GxManagedKernelSerialPlatformDeviceV1 _device;
     private readonly GxManagedKernelSerialServicesV1 _services;
     private ManagedSerialDriverState _state;
+    private ManagedSerialReceiveState _receiveState;
+    private ulong _receiveSubscriptionId;
+    private ulong _lastReceiveSequence;
+    private uint _receiveCount;
+    private byte _lastReceiveByte;
 
     private ManagedSerialDriver(
         KernelArena arena,
@@ -123,12 +135,18 @@ internal unsafe sealed class ManagedSerialDriver
         _device = device;
         _services = services;
         _state = ManagedSerialDriverState.Uninitialized;
+        _receiveState = ManagedSerialReceiveState.NotSubscribed;
     }
 
     internal ManagedSerialDriverState State => _state;
     internal uint DeviceId => _device.DeviceId;
     internal uint ComIndex => _device.ComIndex;
     internal uint MaxTransmitBytes => _services.MaxTransmitBytesValue;
+    internal ManagedSerialReceiveState ReceiveState => _receiveState;
+    internal ulong ReceiveSubscriptionId => _receiveSubscriptionId;
+    internal uint ReceiveCount => _receiveCount;
+    internal ulong LastReceiveSequence => _lastReceiveSequence;
+    internal byte LastReceiveByte => _lastReceiveByte;
     internal KernelArenaMetrics Metrics => _arena.IsDestroyed
         ? default : _arena.GetMetrics();
     internal bool IsDestroyed => _state == ManagedSerialDriverState.Disposed;
@@ -196,6 +214,7 @@ internal unsafe sealed class ManagedSerialDriver
             return false;
         }
         _state = ManagedSerialDriverState.Initialized;
+        _receiveState = ManagedSerialReceiveState.NotSubscribed;
         return true;
     }
 
@@ -203,6 +222,7 @@ internal unsafe sealed class ManagedSerialDriver
     {
         if (_state != ManagedSerialDriverState.Initialized) return false;
         _state = ManagedSerialDriverState.Started;
+        _receiveState = ManagedSerialReceiveState.NotSubscribed;
         return true;
     }
 
@@ -227,8 +247,10 @@ internal unsafe sealed class ManagedSerialDriver
 
     internal bool TryStop()
     {
-        if (_state != ManagedSerialDriverState.Started) return false;
+        if (_state != ManagedSerialDriverState.Started ||
+            _receiveState == ManagedSerialReceiveState.Subscribed) return false;
         _state = ManagedSerialDriverState.Stopped;
+        _receiveState = ManagedSerialReceiveState.Stopped;
         return true;
     }
 
@@ -246,7 +268,68 @@ internal unsafe sealed class ManagedSerialDriver
             return false;
         }
         _state = ManagedSerialDriverState.Disposed;
+        _receiveState = ManagedSerialReceiveState.Stopped;
         return true;
+    }
+
+    internal bool TrySubscribeReceive(ManagedInterruptDispatcher dispatcher)
+    {
+        ulong subscriptionId;
+        if (_state != ManagedSerialDriverState.Started ||
+            _receiveState != ManagedSerialReceiveState.NotSubscribed ||
+            dispatcher == null ||
+            !dispatcher.TrySubscribe(GxManagedKernelInterruptEventV1.EventTypeSerialReceive,
+                _device.DeviceKind, _device.DeviceId, out subscriptionId))
+        {
+            return false;
+        }
+        _receiveSubscriptionId = subscriptionId;
+        _receiveState = ManagedSerialReceiveState.Subscribed;
+        return true;
+    }
+
+    internal bool TryUnsubscribeReceive(ManagedInterruptDispatcher dispatcher)
+    {
+        if (_receiveState != ManagedSerialReceiveState.Subscribed ||
+            dispatcher == null || !dispatcher.TryUnsubscribe()) return false;
+        _receiveSubscriptionId = 0;
+        _receiveState = ManagedSerialReceiveState.NotSubscribed;
+        return true;
+    }
+
+    internal bool TryHandleReceive(
+        in GxManagedKernelInterruptEventV1 value, byte expectedPayload)
+    {
+        if (_state != ManagedSerialDriverState.Started ||
+            _receiveState != ManagedSerialReceiveState.Subscribed ||
+            value.DeviceKind != _device.DeviceKind ||
+            value.DeviceId != _device.DeviceId ||
+            value.PayloadByte != expectedPayload || value.Sequence == 0 ||
+            (_receiveCount != 0 && value.Sequence != _lastReceiveSequence + 1))
+        {
+            return false;
+        }
+        _lastReceiveSequence = value.Sequence;
+        _lastReceiveByte = value.PayloadByte;
+        _receiveCount++;
+        return true;
+    }
+
+    internal bool TryRunReceiveRuntimeArenaProof()
+    {
+        KernelArenaAllocation allocation;
+        if (_state != ManagedSerialDriverState.Started ||
+            _receiveState != ManagedSerialReceiveState.Subscribed ||
+            _arena.TryAllocate(32, 8, out allocation) != KernelArenaStatus.Ok)
+        {
+            return false;
+        }
+        Span<byte> bytes = new Span<byte>(
+            (void*)(nuint)allocation.VirtualAddress, 32);
+        bytes.Fill(0xD9);
+        bool valid = bytes[0] == 0xD9 && bytes[31] == 0xD9;
+        valid = _arena.Free(in allocation) == KernelArenaStatus.Ok && valid;
+        return valid;
     }
 
     internal static bool TryRunNegativeTests(
@@ -322,8 +405,12 @@ internal static unsafe class ManagedSerialDriverSubsystem
 
     private static int s_installed;
     private static int s_run;
+    private static int s_interruptInstalled;
+    private static int s_phase9State;
     private static GxManagedKernelSerialPlatformDeviceV1 s_device;
     private static GxManagedKernelSerialServicesV1 s_services;
+    private static GxManagedKernelInterruptServicesV1 s_interruptServices;
+    private static ManagedInterruptDispatcher? s_interruptDispatcher;
     private static ManagedSerialDriver? s_operationalDriver;
 
     internal static bool Installed => s_installed != 0;
@@ -496,6 +583,158 @@ internal static unsafe class ManagedSerialDriverSubsystem
             if (value.State == ManagedSerialDriverState.Started) value.TryStop();
             if (value.State == ManagedSerialDriverState.Stopped) value.Destroy();
         }
+    }
+
+    internal static uint InstallInterruptServices(uint requestedAbiVersion,
+                                                   nuint servicesAddress)
+    {
+        GxManagedKernelInterruptServicesV1 services;
+        ManagedInterruptDispatcher? dispatcher;
+        if (requestedAbiVersion != GxManagedKernelInterruptServicesV1.AbiVersionCurrent)
+        {
+            return ManagedKernelContract.UnsupportedAbi;
+        }
+        if (!ManagedKernelContract.IsStarted || s_installed == 0 || s_run == 0)
+        {
+            return ManagedKernelContract.InvalidState;
+        }
+        if (s_interruptInstalled != 0 || servicesAddress == 0 ||
+            !ManagedKernelContract.IsRangeValid(servicesAddress,
+                GxManagedKernelInterruptServicesV1.ExpectedSize))
+        {
+            return s_interruptInstalled != 0 ? ManagedKernelContract.AlreadyInitialized :
+                ManagedKernelContract.InvalidArgument;
+        }
+        services = *(GxManagedKernelInterruptServicesV1*)servicesAddress;
+        dispatcher = ManagedInterruptDispatcher.TryCreate(in services);
+        if (dispatcher == null) return ManagedKernelContract.InvalidArgument;
+        s_interruptServices = services;
+        s_interruptDispatcher = dispatcher;
+        s_interruptInstalled = 1;
+        s_phase9State = 0;
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_SERVICES_INSTALLED\r\n"u8))
+        {
+            s_interruptDispatcher = null;
+            s_interruptServices = default;
+            s_interruptInstalled = 0;
+            return ManagedKernelContract.InvalidState;
+        }
+        return ManagedKernelContract.ManagedOk;
+    }
+
+    internal static uint RunPhase9(uint stage)
+    {
+        ManagedSerialDriver? driver = s_operationalDriver;
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        if (!ManagedKernelContract.IsStarted || s_interruptInstalled == 0 ||
+            s_run == 0 || driver == null || dispatcher == null)
+        {
+            return ManagedKernelContract.InvalidState;
+        }
+        if (stage == 1)
+        {
+            ulong ignored;
+            if (s_phase9State != 0 ||
+                dispatcher.TrySubscribe(GxManagedKernelInterruptEventV1.EventTypeSerialReceive + 1,
+                    driver.DeviceId == GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1
+                        ? GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial : 0,
+                    driver.DeviceId, out ignored) ||
+                !driver.TrySubscribeReceive(dispatcher) ||
+                dispatcher.TrySubscribe(GxManagedKernelInterruptEventV1.EventTypeSerialReceive,
+                    GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial,
+                    driver.DeviceId, out ignored))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            s_phase9State = 1;
+            return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SUBSCRIBED\r\n"u8) &&
+                   KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_READY\r\n"u8)
+                ? ManagedKernelContract.ManagedOk : ManagedKernelContract.InvalidState;
+        }
+        if (stage == 2)
+        {
+            uint delivered;
+            byte expected = driver.ReceiveCount == 0 ? (byte)'R' : (byte)'S';
+            if ((s_phase9State != 1 && s_phase9State != 3) ||
+                !dispatcher.TryDispatch(driver, expected, out delivered) ||
+                delivered != 1) return ManagedKernelContract.InvalidState;
+            if (driver.ReceiveCount == 1)
+            {
+                s_phase9State = 2;
+                return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_DISPATCHED\r\n"u8) &&
+                       KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_FROM_HARDWARE_OK\r\n"u8)
+                    ? ManagedKernelContract.ManagedOk : ManagedKernelContract.InvalidState;
+            }
+            if (driver.ReceiveCount == 2)
+            {
+                s_phase9State = 4;
+                return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_DISPATCHED\r\n"u8) &&
+                       KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK\r\n"u8)
+                    ? ManagedKernelContract.ManagedOk : ManagedKernelContract.InvalidState;
+            }
+            return ManagedKernelContract.InvalidState;
+        }
+        if (stage == 3)
+        {
+            KernelMemoryRegion region = default;
+            bool live = false;
+            byte* address;
+            bool valid = s_phase9State == 2 && driver.ReceiveCount == 1 &&
+                         ManagedKernelContract.TryInvokeHostLog(
+                             "GXOS_NET10:MANAGED_KERNEL_PHASE9_RUNTIME_ACTIVITY\r\n"u8) &&
+                         ManagedKernelContract.TryQueryMonotonicTime(out _) &&
+                         driver.TryRunReceiveRuntimeArenaProof() &&
+                         KernelMemory.TryAllocate(1, 0, out region);
+            if (!valid) return ManagedKernelContract.InvalidState;
+            live = true;
+            address = (byte*)(nuint)region.VirtualAddress;
+            address[0] = 0xC6;
+            byte[] gcActivity = new byte[2048];
+            gcActivity[0] = 0x7E;
+            GC.Collect();
+            GC.KeepAlive(gcActivity);
+            valid = address[0] == 0xC6 &&
+                    ManagedKernelContract.OperationalDeviceInventory != null &&
+                    ManagedKernelContract.OperationalDeviceInventory.ValidateInvariants() &&
+                    ManagedKernelContract.OperationalDriverRegistry != null &&
+                    ManagedKernelContract.OperationalDriverRegistry.ValidateInvariants();
+            if (ManagedKernelContract.OperationalDeviceInventory != null &&
+                ManagedKernelContract.OperationalDeviceInventory.DeviceCount != 0 &&
+                ManagedKernelContract.OperationalDeviceInventory.TryGetDevice(0,
+                    out ManagedDevice device))
+            {
+                valid = valid && PciConfiguration.TryRead16(in device, 0, out _);
+            }
+            if (!KernelMemory.TryRelease(in region)) valid = false;
+            live = false;
+            if (!valid || !driver.TryWrite("MANAGED_SERIAL_DRIVER_TX_PHASE9_RUNTIME\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_OK\r\n"u8))
+            {
+                if (live) KernelMemory.TryRelease(in region);
+                return ManagedKernelContract.InvalidState;
+            }
+            s_phase9State = 3;
+            return ManagedKernelContract.ManagedOk;
+        }
+        if (stage == 4)
+        {
+            if (s_phase9State != 4 || !driver.TryUnsubscribeReceive(dispatcher) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBE_OK\r\n"u8) ||
+                !driver.TryStop() || !driver.Destroy())
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            s_operationalDriver = null;
+            s_run = 0;
+            s_phase9State = 5;
+            if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_NEGATIVE_TESTS_OK\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ACCOUNTING_RESTORED\r\n"u8))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            return ManagedKernelContract.ManagedOk;
+        }
+        return ManagedKernelContract.InvalidArgument;
     }
 
     private static bool ValidateService(in GxManagedKernelSerialServicesV1 services)

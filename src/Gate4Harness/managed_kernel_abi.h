@@ -60,6 +60,13 @@
 #define GX_MANAGED_KERNEL_SERIAL_STATUS_V1_SIZE 32U
 #define GX_MANAGED_KERNEL_SERIAL_MAX_TRANSMIT_BYTES 1024U
 #define GX_MANAGED_KERNEL_SERIAL_TX_POLL_LIMIT 4096U
+#define GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_INTERRUPT_SERVICES_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1_SIZE 88U
+#define GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1_SIZE 48U
+#define GX_MANAGED_KERNEL_INTERRUPT_STATS_V1_SIZE 80U
+#define GX_MANAGED_KERNEL_INTERRUPT_QUEUE_CAPACITY 8U
+#define GX_MANAGED_KERNEL_INTERRUPT_MAX_DRAIN 4U
 
 typedef enum {
     GX_MANAGED_OK = 0U,
@@ -138,6 +145,18 @@ enum {
     GX_MANAGED_SERIAL_FLAG_NONE = 0U,
     GX_MANAGED_SERIAL_DEVICE_ID_COM1 = 1U,
     GX_MANAGED_SERIAL_COM_INDEX_1 = 1U
+};
+
+enum {
+    GX_MANAGED_INTERRUPT_CAPABILITY_SUBSCRIBE = 1ULL << 0,
+    GX_MANAGED_INTERRUPT_CAPABILITY_UNSUBSCRIBE = 1ULL << 1,
+    GX_MANAGED_INTERRUPT_CAPABILITY_DRAIN = 1ULL << 2,
+    GX_MANAGED_INTERRUPT_CAPABILITY_QUERY_STATS = 1ULL << 3
+};
+
+enum {
+    GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX = 1U,
+    GX_MANAGED_INTERRUPT_EVENT_FLAG_HARDWARE_CAPTURE = 1U << 0
 };
 
 /* Stable guideXOS meanings. These are not UEFI EFI_MEMORY_TYPE values. */
@@ -375,6 +394,55 @@ typedef struct {
     uint64_t Capabilities;
     uint64_t Reserved1;
 } GX_MANAGED_KERNEL_SERIAL_STATUS_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t EventType;
+    uint32_t DeviceKind;
+    uint32_t DeviceId;
+    uint64_t Sequence;
+    uint32_t Flags;
+    uint8_t PayloadByte;
+    uint8_t PayloadLength;
+    uint16_t Reserved0;
+    uint32_t Status;
+    uint64_t Timestamp;
+} GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t QueueCapacity;
+    uint32_t MaxDrain;
+    uint64_t IrqEntryCount;
+    uint64_t SerialIsrCount;
+    uint64_t EnqueuedCount;
+    uint64_t DrainedCount;
+    uint64_t DroppedCount;
+    uint64_t NextSequence;
+    uint32_t SubscriptionActive;
+    uint32_t HardwareEnabled;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_INTERRUPT_STATS_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint64_t Capabilities;
+    uint32_t EventRecordSize;
+    uint32_t QueueCapacity;
+    uint32_t MaxDrain;
+    uint32_t Reserved0;
+    uint64_t SubscribeAddress;
+    uint64_t UnsubscribeAddress;
+    uint64_t DrainAddress;
+    uint64_t QueryStatsAddress;
+    uint64_t Reserved1;
+    uint64_t Reserved2;
+} GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1;
 #pragma pack(pop)
 
 _Static_assert(sizeof(GX_MANAGED_KERNEL_INIT_REQUEST_V1) ==
@@ -726,6 +794,31 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_STATUS_V1, Status) == 8,
                "managed serial status Status offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_STATUS_V1, Capabilities) == 16,
                "managed serial status Capabilities offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1) ==
+                   GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1_SIZE,
+               "managed interrupt event size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1, Sequence) == 20,
+               "managed interrupt event Sequence offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1, PayloadByte) == 32,
+               "managed interrupt event PayloadByte offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1, Status) == 36,
+               "managed interrupt event Status offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_INTERRUPT_STATS_V1) ==
+                   GX_MANAGED_KERNEL_INTERRUPT_STATS_V1_SIZE,
+               "managed interrupt stats size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_STATS_V1, IrqEntryCount) == 16,
+               "managed interrupt stats IrqEntryCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_STATS_V1, DroppedCount) == 48,
+               "managed interrupt stats DroppedCount offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1) ==
+                   GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1_SIZE,
+               "managed interrupt services size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1, Capabilities) == 16,
+               "managed interrupt services Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1, SubscribeAddress) == 40,
+               "managed interrupt services SubscribeAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1, QueryStatsAddress) == 64,
+               "managed interrupt services QueryStatsAddress offset");
 
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INITIALIZE_ENTRY)(
     uint32_t requested_abi_version, uintptr_t request_address);
@@ -779,6 +872,20 @@ typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_SERIAL_TRANSMIT_EN
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_SERIAL_QUERY_STATUS_ENTRY)(
     uint32_t requested_abi_version, uint32_t device_id,
     uintptr_t result_address, uintptr_t result_capacity);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INSTALL_INTERRUPT_SERVICES_ENTRY)(
+    uint32_t requested_abi_version, uintptr_t services_address);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INTERRUPT_SUBSCRIBE_ENTRY)(
+    uint32_t event_type, uint32_t device_kind, uint32_t device_id,
+    uintptr_t token_address, uintptr_t token_capacity);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INTERRUPT_UNSUBSCRIBE_ENTRY)(
+    uint64_t subscription_id);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INTERRUPT_DRAIN_ENTRY)(
+    uint32_t requested_abi_version, uintptr_t output_address,
+    uint32_t output_capacity, uintptr_t drained_address,
+    uintptr_t drained_capacity);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INTERRUPT_QUERY_STATS_ENTRY)(
+    uint32_t requested_abi_version, uintptr_t output_address,
+    uintptr_t output_capacity);
 
 /* Native callers use this before crossing into managed code. */
 static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_output_buffer(

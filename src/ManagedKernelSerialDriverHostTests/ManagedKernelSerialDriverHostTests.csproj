@@ -18,6 +18,7 @@
     <Compile Include="..\ManagedKernel\ManagedDeviceInventory.cs" Link="ManagedDeviceInventory.cs" />
     <Compile Include="..\ManagedKernel\ManagedDriverBinding.cs" Link="ManagedDriverBinding.cs" />
     <Compile Include="..\ManagedKernel\ManagedPciConfiguration.cs" Link="ManagedPciConfiguration.cs" />
+    <Compile Include="..\ManagedKernel\ManagedInterruptDispatcher.cs" Link="ManagedInterruptDispatcher.cs" />
     <Compile Include="..\ManagedKernel\ManagedSerialDriver.cs" Link="ManagedSerialDriver.cs" />
   </ItemGroup>
 </Project>

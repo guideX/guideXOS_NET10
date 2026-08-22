@@ -23,9 +23,11 @@ $arguments = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fno-builtin',
 if ($LASTEXITCODE -ne 0) { throw "Memory accounting host test compile failed: $LASTEXITCODE" }
 & $exe
 if ($LASTEXITCODE -ne 0) { throw "Memory accounting host tests failed: $LASTEXITCODE" }
-& $gcc.Source '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fno-builtin',
+$freestandingArguments = @(
+    '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fno-builtin',
     '-ffreestanding', '-I', $include, '-c',
-    (Join-Path $include 'memory_accounting.c'), '-o', $object
+    (Join-Path $include 'memory_accounting.c'), '-o', $object)
+& $gcc.Source @freestandingArguments
 if ($LASTEXITCODE -ne 0) { throw "Memory accounting freestanding compile failed: $LASTEXITCODE" }
 $nm = Get-Command nm -ErrorAction Stop
 $undefined = & $nm.Source '-u' $object
