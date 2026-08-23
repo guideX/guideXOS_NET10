@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)] [string]$PayloadSha256,
     [Parameter(Mandatory = $true)] [long]$PayloadSize,
     [int]$RunCount = 3,
-    [int]$TimeoutSeconds = 180
+    [int]$TimeoutSeconds = 180,
+    [string]$PostPhase11Marker = ''
 )
 
 Set-StrictMode -Version Latest
@@ -290,6 +291,9 @@ try {
             Send-Serial11 $client $stream $process $injectionLog 'KEYBOARD_B_SENT' 0x46
             Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_DRAINED' $deadline $process $stream $logStream $text $buffer
             Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS' $deadline $process $stream $logStream $text $buffer
+            if (-not [string]::IsNullOrEmpty($PostPhase11Marker)) {
+                Wait-Marker11 $PostPhase11Marker $deadline $process $stream $logStream $text $buffer
+            }
             Pump-Serial11 $stream $logStream $text $buffer
             $finalText = $text.ToString()
         } finally {

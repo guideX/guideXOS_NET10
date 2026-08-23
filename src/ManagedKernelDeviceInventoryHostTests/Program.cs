@@ -253,11 +253,116 @@ internal static unsafe class Program
         }
     }
 
+    private static GxManagedKernelDeviceResourceV1 Resource(
+        ulong id, uint kind, uint deviceId, ushort index, ulong baseAddress,
+        ulong length)
+    {
+        return new GxManagedKernelDeviceResourceV1
+        {
+            Size = GxManagedKernelDeviceResourceV1.ExpectedSize,
+            AbiVersion = 1,
+            ResourceId = id,
+            OwnerDeviceKind = kind,
+            OwnerDeviceId = deviceId,
+            ResourceIndex = index,
+            ResourceType = GxManagedKernelDeviceResourceV1.ResourceTypeIoPort,
+            Flags = GxManagedKernelDeviceResourceV1.FlagReadable |
+                    GxManagedKernelDeviceResourceV1.FlagIoPort |
+                    GxManagedKernelDeviceResourceV1.FlagPlatform,
+            PhysicalBase = baseAddress,
+            Length = length,
+            Alignment = 1
+        };
+    }
+
+    private static void TestResourceCatalog()
+    {
+        FakeProvider provider = new FakeProvider();
+        GxManagedKernelDeviceResourceV1[] resources =
+        {
+            Resource(1, GxManagedKernelDeviceResourceV1.DeviceKindPlatformSerial,
+                     1, 0, 0x3F8, 8),
+            Resource(2, GxManagedKernelDeviceResourceV1.DeviceKindPlatformKeyboard,
+                     1, 0, 0x60, 1),
+            Resource(3, GxManagedKernelDeviceResourceV1.DeviceKindPlatformKeyboard,
+                     1, 1, 0x64, 1)
+        };
+        fixed (GxManagedKernelDeviceResourceV1* pointer = resources)
+        {
+            Expect(ManagedDeviceResourceCatalog.TryCreateFromDescriptors(
+                       provider, pointer, 3,
+                       out ManagedDeviceResourceCatalog? catalog) && catalog != null,
+                   "resource catalog copies native descriptors");
+            if (catalog == null) return;
+            Expect(catalog.ResourceCount == 3 && catalog.ActiveClaimCount == 0 &&
+                       catalog.ValidateInvariants(),
+                   "resource catalog is bounded and valid");
+            Expect(catalog.TryFindByOwner(
+                       GxManagedKernelDeviceResourceV1.DeviceKindPlatformSerial, 1, 0,
+                       out ManagedDeviceResource serial) && serial.PhysicalBase == 0x3F8,
+                   "resource owner lookup works");
+            Expect(catalog.TryFindByOwner(
+                       GxManagedKernelDeviceResourceV1.DeviceKindPlatformKeyboard, 1, 0,
+                       out ManagedDeviceResource keyboard),
+                   "keyboard resource owner lookup works");
+            Expect(catalog.TryClaim(in serial, ManagedSerialDriver.DriverId,
+                                    GxManagedKernelDeviceResourceV1.DeviceKindPlatformSerial, 1) &&
+                       catalog.IsClaimedBy(in serial, ManagedSerialDriver.DriverId),
+                   "resource claim records the authorized driver");
+            Expect(!catalog.TryClaim(in serial, ManagedKeyboardDriver.DriverId,
+                                     GxManagedKernelDeviceResourceV1.DeviceKindPlatformSerial, 1) &&
+                       !catalog.TryClaim(in keyboard, ManagedSerialDriver.DriverId,
+                                         GxManagedKernelDeviceResourceV1.DeviceKindPlatformSerial, 1),
+                   "duplicate and wrong-owner claims are rejected");
+            Expect(catalog.TryClaim(in keyboard, ManagedKeyboardDriver.DriverId,
+                                    GxManagedKernelDeviceResourceV1.DeviceKindPlatformKeyboard, 1) &&
+                       catalog.ActiveClaimCount == 2,
+                   "independent driver claim succeeds");
+            Expect(!catalog.Destroy(), "teardown with active claims is rejected");
+            Expect(catalog.TryRelease(in serial, ManagedSerialDriver.DriverId) &&
+                       catalog.TryRelease(in keyboard, ManagedKeyboardDriver.DriverId) &&
+                       catalog.ActiveClaimCount == 0,
+                   "claims release exactly once");
+            Expect(!catalog.TryRelease(in serial, ManagedSerialDriver.DriverId),
+                   "double release is rejected");
+            Expect(catalog.TryRunRuntimeSurvival(),
+                   "resource catalog survives GC/runtime activity");
+            Expect(catalog.Destroy() && catalog.IsDestroyed &&
+                       !catalog.TryGetResource(0, out _),
+                   "resource catalog teardown destroys stale handles");
+        }
+    }
+
+    private static void TestResourceMalformedInput()
+    {
+        FakeProvider provider = new FakeProvider();
+        GxManagedKernelDeviceResourceV1[] resources =
+        {
+            Resource(4, GxManagedKernelDeviceResourceV1.DeviceKindPlatformSerial,
+                     1, 0, 0x3F8, 8),
+            Resource(5, GxManagedKernelDeviceResourceV1.DeviceKindPlatformKeyboard,
+                     1, 0, 0x3F8, 1)
+        };
+        fixed (GxManagedKernelDeviceResourceV1* pointer = resources)
+        {
+            Expect(!ManagedDeviceResourceCatalog.TryCreateFromDescriptors(
+                       provider, pointer, 2, out _),
+                   "overlapping resource ranges are rejected");
+            resources[1].PhysicalBase = 0x60;
+            resources[1].Reserved0 = 1;
+            Expect(!ManagedDeviceResourceCatalog.TryCreateFromDescriptors(
+                       provider, pointer, 2, out _),
+                   "reserved resource fields are rejected");
+        }
+    }
+
     public static int Main()
     {
         TestSuccessfulInventory();
         TestFailureRollback();
         TestCapacityAndMalformed();
+        TestResourceCatalog();
+        TestResourceMalformedInput();
         if (s_failures != 0)
         {
             Console.WriteLine("MANAGED_KERNEL_DEVICE_INVENTORY_HOST_TESTS=FAILED failures=" +

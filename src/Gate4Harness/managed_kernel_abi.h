@@ -45,6 +45,13 @@
 #define GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1_SIZE 48U
 #define GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_DEVICES 256U
 #define GX_MANAGED_KERNEL_DEVICE_INVENTORY_MAX_RESOURCES 1024U
+#define GX_MANAGED_KERNEL_DEVICE_RESOURCES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_DEVICE_RESOURCES_SERVICE_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1_SIZE 40U
+#define GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1_SIZE 80U
+#define GX_MANAGED_KERNEL_DEVICE_RESOURCE_PUBLICATION_V1_SIZE 48U
+#define GX_MANAGED_KERNEL_DEVICE_RESOURCE_MAX_DESCRIPTORS 64U
+#define GX_MANAGED_KERNEL_DEVICE_RESOURCE_MAX_CLAIMS 16U
 #define GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1 1U
 #define GX_MANAGED_KERNEL_PCI_SERVICES_VERSION_V1 1U
 #define GX_MANAGED_KERNEL_PCI_SERVICES_V1_SIZE 48U
@@ -120,6 +127,33 @@ enum {
     GX_MANAGED_DEVICE_INVENTORY_CAPABILITY_SUMMARY = 1ULL << 0,
     GX_MANAGED_DEVICE_INVENTORY_CAPABILITY_DEVICES = 1ULL << 1,
     GX_MANAGED_DEVICE_INVENTORY_CAPABILITY_IMMUTABLE_BOOT_SNAPSHOT = 1ULL << 2
+};
+
+enum {
+    GX_MANAGED_DEVICE_RESOURCE_CAPABILITY_SUMMARY = 1ULL << 0,
+    GX_MANAGED_DEVICE_RESOURCE_CAPABILITY_DESCRIPTORS = 1ULL << 1,
+    GX_MANAGED_DEVICE_RESOURCE_CAPABILITY_IMMUTABLE_PUBLICATION = 1ULL << 2,
+    GX_MANAGED_DEVICE_RESOURCE_CAPABILITY_CLAIM_POLICY = 1ULL << 3
+};
+
+typedef enum {
+    GX_MANAGED_DEVICE_RESOURCE_TYPE_UNKNOWN = 0U,
+    GX_MANAGED_DEVICE_RESOURCE_TYPE_IO_PORT = 1U,
+    GX_MANAGED_DEVICE_RESOURCE_TYPE_MMIO = 2U,
+    GX_MANAGED_DEVICE_RESOURCE_TYPE_PLATFORM_MEMORY = 3U,
+    GX_MANAGED_DEVICE_RESOURCE_TYPE_INTERRUPT = 4U
+} GX_MANAGED_DEVICE_RESOURCE_TYPE;
+
+enum {
+    GX_MANAGED_DEVICE_RESOURCE_FLAG_READABLE = 1U << 0,
+    GX_MANAGED_DEVICE_RESOURCE_FLAG_WRITABLE = 1U << 1,
+    GX_MANAGED_DEVICE_RESOURCE_FLAG_IO_PORT = 1U << 2,
+    GX_MANAGED_DEVICE_RESOURCE_FLAG_MEMORY = 1U << 3,
+    GX_MANAGED_DEVICE_RESOURCE_FLAG_PREFETCHABLE = 1U << 4,
+    GX_MANAGED_DEVICE_RESOURCE_FLAG_ADDRESS_64 = 1U << 5,
+    GX_MANAGED_DEVICE_RESOURCE_FLAG_CACHE_UNCACHED = 1U << 6,
+    GX_MANAGED_DEVICE_RESOURCE_FLAG_PLATFORM = 1U << 7,
+    GX_MANAGED_DEVICE_RESOURCE_FLAG_PCI_ASSIGNED = 1U << 8
 };
 
 typedef enum {
@@ -364,6 +398,49 @@ typedef struct {
     uint64_t DescriptorByteLength;
     uint64_t Reserved;
 } GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint32_t ResourceCount;
+    uint32_t MaxClaims;
+    uint64_t Capabilities;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t ResourceId;
+    uint32_t OwnerDeviceKind;
+    uint32_t OwnerDeviceId;
+    uint16_t OwnerSegment;
+    uint8_t OwnerBus;
+    uint8_t OwnerDevice;
+    uint8_t OwnerFunction;
+    uint8_t ReservedLocation;
+    uint16_t ResourceIndex;
+    uint32_t ResourceType;
+    uint32_t Flags;
+    uint64_t PhysicalBase;
+    uint64_t Length;
+    uint64_t Alignment;
+    uint64_t Reserved0;
+    uint64_t Reserved1;
+} GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t SummaryAddress;
+    uint64_t DescriptorAddress;
+    uint32_t DescriptorCount;
+    uint32_t DescriptorSize;
+    uint64_t DescriptorByteLength;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_DEVICE_RESOURCE_PUBLICATION_V1;
 
 typedef struct {
     uint32_t Size;
@@ -777,6 +854,47 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, Descr
                "managed device inventory publication DescriptorByteLength offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_INVENTORY_PUBLICATION_V1, Reserved) == 40,
                "managed device inventory publication Reserved offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1) ==
+                   GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1_SIZE,
+               "managed device resource summary size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1, ResourceCount) == 16,
+               "managed device resource summary ResourceCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1, MaxClaims) == 20,
+               "managed device resource summary MaxClaims offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1, Capabilities) == 24,
+               "managed device resource summary Capabilities offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1) ==
+                   GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1_SIZE,
+               "managed device resource descriptor size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1, ResourceId) == 8,
+               "managed device resource ResourceId offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1, OwnerSegment) == 24,
+               "managed device resource OwnerSegment offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1, ResourceIndex) == 30,
+               "managed device resource ResourceIndex offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1, ResourceType) == 32,
+               "managed device resource ResourceType offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1, Flags) == 36,
+               "managed device resource Flags offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1, PhysicalBase) == 40,
+               "managed device resource PhysicalBase offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1, Length) == 48,
+               "managed device resource Length offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1, Alignment) == 56,
+               "managed device resource Alignment offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_PUBLICATION_V1) ==
+                   GX_MANAGED_KERNEL_DEVICE_RESOURCE_PUBLICATION_V1_SIZE,
+               "managed device resource publication size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_PUBLICATION_V1, SummaryAddress) == 8,
+               "managed device resource publication SummaryAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_PUBLICATION_V1, DescriptorAddress) == 16,
+               "managed device resource publication DescriptorAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_PUBLICATION_V1, DescriptorCount) == 24,
+               "managed device resource publication DescriptorCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_PUBLICATION_V1, DescriptorSize) == 28,
+               "managed device resource publication DescriptorSize offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DEVICE_RESOURCE_PUBLICATION_V1, DescriptorByteLength) == 32,
+               "managed device resource publication DescriptorByteLength offset");
 _Static_assert(sizeof(GX_MANAGED_KERNEL_PCI_SERVICES_V1) ==
                    GX_MANAGED_KERNEL_PCI_SERVICES_V1_SIZE,
                "managed PCI services size");

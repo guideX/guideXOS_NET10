@@ -146,6 +146,19 @@ scheduler-driven worker and bounded event queue as COM1. The focused design,
 ownership, routing, and limitation record is in
 [MANAGED_KERNEL_SECOND_DRIVER.md](docs/MANAGED_KERNEL_SECOND_DRIVER.md).
 
+ManagedKernel Phase 12 completes native-authoritative resource discovery and
+bounded managed ownership. The native publication contains the three
+platform I/O-port ranges needed by the existing COM1 and i8042 drivers, while
+PCI identity discovery remains read-only and PCI BAR resources remain
+unpublished unless a safe assigned-range source is available. Managed queries
+are immutable, owner-checked, bounded to 64 descriptors and 16 claims, and
+cover wrong-owner rejection, GC survival, release, and accounting restoration.
+Three fresh Phase 12 QEMU boots and three ManagedEntryProbe control boots pass.
+The honest classification is **PHASE 12 RESOURCE DISCOVERY COMPLETE — MMIO
+ACCESS DEFERRED**: the current VM substrate has no generic physical mapping or
+cache-type/PAT/MTRR policy, so no arbitrary MMIO mapping or managed PCI
+configuration write path is exposed. See the [Phase 12 resource contract](docs/MANAGED_KERNEL_DEVICE_RESOURCES.md).
+
 The Phase 9 host vectors are `Run-ManagedKernelInterruptNativeHostTests.ps1`
 and `Run-ManagedKernelInterruptHostTests.ps1`. The Phase 10 worker model
 vector is `Run-ManagedKernelDriverWorkerHostTests.ps1`; its real-hardware
@@ -181,6 +194,8 @@ UEFI firmware
   -> native COM1 IRQ4 capture at vector 0x24
   -> fixed native receive queue and managed safe-point drain
   -> managed serial receive validation, runtime proof, and unsubscribe
+  -> native immutable COM1/i8042 resource publication
+  -> managed resource queries, owner claims, GC proof, and release accounting
   -> post-initialization ManagedCallback export with existing runtime state
   -> scheduler-thread reverse-P/Invoke attach
   -> managed allocation and real GC probe
@@ -218,6 +233,7 @@ This foundation deliberately excludes managed thread-pool/`Task`/async support, 
 - [`IsProcessInJob` bootstrap contract](docs/KERNEL32_ISPROCESSINJOB_BOOTSTRAP.md)
 - [`SetThreadPriority` bootstrap contract](docs/KERNEL32_SETTHREADPRIORITY_BOOTSTRAP.md)
 - [Evidence ledger](docs/EVIDENCE_LEDGER.md)
+- [ManagedKernel Phase 12 device resources](docs/MANAGED_KERNEL_DEVICE_RESOURCES.md)
 - [Next-stage blockers](docs/NEXT_STAGE_BLOCKERS.md)
 
 ## Audit documents

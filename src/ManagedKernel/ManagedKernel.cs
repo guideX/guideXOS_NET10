@@ -245,6 +245,80 @@ internal struct GxManagedKernelDeviceInventoryPublicationV1
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelDeviceResourceSummaryV1
+{
+    internal const uint ExpectedSize = 40;
+    internal const ulong CapabilitySummary = 1UL << 0;
+    internal const ulong CapabilityDescriptors = 1UL << 1;
+    internal const ulong CapabilityImmutablePublication = 1UL << 2;
+    internal const ulong CapabilityClaimPolicy = 1UL << 3;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint ServiceVersion;
+    internal uint Architecture;
+    internal uint ResourceCount;
+    internal uint MaxClaims;
+    internal ulong Capabilities;
+    internal ulong Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelDeviceResourceV1
+{
+    internal const uint ExpectedSize = 80;
+    internal const uint ResourceTypeIoPort = 1;
+    internal const uint ResourceTypeMmio = 2;
+    internal const uint ResourceTypePlatformMemory = 3;
+    internal const uint ResourceTypeInterrupt = 4;
+    internal const uint FlagReadable = 1U << 0;
+    internal const uint FlagWritable = 1U << 1;
+    internal const uint FlagIoPort = 1U << 2;
+    internal const uint FlagMemory = 1U << 3;
+    internal const uint FlagPrefetchable = 1U << 4;
+    internal const uint FlagAddress64 = 1U << 5;
+    internal const uint FlagCacheUncached = 1U << 6;
+    internal const uint FlagPlatform = 1U << 7;
+    internal const uint FlagPciAssigned = 1U << 8;
+    internal const uint DeviceKindPlatformSerial = 2;
+    internal const uint DeviceKindPlatformKeyboard = 3;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal ulong ResourceId;
+    internal uint OwnerDeviceKind;
+    internal uint OwnerDeviceId;
+    internal ushort OwnerSegment;
+    internal byte OwnerBus;
+    internal byte OwnerDevice;
+    internal byte OwnerFunction;
+    internal byte ReservedLocation;
+    internal ushort ResourceIndex;
+    internal uint ResourceType;
+    internal uint Flags;
+    internal ulong PhysicalBase;
+    internal ulong Length;
+    internal ulong Alignment;
+    internal ulong Reserved0;
+    internal ulong Reserved1;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelDeviceResourcePublicationV1
+{
+    internal const uint ExpectedSize = 48;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal nuint SummaryAddress;
+    internal nuint DescriptorAddress;
+    internal uint DescriptorCount;
+    internal uint DescriptorSize;
+    internal nuint DescriptorByteLength;
+    internal ulong Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
 internal struct GxManagedKernelPciServicesV1
 {
     internal const uint ExpectedSize = 48;
@@ -291,6 +365,9 @@ internal static unsafe class ManagedKernelLayout
                sizeof(GxManagedKernelDeviceInventorySummaryV1) == 40 &&
                sizeof(GxManagedKernelDeviceV1) == 48 &&
                sizeof(GxManagedKernelDeviceInventoryPublicationV1) == 48 &&
+               sizeof(GxManagedKernelDeviceResourceSummaryV1) == 40 &&
+               sizeof(GxManagedKernelDeviceResourceV1) == 80 &&
+               sizeof(GxManagedKernelDeviceResourcePublicationV1) == 48 &&
                sizeof(GxManagedKernelPciServicesV1) == 48 &&
                sizeof(GxManagedKernelPciReadResultV1) == 32 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Magic)).ToInt32() == 0 &&
@@ -386,7 +463,17 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorCount)).ToInt32() == 24 &&
                Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorSize)).ToInt32() == 28 &&
                Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.DescriptorByteLength)).ToInt32() == 32 &&
-               Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.Reserved)).ToInt32() == 40 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceInventoryPublicationV1>(nameof(GxManagedKernelDeviceInventoryPublicationV1.Reserved)).ToInt32() == 40 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourceSummaryV1>(nameof(GxManagedKernelDeviceResourceSummaryV1.ResourceCount)).ToInt32() == 16 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourceSummaryV1>(nameof(GxManagedKernelDeviceResourceSummaryV1.MaxClaims)).ToInt32() == 20 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourceV1>(nameof(GxManagedKernelDeviceResourceV1.ResourceId)).ToInt32() == 8 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourceV1>(nameof(GxManagedKernelDeviceResourceV1.OwnerSegment)).ToInt32() == 24 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourceV1>(nameof(GxManagedKernelDeviceResourceV1.ResourceIndex)).ToInt32() == 30 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourceV1>(nameof(GxManagedKernelDeviceResourceV1.ResourceType)).ToInt32() == 32 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourceV1>(nameof(GxManagedKernelDeviceResourceV1.PhysicalBase)).ToInt32() == 40 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourceV1>(nameof(GxManagedKernelDeviceResourceV1.Length)).ToInt32() == 48 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourceV1>(nameof(GxManagedKernelDeviceResourceV1.Alignment)).ToInt32() == 56 &&
+                Marshal.OffsetOf<GxManagedKernelDeviceResourcePublicationV1>(nameof(GxManagedKernelDeviceResourcePublicationV1.SummaryAddress)).ToInt32() == 8 &&
                Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.Size)).ToInt32() == 0 &&
                Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.AbiVersion)).ToInt32() == 4 &&
                Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.ServiceVersion)).ToInt32() == 8 &&
@@ -469,6 +556,15 @@ internal static unsafe class ManagedKernelContract
         GxManagedKernelDeviceInventorySummaryV1.CapabilitySummary |
         GxManagedKernelDeviceInventorySummaryV1.CapabilityDevices |
         GxManagedKernelDeviceInventorySummaryV1.CapabilityImmutableBootSnapshot;
+    private const uint DeviceResourceAbiVersionV1 = 1;
+    private const uint DeviceResourceServiceVersionV1 = 1;
+    private const uint DeviceResourceMaxDescriptors = 64;
+    private const uint DeviceResourceMaxClaims = 16;
+    private const ulong DeviceResourceCapabilities =
+        GxManagedKernelDeviceResourceSummaryV1.CapabilitySummary |
+        GxManagedKernelDeviceResourceSummaryV1.CapabilityDescriptors |
+        GxManagedKernelDeviceResourceSummaryV1.CapabilityImmutablePublication |
+        GxManagedKernelDeviceResourceSummaryV1.CapabilityClaimPolicy;
     private const uint PciServicesAbiVersionV1 = 1;
     private const uint PciServicesServiceVersionV1 = 1;
     private const ulong PciServicesKnownCapabilities =
@@ -510,6 +606,9 @@ internal static unsafe class ManagedKernelContract
     private static nuint s_memoryReleasePagesAddress;
     private static int s_deviceInventoryInstalled;
     private static ManagedDeviceInventory? s_deviceInventory;
+    private static int s_deviceResourcesInstalled;
+    private static int s_phase12Run;
+    private static int s_phase12TeardownRun;
     private static int s_pciServicesInstalled;
     private static ulong s_pciCapabilities;
     private static nuint s_pciConfigReadAddress;
@@ -527,6 +626,7 @@ internal static unsafe class ManagedKernelContract
     internal static nuint MemoryAllocatePagesAddress => s_memoryAllocatePagesAddress;
     internal static nuint MemoryReleasePagesAddress => s_memoryReleasePagesAddress;
     internal static bool DeviceInventoryInstalled => s_deviceInventoryInstalled != 0;
+    internal static bool DeviceResourcesInstalled => s_deviceResourcesInstalled != 0;
     internal static bool HostServicesInstalled => s_hostServicesInstalled != 0;
     internal static bool PciServicesInstalled => s_pciServicesInstalled != 0;
     internal static nuint PciConfigReadAddress => s_pciConfigReadAddress;
@@ -1209,6 +1309,149 @@ internal static unsafe class ManagedKernelContract
         s_deviceInventory = candidate;
         s_deviceInventoryInstalled = 1;
         return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallDeviceResources")]
+    internal static uint InstallDeviceResources(uint requestedAbiVersion,
+                                                nuint publicationAddress)
+    {
+        if (requestedAbiVersion != DeviceResourceAbiVersionV1) return UnsupportedAbi;
+        if (!IsInitialized || s_deviceInventoryInstalled == 0 ||
+            s_deviceInventory == null) return NotInitialized;
+        if (s_deviceResourcesInstalled != 0) return AlreadyInitialized;
+        if (s_lifecycleState != (int)LifecycleState.Started ||
+            s_memoryServicesInstalled == 0 || publicationAddress == 0 ||
+            !IsRangeValid(publicationAddress,
+                (nuint)GxManagedKernelDeviceResourcePublicationV1.ExpectedSize))
+        {
+            return s_lifecycleState != (int)LifecycleState.Started
+                ? InvalidState : InvalidArgument;
+        }
+        if (!ManagedDeviceResourceRuntimeCatalog.TryInstallFromPublication(
+                Phase4KernelMemoryProvider.Instance, publicationAddress))
+        {
+            return InvalidArgument;
+        }
+        if (ManagedDeviceResourceRuntimeCatalog.ResourceCount == 0 ||
+            ManagedDeviceResourceRuntimeCatalog.ResourceCount > DeviceResourceMaxDescriptors ||
+            !ManagedDeviceResourceRuntimeCatalog.ValidateInvariants())
+        {
+            ManagedDeviceResourceRuntimeCatalog.Destroy();
+            return InvalidState;
+        }
+        s_deviceResourcesInstalled = 1;
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_SERVICES_INSTALLED\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_DISCOVERY_OK\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_RESOURCE_COUNT=0x"u8,
+                                    ManagedDeviceResourceRuntimeCatalog.ResourceCount) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_CATALOG_OK\r\n"u8))
+        {
+            ManagedDeviceResourceRuntimeCatalog.Destroy();
+            s_deviceResourcesInstalled = 0;
+            return InvalidState;
+        }
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedQueryDeviceResourceSummary")]
+    internal static uint QueryDeviceResourceSummary(uint requestedAbiVersion,
+                                                    nuint outputAddress,
+                                                    nuint outputCapacity)
+    {
+        if (requestedAbiVersion != DeviceResourceAbiVersionV1) return UnsupportedAbi;
+        if (!IsInitialized || s_deviceResourcesInstalled == 0 ||
+            !ManagedDeviceResourceRuntimeCatalog.IsInstalled) return NotInitialized;
+        if (outputAddress == 0) return InvalidArgument;
+        if (outputCapacity < GxManagedKernelDeviceResourceSummaryV1.ExpectedSize)
+            return BufferTooSmall;
+        if (!IsRangeValid(outputAddress, outputCapacity)) return InvalidArgument;
+        *(GxManagedKernelDeviceResourceSummaryV1*)outputAddress =
+            new GxManagedKernelDeviceResourceSummaryV1
+            {
+                Size = GxManagedKernelDeviceResourceSummaryV1.ExpectedSize,
+                AbiVersion = DeviceResourceAbiVersionV1,
+                ServiceVersion = DeviceResourceServiceVersionV1,
+                Architecture = ArchitectureX64,
+                ResourceCount = ManagedDeviceResourceRuntimeCatalog.ResourceCount,
+                MaxClaims = DeviceResourceMaxClaims,
+                Capabilities = DeviceResourceCapabilities,
+                Reserved = 0
+            };
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedQueryDeviceResource")]
+    internal static uint QueryDeviceResource(uint requestedAbiVersion, uint index,
+                                             nuint outputAddress, nuint outputCapacity)
+    {
+        if (requestedAbiVersion != DeviceResourceAbiVersionV1) return UnsupportedAbi;
+        if (!IsInitialized || s_deviceResourcesInstalled == 0 ||
+            !ManagedDeviceResourceRuntimeCatalog.IsInstalled) return NotInitialized;
+        if (index >= ManagedDeviceResourceRuntimeCatalog.ResourceCount) return OutOfRange;
+        if (outputAddress == 0) return InvalidArgument;
+        if (outputCapacity < GxManagedKernelDeviceResourceV1.ExpectedSize)
+            return BufferTooSmall;
+        if (!IsRangeValid(outputAddress, outputCapacity) ||
+            !ManagedDeviceResourceRuntimeCatalog.TryGetResource(index, out _)) return InvalidArgument;
+        /* The public result is copied from the catalog's validated immutable
+           snapshot without returning a capability pointer. */
+        if (!ManagedDeviceResourceRuntimeCatalog.TryCopyDescriptor(index,
+                (GxManagedKernelDeviceResourceV1*)outputAddress)) return InvalidState;
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase12")]
+    internal static uint RunPhase12(uint stage)
+    {
+        if (!IsInitialized || s_lifecycleState != (int)LifecycleState.Started)
+            return IsInitialized ? InvalidState : NotInitialized;
+        if (stage == 1)
+        {
+            if (s_phase12Run != 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                s_deviceResourcesInstalled == 0) return InvalidState;
+            if (!ManagedDeviceResourceRuntimeCatalog.TryFindByOwner(
+                    GxManagedKernelDeviceResourceV1.DeviceKindPlatformSerial, 1, 0,
+                    out ManagedDeviceResource serial) ||
+                !ManagedDeviceResourceRuntimeCatalog.TryFindByOwner(
+                    GxManagedKernelDeviceResourceV1.DeviceKindPlatformKeyboard, 1, 0,
+                    out ManagedDeviceResource keyboard) ||
+                !ManagedDeviceResourceRuntimeCatalog.TryClaim(in serial, ManagedSerialDriver.DriverId,
+                    GxManagedKernelDeviceResourceV1.DeviceKindPlatformSerial, 1) ||
+                ManagedDeviceResourceRuntimeCatalog.TryClaim(in keyboard, ManagedSerialDriver.DriverId,
+                    GxManagedKernelDeviceResourceV1.DeviceKindPlatformSerial, 1) ||
+                !ManagedDeviceResourceRuntimeCatalog.TryRelease(in serial, ManagedSerialDriver.DriverId) ||
+                !ManagedDeviceResourceRuntimeCatalog.TryClaim(in keyboard, ManagedKeyboardDriver.DriverId,
+                    GxManagedKernelDeviceResourceV1.DeviceKindPlatformKeyboard, 1) ||
+                !ManagedDeviceResourceRuntimeCatalog.TryRelease(in keyboard, ManagedKeyboardDriver.DriverId) ||
+                !ManagedDeviceResourceRuntimeCatalog.TryRunRuntimeSurvival() ||
+                !ManagedDeviceResourceRuntimeCatalog.ValidateInvariants()) return InvalidState;
+            if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_CLAIM_OK\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_WRONG_OWNER_REJECTED\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_RUNTIME_SURVIVAL_OK\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_ACCESS_DEFERRED_MMIO_CACHE\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_NEGATIVE_TESTS_OK\r\n"u8))
+                return InvalidState;
+            s_phase12Run = 1;
+            return ManagedOk;
+        }
+        if (stage == 2)
+        {
+            if (s_phase12Run == 0 || s_phase12TeardownRun != 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                !ManagedDeviceResourceRuntimeCatalog.ValidateInvariants()) return InvalidState;
+            GC.Collect();
+            if (!ManagedDeviceResourceRuntimeCatalog.ValidateInvariants() ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_GC_SURVIVAL_OK\r\n"u8) ||
+                !ManagedDeviceResourceRuntimeCatalog.Destroy()) return InvalidState;
+            s_phase12TeardownRun = 1;
+            if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_RELEASE_OK\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_ACCOUNTING_RESTORED\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS\r\n"u8))
+                return InvalidState;
+            return ManagedOk;
+        }
+        return InvalidArgument;
     }
 
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallPciServices")]

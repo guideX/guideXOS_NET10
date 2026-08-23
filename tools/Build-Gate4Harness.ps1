@@ -68,6 +68,7 @@ $managedKernelBootResourcesSource = Join-Path $root 'src\Gate4Harness\managed_ke
 $managedKernelHostServicesSource = Join-Path $root 'src\Gate4Harness\managed_kernel_host_services.c'
 $managedKernelMemorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_memory.c'
 $managedKernelDeviceInventorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_device_inventory.c'
+$managedKernelDeviceResourcesSource = Join-Path $root 'src\Gate4Harness\managed_kernel_device_resources.c'
 $managedKernelSerialSource = Join-Path $root 'src\Gate4Harness\managed_kernel_serial.c'
 $managedKernelInterruptSource = Join-Path $root 'src\Gate4Harness\managed_kernel_interrupt.c'
 $managedKernelDriverWorkerSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_worker.c'
@@ -1155,6 +1156,7 @@ if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelBootResourcesSource
     $gccArguments += $managedKernelHostServicesSource
     $gccArguments += $managedKernelDeviceInventorySource
+    $gccArguments += $managedKernelDeviceResourcesSource
     $gccArguments += $managedKernelSerialSource
     $gccArguments += $managedKernelInterruptSource
     $gccArguments += $managedKernelDriverWorkerSource
