@@ -149,6 +149,7 @@ internal unsafe sealed class ManagedSerialDriver
     internal byte LastReceiveByte => _lastReceiveByte;
     internal KernelArenaMetrics Metrics => _arena.IsDestroyed
         ? default : _arena.GetMetrics();
+    internal KernelArena Arena => _arena;
     internal bool IsDestroyed => _state == ManagedSerialDriverState.Disposed;
 
     internal static ManagedSerialDriver? TryCreate(
@@ -257,16 +258,10 @@ internal unsafe sealed class ManagedSerialDriver
     internal bool Destroy()
     {
         if (_state == ManagedSerialDriverState.Disposed ||
-            _state != ManagedSerialDriverState.Stopped)
-        {
-            return false;
-        }
-        if (_arena.Free(in _stagingAllocation) != KernelArenaStatus.Ok ||
+            _state != ManagedSerialDriverState.Stopped ||
+            _arena.Free(in _stagingAllocation) != KernelArenaStatus.Ok ||
             _arena.Free(in _stateAllocation) != KernelArenaStatus.Ok ||
-            _arena.Destroy() != KernelArenaStatus.Ok)
-        {
-            return false;
-        }
+            _arena.Destroy() != KernelArenaStatus.Ok) return false;
         _state = ManagedSerialDriverState.Disposed;
         _receiveState = ManagedSerialReceiveState.Stopped;
         return true;
@@ -288,10 +283,47 @@ internal unsafe sealed class ManagedSerialDriver
         return true;
     }
 
+    internal bool TryReconcileOperationalReceive(
+        ManagedInterruptDispatcher dispatcher)
+    {
+        if (dispatcher == null) return false;
+        if (_state == ManagedSerialDriverState.Started &&
+            _receiveState == ManagedSerialReceiveState.Subscribed)
+        {
+            return true;
+        }
+        if (_state == ManagedSerialDriverState.Started &&
+            _receiveState == ManagedSerialReceiveState.NotSubscribed &&
+            dispatcher.SubscriptionId == 0)
+        {
+            return true;
+        }
+        /* A scheduler/GC activation may expose a stale managed lifecycle
+           shadow while the native dispatcher still owns the live route.
+           Reconcile only that exact state and token combination; never
+           manufacture a subscription without native authority. */
+        if ((_state != ManagedSerialDriverState.Uninitialized &&
+             _state != ManagedSerialDriverState.Started) ||
+            _receiveState != ManagedSerialReceiveState.NotSubscribed ||
+            _receiveSubscriptionId != 0 || dispatcher.SubscriptionId == 0)
+        {
+            return false;
+        }
+        _state = ManagedSerialDriverState.Started;
+        _receiveState = ManagedSerialReceiveState.Subscribed;
+        _receiveSubscriptionId = dispatcher.SubscriptionId;
+        return true;
+    }
+
     internal bool TryUnsubscribeReceive(ManagedInterruptDispatcher dispatcher)
     {
-        if (_receiveState != ManagedSerialReceiveState.Subscribed ||
-            dispatcher == null || !dispatcher.TryUnsubscribe()) return false;
+        if (dispatcher == null) return false;
+        /* The native dispatcher is authoritative for the subscription token.
+           Reconcile a stale managed receive-state shadow before teardown so a
+           worker/GC activation cannot strand an otherwise live route. */
+        if (!TryReconcileOperationalReceive(dispatcher) ||
+            _receiveState != ManagedSerialReceiveState.Subscribed ||
+            !dispatcher.TryUnsubscribe()) return false;
         _receiveSubscriptionId = 0;
         _receiveState = ManagedSerialReceiveState.NotSubscribed;
         return true;
@@ -305,7 +337,8 @@ internal unsafe sealed class ManagedSerialDriver
             value.DeviceKind != _device.DeviceKind ||
             value.DeviceId != _device.DeviceId ||
             value.PayloadByte != expectedPayload || value.Sequence == 0 ||
-            (_receiveCount != 0 && value.Sequence != _lastReceiveSequence + 1))
+            (_receiveCount != 0 &&
+             value.Sequence != _lastReceiveSequence + 1U))
         {
             return false;
         }
@@ -321,7 +354,7 @@ internal unsafe sealed class ManagedSerialDriver
             _receiveState != ManagedSerialReceiveState.Subscribed ||
             value.DeviceKind != _device.DeviceKind ||
             value.DeviceId != _device.DeviceId || value.Sequence == 0 ||
-            (_receiveCount != 0 && value.Sequence != _lastReceiveSequence + 1))
+            (_receiveCount != 0 && value.Sequence <= _lastReceiveSequence))
         {
             return false;
         }
@@ -426,9 +459,15 @@ internal static unsafe class ManagedSerialDriverSubsystem
     private static GxManagedKernelSerialPlatformDeviceV1 s_device;
     private static GxManagedKernelSerialServicesV1 s_services;
     private static GxManagedKernelInterruptServicesV1 s_interruptServices;
+    private static GxManagedKernelInputServicesV1 s_inputServices;
     private static ManagedInterruptDispatcher? s_interruptDispatcher;
     private static ManagedSerialDriver? s_operationalDriver;
+    private static KernelArena? s_operationalArena;
+    private static GxManagedKernelKeyboardPlatformDeviceV1 s_keyboardDevice;
+    private static ManagedKeyboardDriver? s_keyboardDriver;
     private static ManagedDriverWorker? s_driverWorker;
+    private static int s_inputInstalled;
+    private static int s_phase11State;
 
     internal static bool Installed => s_installed != 0;
 
@@ -475,6 +514,172 @@ internal static unsafe class ManagedSerialDriverSubsystem
             return ManagedKernelContract.InvalidState;
         }
         return ManagedKernelContract.ManagedOk;
+    }
+
+    internal static uint InstallInputServices(uint requestedAbiVersion,
+                                               nuint servicesAddress,
+                                               nuint deviceAddress)
+    {
+        GxManagedKernelInputServicesV1 services;
+        GxManagedKernelKeyboardPlatformDeviceV1 device;
+        if (requestedAbiVersion != GxManagedKernelInputServicesV1.AbiVersionCurrent)
+        {
+            return ManagedKernelContract.UnsupportedAbi;
+        }
+        if (!ManagedKernelContract.IsStarted || s_installed == 0 || s_run == 0 ||
+            s_interruptInstalled == 0 || s_interruptDispatcher == null)
+        {
+            return ManagedKernelContract.InvalidState;
+        }
+        if (s_inputInstalled != 0 || servicesAddress == 0 || deviceAddress == 0 ||
+            !ManagedKernelContract.IsRangeValid(servicesAddress,
+                GxManagedKernelInputServicesV1.ExpectedSize) ||
+            !ManagedKernelContract.IsRangeValid(deviceAddress,
+                GxManagedKernelKeyboardPlatformDeviceV1.ExpectedSize))
+        {
+            return s_inputInstalled != 0 ? ManagedKernelContract.AlreadyInitialized :
+                ManagedKernelContract.InvalidArgument;
+        }
+        services = *(GxManagedKernelInputServicesV1*)servicesAddress;
+        device = *(GxManagedKernelKeyboardPlatformDeviceV1*)deviceAddress;
+        if (!ValidateInputService(in services) || !ValidateKeyboardDevice(in device) ||
+            !s_interruptDispatcher.TryAttachInputServices(in services))
+        {
+            return ManagedKernelContract.InvalidArgument;
+        }
+        s_inputServices = services;
+        s_keyboardDevice = device;
+        s_inputInstalled = 1;
+        s_phase11State = 0;
+        return KernelLog.Write(
+            "GXOS_NET10:MANAGED_KERNEL_INPUT_SERVICES_INSTALLED\r\n"u8)
+            ? ManagedKernelContract.ManagedOk : ManagedKernelContract.InvalidState;
+    }
+
+    internal static uint RunPhase11(uint stage)
+    {
+        ManagedSerialDriver? serialDriver = s_operationalDriver;
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        ManagedDriverWorker? worker = s_driverWorker;
+        if (!ManagedKernelContract.IsStarted || s_inputInstalled == 0 ||
+            s_phase9State != 4 || s_run == 0 || serialDriver == null ||
+            dispatcher == null || worker == null ||
+            worker.State != ManagedDriverWorkerState.Running)
+        {
+            return ManagedKernelContract.InvalidState;
+        }
+
+        if (stage == 1)
+        {
+            ManagedKeyboardDriver? keyboard = ManagedKeyboardDriver.TryCreate(
+                Phase4KernelMemoryProvider.Instance, in s_keyboardDevice,
+                s_operationalArena);
+            GC.KeepAlive(serialDriver);
+            if (s_phase11State != 0 || s_keyboardDriver != null || keyboard == null ||
+                !keyboard.TryInitialize() || !keyboard.TryStart() ||
+                !keyboard.TrySubscribe(dispatcher) || !worker.AttachKeyboard(keyboard))
+            {
+                if (keyboard != null && !keyboard.IsDestroyed)
+                {
+                    if (keyboard.SubscriptionState ==
+                        ManagedKeyboardSubscriptionState.Subscribed)
+                    {
+                        keyboard.TryUnsubscribe(dispatcher);
+                    }
+                    if (keyboard.State == ManagedKeyboardDriverState.Started)
+                    {
+                        keyboard.TryStop();
+                    }
+                    if (keyboard.State == ManagedKeyboardDriverState.Stopped)
+                    {
+                        keyboard.Destroy();
+                    }
+                }
+                return ManagedKernelContract.InvalidState;
+            }
+            s_keyboardDriver = keyboard;
+            if (!serialDriver.TryReconcileOperationalReceive(dispatcher))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            s_phase11State = 1;
+            if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_DEVICE_BOUND\r\n"u8) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_DRIVER_ID=0x"u8,
+                                        ManagedKeyboardDriver.DriverId) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_DEVICE_ID=0x"u8,
+                                        keyboard.DeviceId) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_IRQ=0x"u8,
+                                        keyboard.Irq) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_SCANCODE_SET=0x"u8,
+                                        keyboard.ScancodeSet) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_ARENA_PAGES=0x"u8,
+                    keyboard.Metrics.TotalBackingBytes / KernelArena.PageSize) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_DRIVER_INIT_OK\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_DRIVER_START_OK\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_SUBSCRIBED\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_INPUT_READY\r\n"u8))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            return ManagedKernelContract.ManagedOk;
+        }
+
+        ManagedKeyboardDriver? activeKeyboard = s_keyboardDriver;
+        if (activeKeyboard == null) return ManagedKernelContract.InvalidState;
+        if (stage == 3)
+        {
+            KernelMemoryRegion region = default;
+            bool live = false;
+            bool valid = s_phase11State == 2 && activeKeyboard.MakeCount == 1 &&
+                         activeKeyboard.LastMakeScancode == 0x1E &&
+                         ManagedKernelContract.TryQueryMonotonicTime(out _) &&
+                         activeKeyboard.TryRunRuntimeArenaProof() &&
+                         KernelMemory.TryAllocate(1, 0, out region);
+            live = true;
+            byte* address = (byte*)(nuint)region.VirtualAddress;
+            address[0] = 0xD1;
+            byte[] gcActivity = new byte[2048];
+            gcActivity[0] = 0x4D;
+            GC.Collect();
+            GC.KeepAlive(gcActivity);
+            GC.KeepAlive(activeKeyboard);
+            ManagedDeviceInventory? inventory =
+                ManagedKernelContract.OperationalDeviceInventory;
+            ManagedDriverRegistry? registry =
+                ManagedKernelContract.OperationalDriverRegistry;
+            valid = address[0] == 0xD1 && inventory != null &&
+                    registry != null && inventory.ValidateInvariants() &&
+                    registry.ValidateInvariants() && inventory.DeviceCount != 0 &&
+                    inventory.TryGetDevice(0, out ManagedDevice device) &&
+                    PciConfiguration.TryRead16(in device, 0, out _);
+            if (!KernelMemory.TryRelease(in region)) valid = false;
+            live = false;
+            if (!valid ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_RUNTIME_SURVIVAL_OK\r\n"u8))
+            {
+                if (live) KernelMemory.TryRelease(in region);
+                return ManagedKernelContract.InvalidState;
+            }
+            s_phase11State = 3;
+            return ManagedKernelContract.ManagedOk;
+        }
+        if (stage == 4)
+        {
+            if (s_phase11State != 4 || activeKeyboard.MakeCount < 2 ||
+                !activeKeyboard.TryUnsubscribe(dispatcher) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_UNSUBSCRIBE_OK\r\n"u8) ||
+                !worker.DetachKeyboard(activeKeyboard) ||
+                !activeKeyboard.TryStop() || !activeKeyboard.Destroy() ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_ACCOUNTING_RESTORED\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_KEYBOARD_UNSUBSCRIBED_SERIAL_REMAINS_ACTIVE_OK\r\n"u8))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            s_keyboardDriver = null;
+            s_phase11State = 5;
+            return ManagedKernelContract.ManagedOk;
+        }
+        return ManagedKernelContract.InvalidArgument;
     }
 
     internal static uint RunAccounting()
@@ -528,6 +733,10 @@ internal static unsafe class ManagedSerialDriverSubsystem
         driver = ManagedSerialDriver.TryCreate(
             Phase4KernelMemoryProvider.Instance, in s_device, in s_services);
         if (driver == null) return ManagedKernelContract.ResourceExhausted;
+        /* Keep the arena itself rooted across the explicit GC proof and the
+           scheduler hand-off; the operational driver is published only after
+           its runtime checks complete. */
+        s_operationalArena = driver.Arena;
 
         if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_SERIAL_DEVICE_BOUND\r\n"u8) ||
             !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_SERIAL_DRIVER_ID=0x"u8,
@@ -564,6 +773,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
         gcActivity[0] = 0x5C;
         GC.Collect();
         GC.KeepAlive(gcActivity);
+        GC.KeepAlive(driver);
         bool runtimeValid = runtimeAddress[0] == 0xA7 &&
                             inventory.ValidateInvariants() &&
                             registry.ValidateInvariants() &&
@@ -588,6 +798,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
             !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE8_PASS\r\n"u8))
         {
             s_operationalDriver = null;
+            s_operationalArena = null;
             s_run = 0;
             Cleanup(driver);
             return ManagedKernelContract.InvalidState;
@@ -599,6 +810,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
             if (runtimeRegionLive) KernelMemory.TryRelease(in runtimeRegion);
             if (value.State == ManagedSerialDriverState.Started) value.TryStop();
             if (value.State == ManagedSerialDriverState.Stopped) value.Destroy();
+            s_operationalArena = null;
         }
     }
 
@@ -742,6 +954,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
                 return ManagedKernelContract.InvalidState;
             }
             s_operationalDriver = null;
+            s_operationalArena = null;
             s_run = 0;
             s_phase9State = 5;
             if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_NEGATIVE_TESTS_OK\r\n"u8) ||
@@ -799,6 +1012,38 @@ internal static unsafe class ManagedSerialDriverSubsystem
                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORK_DISPATCH_OK\r\n"u8))
             {
                 return ManagedKernelContract.InvalidState;
+            }
+            if (s_keyboardDriver != null && s_phase11State == 1 &&
+                s_keyboardDriver.MakeCount == 1)
+            {
+                if (s_keyboardDriver.LastMakeScancode != 0x1E)
+                {
+                    return ManagedKernelContract.InvalidState;
+                }
+                s_phase11State = 2;
+                if (!KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_KEYBOARD_EVENT_DISPATCHED\r\n"u8) ||
+                    !KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_KEYBOARD_EVENT_OK\r\n"u8))
+                {
+                    return ManagedKernelContract.InvalidState;
+                }
+            }
+            if (s_keyboardDriver != null && s_phase11State == 3 &&
+                s_keyboardDriver.MakeCount == 2)
+            {
+                if (s_keyboardDriver.LastMakeScancode != 0x30)
+                {
+                    return ManagedKernelContract.InvalidState;
+                }
+                s_phase11State = 4;
+                if (!KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_KEYBOARD_EVENT_DISPATCHED\r\n"u8) ||
+                    !KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_KEYBOARD_EVENT_OK\r\n"u8))
+                {
+                    return ManagedKernelContract.InvalidState;
+                }
             }
             if (driver.ReceiveCount == 1 && s_phase9State == 1)
             {
@@ -885,9 +1130,15 @@ internal static unsafe class ManagedSerialDriverSubsystem
         if (stage == 4)
         {
             if (s_phase9State != 4 ||
-                worker.State != ManagedDriverWorkerState.Running ||
-                !driver.TryUnsubscribeReceive(dispatcher) ||
-                !worker.BeginStop() ||
+                worker.State != ManagedDriverWorkerState.Running)
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            if (!driver.TryUnsubscribeReceive(dispatcher))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            if (!worker.BeginStop() ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBE_OK\r\n"u8) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_STOPPING\r\n"u8))
             {
@@ -898,13 +1149,12 @@ internal static unsafe class ManagedSerialDriverSubsystem
         if (stage == 5)
         {
             if (worker.State != ManagedDriverWorkerState.Stopping ||
-                !worker.CompleteStop() || !driver.TryStop() ||
-                !driver.Destroy() || !worker.Destroy())
-            {
+                !worker.CompleteStop() || driver.State != ManagedSerialDriverState.Started ||
+                !driver.TryStop() || !driver.Destroy() || !worker.Destroy())
                 return ManagedKernelContract.InvalidState;
-            }
             s_driverWorker = null;
             s_operationalDriver = null;
+            s_operationalArena = null;
             s_run = 0;
             s_phase9State = 5;
             if (!KernelLog.Write(
@@ -947,5 +1197,42 @@ internal static unsafe class ManagedSerialDriverSubsystem
                device.Capabilities == KnownCapabilities &&
                device.ComIndex == GxManagedKernelSerialPlatformDeviceV1.ComIndex1 &&
                device.Reserved == 0;
+    }
+
+    private static bool ValidateInputService(
+        in GxManagedKernelInputServicesV1 services)
+    {
+        const ulong knownCapabilities =
+            GxManagedKernelInputServicesV1.CapabilitySubscribe |
+            GxManagedKernelInputServicesV1.CapabilityUnsubscribe |
+            GxManagedKernelInputServicesV1.CapabilityDrain |
+            GxManagedKernelInputServicesV1.CapabilityQueryStats;
+        return services.Size == GxManagedKernelInputServicesV1.ExpectedSize &&
+               services.AbiVersion == GxManagedKernelInputServicesV1.AbiVersionCurrent &&
+               services.ServiceVersion == GxManagedKernelInputServicesV1.ServiceVersionCurrent &&
+               services.Architecture == GxManagedKernelInputServicesV1.ArchitectureX64 &&
+               services.Capabilities == knownCapabilities &&
+               services.EventRecordSize == GxManagedKernelInterruptEventV1.ExpectedSize &&
+               services.QueueCapacityValue == GxManagedKernelInputServicesV1.QueueCapacity &&
+               services.MaxDrainValue == GxManagedKernelInputServicesV1.MaxDrain &&
+               services.Reserved0 == 0 && services.Reserved1 == 0 &&
+               services.Reserved2 == 0 && services.SubscribeAddress != 0 &&
+               services.UnsubscribeAddress != 0 && services.DrainAddress != 0 &&
+               services.QueryStatsAddress != 0;
+    }
+
+    private static bool ValidateKeyboardDevice(
+        in GxManagedKernelKeyboardPlatformDeviceV1 device)
+    {
+        const ulong knownCapabilities =
+            GxManagedKernelKeyboardPlatformDeviceV1.CapabilityRawScancode |
+            GxManagedKernelKeyboardPlatformDeviceV1.CapabilityMakeBreak;
+        return device.Size == GxManagedKernelKeyboardPlatformDeviceV1.ExpectedSize &&
+               device.AbiVersion == GxManagedKernelInputServicesV1.AbiVersionCurrent &&
+               device.DeviceKind == GxManagedKernelKeyboardPlatformDeviceV1.DeviceKindPlatformKeyboard &&
+               device.DeviceId == GxManagedKernelKeyboardPlatformDeviceV1.DeviceIdI8042 &&
+               device.Capabilities == knownCapabilities &&
+               device.Irq == GxManagedKernelKeyboardPlatformDeviceV1.Irq1 &&
+               device.ScancodeSet == GxManagedKernelKeyboardPlatformDeviceV1.ScancodeSet1;
     }
 }

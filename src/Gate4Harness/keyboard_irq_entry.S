@@ -1,11 +1,11 @@
 .text
 
-.extern gxos_managed_kernel_serial_irq_capture
+.extern gxos_managed_kernel_keyboard_irq_capture
 
-.globl gxos_managed_kernel_serial_irq_entry
-gxos_managed_kernel_serial_irq_entry:
-    /* IRQ4 enters with IF cleared by the interrupt gate. No managed call is
-       made here; the C routine only captures bounded UART state. */
+.globl gxos_managed_kernel_keyboard_irq_entry
+gxos_managed_kernel_keyboard_irq_entry:
+    /* IRQ1 is a hardware interrupt gate. Capture is native-only and bounded;
+       the managed worker is reached later through the scheduler event. */
     pushq %r15
     pushq %r14
     pushq %r13
@@ -21,14 +21,12 @@ gxos_managed_kernel_serial_irq_entry:
     pushq %rcx
     pushq %rbx
     pushq %rax
-    /* %r11 is caller-clobbered by the C capture routine. Keep the original
-       register-save stack in callee-saved %r12 until the call returns. */
     movq %rsp, %r12
     andq $-16, %rsp
     subq $32, %rsp
     subq $512, %rsp
     fxsave64 (%rsp)
-    call gxos_managed_kernel_serial_irq_capture
+    call gxos_managed_kernel_keyboard_irq_capture
     fxrstor64 (%rsp)
     addq $512, %rsp
     movq %r12, %rsp

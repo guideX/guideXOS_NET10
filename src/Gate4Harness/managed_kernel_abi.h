@@ -63,6 +63,11 @@
 #define GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1 1U
 #define GX_MANAGED_KERNEL_INTERRUPT_SERVICES_VERSION_V1 1U
 #define GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1_SIZE 88U
+#define GX_MANAGED_KERNEL_INPUT_SERVICES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_INPUT_SERVICES_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_INPUT_SERVICES_V1_SIZE 88U
+#define GX_MANAGED_KERNEL_KEYBOARD_PLATFORM_DEVICE_V1_SIZE 32U
+#define GX_MANAGED_KERNEL_KEYBOARD_STATUS_V1_SIZE 40U
 #define GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1_SIZE 48U
 #define GX_MANAGED_KERNEL_INTERRUPT_STATS_V1_SIZE 80U
 #define GX_MANAGED_KERNEL_INTERRUPT_QUEUE_CAPACITY 8U
@@ -120,7 +125,8 @@ enum {
 typedef enum {
     GX_MANAGED_DEVICE_KIND_UNKNOWN = 0U,
     GX_MANAGED_DEVICE_KIND_PCI = 1U,
-    GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL = 2U
+    GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL = 2U,
+    GX_MANAGED_DEVICE_KIND_PLATFORM_KEYBOARD = 3U
 } GX_MANAGED_DEVICE_KIND;
 
 enum {
@@ -148,6 +154,24 @@ enum {
 };
 
 enum {
+    GX_MANAGED_KEYBOARD_DEVICE_ID_I8042 = 1U,
+    GX_MANAGED_KEYBOARD_IRQ_1 = 1U,
+    GX_MANAGED_KEYBOARD_SCANCODE_SET_1 = 1U
+};
+
+enum {
+    GX_MANAGED_KEYBOARD_CAPABILITY_RAW_SCANCODE = 1ULL << 0,
+    GX_MANAGED_KEYBOARD_CAPABILITY_MAKE_BREAK = 1ULL << 1,
+    GX_MANAGED_KEYBOARD_CAPABILITY_QUERY_STATUS = 1ULL << 2
+};
+
+enum {
+    GX_MANAGED_KEYBOARD_STATUS_PRESENT = 1U << 0,
+    GX_MANAGED_KEYBOARD_STATUS_DATA_READY = 1U << 1,
+    GX_MANAGED_KEYBOARD_STATUS_AUXILIARY = 1U << 2
+};
+
+enum {
     GX_MANAGED_INTERRUPT_CAPABILITY_SUBSCRIBE = 1ULL << 0,
     GX_MANAGED_INTERRUPT_CAPABILITY_UNSUBSCRIBE = 1ULL << 1,
     GX_MANAGED_INTERRUPT_CAPABILITY_DRAIN = 1ULL << 2,
@@ -156,6 +180,7 @@ enum {
 
 enum {
     GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX = 1U,
+    GX_MANAGED_INTERRUPT_EVENT_TYPE_KEYBOARD_SCANCODE = 2U,
     GX_MANAGED_INTERRUPT_EVENT_FLAG_HARDWARE_CAPTURE = 1U << 0
 };
 
@@ -398,6 +423,27 @@ typedef struct {
 typedef struct {
     uint32_t Size;
     uint32_t AbiVersion;
+    uint32_t DeviceKind;
+    uint32_t DeviceId;
+    uint64_t Capabilities;
+    uint32_t Irq;
+    uint32_t ScancodeSet;
+} GX_MANAGED_KERNEL_KEYBOARD_PLATFORM_DEVICE_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t Status;
+    uint32_t Reserved0;
+    uint64_t Capabilities;
+    uint32_t Irq;
+    uint32_t ScancodeSet;
+    uint64_t Reserved1;
+} GX_MANAGED_KERNEL_KEYBOARD_STATUS_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
     uint32_t EventType;
     uint32_t DeviceKind;
     uint32_t DeviceId;
@@ -443,6 +489,28 @@ typedef struct {
     uint64_t Reserved1;
     uint64_t Reserved2;
 } GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1;
+
+/* Separate service-table ABI for the second real device. The record and
+   queue are intentionally shared with the Phase 9/10 interrupt transport;
+   the distinct table prevents the original serial-only contract from being
+   silently widened. */
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint64_t Capabilities;
+    uint32_t EventRecordSize;
+    uint32_t QueueCapacity;
+    uint32_t MaxDrain;
+    uint32_t Reserved0;
+    uint64_t SubscribeAddress;
+    uint64_t UnsubscribeAddress;
+    uint64_t DrainAddress;
+    uint64_t QueryStatsAddress;
+    uint64_t Reserved1;
+    uint64_t Reserved2;
+} GX_MANAGED_KERNEL_INPUT_SERVICES_V1;
 #pragma pack(pop)
 
 _Static_assert(sizeof(GX_MANAGED_KERNEL_INIT_REQUEST_V1) ==
@@ -794,6 +862,18 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_STATUS_V1, Status) == 8,
                "managed serial status Status offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_SERIAL_STATUS_V1, Capabilities) == 16,
                "managed serial status Capabilities offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_KEYBOARD_PLATFORM_DEVICE_V1) == 32,
+               "managed keyboard platform device size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_KEYBOARD_PLATFORM_DEVICE_V1, Capabilities) == 16,
+               "managed keyboard platform device Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_KEYBOARD_PLATFORM_DEVICE_V1, Irq) == 24,
+               "managed keyboard platform device Irq offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_KEYBOARD_STATUS_V1) == 40,
+               "managed keyboard status size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_KEYBOARD_STATUS_V1, Capabilities) == 16,
+               "managed keyboard status Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_KEYBOARD_STATUS_V1, Irq) == 24,
+               "managed keyboard status Irq offset");
 _Static_assert(sizeof(GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1) ==
                    GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1_SIZE,
                "managed interrupt event size");
@@ -819,6 +899,15 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1, SubscribeAddres
                "managed interrupt services SubscribeAddress offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1, QueryStatsAddress) == 64,
                "managed interrupt services QueryStatsAddress offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_INPUT_SERVICES_V1) ==
+                   GX_MANAGED_KERNEL_INPUT_SERVICES_V1_SIZE,
+               "managed input services size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INPUT_SERVICES_V1, Capabilities) == 16,
+               "managed input services Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INPUT_SERVICES_V1, SubscribeAddress) == 40,
+               "managed input services SubscribeAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_INPUT_SERVICES_V1, QueryStatsAddress) == 64,
+               "managed input services QueryStatsAddress offset");
 
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INITIALIZE_ENTRY)(
     uint32_t requested_abi_version, uintptr_t request_address);
@@ -886,6 +975,11 @@ typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INTERRUPT_DRAIN_EN
 typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INTERRUPT_QUERY_STATS_ENTRY)(
     uint32_t requested_abi_version, uintptr_t output_address,
     uintptr_t output_capacity);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_INSTALL_INPUT_SERVICES_ENTRY)(
+    uint32_t requested_abi_version, uintptr_t services_address,
+    uintptr_t device_address);
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI *GX_MANAGED_KERNEL_RUN_PHASE11_ENTRY)(
+    uint32_t stage);
 
 /* Native callers use this before crossing into managed code. */
 static inline GX_MANAGED_STATUS gxos_managed_kernel_validate_output_buffer(

@@ -21,5 +21,6 @@
     <Compile Include="..\ManagedKernel\ManagedInterruptDispatcher.cs" Link="ManagedInterruptDispatcher.cs" />
     <Compile Include="..\ManagedKernel\ManagedSerialDriver.cs" Link="ManagedSerialDriver.cs" />
     <Compile Include="..\ManagedKernel\ManagedDriverWorker.cs" Link="ManagedDriverWorker.cs" />
+    <Compile Include="..\ManagedKernel\ManagedKeyboardDriver.cs" Link="ManagedKeyboardDriver.cs" />
   </ItemGroup>
 </Project>

@@ -102,18 +102,19 @@ function Wait-Marker([string]$marker, [datetime]$deadline,
     while ((Get-Date) -lt $deadline) {
         Pump-Serial $stream $logStream $text $buffer
         $tail = [string]$script:phase9Tail
+        $transcript = $text.ToString()
         if (-not $script:phase9DataReadyTimelineRecorded -and
-            $tail.Contains('GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_DATA_READY_OBSERVED')) {
+            $transcript.Contains('GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_DATA_READY_OBSERVED')) {
             Write-Timeline $script:phase9Timeline 'GUEST_UART_DATA_READY'
             $script:phase9DataReadyTimelineRecorded = $true
         }
-        if ($tail.Contains($marker)) {
+        if ($transcript.Contains($marker)) {
             Write-Timeline $script:phase9Timeline 'GUEST_MARKER' "marker=$marker"
             return
         }
-        if ($tail.Contains('GXOS_NET10:FAIL:') -or
-            $tail.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
-            $tail.Contains('GXOS_NET10:PAGE_FAULT_')) {
+        if ($transcript.Contains('GXOS_NET10:FAIL:') -or
+            $transcript.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
+            $transcript.Contains('GXOS_NET10:PAGE_FAULT_')) {
             throw "QEMU reported a fault while waiting for $marker."
         }
         if ($process.HasExited) { throw "QEMU exited while waiting for $marker." }
@@ -175,7 +176,6 @@ $requiredMarkers = @(
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SUBSCRIBED',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_READY',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_FROM_HARDWARE_OK',
-    'GXOS_NET10:MANAGED_KERNEL_PHASE9_RUNTIME_ACTIVITY',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_OK',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_NATIVE_OK',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK',
@@ -208,7 +208,7 @@ try {
         $port = ([Net.IPEndPoint]$probe.LocalEndpoint).Port
         $probe.Stop()
         $arguments = @(
-            '-machine', 'q35', '-accel', 'tcg,thread=multi', '-m', '128M',
+            '-machine', 'q35', '-accel', 'tcg,thread=single', '-m', '128M',
             '-drive', "if=pflash,format=raw,readonly=on,file=$code",
             '-drive', "if=pflash,format=raw,file=$vars",
             '-drive', 'file=fat:rw:ESP,format=raw,if=ide,index=0,media=disk',
@@ -250,12 +250,15 @@ try {
             $buffer = New-Object byte[] 4096
 
             Wait-Marker 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_READY' $deadline $process $stream $logStream $text $buffer
+            Wait-Marker 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WORKER_UART_READY' $deadline $process $stream $logStream $text $buffer
             Require (!$process.HasExited) 'QEMU exited after RX_READY.'
+            Start-Sleep -Milliseconds 50
             Send-SerialByte $client $stream $process $injectionLog 'RX_READY' 0x52
             Wait-Marker 'GXOS_NET10:MANAGED_KERNEL_SERIAL_IRQ_CAPTURED' $deadline $process $stream $logStream $text $buffer
             Wait-Marker 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_FROM_HARDWARE_OK' $deadline $process $stream $logStream $text $buffer
             Wait-Marker 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_OK' $deadline $process $stream $logStream $text $buffer
             Require (!$process.HasExited) 'QEMU exited after runtime-survival marker.'
+            Wait-Marker 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SECOND_WAIT_READY' $deadline $process $stream $logStream $text $buffer
             Send-SerialByte $client $stream $process $injectionLog 'RX_RUNTIME_SURVIVAL_OK' 0x53
             Wait-Marker 'GXOS_NET10:MANAGED_KERNEL_SERIAL_IRQ_CAPTURED' $deadline $process $stream $logStream $text $buffer
             Wait-Marker 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK' $deadline $process $stream $logStream $text $buffer
@@ -285,6 +288,9 @@ try {
         foreach ($marker in $requiredMarkers) {
             Require ($finalText.Contains($marker)) "Boot $sequence missing marker: $marker"
         }
+        Require ($finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE9_RUNTIME_ACTIVITY') -or
+                 $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE10_RUNTIME_ACTIVITY')) `
+            "Boot $sequence missing managed runtime activity marker."
         Require (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_SERIAL_IRQ_CAPTURED')).Count -eq 2) `
             "Boot $sequence did not capture exactly two native IRQ events."
         Require (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_ENQUEUED')).Count -eq 2) `

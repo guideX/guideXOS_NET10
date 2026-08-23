@@ -5,7 +5,7 @@ param(
     [ValidateSet('ManagedEntryProbe', 'ManagedKernel')]
     [Alias('Payload')]
     [string]$PayloadMode = 'ManagedEntryProbe',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'IsProcessInJob', 'IsProcessInJobDisabled', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'RegisterOnexitMarkerMutation', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled', 'CreateEventW', 'CreateEventWDisabled', 'CreateMemoryResourceNotification', 'CreateMemoryResourceNotificationDisabled', 'CreateThread', 'CreateThreadDisabled', 'SetThreadPriority', 'SetThreadPriorityDisabled', 'ResumeThread', 'ResumeThreadDisabled', 'GlobalMemoryStatusEx', 'GlobalMemoryStatusExDisabled', 'VirtualMemory', 'NativeAotEventWait', 'SyntheticScheduler')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectMarkerMutation', 'QueryInformationJobObjectSuccessExperiment', 'QueryInformationJobObjectActiveLimitExperiment', 'IsProcessInJob', 'IsProcessInJobDisabled', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetModuleHandleWRvaExperiment', 'GetModuleHandleWWrongImageExperiment', 'GetModuleHandleEx', 'GetModuleHandleExDisabled', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'RegisterOnexitMarkerMutation', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled', 'CreateEventW', 'CreateEventWDisabled', 'CreateMemoryResourceNotification', 'CreateMemoryResourceNotificationDisabled', 'CreateThread', 'CreateThreadDisabled', 'SetThreadPriority', 'SetThreadPriorityDisabled', 'ResumeThread', 'ResumeThreadDisabled', 'GlobalMemoryStatusEx', 'GlobalMemoryStatusExDisabled', 'VirtualMemory', 'NativeAotEventWait', 'ManagedKernelPhase11', 'SyntheticScheduler')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$EnableNativeAotManagedCallback,
@@ -80,6 +80,7 @@ $performanceSource = Join-Path $root 'src\Gate4Harness\platform_performance.c'
 $exceptionSource = Join-Path $root 'src\Gate4Harness\exception_context.c'
 $exceptionAssembly = Join-Path $root 'src\Gate4Harness\exception_entry.S'
 $serialInterruptAssembly = Join-Path $root 'src\Gate4Harness\serial_irq_entry.S'
+$keyboardInterruptAssembly = Join-Path $root 'src\Gate4Harness\keyboard_irq_entry.S'
 $vectoredHandlerSource = Join-Path $root 'src\Gate4Harness\vectored_handler.c'
 $schedulerSource = Join-Path $root 'src\Gate4Harness\scheduler_foundation.c'
 $schedulerAssembly = Join-Path $root 'src\Gate4Harness\scheduler_context.S'
@@ -125,7 +126,8 @@ if ([string]::IsNullOrWhiteSpace($ManagedArtifact)) {
         $Scenario -eq 'ResumeThread' -or $Scenario -eq 'ResumeThreadDisabled' -or
         $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled' -or
         $Scenario -eq 'GlobalMemoryStatusEx' -or $Scenario -eq 'GlobalMemoryStatusExDisabled' -or
-        $Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait') {
+        $Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait' -or
+        $Scenario -eq 'ManagedKernelPhase11') {
         $managedArtifact = Join-Path $root 'artifacts\veh-final3-normal-gate\ESP\GXOS\gxos-managed-entry-probe.dll'
     } else {
         $managedArtifact = Join-Path $root 'artifacts\gate1-brepro-shared\gxos-managed-entry-probe.dll'
@@ -149,8 +151,9 @@ if (-not (Test-Path -LiteralPath $managedKernelMemorySource)) { throw "ManagedKe
 if (-not (Test-Path -LiteralPath $managedKernelDeviceInventorySource)) { throw "ManagedKernel device-inventory source not found: $managedKernelDeviceInventorySource" }
 if (-not (Test-Path -LiteralPath $managedKernelSerialSource)) { throw "ManagedKernel serial-service source not found: $managedKernelSerialSource" }
 if (-not (Test-Path -LiteralPath $managedKernelInterruptSource) -or
-    -not (Test-Path -LiteralPath $serialInterruptAssembly)) {
-    throw "ManagedKernel interrupt sources not found: $managedKernelInterruptSource / $serialInterruptAssembly"
+    -not (Test-Path -LiteralPath $serialInterruptAssembly) -or
+    -not (Test-Path -LiteralPath $keyboardInterruptAssembly)) {
+    throw "ManagedKernel interrupt sources not found: $managedKernelInterruptSource / $serialInterruptAssembly / $keyboardInterruptAssembly"
 }
 if (-not (Test-Path -LiteralPath $managedKernelDriverWorkerSource)) {
     throw "ManagedKernel driver-worker source not found: $managedKernelDriverWorkerSource"
@@ -200,7 +203,8 @@ if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
     $Scenario -eq 'ResumeThread' -or $Scenario -eq 'ResumeThreadDisabled' -or
     $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled' -or
     $Scenario -eq 'GlobalMemoryStatusEx' -or $Scenario -eq 'GlobalMemoryStatusExDisabled' -or
-    $Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait') {
+    $Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait' -or
+    $Scenario -eq 'ManagedKernelPhase11') {
     $payloadHash = (Get-FileHash -LiteralPath $managedArtifact -Algorithm SHA256).Hash.ToUpperInvariant()
     $payloadSize = (Get-Item -LiteralPath $managedArtifact).Length
     if ($PayloadMode -eq 'ManagedKernel') {
@@ -262,6 +266,11 @@ if ($requiresAuthoritativePayload -or $requiresCallbackPayload) {
     }
 }
 
+$managedKernelInterruptAssemblies = if ($PayloadMode -eq 'ManagedKernel') {
+    @($serialInterruptAssembly, $keyboardInterruptAssembly)
+} else {
+    @()
+}
 $gccArguments = @(
     '-ffreestanding', '-fno-stack-protector', '-fno-asynchronous-unwind-tables',
     '-fno-ident', '-mno-red-zone', '-O2', '-Wall', '-Wextra', '-Werror',
@@ -269,7 +278,7 @@ $gccArguments = @(
     '-Wl,--image-base,0x100000', '-Wl,--enable-reloc-section',
     '-Wl,--no-insert-timestamp',
     '-o', $efi, $source, $memoryAccountingSource, $vmSubstrateSource, $managedKernelMemorySource, $timeSource, $performanceSource,
-    $exceptionSource, $exceptionAssembly, $serialInterruptAssembly, $vectoredHandlerSource,
+    $exceptionSource, $exceptionAssembly, $managedKernelInterruptAssemblies, $vectoredHandlerSource,
     $virtualMemorySource,
     $virtualQueryCaptureAssembly,
     (Join-Path $root 'src\Gate4Harness\crt_onexit.c'),
@@ -1062,7 +1071,8 @@ switch ($Scenario) {
 if ($Scenario -eq 'GlobalMemoryStatusEx' -or
     $Scenario -eq 'VirtualMemory' -or
     $Scenario -eq 'GlobalMemoryStatusExDisabled' -or
-    $Scenario -eq 'NativeAotEventWait') {
+    $Scenario -eq 'NativeAotEventWait' -or
+    $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += '-DGXOS_ENABLE_CRT_ONEXIT'
     $gccArguments += '-DGXOS_ENABLE_SLIST'
     $gccArguments += '-DGXOS_ENABLE_CRT_INITTERM_E'
@@ -1099,7 +1109,8 @@ if ($Scenario -eq 'GlobalMemoryStatusEx' -or
     $gccArguments += '-DGXOS_ENABLE_IS_PROCESS_IN_JOB'
     $gccArguments += $isProcessInJobEntryAssembly
     if ($Scenario -eq 'GlobalMemoryStatusEx' -or $Scenario -eq 'VirtualMemory' -or
-        $Scenario -eq 'NativeAotEventWait') {
+        $Scenario -eq 'NativeAotEventWait' -or
+        $Scenario -eq 'ManagedKernelPhase11') {
         $gccArguments += '-DGXOS_ENABLE_GLOBAL_MEMORY_STATUS_EX'
     }
 }
@@ -1113,14 +1124,16 @@ if ($Scenario -eq 'Malloc' -or $Scenario -eq 'VectoredExceptionHandler' -or
     $Scenario -eq 'ResumeThread' -or $Scenario -eq 'ResumeThreadDisabled' -or
     $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled' -or
     $Scenario -eq 'GlobalMemoryStatusEx' -or $Scenario -eq 'GlobalMemoryStatusExDisabled' -or
-    $Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait') {
+    $Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait' -or
+    $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += (Join-Path $root 'src\Gate4Harness\crt_malloc.c')
 }
-if ($Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait') {
+if ($Scenario -eq 'VirtualMemory' -or $Scenario -eq 'NativeAotEventWait' -or
+    $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += '-DGXOS_ENABLE_VIRTUAL_MEMORY'
     $gccArguments += '-DGXOS_ENABLE_PROCESSOR_TOPOLOGY'
 }
-if ($Scenario -eq 'NativeAotEventWait') {
+if ($Scenario -eq 'NativeAotEventWait' -or $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_EVENT_WAIT'
     $gccArguments += $eventApiSource
     $gccArguments += $standardHandleSource
@@ -1135,6 +1148,9 @@ if ($EnableNativeAotManagedCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT
 if ($EnableNativeAotSchedulerCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK' }
 if ($EnableNativeAotManagedGcProbe) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE' }
 if ($PayloadMode -eq 'ManagedKernel') { $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL' }
+if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase11') {
+    $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE11'
+}
 if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelBootResourcesSource
     $gccArguments += $managedKernelHostServicesSource
@@ -1142,7 +1158,7 @@ if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelSerialSource
     $gccArguments += $managedKernelInterruptSource
     $gccArguments += $managedKernelDriverWorkerSource
-    if ($Scenario -ne 'NativeAotEventWait') {
+    if ($Scenario -notin @('NativeAotEventWait', 'ManagedKernelPhase11')) {
         # ManagedKernel is an allocation-enabled NativeAOT payload.  Keep its
         # startup/runtime import surface on the already-proven bounded harness
         # contracts instead of allowing the loader to fail-fast at the first CRT
@@ -1194,7 +1210,7 @@ if ($PayloadMode -eq 'ManagedKernel') {
         $gccArguments += $multibyteAssembly
         $gccArguments += (Join-Path $root 'src\Gate4Harness\crt_malloc.c')
         if ($Scenario -notin @(
-                'NativeAotEventWait', 'CreateEventW', 'CreateEventWDisabled',
+                'NativeAotEventWait', 'ManagedKernelPhase11', 'CreateEventW', 'CreateEventWDisabled',
                 'CreateMemoryResourceNotification',
                 'CreateMemoryResourceNotificationDisabled', 'CreateThread',
                 'CreateThreadDisabled', 'SetThreadPriority',
@@ -1246,12 +1262,14 @@ if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
         $Scenario -eq 'SetThreadPriority' -or $Scenario -eq 'SetThreadPriorityDisabled' -or
         $Scenario -eq 'ResumeThread' -or $Scenario -eq 'ResumeThreadDisabled' -or
         $Scenario -eq 'IsProcessInJob' -or $Scenario -eq 'IsProcessInJobDisabled' -or
-        $Scenario -eq 'NativeAotEventWait') {
+        $Scenario -eq 'NativeAotEventWait' -or
+        $Scenario -eq 'ManagedKernelPhase11') {
         $gccArguments += '-DGXOS_ENABLE_CREATE_EVENT_W'
         $gccArguments += $schedulerSource
         $gccArguments += $schedulerAssembly
         $gccArguments += $createEventSource
-        if ($Scenario -eq 'NativeAotEventWait') {
+        if ($Scenario -eq 'NativeAotEventWait' -or
+            $Scenario -eq 'ManagedKernelPhase11') {
             $gccArguments += $eventApiSource
         }
     }

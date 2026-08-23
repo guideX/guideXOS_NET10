@@ -61,6 +61,8 @@ internal sealed class ManagedDriverWorkerModel
     internal uint RejectedCount { get; private set; }
     internal uint YieldCount { get; private set; }
     internal uint RescheduleCount { get; private set; }
+    internal bool IsSleeping => State == ManagedDriverWorkerModelState.Running &&
+                                 QueueDepth == 0 && !_workPending;
 
     internal bool RegisterConsumer(uint deviceId, ulong subscriptionId,
                                    IManagedDriverWorkerConsumer consumer)

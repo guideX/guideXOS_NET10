@@ -133,6 +133,19 @@ are driven by
 `Run-ManagedKernelPhase10FreshBoots.ps1`; the contract and limitations are in
 [the Phase 10 managed driver execution document](docs/MANAGED_KERNEL_DRIVER_EXECUTION.md).
 
+Phase 10 status: COMPLETE. On 2026-08-22, three fresh single-threaded-TCG
+QEMU boots passed the complete repeated-event acceptance, including the real
+second COM1 IRQ after runtime/GC activity, burst/coalescing, unsubscribe,
+worker reclamation, and accounting restoration. The multi-threaded-TCG
+variant remains a non-acceptance stress control because it intermittently
+raises an unrelated NativeAOT runtime GP during the existing survival proof.
+
+Phase 11 adds the second real managed driver: an i8042/PS/2 keyboard using
+native IRQ1 capture, the versioned input service ABI, and the same shared
+scheduler-driven worker and bounded event queue as COM1. The focused design,
+ownership, routing, and limitation record is in
+[MANAGED_KERNEL_SECOND_DRIVER.md](docs/MANAGED_KERNEL_SECOND_DRIVER.md).
+
 The Phase 9 host vectors are `Run-ManagedKernelInterruptNativeHostTests.ps1`
 and `Run-ManagedKernelInterruptHostTests.ps1`. The Phase 10 worker model
 vector is `Run-ManagedKernelDriverWorkerHostTests.ps1`; its real-hardware

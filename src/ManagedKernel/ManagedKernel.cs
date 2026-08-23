@@ -1080,6 +1080,15 @@ internal static unsafe class ManagedKernelContract
             requestedAbiVersion, servicesAddress);
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallInputServices")]
+    internal static uint InstallInputServices(uint requestedAbiVersion,
+                                               nuint servicesAddress,
+                                               nuint deviceAddress)
+    {
+        return ManagedSerialDriverSubsystem.InstallInputServices(
+            requestedAbiVersion, servicesAddress, deviceAddress);
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase9")]
     internal static uint RunPhase9(uint stage)
     {
@@ -1096,6 +1105,12 @@ internal static unsafe class ManagedKernelContract
     internal static uint RunPhase10(uint stage)
     {
         return ManagedSerialDriverSubsystem.RunPhase10(stage);
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase11")]
+    internal static uint RunPhase11(uint stage)
+    {
+        return ManagedSerialDriverSubsystem.RunPhase11(stage);
     }
 
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallDeviceInventory")]

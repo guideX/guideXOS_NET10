@@ -99,13 +99,14 @@ function Wait-Marker10([string]$marker, [datetime]$deadline,
                        [Text.StringBuilder]$text, [byte[]]$buffer) {
     while ((Get-Date) -lt $deadline) {
         Pump-Serial10 $stream $logStream $text $buffer
-        if ($script:phase10Tail.Contains($marker)) {
+        $transcript = $text.ToString()
+        if ($transcript.Contains($marker)) {
             Write-Timeline10 $script:phase10Timeline 'GUEST_MARKER' "marker=$marker"
             return
         }
-        if ($script:phase10Tail.Contains('GXOS_NET10:FAIL:') -or
-            $script:phase10Tail.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
-            $script:phase10Tail.Contains('GXOS_NET10:PAGE_FAULT_')) {
+        if ($transcript.Contains('GXOS_NET10:FAIL:') -or
+            $transcript.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
+            $transcript.Contains('GXOS_NET10:PAGE_FAULT_')) {
             throw "QEMU reported a fault while waiting for $marker."
         }
         if ($process.HasExited) { throw "QEMU exited while waiting for $marker." }
@@ -132,6 +133,26 @@ function Send-SerialByte10([Net.Sockets.TcpClient]$client,
     $injectionLog.Flush()
     Write-Timeline10 $script:phase10Timeline 'HOST_INJECT' `
         "after=$afterMarker byte=0x$('{0:X2}' -f $value)"
+}
+
+function Send-SerialBurst10([Net.Sockets.TcpClient]$client,
+                             [System.IO.Stream]$stream,
+                             [System.Diagnostics.Process]$process,
+                             [IO.StreamWriter]$injectionLog,
+                             [string]$afterMarker, [byte[]]$values) {
+    Require10 ($null -ne $client -and $client.Connected -and
+               $null -ne $stream -and $stream.CanWrite) 'QEMU serial socket is not connected.'
+    Require10 ($null -ne $process -and !$process.HasExited) 'QEMU exited before serial injection.'
+    Require10 ($null -ne $values -and $values.Length -ne 0) 'Serial burst must not be empty.'
+    $client.Client.NoDelay = $true
+    $stream.Write($values, 0, $values.Length)
+    $stream.Flush()
+    $hex = (($values | ForEach-Object { '0x{0:X2}' -f $_ }) -join ',')
+    $injectionLog.WriteLine(('{0} utc={1:o} bytes={2}' -f
+        $afterMarker, (Get-Date).ToUniversalTime(), $hex))
+    $injectionLog.Flush()
+    Write-Timeline10 $script:phase10Timeline 'HOST_INJECT_BURST' `
+        "after=$afterMarker bytes=$hex"
 }
 
 function Get-HexField10([string]$text, [string]$name) {
@@ -234,7 +255,7 @@ try {
         $port = ([Net.IPEndPoint]$probe.LocalEndpoint).Port
         $probe.Stop()
         $arguments = @(
-            '-machine', 'q35', '-accel', 'tcg,thread=multi', '-m', '128M',
+            '-machine', 'q35', '-accel', 'tcg,thread=single', '-m', '128M',
             '-drive', "if=pflash,format=raw,readonly=on,file=$code",
             '-drive', "if=pflash,format=raw,file=$vars",
             '-drive', 'file=fat:rw:ESP,format=raw,if=ide,index=0,media=disk',
@@ -280,6 +301,9 @@ try {
                 $deadline $process $stream $logStream $text $buffer
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_READY' `
                 $deadline $process $stream $logStream $text $buffer
+            Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WORKER_UART_READY' `
+                $deadline $process $stream $logStream $text $buffer
+            Start-Sleep -Milliseconds 50
             Send-SerialByte10 $client $stream $process $injectionLog 'RX_READY' 0x52
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_WAKE_OK' `
                 $deadline $process $stream $logStream $text $buffer
@@ -294,18 +318,13 @@ try {
 
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SECOND_WAIT_READY' `
                 $deadline $process $stream $logStream $text $buffer
-            Start-Sleep -Milliseconds 50
             Send-SerialByte10 $client $stream $process $injectionLog `
                 'RX_RUNTIME_SURVIVAL_NATIVE_OK' 0x53
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK' `
                 $deadline $process $stream $logStream $text $buffer
 
-            Send-SerialByte10 $client $stream $process $injectionLog `
-                'RX_AFTER_RUNTIME_OK_BURST_A' 0x41
-            Send-SerialByte10 $client $stream $process $injectionLog `
-                'RX_AFTER_RUNTIME_OK_BURST_B' 0x42
-            Send-SerialByte10 $client $stream $process $injectionLog `
-                'RX_AFTER_RUNTIME_OK_BURST_C' 0x43
+            Send-SerialBurst10 $client $stream $process $injectionLog `
+                'RX_AFTER_RUNTIME_OK_BURST' ([byte[]](0x41, 0x42, 0x43))
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_DRAINED' `
                 $deadline $process $stream $logStream $text $buffer
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBED_READY' `

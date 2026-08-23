@@ -1,3 +1,5 @@
+using System;
+
 namespace GuideXOS.Net10.ManagedKernel;
 
 internal enum ManagedDriverWorkerState : uint
@@ -19,6 +21,7 @@ internal unsafe sealed class ManagedDriverWorker
 
     private readonly ManagedInterruptDispatcher _dispatcher;
     private readonly ManagedSerialDriver _serialDriver;
+    private ManagedKeyboardDriver? _keyboardDriver;
     private ManagedDriverWorkerState _state;
     private uint _dispatchBatches;
     private uint _managedDispatches;
@@ -26,10 +29,12 @@ internal unsafe sealed class ManagedDriverWorker
     private uint _rejected;
 
     internal ManagedDriverWorker(ManagedInterruptDispatcher dispatcher,
-                                 ManagedSerialDriver serialDriver)
+                                 ManagedSerialDriver serialDriver,
+                                 ManagedKeyboardDriver? keyboardDriver = null)
     {
         _dispatcher = dispatcher;
         _serialDriver = serialDriver;
+        _keyboardDriver = keyboardDriver;
         _state = ManagedDriverWorkerState.Created;
     }
 
@@ -38,6 +43,22 @@ internal unsafe sealed class ManagedDriverWorker
     internal uint ManagedDispatches => _managedDispatches;
     internal uint Delivered => _delivered;
     internal uint Rejected => _rejected;
+
+    internal bool AttachKeyboard(ManagedKeyboardDriver keyboardDriver)
+    {
+        if (_state != ManagedDriverWorkerState.Running ||
+            keyboardDriver == null || _keyboardDriver != null) return false;
+        _keyboardDriver = keyboardDriver;
+        return true;
+    }
+
+    internal bool DetachKeyboard(ManagedKeyboardDriver keyboardDriver)
+    {
+        if (_state != ManagedDriverWorkerState.Running ||
+            keyboardDriver == null || _keyboardDriver != keyboardDriver) return false;
+        _keyboardDriver = null;
+        return true;
+    }
 
     internal bool Start()
     {
@@ -52,10 +73,15 @@ internal unsafe sealed class ManagedDriverWorker
         delivered = 0;
         rejected = 0;
         if (_state != ManagedDriverWorkerState.Running) return false;
+        if (!_serialDriver.TryReconcileOperationalReceive(_dispatcher))
+        {
+            return false;
+        }
+        GC.KeepAlive(_serialDriver);
         _dispatchBatches++;
         _managedDispatches++;
-        if (!_dispatcher.TryDispatchBatch(_serialDriver, out delivered,
-                                           out rejected)) return false;
+        if (!_dispatcher.TryDispatchBatch(_serialDriver, _keyboardDriver,
+                                           out delivered, out rejected)) return false;
         _delivered += delivered;
         _rejected += rejected;
         return true;

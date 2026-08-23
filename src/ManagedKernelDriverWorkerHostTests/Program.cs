@@ -91,6 +91,38 @@ internal static class Program
         Check(worker.QueueDepth == 0 && worker.YieldCount == 2,
               "filled queue rescheduled");
 
+        /* A malformed keyboard-side record must not poison the shared worker:
+           the serial route remains usable on the next activation. */
+        Check(worker.Enqueue(Item(1, 101, 7, (byte)'g')),
+              "serial recovery enqueue");
+        Check(worker.RunActivation() && worker.DeliveredCount == 8 &&
+              first.Payloads.Count == 7 && first.Payloads[6] == (byte)'g',
+              "serial route survives rejected input");
+
+        /* A worker instance must be reusable after each auto-reset wake. This
+           is intentionally separate from burst/coalescing coverage: every
+           cycle returns to the sleeping state before the next signal. */
+        ManagedDriverWorkerModel repeated = new ManagedDriverWorkerModel();
+        Consumer repeatedConsumer = new Consumer(7, 707);
+        Check(repeated.RegisterConsumer(7, 707, repeatedConsumer),
+              "repeated-wake route");
+        Check(repeated.Start(), "repeated-wake start");
+        for (ulong sequence = 1; sequence != 4; ++sequence)
+        {
+            Check(repeated.Enqueue(Item(7, 707, sequence,
+                                        (byte)('p' + sequence - 1))),
+                  "repeated-wake enqueue");
+            Check(repeated.WakeRequests == (uint)sequence,
+                  "repeated-wake signal count");
+            Check(repeated.RunActivation(), "repeated-wake dispatch");
+            Check(repeated.IsSleeping && repeated.QueueDepth == 0,
+                  "repeated-wake sleep re-arm");
+        }
+        Check(repeated.DispatchBatches == 3 &&
+              repeated.DeliveredCount == 3 &&
+              repeatedConsumer.Payloads.Count == 3,
+              "repeated-wake same worker instance");
+
         Check(worker.BeginStop(), "begin stop");
         Check(!worker.BeginStop(), "duplicate stop rejected");
         Check(worker.CompleteStop(), "complete stop");
@@ -107,5 +139,6 @@ internal static class Program
         Console.WriteLine($"REJECTED={worker.RejectedCount}");
         Console.WriteLine($"DROPPED={worker.DropCount}");
         Console.WriteLine($"YIELDS={worker.YieldCount}");
+        Console.WriteLine($"REPEATED_WAKE_CYCLES={repeated.DispatchBatches}");
     }
 }
