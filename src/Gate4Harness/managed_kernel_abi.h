@@ -60,6 +60,12 @@
 #define GX_MANAGED_KERNEL_PCI_READ_WIDTH_8 1U
 #define GX_MANAGED_KERNEL_PCI_READ_WIDTH_16 2U
 #define GX_MANAGED_KERNEL_PCI_READ_WIDTH_32 4U
+#define GX_MANAGED_KERNEL_MMIO_SERVICES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_MMIO_SERVICES_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_MMIO_SERVICES_V1_SIZE 88U
+#define GX_MANAGED_KERNEL_MMIO_CLAIM_RESULT_V1_SIZE 24U
+#define GX_MANAGED_KERNEL_MMIO_MAPPING_RESULT_V1_SIZE 48U
+#define GX_MANAGED_KERNEL_MMIO_READ_RESULT_V1_SIZE 32U
 #define GX_MANAGED_KERNEL_SERIAL_SERVICES_ABI_V1 1U
 #define GX_MANAGED_KERNEL_SERIAL_SERVICES_VERSION_V1 1U
 #define GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1_SIZE 32U
@@ -169,6 +175,14 @@ enum {
 
 enum {
     GX_MANAGED_PCI_CAPABILITY_CONFIG_READ = 1ULL << 0
+};
+
+enum {
+    GX_MANAGED_MMIO_CAPABILITY_CLAIM = 1ULL << 0,
+    GX_MANAGED_MMIO_CAPABILITY_MAP = 1ULL << 1,
+    GX_MANAGED_MMIO_CAPABILITY_UNMAP = 1ULL << 2,
+    GX_MANAGED_MMIO_CAPABILITY_READ = 1ULL << 3,
+    GX_MANAGED_MMIO_CAPABILITY_UNCACHEABLE = 1ULL << 4
 };
 
 enum {
@@ -461,6 +475,50 @@ typedef struct {
     uint64_t Value;
     uint64_t Reserved1;
 } GX_MANAGED_KERNEL_PCI_READ_RESULT_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint64_t Capabilities;
+    uint64_t ClaimAddress;
+    uint64_t ReleaseAddress;
+    uint64_t MapAddress;
+    uint64_t UnmapAddress;
+    uint64_t ReadAddress;
+    uint32_t MaxClaims;
+    uint32_t MaxMappings;
+    uint64_t WindowBase;
+    uint64_t WindowLength;
+} GX_MANAGED_KERNEL_MMIO_SERVICES_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t Handle;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_MMIO_CLAIM_RESULT_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t Handle;
+    uint64_t ResourceId;
+    uint64_t Offset;
+    uint64_t Length;
+    uint32_t Access;
+    uint32_t Reserved0;
+} GX_MANAGED_KERNEL_MMIO_MAPPING_RESULT_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t Width;
+    uint32_t Reserved0;
+    uint64_t Value;
+    uint64_t Reserved1;
+} GX_MANAGED_KERNEL_MMIO_READ_RESULT_V1;
 
 typedef struct {
     uint32_t Size;
@@ -927,6 +985,18 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Value) == 16,
                "managed PCI read result Value offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Reserved1) == 24,
                "managed PCI read result Reserved1 offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_MMIO_SERVICES_V1) ==
+                   GX_MANAGED_KERNEL_MMIO_SERVICES_V1_SIZE,
+               "managed MMIO services size");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_MMIO_CLAIM_RESULT_V1) ==
+                   GX_MANAGED_KERNEL_MMIO_CLAIM_RESULT_V1_SIZE,
+               "managed MMIO claim result size");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_MMIO_MAPPING_RESULT_V1) ==
+                   GX_MANAGED_KERNEL_MMIO_MAPPING_RESULT_V1_SIZE,
+               "managed MMIO mapping result size");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_MMIO_READ_RESULT_V1) ==
+                   GX_MANAGED_KERNEL_MMIO_READ_RESULT_V1_SIZE,
+               "managed MMIO read result size");
 _Static_assert(sizeof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1) ==
                    GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1_SIZE,
                "managed serial platform device size");

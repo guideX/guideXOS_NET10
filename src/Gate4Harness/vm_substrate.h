@@ -8,6 +8,8 @@
 
 #define GXOS_X64_PAGING_ENTRY_PRESENT ((uint64_t)1U)
 #define GXOS_X64_PAGING_ENTRY_WRITABLE ((uint64_t)1U << 1)
+#define GXOS_X64_PAGING_ENTRY_WRITE_THROUGH ((uint64_t)1U << 3)
+#define GXOS_X64_PAGING_ENTRY_CACHE_DISABLE ((uint64_t)1U << 4)
 #define GXOS_X64_PAGING_ENTRY_PAGE_SIZE ((uint64_t)1U << 7)
 #define GXOS_X64_PAGING_ENTRY_NO_EXECUTE ((uint64_t)1U << 63)
 #define GXOS_X64_PAGING_PHYSICAL_MASK ((uint64_t)0x000FFFFFFFFFF000ULL)
@@ -209,6 +211,13 @@ GXOS_VM_PAGING_STATUS gxos_vm_paging_map_page(
     uint64_t physical_page,
     uint32_t writable,
     uint32_t executable);
+GXOS_VM_PAGING_STATUS gxos_vm_paging_map_page_with_flags(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_page,
+    uint64_t physical_page,
+    uint32_t writable,
+    uint32_t executable,
+    uint64_t leaf_flags);
 GXOS_VM_PAGING_STATUS gxos_vm_paging_map_range(
     GXOS_VM_PAGING *paging,
     uint64_t virtual_start,
@@ -216,10 +225,34 @@ GXOS_VM_PAGING_STATUS gxos_vm_paging_map_range(
     uint64_t page_count,
     uint32_t writable,
     uint32_t executable);
+GXOS_VM_PAGING_STATUS gxos_vm_paging_map_range_with_flags(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_start,
+    uint64_t physical_start,
+    uint64_t page_count,
+    uint32_t writable,
+    uint32_t executable,
+    uint64_t leaf_flags);
+GXOS_VM_PAGING_STATUS gxos_vm_paging_map_range_with_flags_in_window(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_start,
+    uint64_t physical_start,
+    uint64_t page_count,
+    uint32_t writable,
+    uint32_t executable,
+    uint64_t leaf_flags,
+    uint64_t window_base,
+    uint64_t window_length);
 GXOS_VM_PAGING_STATUS gxos_vm_paging_unmap_page(
     GXOS_VM_PAGING *paging,
     uint64_t virtual_page,
     uint64_t *physical_page_out);
+GXOS_VM_PAGING_STATUS gxos_vm_paging_unmap_page_in_window(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_page,
+    uint64_t *physical_page_out,
+    uint64_t window_base,
+    uint64_t window_length);
 
 typedef enum {
     GXOS_VM_COMMIT_OPERATION_OK = 0,

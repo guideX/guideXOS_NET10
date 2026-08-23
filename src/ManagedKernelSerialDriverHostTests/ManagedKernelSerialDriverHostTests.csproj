@@ -16,6 +16,9 @@
     <Compile Include="..\ManagedKernel\KernelArena.cs" Link="KernelArena.cs" />
     <Compile Include="..\ManagedKernel\KernelArenaProof.cs" Link="KernelArenaProof.cs" />
     <Compile Include="..\ManagedKernel\ManagedDeviceInventory.cs" Link="ManagedDeviceInventory.cs" />
+    <Compile Include="..\ManagedKernel\ManagedDeviceResourceCatalog.cs" Link="ManagedDeviceResourceCatalog.cs" />
+    <Compile Include="..\ManagedKernel\ManagedDeviceResourceRuntimeCatalog.cs" Link="ManagedDeviceResourceRuntimeCatalog.cs" />
+    <Compile Include="..\ManagedKernel\ManagedMmioMapping.cs" Link="ManagedMmioMapping.cs" />
     <Compile Include="..\ManagedKernel\ManagedDriverBinding.cs" Link="ManagedDriverBinding.cs" />
     <Compile Include="..\ManagedKernel\ManagedPciConfiguration.cs" Link="ManagedPciConfiguration.cs" />
     <Compile Include="..\ManagedKernel\ManagedInterruptDispatcher.cs" Link="ManagedInterruptDispatcher.cs" />

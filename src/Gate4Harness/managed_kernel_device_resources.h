@@ -34,6 +34,11 @@ typedef struct {
     uint32_t implemented;
 } GXOS_PCI_BAR_DECODED;
 
+typedef struct {
+    uint64_t base;
+    uint64_t length;
+} GXOS_PCI_FIRMWARE_BAR;
+
 GXOS_PCI_BAR_DECODE_STATUS gxos_pci_decode_bar(
     uint32_t raw_low, uint32_t raw_high,
     uint32_t mask_low, uint32_t mask_high,
@@ -51,5 +56,21 @@ GXOS_MANAGED_KERNEL_RESOURCE_STATUS gxos_managed_kernel_make_platform_resources(
 int gxos_managed_kernel_resource_ranges_overlap(
     const GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 *left,
     const GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 *right);
+
+GXOS_MANAGED_KERNEL_RESOURCE_STATUS gxos_managed_kernel_append_pci_mmio_resource(
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 *resources,
+    uint32_t resource_capacity,
+    uint32_t *resource_count,
+    uint16_t segment,
+    uint8_t bus,
+    uint8_t device,
+    uint8_t function,
+    uint16_t vendor_id,
+    uint16_t device_id,
+    uint8_t bar_index,
+    uint32_t raw_low,
+    uint32_t raw_high,
+    const GXOS_PCI_FIRMWARE_BAR *firmware_bar,
+    GXOS_PCI_BAR_DECODED *decoded_out);
 
 #endif

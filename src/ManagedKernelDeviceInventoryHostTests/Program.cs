@@ -356,6 +356,25 @@ internal static unsafe class Program
         }
     }
 
+    private static void TestManagedMmioSurface()
+    {
+        ManagedMmioMapping mapping = new ManagedMmioMapping(
+            1, 0xD013, 0x0000000100000001, 0x10);
+        Expect(mapping.IsLive, "managed MMIO capability starts live");
+        Expect(!mapping.TryRead32(0x10, out _),
+               "managed MMIO read at mapping end is rejected");
+        Expect(!mapping.TryRead32(0x0D, out _),
+               "managed MMIO read crossing mapping end is rejected");
+        Expect(!mapping.TryRead16(1, out _),
+               "managed MMIO unaligned read is rejected");
+        Expect(!mapping.TryRead8(ulong.MaxValue, out _),
+               "managed MMIO offset overflow is rejected");
+        GC.Collect();
+        GC.KeepAlive(mapping);
+        Expect(mapping.IsLive && !mapping.TryUnmap(),
+               "managed MMIO remains live when native simulation is unavailable");
+    }
+
     public static int Main()
     {
         TestSuccessfulInventory();
@@ -363,6 +382,7 @@ internal static unsafe class Program
         TestCapacityAndMalformed();
         TestResourceCatalog();
         TestResourceMalformedInput();
+        TestManagedMmioSurface();
         if (s_failures != 0)
         {
             Console.WriteLine("MANAGED_KERNEL_DEVICE_INVENTORY_HOST_TESTS=FAILED failures=" +

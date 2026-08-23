@@ -347,6 +347,68 @@ internal struct GxManagedKernelPciReadResultV1
     internal ulong Reserved1;
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelMmioServicesV1
+{
+    internal const uint ExpectedSize = 88;
+    internal const ulong CapabilityClaim = 1UL << 0;
+    internal const ulong CapabilityMap = 1UL << 1;
+    internal const ulong CapabilityUnmap = 1UL << 2;
+    internal const ulong CapabilityRead = 1UL << 3;
+    internal const ulong CapabilityUncacheable = 1UL << 4;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint ServiceVersion;
+    internal uint Architecture;
+    internal ulong Capabilities;
+    internal ulong ClaimAddress;
+    internal ulong ReleaseAddress;
+    internal ulong MapAddress;
+    internal ulong UnmapAddress;
+    internal ulong ReadAddress;
+    internal uint MaxClaims;
+    internal uint MaxMappings;
+    internal ulong WindowBase;
+    internal ulong WindowLength;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelMmioClaimResultV1
+{
+    internal const uint ExpectedSize = 24;
+    internal uint Size;
+    internal uint AbiVersion;
+    internal ulong Handle;
+    internal ulong Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelMmioMappingResultV1
+{
+    internal const uint ExpectedSize = 48;
+    internal uint Size;
+    internal uint AbiVersion;
+    internal ulong Handle;
+    internal ulong ResourceId;
+    internal ulong Offset;
+    internal ulong Length;
+    internal uint Access;
+    internal uint Reserved0;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelMmioReadResultV1
+{
+    internal const uint ExpectedSize = 32;
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint Width;
+    internal uint Reserved0;
+    internal ulong Value;
+    internal ulong Reserved1;
+}
+
 internal static unsafe class ManagedKernelLayout
 {
     internal static bool IsValid()
@@ -370,6 +432,10 @@ internal static unsafe class ManagedKernelLayout
                sizeof(GxManagedKernelDeviceResourcePublicationV1) == 48 &&
                sizeof(GxManagedKernelPciServicesV1) == 48 &&
                sizeof(GxManagedKernelPciReadResultV1) == 32 &&
+               sizeof(GxManagedKernelMmioServicesV1) == 88 &&
+               sizeof(GxManagedKernelMmioClaimResultV1) == 24 &&
+               sizeof(GxManagedKernelMmioMappingResultV1) == 48 &&
+               sizeof(GxManagedKernelMmioReadResultV1) == 32 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Magic)).ToInt32() == 0 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Version)).ToInt32() == 4 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Size)).ToInt32() == 6 &&
@@ -487,6 +553,12 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Width)).ToInt32() == 8 &&
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Value)).ToInt32() == 16 &&
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Reserved1)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelMmioServicesV1>(nameof(GxManagedKernelMmioServicesV1.ClaimAddress)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelMmioServicesV1>(nameof(GxManagedKernelMmioServicesV1.ReadAddress)).ToInt32() == 56 &&
+               Marshal.OffsetOf<GxManagedKernelMmioServicesV1>(nameof(GxManagedKernelMmioServicesV1.WindowBase)).ToInt32() == 72 &&
+               Marshal.OffsetOf<GxManagedKernelMmioClaimResultV1>(nameof(GxManagedKernelMmioClaimResultV1.Handle)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelMmioMappingResultV1>(nameof(GxManagedKernelMmioMappingResultV1.Offset)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelMmioReadResultV1>(nameof(GxManagedKernelMmioReadResultV1.Value)).ToInt32() == 16 &&
                 ManagedKernelSerialLayout.IsValid() &&
                 ManagedInterruptLayout.IsValid();
     }
@@ -571,6 +643,14 @@ internal static unsafe class ManagedKernelContract
         GxManagedKernelPciServicesV1.CapabilityConfigRead;
     private const ulong PciServicesRequiredCapabilities =
         GxManagedKernelPciServicesV1.CapabilityConfigRead;
+    private const uint MmioServicesAbiVersionV1 = 1;
+    private const uint MmioServicesServiceVersionV1 = 1;
+    private const ulong MmioServicesKnownCapabilities =
+        GxManagedKernelMmioServicesV1.CapabilityClaim |
+        GxManagedKernelMmioServicesV1.CapabilityMap |
+        GxManagedKernelMmioServicesV1.CapabilityUnmap |
+        GxManagedKernelMmioServicesV1.CapabilityRead |
+        GxManagedKernelMmioServicesV1.CapabilityUncacheable;
     internal const ulong MemoryPageSize = 4096;
     internal const uint MemoryMaxPagesPerAllocation = 256;
     internal const uint MemoryMaxLiveAllocations = 16;
@@ -612,6 +692,16 @@ internal static unsafe class ManagedKernelContract
     private static int s_pciServicesInstalled;
     private static ulong s_pciCapabilities;
     private static nuint s_pciConfigReadAddress;
+    private static int s_mmioServicesInstalled;
+    private static ulong s_mmioCapabilities;
+    private static nuint s_mmioClaimAddress;
+    private static nuint s_mmioReleaseAddress;
+    private static nuint s_mmioMapAddress;
+    private static nuint s_mmioUnmapAddress;
+    private static nuint s_mmioReadAddress;
+    private static uint s_mmioMaxClaims;
+    private static int s_phase13Run;
+    private static int s_phase13TeardownRun;
     private static int s_pciReadBeforeInstallNegativeLogged;
     private static int s_phase7Run;
     private static int s_phase7AccountingRun;
@@ -1353,6 +1443,139 @@ internal static unsafe class ManagedKernelContract
         return ManagedOk;
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallMmioServices")]
+    internal static uint InstallMmioServices(uint requestedAbiVersion,
+                                              nuint serviceAddress)
+    {
+        if (requestedAbiVersion != MmioServicesAbiVersionV1) return UnsupportedAbi;
+        if (!IsInitialized || s_deviceResourcesInstalled == 0 ||
+            s_mmioServicesInstalled != 0) return s_mmioServicesInstalled != 0
+                ? AlreadyInitialized : NotInitialized;
+        if (s_lifecycleState != (int)LifecycleState.Started ||
+            serviceAddress == 0 ||
+            !IsRangeValid(serviceAddress,
+                (nuint)GxManagedKernelMmioServicesV1.ExpectedSize)) {
+            return s_lifecycleState != (int)LifecycleState.Started
+                ? InvalidState : InvalidArgument;
+        }
+        GxManagedKernelMmioServicesV1* service =
+            (GxManagedKernelMmioServicesV1*)serviceAddress;
+        if (service->Size != GxManagedKernelMmioServicesV1.ExpectedSize ||
+            service->AbiVersion != MmioServicesAbiVersionV1 ||
+            service->ServiceVersion != MmioServicesServiceVersionV1 ||
+            service->Architecture != ArchitectureX64 ||
+            service->Capabilities != MmioServicesKnownCapabilities ||
+            service->ClaimAddress == 0 || service->ReleaseAddress == 0 ||
+            service->MapAddress == 0 || service->UnmapAddress == 0 ||
+            service->ReadAddress == 0 || service->MaxClaims != DeviceResourceMaxClaims ||
+            service->MaxMappings != ManagedDeviceResourceRuntimeCatalog.MaxMappings ||
+            service->WindowBase == 0 ||
+            service->WindowLength == 0 ||
+            service->WindowBase > ulong.MaxValue - service->WindowLength) {
+            return InvalidArgument;
+        }
+        s_mmioCapabilities = service->Capabilities;
+        s_mmioClaimAddress = (nuint)service->ClaimAddress;
+        s_mmioReleaseAddress = (nuint)service->ReleaseAddress;
+        s_mmioMapAddress = (nuint)service->MapAddress;
+        s_mmioUnmapAddress = (nuint)service->UnmapAddress;
+        s_mmioReadAddress = (nuint)service->ReadAddress;
+        s_mmioMaxClaims = service->MaxClaims;
+        s_mmioServicesInstalled = 1;
+        return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_SERVICES_INSTALLED\r\n"u8)
+            ? ManagedOk : InvalidState;
+    }
+
+    internal static bool MmioServicesInstalled =>
+        s_mmioServicesInstalled != 0;
+
+    internal static bool TryMmioClaim(ulong resourceId, uint driverId,
+                                      uint expectedOwnerKind,
+                                      uint expectedOwnerId,
+                                      out ulong handle)
+    {
+        GxManagedKernelMmioClaimResultV1 result = default;
+        handle = 0;
+        if (s_mmioServicesInstalled == 0 || resourceId == 0 || driverId == 0 ||
+            s_mmioClaimAddress == 0) return false;
+        delegate* unmanaged<ulong, uint, uint, uint, nuint, nuint, uint> callback =
+            (delegate* unmanaged<ulong, uint, uint, uint, nuint, nuint, uint>)
+                s_mmioClaimAddress;
+        uint status = callback(resourceId, driverId, expectedOwnerKind,
+                               expectedOwnerId, (nuint)(&result),
+                               (nuint)GxManagedKernelMmioClaimResultV1.ExpectedSize);
+        if (status != ManagedOk || result.Size !=
+                GxManagedKernelMmioClaimResultV1.ExpectedSize ||
+            result.AbiVersion != MmioServicesAbiVersionV1 || result.Handle == 0 ||
+            result.Reserved != 0) return false;
+        handle = result.Handle;
+        return true;
+    }
+
+    internal static bool TryMmioRelease(ulong handle, uint driverId)
+    {
+        if (s_mmioServicesInstalled == 0 || handle == 0 || driverId == 0 ||
+            s_mmioReleaseAddress == 0) return false;
+        delegate* unmanaged<ulong, uint, uint> callback =
+            (delegate* unmanaged<ulong, uint, uint>)s_mmioReleaseAddress;
+        return callback(handle, driverId) == ManagedOk;
+    }
+
+    internal static bool TryMmioMap(ulong claimHandle, uint driverId,
+                                    ulong offset, ulong length, uint access,
+                                    ulong resourceId, out ulong mappingHandle)
+    {
+        GxManagedKernelMmioMappingResultV1 result = default;
+        mappingHandle = 0;
+        if (s_mmioServicesInstalled == 0 || claimHandle == 0 || driverId == 0 ||
+            length == 0 || s_mmioMapAddress == 0) return false;
+        delegate* unmanaged<ulong, uint, ulong, ulong, uint, nuint, nuint, uint>
+            callback = (delegate* unmanaged<ulong, uint, ulong, ulong, uint,
+                         nuint, nuint, uint>)s_mmioMapAddress;
+        uint status = callback(claimHandle, driverId, offset, length, access,
+                               (nuint)(&result),
+                               (nuint)GxManagedKernelMmioMappingResultV1.ExpectedSize);
+        if (status != ManagedOk || result.Size !=
+                GxManagedKernelMmioMappingResultV1.ExpectedSize ||
+            result.AbiVersion != MmioServicesAbiVersionV1 || result.Handle == 0 ||
+            result.ResourceId != resourceId || result.Offset != offset ||
+            result.Length != length || result.Access != access ||
+            result.Reserved0 != 0) return false;
+        mappingHandle = result.Handle;
+        return true;
+    }
+
+    internal static bool TryMmioUnmap(ulong mappingHandle, uint driverId)
+    {
+        if (s_mmioServicesInstalled == 0 || mappingHandle == 0 || driverId == 0 ||
+            s_mmioUnmapAddress == 0) return false;
+        delegate* unmanaged<ulong, uint, uint> callback =
+            (delegate* unmanaged<ulong, uint, uint>)s_mmioUnmapAddress;
+        return callback(mappingHandle, driverId) == ManagedOk;
+    }
+
+    internal static bool TryMmioRead(ulong mappingHandle, uint driverId,
+                                     ulong offset, uint width, out ulong value)
+    {
+        GxManagedKernelMmioReadResultV1 result = default;
+        value = 0;
+        if (s_mmioServicesInstalled == 0 || mappingHandle == 0 || driverId == 0 ||
+            s_mmioReadAddress == 0) return false;
+        delegate* unmanaged<ulong, uint, ulong, uint, nuint, nuint, uint> callback =
+            (delegate* unmanaged<ulong, uint, ulong, uint, nuint, nuint, uint>)
+                s_mmioReadAddress;
+        uint status = callback(mappingHandle, driverId, offset, width,
+                               (nuint)(&result),
+                               (nuint)GxManagedKernelMmioReadResultV1.ExpectedSize);
+        if (status != ManagedOk || result.Size !=
+                GxManagedKernelMmioReadResultV1.ExpectedSize ||
+            result.AbiVersion != MmioServicesAbiVersionV1 ||
+            result.Width != width || result.Reserved0 != 0 ||
+            result.Reserved1 != 0) return false;
+        value = result.Value;
+        return true;
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "GxManagedQueryDeviceResourceSummary")]
     internal static uint QueryDeviceResourceSummary(uint requestedAbiVersion,
                                                     nuint outputAddress,
@@ -1449,6 +1672,172 @@ internal static unsafe class ManagedKernelContract
                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_RESOURCE_ACCOUNTING_RESTORED\r\n"u8) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS\r\n"u8))
                 return InvalidState;
+            return ManagedOk;
+        }
+        return InvalidArgument;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase13")]
+    internal static uint RunPhase13(uint stage)
+    {
+        const uint phase13DriverId = 0xD013;
+        const uint targetOwnerId = 0x808610D3;
+        const ulong statusOffset = 0x8;
+        const ulong mapLength = 0x10;
+        ManagedDeviceResource targetResource = default;
+        bool targetResourceFound = false;
+
+        if (!IsInitialized || s_lifecycleState != (int)LifecycleState.Started)
+            return IsInitialized ? InvalidState : NotInitialized;
+        if (stage == 1)
+        {
+            if (s_phase13Run != 0 || s_deviceResourcesInstalled == 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                s_mmioServicesInstalled == 0 || s_deviceInventory == null)
+                return InvalidState;
+            if (!s_deviceInventory.TryFindPciDevice(0, 0, 2, 0,
+                    out ManagedDevice target) || target.VendorId != 0x8086 ||
+                target.DeviceId != 0x10D3 || target.ClassCode != 0x02 ||
+                target.Subclass != 0x00 || target.ProgrammingInterface != 0x00)
+                return NotFound;
+
+            for (uint index = 0; index !=
+                     ManagedDeviceResourceRuntimeCatalog.ResourceCount; ++index)
+            {
+                if (!ManagedDeviceResourceRuntimeCatalog.TryGetResource(index,
+                        out ManagedDeviceResource candidate) ||
+                    candidate.ResourceType !=
+                        GxManagedKernelDeviceResourceV1.ResourceTypeMmio ||
+                    candidate.OwnerDeviceKind != GxManagedKernelDeviceV1.DeviceKindPci ||
+                    candidate.OwnerDeviceId != targetOwnerId ||
+                    candidate.OwnerSegment != 0 || candidate.OwnerBus != 0 ||
+                    candidate.OwnerDevice != 2 || candidate.OwnerFunction != 0 ||
+                    (candidate.Flags & (GxManagedKernelDeviceResourceV1.FlagReadable |
+                                        GxManagedKernelDeviceResourceV1.FlagMemory |
+                                        GxManagedKernelDeviceResourceV1.FlagCacheUncached |
+                                        GxManagedKernelDeviceResourceV1.FlagPciAssigned)) !=
+                        (GxManagedKernelDeviceResourceV1.FlagReadable |
+                         GxManagedKernelDeviceResourceV1.FlagMemory |
+                         GxManagedKernelDeviceResourceV1.FlagCacheUncached |
+                         GxManagedKernelDeviceResourceV1.FlagPciAssigned))
+                    continue;
+                targetResource = candidate;
+                targetResourceFound = true;
+                break;
+            }
+            if (!targetResourceFound) return NotFound;
+            if (targetResource.Length < mapLength ||
+                targetResource.Length <= statusOffset ||
+                !ManagedDeviceResourceRuntimeCatalog.TryClaim(
+                    in targetResource, phase13DriverId,
+                    GxManagedKernelDeviceV1.DeviceKindPci, targetOwnerId))
+                return InvalidState;
+
+            if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_MAPPING_REQUESTED\r\n"u8) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_BDF=0x"u8,
+                                        0x0000000000000200) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_VENDOR=0x"u8,
+                                        target.VendorId) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_DEVICE=0x"u8,
+                                        target.DeviceId) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_BAR_BASE=0x"u8,
+                                        targetResource.PhysicalBase) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_BAR_LENGTH=0x"u8,
+                                        targetResource.Length) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_RESOURCE_OFFSET=0x"u8,
+                                        0) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_RESOURCE_LENGTH=0x"u8,
+                                        mapLength))
+            {
+                ManagedDeviceResourceRuntimeCatalog.TryRelease(in targetResource,
+                                                                phase13DriverId);
+                return InvalidState;
+            }
+
+            if (!ManagedDeviceResourceRuntimeCatalog.TryMap(
+                    in targetResource, phase13DriverId, 0, mapLength, 1,
+                    out ManagedMmioMapping? mapping) || mapping == null)
+            {
+                ManagedDeviceResourceRuntimeCatalog.TryRelease(in targetResource,
+                                                                phase13DriverId);
+                return InvalidState;
+            }
+            if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_MAPPING_CREATED\r\n"u8) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_MAPPING_HANDLE=0x"u8,
+                                        mapping.Handle))
+                return InvalidState;
+
+            if (!mapping.TryRead32(statusOffset, out uint statusValue) ||
+                statusValue == 0xFFFFFFFFU ||
+                !mapping.TryRead32(statusOffset, out uint repeatedStatus) ||
+                repeatedStatus != statusValue)
+                return InvalidState;
+            if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_READ\r\n"u8) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_REGISTER_OFFSET=0x"u8,
+                                        statusOffset) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_REGISTER_VALUE=0x"u8,
+                                        statusValue))
+                return InvalidState;
+
+            if (ManagedDeviceResourceRuntimeCatalog.TryRelease(
+                    in targetResource, phase13DriverId) ||
+                mapping.TryRead32(mapping.Length, out _) ||
+                mapping.TryRead32(mapping.Length - 3, out _) ||
+                mapping.TryRead16(1, out _) ||
+                new ManagedMmioMapping(targetResource.ResourceId, phase13DriverId,
+                                       0xFFFFFFFF00000001, 4).TryRead32(0, out _))
+                return InvalidState;
+
+            GC.Collect();
+            GC.KeepAlive(mapping);
+            if (!mapping.TryRead32(statusOffset, out uint gcStatus) ||
+                gcStatus != statusValue || !KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_MMIO_GC_SURVIVAL_OK\r\n"u8))
+                return InvalidState;
+            if (!mapping.TryUnmap() || mapping.IsLive || mapping.TryUnmap() ||
+                mapping.TryRead32(statusOffset, out _) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_MAPPING_TEARDOWN\r\n"u8))
+                return InvalidState;
+            if (!ManagedDeviceResourceRuntimeCatalog.TryRelease(
+                    in targetResource, phase13DriverId) ||
+                ManagedDeviceResourceRuntimeCatalog.TryMap(
+                    in targetResource, phase13DriverId, 0, mapLength, 1,
+                    out _))
+                return InvalidState;
+
+            for (uint cycle = 0; cycle != 3; ++cycle)
+            {
+                if (!ManagedDeviceResourceRuntimeCatalog.TryClaim(
+                        in targetResource, phase13DriverId,
+                        GxManagedKernelDeviceV1.DeviceKindPci, targetOwnerId) ||
+                    !ManagedDeviceResourceRuntimeCatalog.TryMap(
+                        in targetResource, phase13DriverId, 0, mapLength, 1,
+                        out ManagedMmioMapping? cycleMapping) ||
+                    cycleMapping == null || !cycleMapping.TryUnmap() ||
+                    !ManagedDeviceResourceRuntimeCatalog.TryRelease(
+                        in targetResource, phase13DriverId))
+                    return InvalidState;
+            }
+            if (!ManagedDeviceResourceRuntimeCatalog.ValidateInvariants() ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_NEGATIVE_TESTS_OK\r\n"u8))
+                return InvalidState;
+            s_phase13Run = 1;
+            return ManagedOk;
+        }
+        if (stage == 2)
+        {
+            if (s_phase13Run == 0 || s_phase13TeardownRun != 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.ValidateInvariants() ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            GC.Collect();
+            if (!ManagedDeviceResourceRuntimeCatalog.ValidateInvariants() ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_ACCOUNTING_RESTORED\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE13_PASS\r\n"u8))
+                return InvalidState;
+            s_phase13TeardownRun = 1;
             return ManagedOk;
         }
         return InvalidArgument;

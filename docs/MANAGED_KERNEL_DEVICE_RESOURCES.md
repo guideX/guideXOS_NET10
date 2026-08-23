@@ -1,17 +1,19 @@
 # ManagedKernel Phase 12: Device Resources and Ownership
 
-Phase 12 completes bounded resource discovery for the resources that the
-current guideXOS bootstrap can identify authoritatively without changing
-hardware state. The native side publishes an immutable snapshot; ManagedKernel
-provides bounded queries and ownership claims over that snapshot. The accepted
-classification is:
+Phase 12 completed bounded resource discovery for the resources that the
+guideXOS bootstrap could identify authoritatively without changing hardware
+state. The native side publishes an immutable snapshot; ManagedKernel provides
+bounded queries and ownership claims over that snapshot. The accepted Phase 12
+classification was:
 
 ```text
 PHASE 12 RESOURCE DISCOVERY COMPLETE — MMIO ACCESS DEFERRED
 ```
 
-This is a discovery and ownership milestone. It is not a claim that arbitrary
-PCI BAR mapping or generic MMIO execution is safe in the current substrate.
+This remains the historical Phase 12 boundary. Phase 13 adds a separate
+bounded, uncacheable, read-only MMIO capability for an already-published and
+claimed resource; it does not add arbitrary physical mapping. See
+`MANAGED_KERNEL_MMIO_MAPPING.md` for the current mapping architecture.
 
 ## Substrate audit
 
@@ -28,9 +30,11 @@ The current loader and QEMU profile provide the following authoritative facts:
 - The existing PCI path does not retain a firmware-assigned PCI resource
   descriptor source. BAR sizing by writing all ones and restoring the BAR is
   outside the read-only discovery boundary and is not performed.
-- The VM substrate supplies identity/page-table mappings and allocation
-  ledgers, but no generic physical-to-virtual MMIO mapping API and no PAT/MTRR
-  or equivalent cache-type policy service.
+- At the Phase 12 boundary, the VM substrate supplied identity/page-table
+  mappings and allocation ledgers, but no generic physical-to-virtual MMIO
+  mapping API and no proven PAT/MTRR or equivalent cache-type policy service.
+  Phase 13 closes this specific gap with a dedicated native-owned virtual
+  window and a fail-closed UC policy.
 - Existing COM1 and i8042 drivers retain native-authoritative port-I/O access.
   Managed code receives resource facts and claims; it does not receive raw
   PCI configuration-write authority, arbitrary physical mapping authority, or
@@ -98,9 +102,11 @@ for already available raw values; it does not read or write PCI configuration
 space and does not publish a BAR unless an authoritative assigned value is
 available through a future safe source.
 
-Therefore Phase 6 PCI descriptors continue to report
-`ResourceCount == 0`, while Phase 12 publishes the three independently
-authoritative COM1/i8042 platform resources.
+Therefore, at the Phase 12 boundary, Phase 6 PCI descriptors continued to report
+`ResourceCount == 0` in the Phase 12 identity snapshot, while Phase 12
+published the three independently authoritative COM1/i8042 platform
+resources. Phase 13 separately publishes the one-page, firmware-authorized
+MMIO representation for `0000:00:02.0` after its side-effect-free BAR decode.
 
 ## Managed catalog and ownership
 
@@ -136,12 +142,13 @@ teardown independently of the NativeAOT boot path.
 |---|---|---|
 | A — authoritative discovery | Complete | Native platform snapshot, fixed ABI, validation, six-device PCI identity audit, and three fresh QEMU boots. |
 | B — managed ownership/capability | Complete | Bounded queries, owner-checked claims, wrong-owner rejection, GC survival, release, and accounting markers. |
-| C — safe generic MMIO execution | Deferred | No generic mapping service and no cache-type/PAT/MTRR policy. No arbitrary mapping or managed PCI configuration writes were added. |
+| C — safe generic MMIO execution | Deferred in Phase 12 | Phase 13 now provides only the bounded UC mapping proof described in `MANAGED_KERNEL_MMIO_MAPPING.md`; arbitrary mapping and managed PCI configuration writes remain unsupported. |
 
-The deliberate next step for Level C is to add a native cache-policy and
-mapping substrate first, then publish only assigned, validated ranges with an
-explicit access capability. Until that exists, the honest result is discovery
-complete with MMIO access deferred.
+The deliberate next step for Level C in the Phase 12 record was to add a native
+cache-policy and mapping substrate first, then publish only assigned, validated
+ranges with an explicit access capability. Phase 13 supplies that bounded
+substrate; the remaining unsupported operations are listed in
+`MANAGED_KERNEL_MMIO_MAPPING.md`.
 
 ## Verification record
 

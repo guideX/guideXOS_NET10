@@ -234,15 +234,30 @@ static uint64_t entry_address(uint64_t entry)
     return entry & GXOS_X64_PAGING_PHYSICAL_MASK;
 }
 
-static int arena_contains_page(const GXOS_VM_PAGING *paging,
+static int range_contains_page(uint64_t range_base, uint64_t range_length,
                                uint64_t virtual_page)
 {
     uint64_t end;
-    if (paging == 0 || paging->arena_length == 0 ||
-        !range_end(paging->arena_base, paging->arena_length, &end) ||
+    if (range_length == 0 ||
+        !range_end(range_base, range_length, &end) ||
         virtual_page % GXOS_VM_PAGE_SIZE != 0) return 0;
-    return virtual_page >= paging->arena_base &&
+    return virtual_page >= range_base &&
         virtual_page <= end - GXOS_VM_PAGE_SIZE;
+}
+
+static int paging_range_is_valid(const GXOS_VM_PAGING *paging,
+                                 uint64_t range_base,
+                                 uint64_t range_length)
+{
+    uint64_t range_end_address;
+    if (paging == 0 || range_length == 0 ||
+        !canonical48(range_base) ||
+        !range_end(range_base, range_length, &range_end_address) ||
+        pml4_index(range_base) != pml4_index(range_end_address - 1U) ||
+        pml4_index(range_base) != paging->arena_pml4_index) {
+        return 0;
+    }
+    return 1;
 }
 
 static GXOS_VM_PAGING_STATUS table_alias(
@@ -608,12 +623,52 @@ static GXOS_VM_PAGING_STATUS allocate_table(
     return status;
 }
 
+static GXOS_VM_PAGING_STATUS gxos_vm_paging_map_page_with_flags_in_range(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_page,
+    uint64_t physical_page,
+    uint32_t writable,
+    uint32_t executable,
+    uint64_t leaf_flags,
+    uint64_t allowed_base,
+    uint64_t allowed_length);
+
 GXOS_VM_PAGING_STATUS gxos_vm_paging_map_page(
     GXOS_VM_PAGING *paging,
     uint64_t virtual_page,
     uint64_t physical_page,
     uint32_t writable,
     uint32_t executable)
+{
+    return gxos_vm_paging_map_page_with_flags_in_range(
+        paging, virtual_page, physical_page, writable, executable, 0,
+        paging == 0 ? 0 : paging->arena_base,
+        paging == 0 ? 0 : paging->arena_length);
+}
+
+GXOS_VM_PAGING_STATUS gxos_vm_paging_map_page_with_flags(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_page,
+    uint64_t physical_page,
+    uint32_t writable,
+    uint32_t executable,
+    uint64_t leaf_flags)
+{
+    return gxos_vm_paging_map_page_with_flags_in_range(
+        paging, virtual_page, physical_page, writable, executable, leaf_flags,
+        paging == 0 ? 0 : paging->arena_base,
+        paging == 0 ? 0 : paging->arena_length);
+}
+
+static GXOS_VM_PAGING_STATUS gxos_vm_paging_map_page_with_flags_in_range(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_page,
+    uint64_t physical_page,
+    uint32_t writable,
+    uint32_t executable,
+    uint64_t leaf_flags,
+    uint64_t allowed_base,
+    uint64_t allowed_length)
 {
     volatile uint64_t *pml4;
     volatile uint64_t *pdpt;
@@ -631,7 +686,12 @@ GXOS_VM_PAGING_STATUS gxos_vm_paging_map_page(
         physical_page % GXOS_VM_PAGE_SIZE != 0) {
         return GXOS_VM_PAGING_STATUS_ALIGNMENT;
     }
-    if (!arena_contains_page(paging, virtual_page)) {
+    if ((leaf_flags & ~(GXOS_X64_PAGING_ENTRY_WRITE_THROUGH |
+                        GXOS_X64_PAGING_ENTRY_CACHE_DISABLE)) != 0) {
+        return GXOS_VM_PAGING_STATUS_INVALID_ARGUMENT;
+    }
+    if (!paging_range_is_valid(paging, allowed_base, allowed_length) ||
+        !range_contains_page(allowed_base, allowed_length, virtual_page)) {
         return GXOS_VM_PAGING_STATUS_OUTSIDE_ARENA;
     }
     pml4 = (volatile uint64_t *)paging->root_alias;
@@ -651,7 +711,7 @@ GXOS_VM_PAGING_STATUS gxos_vm_paging_map_page(
     if (!executable && paging->nx_enabled) {
         flags |= GXOS_X64_PAGING_ENTRY_NO_EXECUTE;
     }
-    *pte = physical_page | flags;
+    *pte = physical_page | flags | leaf_flags;
     invalidate_page(paging, virtual_page);
     return GXOS_VM_PAGING_STATUS_OK;
 }
@@ -664,6 +724,37 @@ GXOS_VM_PAGING_STATUS gxos_vm_paging_map_range(
     uint32_t writable,
     uint32_t executable)
 {
+    return gxos_vm_paging_map_range_with_flags(
+        paging, virtual_start, physical_start, page_count,
+        writable, executable, 0);
+}
+
+GXOS_VM_PAGING_STATUS gxos_vm_paging_map_range_with_flags(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_start,
+    uint64_t physical_start,
+    uint64_t page_count,
+    uint32_t writable,
+    uint32_t executable,
+    uint64_t leaf_flags)
+{
+    return gxos_vm_paging_map_range_with_flags_in_window(
+        paging, virtual_start, physical_start, page_count, writable,
+        executable, leaf_flags, paging == 0 ? 0 : paging->arena_base,
+        paging == 0 ? 0 : paging->arena_length);
+}
+
+GXOS_VM_PAGING_STATUS gxos_vm_paging_map_range_with_flags_in_window(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_start,
+    uint64_t physical_start,
+    uint64_t page_count,
+    uint32_t writable,
+    uint32_t executable,
+    uint64_t leaf_flags,
+    uint64_t window_base,
+    uint64_t window_length)
+{
     uint64_t index;
     if (page_count == 0 || page_count > GXOS_VM_MAX_COMMITMENTS ||
         virtual_start % GXOS_VM_PAGE_SIZE != 0 ||
@@ -672,15 +763,21 @@ GXOS_VM_PAGING_STATUS gxos_vm_paging_map_range(
         page_count > (UINT64_MAX - physical_start) / GXOS_VM_PAGE_SIZE) {
         return GXOS_VM_PAGING_STATUS_INVALID_ARGUMENT;
     }
+    if ((leaf_flags & ~(GXOS_X64_PAGING_ENTRY_WRITE_THROUGH |
+                        GXOS_X64_PAGING_ENTRY_CACHE_DISABLE)) != 0) {
+        return GXOS_VM_PAGING_STATUS_INVALID_ARGUMENT;
+    }
     for (index = 0; index != page_count; ++index) {
-        GXOS_VM_PAGING_STATUS status = gxos_vm_paging_map_page(
+        GXOS_VM_PAGING_STATUS status = gxos_vm_paging_map_page_with_flags_in_range(
             paging, virtual_start + index * GXOS_VM_PAGE_SIZE,
-            physical_start + index * GXOS_VM_PAGE_SIZE, writable, executable);
+            physical_start + index * GXOS_VM_PAGE_SIZE, writable, executable,
+            leaf_flags, window_base, window_length);
         if (status != GXOS_VM_PAGING_STATUS_OK) {
             while (index != 0) {
                 --index;
-                (void)gxos_vm_paging_unmap_page(
-                    paging, virtual_start + index * GXOS_VM_PAGE_SIZE, 0);
+                (void)gxos_vm_paging_unmap_page_in_window(
+                    paging, virtual_start + index * GXOS_VM_PAGE_SIZE, 0,
+                    window_base, window_length);
             }
             return status;
         }
@@ -688,10 +785,12 @@ GXOS_VM_PAGING_STATUS gxos_vm_paging_map_range(
     return GXOS_VM_PAGING_STATUS_OK;
 }
 
-GXOS_VM_PAGING_STATUS gxos_vm_paging_unmap_page(
+GXOS_VM_PAGING_STATUS gxos_vm_paging_unmap_page_in_window(
     GXOS_VM_PAGING *paging,
     uint64_t virtual_page,
-    uint64_t *physical_page_out)
+    uint64_t *physical_page_out,
+    uint64_t window_base,
+    uint64_t window_length)
 {
     volatile uint64_t *pml4;
     volatile uint64_t *pdpt;
@@ -706,7 +805,8 @@ GXOS_VM_PAGING_STATUS gxos_vm_paging_unmap_page(
     if (virtual_page % GXOS_VM_PAGE_SIZE != 0) {
         return GXOS_VM_PAGING_STATUS_ALIGNMENT;
     }
-    if (!arena_contains_page(paging, virtual_page)) {
+    if (!paging_range_is_valid(paging, window_base, window_length) ||
+        !range_contains_page(window_base, window_length, virtual_page)) {
         return GXOS_VM_PAGING_STATUS_OUTSIDE_ARENA;
     }
     pml4 = (volatile uint64_t *)paging->root_alias;
@@ -749,6 +849,17 @@ GXOS_VM_PAGING_STATUS gxos_vm_paging_unmap_page(
     pt[pt_index(virtual_page)] = 0;
     invalidate_page(paging, virtual_page);
     return GXOS_VM_PAGING_STATUS_OK;
+}
+
+GXOS_VM_PAGING_STATUS gxos_vm_paging_unmap_page(
+    GXOS_VM_PAGING *paging,
+    uint64_t virtual_page,
+    uint64_t *physical_page_out)
+{
+    return gxos_vm_paging_unmap_page_in_window(
+        paging, virtual_page, physical_page_out,
+        paging == 0 ? 0 : paging->arena_base,
+        paging == 0 ? 0 : paging->arena_length);
 }
 
 static uint64_t round_down_page(uint64_t value)
