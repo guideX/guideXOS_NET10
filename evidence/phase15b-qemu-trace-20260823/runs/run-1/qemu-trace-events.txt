@@ -1,0 +1,17 @@
+e1000x_rx_can_recv
+e1000e_rx_can_recv_rings_full
+e1000e_rx_has_buffers
+e1000x_rx_link_down
+e1000x_rx_disabled
+e1000x_rx_oversized
+e1000e_rx_flt_ucast_match
+e1000e_rx_flt_ucast_mismatch
+e1000e_rx_flt_inexact_mismatch
+e1000e_rx_receive_iov
+e1000e_rx_descr
+e1000e_rx_desc_buff_write
+e1000e_rx_written_to_guest
+e1000e_rx_not_written_to_guest
+e1000e_rx_set_rctl
+e1000e_rx_set_rdt
+e1000e_core_write

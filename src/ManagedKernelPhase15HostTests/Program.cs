@@ -1,4 +1,5 @@
 using System;
+using System.Security.Cryptography;
 using GuideXOS.Net10.ManagedKernel;
 
 internal static class Program
@@ -12,6 +13,9 @@ internal static class Program
         Check(ManagedE1000Protocol.TryBuildRxTestFrame(frame, destination) &&
               ManagedE1000Protocol.TryValidateRxTestFrame(frame, destination),
             "valid-phase15-frame");
+        Check(Convert.ToHexString(SHA256.HashData(frame)) ==
+              "CAFF6094F057FBBFE83BF82A83072CE36D03C40EFAF23C1F24E50D490445D68E",
+            "phase15-frame-hash-preserved");
 
         byte[] descriptor = new byte[(int)ManagedE1000Protocol.DescriptorSize];
         Check(ManagedE1000Protocol.TryBuildRxDescriptor(
@@ -68,6 +72,34 @@ internal static class Program
         Check(!ManagedE1000Protocol.TryAcceptRxDescriptorIndex(
                   2, 3, ManagedE1000Protocol.RingCount, out _),
             "duplicate-or-out-of-order-rx-completion-rejected");
+        Check(ManagedE1000Protocol.TryValidateRxReadyState(
+                  ManagedE1000Protocol.StatusLinkUp,
+                  ManagedE1000Protocol.ReceiveEnable, 0, 7,
+                  ManagedE1000Protocol.RingCount),
+            "rx-ready-state-with-seven-posted-descriptors");
+        Check(!ManagedE1000Protocol.TryValidateRxReadyState(
+                  ManagedE1000Protocol.StatusLinkUp,
+                  ManagedE1000Protocol.ReceiveEnable, 0, 0,
+                  ManagedE1000Protocol.RingCount),
+            "rx-ready-state-empty-ring-rejected");
+        Check(!ManagedE1000Protocol.TryValidateRxReadyState(
+                  0, ManagedE1000Protocol.ReceiveEnable, 0, 7,
+                  ManagedE1000Protocol.RingCount),
+            "rx-ready-state-link-down-rejected");
+        Check(!ManagedE1000Protocol.TryValidateRxReadyState(
+                  ManagedE1000Protocol.StatusLinkUp, 0, 0, 7,
+                  ManagedE1000Protocol.RingCount),
+            "rx-ready-state-disabled-rctl-rejected");
+        Check(!ManagedE1000Protocol.TryValidateRxReadyState(
+                  ManagedE1000Protocol.StatusLinkUp,
+                  ManagedE1000Protocol.ReceiveEnable, 8, 7,
+                  ManagedE1000Protocol.RingCount),
+            "rx-ready-state-head-bounds-rejected");
+        Check(!ManagedE1000Protocol.TryValidateRxReadyState(
+                  ManagedE1000Protocol.StatusLinkUp,
+                  ManagedE1000Protocol.ReceiveEnable, 0, 8,
+                  ManagedE1000Protocol.RingCount),
+            "rx-ready-state-tail-bounds-rejected");
         Check(ManagedE1000Protocol.TryPrepareRxDescriptor(
                   descriptor, 0x12345000) && descriptor[12] == 0 && descriptor[13] == 0 &&
               descriptor[8] == 0 && descriptor[9] == 0,

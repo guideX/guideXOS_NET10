@@ -28,6 +28,7 @@ internal static class ManagedE1000Protocol
     internal const byte RxErrorMask = 0xFF;
     internal const uint RxFrameLength = MinimumEthernetFrameLength;
     internal const uint RxTestSequence = 0x15000001;
+    internal const uint StatusLinkUp = 1U << 1;
 
     internal const ulong RegCtrl = 0x0000;
     internal const ulong RegStatus = 0x0008;
@@ -103,6 +104,16 @@ internal static class ManagedE1000Protocol
         nextIndex = 0;
         return expectedIndex == observedIndex &&
                TryAdvanceRing(expectedIndex, ringCount, out nextIndex);
+    }
+
+    internal static bool TryValidateRxReadyState(uint status, uint rctl,
+                                                  uint rdh, uint rdt,
+                                                  uint ringCount)
+    {
+        return ringCount != 0 &&
+               (status & StatusLinkUp) != 0 &&
+               (rctl & ReceiveEnable) != 0 &&
+               rdh < ringCount && rdt < ringCount && rdh != rdt;
     }
 
     internal static bool TryValidateMmioWrite(ulong offset, uint width,

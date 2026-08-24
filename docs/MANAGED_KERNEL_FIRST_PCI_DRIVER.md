@@ -133,12 +133,61 @@ proof.  The guest emits `MANAGED_E1000_RX_READY` only after the native-owned
 descriptor and packet-buffer allocations, RDBAL/RDBAH/RDLEN/RDH/RDT, and RCTL
 configuration are live.  The host harness then sends exactly one 60-byte
 Ethernet frame through QEMU's documented local UDP `dgram` backend.  The
-backend was selected because it is host-only, needs no Internet, TAP device,
-administrator privilege, or external infrastructure.  The installed Windows
-QEMU 11.0.0 dgram backend was also tested directly; it accepted the local
-configuration and host datagram but did not produce an RX descriptor
-completion in this environment, so the authoritative hardware result remains
-deferred (Outcome B) until a compatible local peer is available.
+backend is host-only, needs no Internet, TAP device, administrator privilege,
+or external infrastructure.
+
+### Phase 15 Outcome B and Phase 15B closure
+
+The first unchanged Phase 15 reproduction was truthful Outcome B: the host
+sent one frame and the guest reached its bounded RX deferral without claiming
+completion.  Phase 15B added an independent QEMU `filter-dump` PCAP on the
+actual `net0` dgram backend and installed-QEMU receive trace events.  The
+PCAP parser requires the destination MAC, source MAC, EtherType, signature,
+sequence, length, exact bytes, and SHA-256; it does not accept packet count
+alone.
+
+The initial all-direction capture proved the Phase 15 frame entered QEMU's
+netdev, but the receive trace showed no e1000e callback.  The decisive failure
+logs also showed that the serial `RX_READY` observation and Windows UDP send
+could occur after the original 50-million-iteration guest poll had already
+timed out.  Thus the frame was independently present at the QEMU dgram
+frontier, while the guest had already emitted the truthful deferred result.
+The guest snapshot ruled out the ring hypotheses: before injection the
+hardware-visible values were `STATUS=0x00080283` (link up),
+`RCTL=0x04008002` (receive enabled, broadcast accepted, 2048-byte buffers,
+strip CRC), `RDBAL=0x05289000` (run-dependent native DMA address),
+`RDBAH=0`, `RDLEN=0x80`, `RDH=0`, and `RDT=7`.  The eight-descriptor ring was
+therefore nonempty; `RDH==RDT` was not the defect.
+
+The narrow fix is a bounded receive-readiness barrier.  The driver validates
+link-up, RCTL enable, descriptor bounds, and `RDH != RDT`, re-posts the
+hardware-visible tail, and emits `MANAGED_E1000_RX_CONFIGURED` before
+`MANAGED_E1000_RX_READY`.  While waiting for this single frame it periodically
+re-posts the unchanged owned tail, which is safe e1000 ownership maintenance
+and causes QEMU e1000e to flush a packet held during a transient
+`can_receive=false` window.  The bounded poll window is one billion guest
+iterations, not a wall-clock sleep; an absent frame still fails closed and
+tears down.  The authoritative harness uses
+`filter-dump,...,queue=tx`, the installed QEMU direction that captures
+host-to-guest datagrams.  This avoids the observed all-direction diagnostic
+perturbation while preserving an independent PCAP boundary.
+
+Three fresh Phase 15B boots now prove the complete path:
+
+`REAL HOST -> QEMU DGRAM -> E1000 -> PCI DMA -> MANAGED C# RECEIVE`
+
+Each produced exactly one 60-byte PCAP match with SHA-256
+`CAFF6094F057FBBFE83BF82A83072CE36D03C40EFAF23C1F24E50D490445D68E`, one
+hardware DD/EOP completion, one managed frame validation, one recycle, GC
+survival, teardown, and accounting restoration.  Phase 14 authentic TX
+remains green.  This project now proves:
+
+`REAL MANAGED E1000 TX AND RX DMA`
+
+It still does not prove interrupt-driven NIC operation, INTx/MSI/MSI-X,
+Ethernet protocol handling, ARP, IP networking, sockets, or Internet
+connectivity.  Scatter/gather, jumbo frames, checksum/segmentation offload,
+and multiple-NIC support remain outside Phase 15B.
 
 The test frame is deterministic except for its destination, which is the
 runtime RAL/RAH MAC discovered by the managed driver:
@@ -173,7 +222,7 @@ receive-success and bounded-failure paths.
 
 This milestone's successful acceptance statement is:
 
-`REAL MANAGED E1000 RECEIVE DMA`
+`REAL MANAGED E1000 TX AND RX DMA`
 
 It does not prove interrupt-driven NIC operation, an Ethernet/network stack,
 IP networking, or Internet connectivity.  ARP, IPv4, IPv6, ICMP, UDP, TCP,

@@ -21,7 +21,12 @@ internal sealed class ManagedE1000Driver
 {
     internal const uint DriverId = 0xD014;
     private const uint PollLimit = 100000;
-    private const uint RxPhase15PollLimit = 50000000;
+    /* The host observes RX_READY over a serial socket before sending the one
+       frame.  Keep this bounded window long enough for that handshake without
+       adding a wall-clock sleep to the guest. */
+    private const uint RxPhase15PollLimit = 1000000000;
+    private const uint RxReadyPollLimit = 5000000;
+    private const uint RxRearmInterval = 1000000;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -154,6 +159,10 @@ internal sealed class ManagedE1000Driver
         _state = ManagedE1000DriverState.Running;
         if (!RunGcSurvival()) return AbortStart();
         if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE15_GC_SURVIVAL_PASSED\r\n"u8) ||
+            !ArmRxForExternalFrame() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_E1000_RX_CONFIGURED\r\n"u8) ||
+            !WriteRxStateSnapshot(
+                "GXOS_NET10:MANAGED_E1000_RX_STATE=BEFORE_INJECTION\r\n"u8) ||
             !KernelLog.Write("GXOS_NET10:MANAGED_E1000_RX_READY\r\n"u8))
             return AbortStart();
         if (!PollPhase15RxProof()) return AbortStart();
@@ -464,6 +473,15 @@ internal sealed class ManagedE1000Driver
         Span<byte> frame = stackalloc byte[(int)ManagedE1000Protocol.PacketBufferSize];
         for (uint spin = 0; spin != RxPhase15PollLimit; ++spin)
         {
+            /* QEMU's net queue can mark the NIC receive path disabled if a
+               datagram arrives during a transient can_receive=false window.
+               e1000e RDT writes call start_recv(), which clears that state and
+               flushes the queued packet.  Re-post the unchanged owned tail at
+               a bounded cadence while this single-buffer proof is pending. */
+            if (spin != 0 && spin % RxRearmInterval == 0 &&
+                !WriteRegister(ManagedE1000Protocol.RegRxDescTail,
+                               ManagedE1000Protocol.RingCount - 1))
+                return false;
             if (!_rxRing.TryRead(
                     (ulong)_rxIndex * ManagedE1000Protocol.DescriptorSize,
                     descriptor)) return false;
@@ -494,7 +512,9 @@ internal sealed class ManagedE1000Driver
                 KernelLog.Write("GXOS_NET10:MANAGED_E1000_RX_FRAME_REJECTED\r\n"u8);
                 return false;
             }
-            if (!RecycleRxDescriptor(_rxIndex)) return false;
+            if (!WriteRxStateSnapshot(
+                    "GXOS_NET10:MANAGED_E1000_RX_STATE=AFTER_COMPLETION\r\n"u8) ||
+                !RecycleRxDescriptor(_rxIndex)) return false;
             _rxProofReceived = 1;
             _rxPhase15Received = 1;
             return KernelLog.Write(
@@ -504,10 +524,65 @@ internal sealed class ManagedE1000Driver
                 KernelLog.Write(
                 "GXOS_NET10:MANAGED_E1000_RX_RECYCLED\r\n"u8);
         }
-        return KernelLog.Write(
+        return WriteRxStateSnapshot(
+                   "GXOS_NET10:MANAGED_E1000_RX_STATE=AFTER_TIMEOUT\r\n"u8) &&
+               KernelLog.Write(
                    "GXOS_NET10:MANAGED_KERNEL_PHASE14_RX_HARNESS_DEFERRED\r\n"u8) &&
                KernelLog.Write(
                    "GXOS_NET10:MANAGED_E1000_RX_HARNESS_DEFERRED\r\n"u8);
+    }
+
+    private bool ArmRxForExternalFrame()
+    {
+        if (_mmio == null) return false;
+        for (uint spin = 0; spin != RxReadyPollLimit; ++spin)
+        {
+            if (!_mmio.TryRead32(ManagedE1000Protocol.RegStatus,
+                                 out uint status) ||
+                !_mmio.TryRead32(ManagedE1000Protocol.RegRctl,
+                                 out uint rctl) ||
+                !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescHead,
+                                 out uint rdh) ||
+                !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescTail,
+                                 out uint rdt)) return false;
+            if (!ManagedE1000Protocol.TryValidateRxReadyState(
+                    status, rctl, rdh, rdt, ManagedE1000Protocol.RingCount))
+                continue;
+
+            if (!WriteRegister(ManagedE1000Protocol.RegRxDescTail,
+                               ManagedE1000Protocol.RingCount - 1) ||
+                !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescTail,
+                                 out uint postedTail) ||
+                postedTail != ManagedE1000Protocol.RingCount - 1)
+                return false;
+            return true;
+        }
+        return false;
+    }
+
+    private bool WriteRxStateSnapshot(ReadOnlySpan<byte> marker)
+    {
+        if (_mmio == null ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegStatus, out uint status) ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRctl, out uint rctl) ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRxDbaLow, out uint rdbal) ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRxDbaHigh, out uint rdbah) ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescLength, out uint rdlen) ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescHead, out uint rdh) ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescTail, out uint rdt))
+            return false;
+        ulong mac = ((ulong)_mac[0] << 40) | ((ulong)_mac[1] << 32) |
+                    ((ulong)_mac[2] << 24) | ((ulong)_mac[3] << 16) |
+                    ((ulong)_mac[4] << 8) | _mac[5];
+        return KernelLog.Write(marker) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_MAC=0x"u8, mac) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_STATUS=0x"u8, status) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_RCTL=0x"u8, rctl) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_RDBAL=0x"u8, rdbal) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_RDBAH=0x"u8, rdbah) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_RDLEN=0x"u8, rdlen) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_RDH=0x"u8, rdh) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_RDT=0x"u8, rdt);
     }
 
     private bool RecycleRxDescriptor(uint index)

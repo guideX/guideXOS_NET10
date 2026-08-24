@@ -12,7 +12,12 @@ param(
     [ValidateSet('dgram', 'user')]
     [string]$Phase15NetworkBackend = 'dgram',
     [switch]$Phase15KeepDefaultNic,
-    [switch]$Phase15AllowHarnessDeferral
+    [switch]$Phase15AllowHarnessDeferral,
+    [switch]$Phase15AcceptEitherOutcome,
+    [switch]$Phase15EnableFilterDump,
+    [switch]$Phase15EnableQemuReceiveTrace,
+    [ValidateSet('all', 'rx', 'tx')]
+    [string]$Phase15FilterDumpQueue = 'tx'
 )
 
 Set-StrictMode -Version Latest
@@ -126,6 +131,34 @@ function Wait-Marker11([string]$marker, [datetime]$deadline,
     throw "Timed out waiting for QEMU marker: $marker"
 }
 
+function Wait-Phase15Outcome11([datetime]$deadline,
+                                [System.Diagnostics.Process]$process,
+                                [System.IO.Stream]$stream, [IO.FileStream]$logStream,
+                                [Text.StringBuilder]$text, [byte[]]$buffer) {
+    while ((Get-Date) -lt $deadline) {
+        Pump-Serial11 $stream $logStream $text $buffer
+        $transcript = $text.ToString()
+        if ($transcript.Contains('MANAGED_KERNEL_PHASE15_PASS')) {
+            Write-Timeline11 $script:phase11Timeline 'GUEST_MARKER' `
+                'marker=MANAGED_KERNEL_PHASE15_PASS outcome=PASS'
+            return 'PASS'
+        }
+        if ($transcript.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE15_RX_HARNESS_DEFERRED')) {
+            Write-Timeline11 $script:phase11Timeline 'GUEST_MARKER' `
+                'marker=GXOS_NET10:MANAGED_KERNEL_PHASE15_RX_HARNESS_DEFERRED outcome=DEFERRED'
+            return 'DEFERRED'
+        }
+        if ($transcript.Contains('GXOS_NET10:FAIL:') -or
+            $transcript.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
+            $transcript.Contains('GXOS_NET10:PAGE_FAULT_')) {
+            throw 'QEMU reported a fault while waiting for the Phase 15 outcome.'
+        }
+        if ($process.HasExited) { throw 'QEMU exited while waiting for the Phase 15 outcome.' }
+        Start-Sleep -Milliseconds 25
+    }
+    throw 'Timed out waiting for a Phase 15 pass or bounded deferral.'
+}
+
 function Send-Serial11([Net.Sockets.TcpClient]$client, [System.IO.Stream]$stream,
                        [System.Diagnostics.Process]$process,
                        [IO.StreamWriter]$injectionLog, [string]$afterMarker,
@@ -229,6 +262,14 @@ Require11 ((Test-Path -LiteralPath $ovmf) -and (Test-Path -LiteralPath $varsTemp
 if ($EnablePhase15Rx) {
     Require11 (Test-Path -LiteralPath $phase15Injector) "Phase 15 injector is missing: $phase15Injector"
 }
+if ($Phase15EnableFilterDump) {
+    Require11 ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') `
+        'Phase 15 filter-dump requires the dgram RX backend.'
+}
+if ($Phase15EnableQemuReceiveTrace) {
+    Require11 ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') `
+        'Phase 15 QEMU receive tracing requires the dgram RX backend.'
+}
 Require11 (@(Get-OwnedQemu11).Count -eq 0) 'An owned QEMU process is already running.'
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
 (& $qemu --version 2>&1) | Set-Content -LiteralPath (Join-Path $evidence 'qemu-version.log') -Encoding ascii
@@ -279,6 +320,15 @@ try {
         $firmwareIdentityPath = Join-Path $run 'firmware-identity.log'
         $stdout = Join-Path $run 'qemu.stdout.log'
         $stderr = Join-Path $run 'qemu.stderr.log'
+        $pcapPath = if ($Phase15EnableFilterDump) {
+            Join-Path $run 'netdev.pcap'
+        } else { '' }
+        $tracePath = if ($Phase15EnableQemuReceiveTrace) {
+            Join-Path $run 'qemu-trace.log'
+        } else { '' }
+        $traceEventsPath = if ($Phase15EnableQemuReceiveTrace) {
+            Join-Path $run 'qemu-trace-events.txt'
+        } else { '' }
         Copy-Item -LiteralPath $ovmf -Destination $code
         Copy-Item -LiteralPath $varsTemplate -Destination $vars
         $codeHash = (Get-FileHash -LiteralPath $code -Algorithm SHA256).Hash.ToUpperInvariant()
@@ -323,10 +373,36 @@ try {
                 $arguments += @('-netdev', 'user,id=net0')
             }
             $arguments += @('-device', 'e1000e,netdev=net0,addr=2')
+            if ($Phase15EnableFilterDump) {
+                $arguments += @('-object',
+                    "filter-dump,id=phase15dump,netdev=net0,file=$pcapPath,maxlen=65535,queue=$Phase15FilterDumpQueue")
+            }
+            if ($Phase15EnableQemuReceiveTrace) {
+                Set-Content -LiteralPath $traceEventsPath -Value @(
+                    'e1000e_rx_can_recv',
+                    'e1000e_rx_can_recv_rings_full',
+                    'e1000e_rx_has_buffers',
+                    'e1000x_rx_link_down',
+                    'e1000x_rx_disabled',
+                    'e1000x_rx_oversized',
+                    'e1000e_rx_flt_dropped',
+                    'e1000e_rx_receive_iov',
+                    'e1000e_rx_start_recv',
+                    'e1000e_rx_descr',
+                    'e1000e_rx_desc_buff_write',
+                    'e1000e_rx_written_to_guest',
+                    'e1000e_rx_not_written_to_guest',
+                    'e1000e_rx_set_rctl',
+                    'e1000e_rx_set_rdt',
+                    'e1000e_core_write') -Encoding ascii
+                $arguments += @('-trace',
+                    "events=$traceEventsPath,file=$tracePath")
+            }
         }
         Set-Content -LiteralPath $commandLinePath -Value ('"{0}" {1}' -f $qemu, ($arguments -join ' ')) -Encoding ascii
         $process = $null; $client = $null; $monitor = $null; $stream = $null
         $logStream = $null; $injectionLog = $null; $timeline = $null
+        $phase15Outcome = ''
         try {
             $timeline = [IO.StreamWriter]::new($timelinePath, $false, [Text.Encoding]::ASCII)
             $script:phase11Timeline = $timeline
@@ -394,10 +470,15 @@ try {
                 if ($Phase15AllowHarnessDeferral) {
                     Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE15_RX_HARNESS_DEFERRED' `
                         $deadline $process $stream $logStream $text $buffer
+                    $phase15Outcome = 'DEFERRED'
+                } elseif ($Phase15AcceptEitherOutcome) {
+                    $phase15Outcome = Wait-Phase15Outcome11 `
+                        $deadline $process $stream $logStream $text $buffer
                 } else {
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_FRAME_OK' $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'MANAGED_KERNEL_PHASE15_PASS' $deadline $process $stream $logStream $text $buffer
+                    $phase15Outcome = 'PASS'
                 }
             }
             Pump-Serial11 $stream $logStream $text $buffer
@@ -413,6 +494,14 @@ try {
             if ($null -ne $timeline) { $timeline.Dispose() }
             $script:phase11Timeline = $null
         }
+        if ($Phase15EnableFilterDump) {
+            Require11 (Test-Path -LiteralPath $pcapPath) `
+                "QEMU filter-dump did not create the PCAP for boot $sequence."
+        }
+        if ($Phase15EnableQemuReceiveTrace) {
+            Require11 (Test-Path -LiteralPath $tracePath) `
+                "QEMU receive tracing did not create the trace for boot $sequence."
+        }
         Require11 ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedHash) "Payload hash changed on boot $sequence."
         Require11 ((!$finalText.Contains('GXOS_NET10:FAIL:') -and !$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:'))) "Boot $sequence reported a fault."
         foreach ($marker in $requiredMarkers) { Require11 $finalText.Contains($marker) "Boot $sequence missing marker: $marker" }
@@ -421,7 +510,7 @@ try {
         $serialHash = (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant()
         $injectionHash = (Get-FileHash -LiteralPath $injections -Algorithm SHA256).Hash.ToUpperInvariant()
         $timelineHash = (Get-FileHash -LiteralPath $timelinePath -Algorithm SHA256).Hash.ToUpperInvariant()
-        Write-Output ("MANAGED_KERNEL_PHASE11_QEMU_RUN_{0}=PASS bytes={1} serial_sha256={2} injections_sha256={3} timeline_sha256={4} serial={5}" -f $sequence, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $timelineHash, $serial)
+        Write-Output ("MANAGED_KERNEL_PHASE11_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} timeline_sha256={5} serial={6}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $timelineHash, $serial)
     }
 } finally {
     foreach ($process in $owned) { Stop-OwnedQemu11 $process }

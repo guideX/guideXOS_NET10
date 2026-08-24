@@ -27,7 +27,8 @@ Require15 (Test-Path -LiteralPath $phase11Runner) 'Phase 11 fresh-boot runner is
 & $phase11Runner -GateDirectory $gate -EvidenceDirectory $evidence `
     -PayloadSha256 $expectedHash -PayloadSize $PayloadSize -RunCount $RunCount `
     -TimeoutSeconds $TimeoutSeconds -PostPhase11Marker `
-    'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' -EnablePhase15Rx -Phase15NetworkBackend dgram
+    'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' -EnablePhase15Rx -Phase15NetworkBackend dgram `
+    -Phase15EnableFilterDump -Phase15FilterDumpQueue tx
 
 $required = @(
     'GXOS_NET10:MANAGED_KERNEL_PHASE13_PASS',
@@ -65,6 +66,8 @@ for ($sequence = 1; $sequence -le $RunCount; $sequence++) {
     Require15 (Test-Path -LiteralPath $injections) "Missing injection log for boot $sequence."
     $text = [IO.File]::ReadAllText($serial)
     $injectionText = [IO.File]::ReadAllText($injections)
+    $pcap = Join-Path $run 'netdev.pcap'
+    Require15 (Test-Path -LiteralPath $pcap) "Missing QEMU netdev PCAP for boot $sequence."
     foreach ($marker in $required) {
         Require15 $text.Contains($marker) "Boot $sequence missing marker: $marker"
     }
@@ -81,6 +84,14 @@ for ($sequence = 1; $sequence -le $RunCount; $sequence++) {
         "Boot $sequence did not emit exactly one Phase 13 pass marker."
     Require15 (([regex]::Matches($text, 'MANAGED_KERNEL_PHASE14_PASS')).Count -eq 1) `
         "Boot $sequence did not emit exactly one Phase 14 pass marker."
+    $macMatch = [regex]::Match($text,
+        'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
+    Require15 $macMatch.Success "Boot $sequence did not publish the runtime e1000 MAC."
+    $destinationMac = ($macMatch.Groups[1].Value + $macMatch.Groups[2].Value)
+    $pcapParser = Join-Path $PSScriptRoot 'Parse-ManagedE1000Phase15Pcap.ps1'
+    $pcapResult = & $pcapParser -PcapPath $pcap -DestinationMac $destinationMac
+    Require15 (($pcapResult -join "`n").Contains('MANAGED_E1000_PHASE15_PCAP=PASS')) `
+        "Boot $sequence did not contain the exact Phase 15 PCAP frame."
     Require15 (!$text.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE15_RX_HARNESS_DEFERRED') -and
                !$text.Contains('GXOS_NET10:MANAGED_E1000_RX_DESCRIPTOR_REJECTED') -and
                !$text.Contains('GXOS_NET10:MANAGED_E1000_RX_FRAME_REJECTED') -and
