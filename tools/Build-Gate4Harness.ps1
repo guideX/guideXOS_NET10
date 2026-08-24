@@ -70,6 +70,7 @@ $managedKernelMemorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_me
 $managedKernelDeviceInventorySource = Join-Path $root 'src\Gate4Harness\managed_kernel_device_inventory.c'
 $managedKernelDeviceResourcesSource = Join-Path $root 'src\Gate4Harness\managed_kernel_device_resources.c'
 $managedKernelMmioSource = Join-Path $root 'src\Gate4Harness\managed_kernel_mmio.c'
+$managedKernelDmaSource = Join-Path $root 'src\Gate4Harness\managed_kernel_dma.c'
 $managedKernelSerialSource = Join-Path $root 'src\Gate4Harness\managed_kernel_serial.c'
 $managedKernelInterruptSource = Join-Path $root 'src\Gate4Harness\managed_kernel_interrupt.c'
 $managedKernelDriverWorkerSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_worker.c'
@@ -151,6 +152,7 @@ if (-not (Test-Path -LiteralPath $managedKernelBootResourcesSource)) { throw "Ma
 if (-not (Test-Path -LiteralPath $managedKernelHostServicesSource)) { throw "ManagedKernel host-service source not found: $managedKernelHostServicesSource" }
 if (-not (Test-Path -LiteralPath $managedKernelMemorySource)) { throw "ManagedKernel memory-service source not found: $managedKernelMemorySource" }
 if (-not (Test-Path -LiteralPath $managedKernelDeviceInventorySource)) { throw "ManagedKernel device-inventory source not found: $managedKernelDeviceInventorySource" }
+if (-not (Test-Path -LiteralPath $managedKernelDmaSource)) { throw "ManagedKernel DMA source not found: $managedKernelDmaSource" }
 if (-not (Test-Path -LiteralPath $managedKernelSerialSource)) { throw "ManagedKernel serial-service source not found: $managedKernelSerialSource" }
 if (-not (Test-Path -LiteralPath $managedKernelInterruptSource) -or
     -not (Test-Path -LiteralPath $serialInterruptAssembly) -or
@@ -1159,6 +1161,7 @@ if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelDeviceInventorySource
     $gccArguments += $managedKernelDeviceResourcesSource
     $gccArguments += $managedKernelMmioSource
+    $gccArguments += $managedKernelDmaSource
     $gccArguments += $managedKernelSerialSource
     $gccArguments += $managedKernelInterruptSource
     $gccArguments += $managedKernelDriverWorkerSource

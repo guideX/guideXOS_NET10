@@ -321,8 +321,9 @@ internal struct GxManagedKernelDeviceResourcePublicationV1
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 internal struct GxManagedKernelPciServicesV1
 {
-    internal const uint ExpectedSize = 48;
+    internal const uint ExpectedSize = 56;
     internal const ulong CapabilityConfigRead = 1UL << 0;
+    internal const ulong CapabilityCommandRmw = 1UL << 4;
 
     internal uint Size;
     internal uint AbiVersion;
@@ -332,6 +333,7 @@ internal struct GxManagedKernelPciServicesV1
     internal ulong ConfigReadAddress;
     internal ulong Reserved0;
     internal ulong Reserved1;
+    internal ulong ConfigCommandAddress;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -348,14 +350,28 @@ internal struct GxManagedKernelPciReadResultV1
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelPciCommandResultV1
+{
+    internal const uint ExpectedSize = 24;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint OriginalCommand;
+    internal uint RequestedBits;
+    internal uint ResultingCommand;
+    internal uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
 internal struct GxManagedKernelMmioServicesV1
 {
-    internal const uint ExpectedSize = 88;
+    internal const uint ExpectedSize = 96;
     internal const ulong CapabilityClaim = 1UL << 0;
     internal const ulong CapabilityMap = 1UL << 1;
     internal const ulong CapabilityUnmap = 1UL << 2;
     internal const ulong CapabilityRead = 1UL << 3;
     internal const ulong CapabilityUncacheable = 1UL << 4;
+    internal const ulong CapabilityWrite = 1UL << 5;
 
     internal uint Size;
     internal uint AbiVersion;
@@ -371,6 +387,7 @@ internal struct GxManagedKernelMmioServicesV1
     internal uint MaxMappings;
     internal ulong WindowBase;
     internal ulong WindowLength;
+    internal ulong WriteAddress;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -409,6 +426,50 @@ internal struct GxManagedKernelMmioReadResultV1
     internal ulong Reserved1;
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelDmaAllocationResultV1
+{
+    internal const uint ExpectedSize = 56;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal ulong Handle;
+    internal ulong BusAddress;
+    internal ulong ByteLength;
+    internal ulong PageCount;
+    internal ulong Alignment;
+    internal ulong Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelDmaServicesV1
+{
+    internal const uint ExpectedSize = 104;
+    internal const ulong CapabilityAllocate = 1UL << 0;
+    internal const ulong CapabilityRelease = 1UL << 1;
+    internal const ulong CapabilityRead = 1UL << 2;
+    internal const ulong CapabilityWrite = 1UL << 3;
+    internal const ulong CapabilityRetain = 1UL << 4;
+    internal const ulong CapabilityReleaseReference = 1UL << 5;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint ServiceVersion;
+    internal uint Architecture;
+    internal ulong Capabilities;
+    internal ulong AllocateAddress;
+    internal ulong ReleaseAddress;
+    internal ulong ReadAddress;
+    internal ulong WriteAddress;
+    internal ulong RetainAddress;
+    internal ulong ReleaseReferenceAddress;
+    internal uint MaxAllocations;
+    internal uint MaxPagesPerAllocation;
+    internal ulong MaxTotalPages;
+    internal ulong MaxBusAddress;
+    internal ulong Reserved;
+}
+
 internal static unsafe class ManagedKernelLayout
 {
     internal static bool IsValid()
@@ -430,12 +491,15 @@ internal static unsafe class ManagedKernelLayout
                sizeof(GxManagedKernelDeviceResourceSummaryV1) == 40 &&
                sizeof(GxManagedKernelDeviceResourceV1) == 80 &&
                sizeof(GxManagedKernelDeviceResourcePublicationV1) == 48 &&
-               sizeof(GxManagedKernelPciServicesV1) == 48 &&
+               sizeof(GxManagedKernelPciServicesV1) == 56 &&
                sizeof(GxManagedKernelPciReadResultV1) == 32 &&
-               sizeof(GxManagedKernelMmioServicesV1) == 88 &&
+               sizeof(GxManagedKernelPciCommandResultV1) == 24 &&
+               sizeof(GxManagedKernelMmioServicesV1) == 96 &&
                sizeof(GxManagedKernelMmioClaimResultV1) == 24 &&
                sizeof(GxManagedKernelMmioMappingResultV1) == 48 &&
                sizeof(GxManagedKernelMmioReadResultV1) == 32 &&
+               sizeof(GxManagedKernelDmaAllocationResultV1) == 56 &&
+               sizeof(GxManagedKernelDmaServicesV1) == 104 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Magic)).ToInt32() == 0 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Version)).ToInt32() == 4 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Size)).ToInt32() == 6 &&
@@ -548,6 +612,7 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.ConfigReadAddress)).ToInt32() == 24 &&
                Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.Reserved0)).ToInt32() == 32 &&
                Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.Reserved1)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelPciServicesV1>(nameof(GxManagedKernelPciServicesV1.ConfigCommandAddress)).ToInt32() == 48 &&
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Size)).ToInt32() == 0 &&
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.AbiVersion)).ToInt32() == 4 &&
                Marshal.OffsetOf<GxManagedKernelPciReadResultV1>(nameof(GxManagedKernelPciReadResultV1.Width)).ToInt32() == 8 &&
@@ -556,9 +621,15 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelMmioServicesV1>(nameof(GxManagedKernelMmioServicesV1.ClaimAddress)).ToInt32() == 24 &&
                Marshal.OffsetOf<GxManagedKernelMmioServicesV1>(nameof(GxManagedKernelMmioServicesV1.ReadAddress)).ToInt32() == 56 &&
                Marshal.OffsetOf<GxManagedKernelMmioServicesV1>(nameof(GxManagedKernelMmioServicesV1.WindowBase)).ToInt32() == 72 &&
+               Marshal.OffsetOf<GxManagedKernelMmioServicesV1>(nameof(GxManagedKernelMmioServicesV1.WriteAddress)).ToInt32() == 88 &&
                Marshal.OffsetOf<GxManagedKernelMmioClaimResultV1>(nameof(GxManagedKernelMmioClaimResultV1.Handle)).ToInt32() == 8 &&
                Marshal.OffsetOf<GxManagedKernelMmioMappingResultV1>(nameof(GxManagedKernelMmioMappingResultV1.Offset)).ToInt32() == 24 &&
                Marshal.OffsetOf<GxManagedKernelMmioReadResultV1>(nameof(GxManagedKernelMmioReadResultV1.Value)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelDmaAllocationResultV1>(nameof(GxManagedKernelDmaAllocationResultV1.Handle)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelDmaAllocationResultV1>(nameof(GxManagedKernelDmaAllocationResultV1.BusAddress)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelDmaServicesV1>(nameof(GxManagedKernelDmaServicesV1.AllocateAddress)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelDmaServicesV1>(nameof(GxManagedKernelDmaServicesV1.MaxAllocations)).ToInt32() == 72 &&
+               Marshal.OffsetOf<GxManagedKernelDmaServicesV1>(nameof(GxManagedKernelDmaServicesV1.MaxBusAddress)).ToInt32() == 88 &&
                 ManagedKernelSerialLayout.IsValid() &&
                 ManagedInterruptLayout.IsValid();
     }
@@ -640,9 +711,11 @@ internal static unsafe class ManagedKernelContract
     private const uint PciServicesAbiVersionV1 = 1;
     private const uint PciServicesServiceVersionV1 = 1;
     private const ulong PciServicesKnownCapabilities =
-        GxManagedKernelPciServicesV1.CapabilityConfigRead;
+        GxManagedKernelPciServicesV1.CapabilityConfigRead |
+        GxManagedKernelPciServicesV1.CapabilityCommandRmw;
     private const ulong PciServicesRequiredCapabilities =
-        GxManagedKernelPciServicesV1.CapabilityConfigRead;
+        GxManagedKernelPciServicesV1.CapabilityConfigRead |
+        GxManagedKernelPciServicesV1.CapabilityCommandRmw;
     private const uint MmioServicesAbiVersionV1 = 1;
     private const uint MmioServicesServiceVersionV1 = 1;
     private const ulong MmioServicesKnownCapabilities =
@@ -650,7 +723,17 @@ internal static unsafe class ManagedKernelContract
         GxManagedKernelMmioServicesV1.CapabilityMap |
         GxManagedKernelMmioServicesV1.CapabilityUnmap |
         GxManagedKernelMmioServicesV1.CapabilityRead |
-        GxManagedKernelMmioServicesV1.CapabilityUncacheable;
+        GxManagedKernelMmioServicesV1.CapabilityUncacheable |
+        GxManagedKernelMmioServicesV1.CapabilityWrite;
+    private const uint DmaServicesAbiVersionV1 = 1;
+    private const uint DmaServicesServiceVersionV1 = 1;
+    private const ulong DmaServicesKnownCapabilities =
+        GxManagedKernelDmaServicesV1.CapabilityAllocate |
+        GxManagedKernelDmaServicesV1.CapabilityRelease |
+        GxManagedKernelDmaServicesV1.CapabilityRead |
+        GxManagedKernelDmaServicesV1.CapabilityWrite |
+        GxManagedKernelDmaServicesV1.CapabilityRetain |
+        GxManagedKernelDmaServicesV1.CapabilityReleaseReference;
     internal const ulong MemoryPageSize = 4096;
     internal const uint MemoryMaxPagesPerAllocation = 256;
     internal const uint MemoryMaxLiveAllocations = 16;
@@ -692,6 +775,7 @@ internal static unsafe class ManagedKernelContract
     private static int s_pciServicesInstalled;
     private static ulong s_pciCapabilities;
     private static nuint s_pciConfigReadAddress;
+    private static nuint s_pciConfigCommandAddress;
     private static int s_mmioServicesInstalled;
     private static ulong s_mmioCapabilities;
     private static nuint s_mmioClaimAddress;
@@ -699,9 +783,25 @@ internal static unsafe class ManagedKernelContract
     private static nuint s_mmioMapAddress;
     private static nuint s_mmioUnmapAddress;
     private static nuint s_mmioReadAddress;
+    private static nuint s_mmioWriteAddress;
     private static uint s_mmioMaxClaims;
     private static int s_phase13Run;
     private static int s_phase13TeardownRun;
+    private static int s_phase14Run;
+    private static int s_phase14TeardownRun;
+    private static ManagedE1000Driver? s_phase14Driver;
+    private static int s_dmaServicesInstalled;
+    private static ulong s_dmaCapabilities;
+    private static nuint s_dmaAllocateAddress;
+    private static nuint s_dmaReleaseAddress;
+    private static nuint s_dmaReadAddress;
+    private static nuint s_dmaWriteAddress;
+    private static nuint s_dmaRetainAddress;
+    private static nuint s_dmaReleaseReferenceAddress;
+    private static uint s_dmaMaxAllocations;
+    private static uint s_dmaMaxPagesPerAllocation;
+    private static ulong s_dmaMaxTotalPages;
+    private static ulong s_dmaMaxBusAddress;
     private static int s_pciReadBeforeInstallNegativeLogged;
     private static int s_phase7Run;
     private static int s_phase7AccountingRun;
@@ -1129,6 +1229,13 @@ internal static unsafe class ManagedKernelContract
                current.Reserved == s_bootResourceSummarySnapshot.Reserved;
     }
 
+    private static uint StartBlocked(uint reason)
+    {
+        KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_START_BLOCKED=0x"u8,
+                               reason);
+        return InvalidState;
+    }
+
     internal static bool TryInvokeHostLog(ReadOnlySpan<byte> utf8)
     {
         if (s_hostServicesInstalled == 0 ||
@@ -1191,33 +1298,24 @@ internal static unsafe class ManagedKernelContract
         {
             return InvalidState;
         }
-        if (s_bootResourcesPublished == 0)
-        {
-            return InvalidState;
-        }
-        if (s_hostServicesInstalled == 0)
-        {
-            return InvalidState;
-        }
-        if (s_memoryServicesInstalled == 0)
-        {
-            return InvalidState;
-        }
+        if (s_bootResourcesPublished == 0) return StartBlocked(1);
+        if (s_hostServicesInstalled == 0) return StartBlocked(2);
+        if (s_memoryServicesInstalled == 0) return StartBlocked(3);
         if ((s_hostCapabilities & RequiredHostServicesCapabilities) !=
             RequiredHostServicesCapabilities)
         {
-            return InvalidState;
+            return StartBlocked(4);
         }
         if (!PublishedBootResourcesRemainStable())
         {
-            return InvalidState;
+            return StartBlocked(5);
         }
 
         hasMonotonicTime =
             (s_hostCapabilities & GxManagedKernelHostServicesV1.CapabilityMonotonicTime) != 0;
         if (hasMonotonicTime)
         {
-            if (!TryQueryMonotonicTime(out firstTime)) return InvalidState;
+            if (!TryQueryMonotonicTime(out firstTime)) return StartBlocked(6);
             index = 0;
             while (index != 1024)
             {
@@ -1227,7 +1325,7 @@ internal static unsafe class ManagedKernelContract
                 secondTime.Ticks < firstTime.Ticks ||
                 secondTime.FrequencyHz != firstTime.FrequencyHz)
             {
-                return InvalidState;
+                return StartBlocked(7);
             }
         }
 
@@ -1235,7 +1333,7 @@ internal static unsafe class ManagedKernelContract
             !KernelLog.Write(KernelLog.ManagedHostLogCallOk) ||
             (hasMonotonicTime && !KernelLog.Write(KernelLog.ManagedMonotonicTimeOk)))
         {
-            return InvalidState;
+            return StartBlocked(8);
         }
         s_lifecycleState = (int)LifecycleState.Started;
         return ManagedOk;
@@ -1467,7 +1565,8 @@ internal static unsafe class ManagedKernelContract
             service->Capabilities != MmioServicesKnownCapabilities ||
             service->ClaimAddress == 0 || service->ReleaseAddress == 0 ||
             service->MapAddress == 0 || service->UnmapAddress == 0 ||
-            service->ReadAddress == 0 || service->MaxClaims != DeviceResourceMaxClaims ||
+            service->ReadAddress == 0 || service->WriteAddress == 0 ||
+            service->MaxClaims != DeviceResourceMaxClaims ||
             service->MaxMappings != ManagedDeviceResourceRuntimeCatalog.MaxMappings ||
             service->WindowBase == 0 ||
             service->WindowLength == 0 ||
@@ -1480,6 +1579,7 @@ internal static unsafe class ManagedKernelContract
         s_mmioMapAddress = (nuint)service->MapAddress;
         s_mmioUnmapAddress = (nuint)service->UnmapAddress;
         s_mmioReadAddress = (nuint)service->ReadAddress;
+        s_mmioWriteAddress = (nuint)service->WriteAddress;
         s_mmioMaxClaims = service->MaxClaims;
         s_mmioServicesInstalled = 1;
         return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_SERVICES_INSTALLED\r\n"u8)
@@ -1488,6 +1588,128 @@ internal static unsafe class ManagedKernelContract
 
     internal static bool MmioServicesInstalled =>
         s_mmioServicesInstalled != 0;
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallDmaServices")]
+    internal static uint InstallDmaServices(uint requestedAbiVersion,
+                                             nuint serviceAddress)
+    {
+        if (requestedAbiVersion != DmaServicesAbiVersionV1) return UnsupportedAbi;
+        if (!IsInitialized || s_deviceResourcesInstalled == 0 ||
+            s_mmioServicesInstalled == 0)
+            return NotInitialized;
+        if (s_dmaServicesInstalled != 0) return AlreadyInitialized;
+        if (s_lifecycleState != (int)LifecycleState.Started || serviceAddress == 0 ||
+            !IsRangeValid(serviceAddress,
+                (nuint)GxManagedKernelDmaServicesV1.ExpectedSize))
+            return s_lifecycleState != (int)LifecycleState.Started
+                ? InvalidState : InvalidArgument;
+        GxManagedKernelDmaServicesV1* service =
+            (GxManagedKernelDmaServicesV1*)serviceAddress;
+        if (service->Size != GxManagedKernelDmaServicesV1.ExpectedSize ||
+            service->AbiVersion != DmaServicesAbiVersionV1 ||
+            service->ServiceVersion != DmaServicesServiceVersionV1 ||
+            service->Architecture != ArchitectureX64 ||
+            service->Capabilities != DmaServicesKnownCapabilities ||
+            service->AllocateAddress == 0 || service->ReleaseAddress == 0 ||
+            service->ReadAddress == 0 || service->WriteAddress == 0 ||
+            service->RetainAddress == 0 || service->ReleaseReferenceAddress == 0 ||
+            service->MaxAllocations == 0 || service->MaxAllocations > 8 ||
+            service->MaxPagesPerAllocation == 0 || service->MaxPagesPerAllocation > 32 ||
+            service->MaxTotalPages == 0 || service->MaxTotalPages > 64 ||
+            service->MaxBusAddress == 0 || service->Reserved != 0)
+            return InvalidArgument;
+        s_dmaCapabilities = service->Capabilities;
+        s_dmaAllocateAddress = (nuint)service->AllocateAddress;
+        s_dmaReleaseAddress = (nuint)service->ReleaseAddress;
+        s_dmaReadAddress = (nuint)service->ReadAddress;
+        s_dmaWriteAddress = (nuint)service->WriteAddress;
+        s_dmaRetainAddress = (nuint)service->RetainAddress;
+        s_dmaReleaseReferenceAddress = (nuint)service->ReleaseReferenceAddress;
+        s_dmaMaxAllocations = service->MaxAllocations;
+        s_dmaMaxPagesPerAllocation = service->MaxPagesPerAllocation;
+        s_dmaMaxTotalPages = service->MaxTotalPages;
+        s_dmaMaxBusAddress = service->MaxBusAddress;
+        s_dmaServicesInstalled = 1;
+        return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DMA_SERVICES_INSTALLED\r\n"u8)
+            ? ManagedOk : InvalidState;
+    }
+
+    internal static bool DmaServicesInstalled => s_dmaServicesInstalled != 0;
+
+    internal static bool TryDmaAllocate(ulong claimHandle, uint driverId,
+                                        ulong bytes, ulong alignment,
+                                        out GxManagedKernelDmaAllocationResultV1 result)
+    {
+        result = default;
+        if (s_dmaServicesInstalled == 0 || claimHandle == 0 || driverId == 0 ||
+            bytes == 0 || alignment == 0 || s_dmaAllocateAddress == 0) return false;
+        delegate* unmanaged<ulong, uint, ulong, ulong, nuint, nuint, uint> callback =
+            (delegate* unmanaged<ulong, uint, ulong, ulong, nuint, nuint, uint>)
+                s_dmaAllocateAddress;
+        uint status;
+        fixed (GxManagedKernelDmaAllocationResultV1* resultPointer = &result)
+        {
+            status = callback(claimHandle, driverId, bytes, alignment,
+                              (nuint)resultPointer,
+                              (nuint)GxManagedKernelDmaAllocationResultV1.ExpectedSize);
+        }
+        return status == ManagedOk &&
+               result.Size == GxManagedKernelDmaAllocationResultV1.ExpectedSize &&
+               result.AbiVersion == DmaServicesAbiVersionV1 && result.Handle != 0 &&
+               result.BusAddress != 0 && result.ByteLength >= bytes &&
+               result.PageCount != 0 && result.Alignment == alignment &&
+               result.Reserved == 0;
+    }
+
+    internal static bool TryDmaRelease(ulong handle, uint driverId)
+    {
+        if (s_dmaServicesInstalled == 0 || handle == 0 || driverId == 0 ||
+            s_dmaReleaseAddress == 0) return false;
+        delegate* unmanaged<ulong, uint, uint> callback =
+            (delegate* unmanaged<ulong, uint, uint>)s_dmaReleaseAddress;
+        return callback(handle, driverId) == ManagedOk;
+    }
+
+    internal static bool TryDmaWrite(ulong handle, uint driverId, ulong offset,
+                                     nuint source, ulong length)
+    {
+        if (s_dmaServicesInstalled == 0 || handle == 0 || driverId == 0 ||
+            source == 0 || length == 0 || length > nuint.MaxValue ||
+            !IsRangeValid(source, (nuint)length) || s_dmaWriteAddress == 0)
+            return false;
+        delegate* unmanaged<ulong, uint, ulong, nuint, ulong, uint> callback =
+            (delegate* unmanaged<ulong, uint, ulong, nuint, ulong, uint>)
+                s_dmaWriteAddress;
+        return callback(handle, driverId, offset, source, length) == ManagedOk;
+    }
+
+    internal static bool TryDmaRead(ulong handle, uint driverId, ulong offset,
+                                    nuint destination, ulong length)
+    {
+        if (s_dmaServicesInstalled == 0 || handle == 0 || driverId == 0 ||
+            destination == 0 || length == 0 || length > nuint.MaxValue ||
+            !IsRangeValid(destination, (nuint)length) || s_dmaReadAddress == 0)
+            return false;
+        delegate* unmanaged<ulong, uint, ulong, nuint, ulong, uint> callback =
+            (delegate* unmanaged<ulong, uint, ulong, nuint, ulong, uint>)
+                s_dmaReadAddress;
+        return callback(handle, driverId, offset, destination, length) == ManagedOk;
+    }
+
+    internal static bool TryDmaRetain(ulong handle, uint driverId) =>
+        TryDmaReference(s_dmaRetainAddress, handle, driverId);
+
+    internal static bool TryDmaReleaseReference(ulong handle, uint driverId) =>
+        TryDmaReference(s_dmaReleaseReferenceAddress, handle, driverId);
+
+    private static bool TryDmaReference(nuint address, ulong handle, uint driverId)
+    {
+        if (s_dmaServicesInstalled == 0 || address == 0 || handle == 0 ||
+            driverId == 0) return false;
+        delegate* unmanaged<ulong, uint, uint> callback =
+            (delegate* unmanaged<ulong, uint, uint>)address;
+        return callback(handle, driverId) == ManagedOk;
+    }
 
     internal static bool TryMmioClaim(ulong resourceId, uint driverId,
                                       uint expectedOwnerKind,
@@ -1574,6 +1796,90 @@ internal static unsafe class ManagedKernelContract
             result.Reserved1 != 0) return false;
         value = result.Value;
         return true;
+    }
+
+    internal static bool TryMmioWrite(ulong mappingHandle, uint driverId,
+                                      ulong offset, uint width, ulong value)
+    {
+        if (s_mmioServicesInstalled == 0 || mappingHandle == 0 ||
+            driverId == 0 || s_mmioWriteAddress == 0 || width != 4) return false;
+        delegate* unmanaged<ulong, uint, ulong, uint, ulong, uint> callback =
+            (delegate* unmanaged<ulong, uint, ulong, uint, ulong, uint>)
+                s_mmioWriteAddress;
+        return callback(mappingHandle, driverId, offset, width, value) == ManagedOk;
+    }
+
+    internal static bool TryPciCommandEnable(ulong resourceId, ulong claimHandle,
+                                               uint driverId, uint requestedBits,
+                                               out GxManagedKernelPciCommandResultV1 result)
+    {
+        result = default;
+        if (s_pciServicesInstalled == 0 || resourceId == 0 || claimHandle == 0 ||
+            driverId == 0 || s_pciConfigCommandAddress == 0 || requestedBits == 0)
+            return false;
+        delegate* unmanaged<ulong, ulong, uint, uint, uint, nuint, nuint, uint>
+            callback = (delegate* unmanaged<ulong, ulong, uint, uint, uint,
+                         nuint, nuint, uint>)s_pciConfigCommandAddress;
+        uint status;
+        fixed (GxManagedKernelPciCommandResultV1* resultPointer = &result)
+        {
+            status = callback(resourceId, claimHandle, driverId, 1, requestedBits,
+                              (nuint)resultPointer,
+                              (nuint)GxManagedKernelPciCommandResultV1.ExpectedSize);
+        }
+        return status == ManagedOk &&
+               result.Size == GxManagedKernelPciCommandResultV1.ExpectedSize &&
+               result.AbiVersion == PciServicesAbiVersionV1 &&
+               result.RequestedBits == requestedBits && result.Reserved == 0;
+    }
+
+    internal static bool TryPciCommandRestore(ulong resourceId, ulong claimHandle,
+                                               uint driverId, uint originalCommand,
+                                               out GxManagedKernelPciCommandResultV1 result)
+    {
+        result = default;
+        if (s_pciServicesInstalled == 0 || resourceId == 0 || claimHandle == 0 ||
+            driverId == 0 || s_pciConfigCommandAddress == 0) return false;
+        delegate* unmanaged<ulong, ulong, uint, uint, uint, nuint, nuint, uint>
+            callback = (delegate* unmanaged<ulong, ulong, uint, uint, uint,
+                         nuint, nuint, uint>)s_pciConfigCommandAddress;
+        uint status;
+        fixed (GxManagedKernelPciCommandResultV1* resultPointer = &result)
+        {
+            status = callback(resourceId, claimHandle, driverId, 2, originalCommand,
+                              (nuint)resultPointer,
+                              (nuint)GxManagedKernelPciCommandResultV1.ExpectedSize);
+        }
+        return status == ManagedOk &&
+               result.Size == GxManagedKernelPciCommandResultV1.ExpectedSize &&
+               result.AbiVersion == PciServicesAbiVersionV1 &&
+               result.RequestedBits == originalCommand && result.Reserved == 0;
+    }
+
+    internal static bool TryPciCommandDisableBusMaster(
+        ulong resourceId, ulong claimHandle, uint driverId,
+        out GxManagedKernelPciCommandResultV1 result)
+    {
+        result = default;
+        if (s_pciServicesInstalled == 0 || resourceId == 0 || claimHandle == 0 ||
+            driverId == 0 || s_pciConfigCommandAddress == 0) return false;
+        delegate* unmanaged<ulong, ulong, uint, uint, uint, nuint, nuint, uint>
+            callback = (delegate* unmanaged<ulong, ulong, uint, uint, uint,
+                         nuint, nuint, uint>)s_pciConfigCommandAddress;
+        uint status;
+        fixed (GxManagedKernelPciCommandResultV1* resultPointer = &result)
+        {
+            status = callback(resourceId, claimHandle, driverId, 3,
+                              ManagedE1000Protocol.PciCommandBusMaster,
+                              (nuint)resultPointer,
+                              (nuint)GxManagedKernelPciCommandResultV1.ExpectedSize);
+        }
+        return status == ManagedOk &&
+               result.Size == GxManagedKernelPciCommandResultV1.ExpectedSize &&
+               result.AbiVersion == PciServicesAbiVersionV1 &&
+               result.RequestedBits == ManagedE1000Protocol.PciCommandBusMaster &&
+               (result.ResultingCommand & ManagedE1000Protocol.PciCommandBusMaster) == 0 &&
+               result.Reserved == 0;
     }
 
     [UnmanagedCallersOnly(EntryPoint = "GxManagedQueryDeviceResourceSummary")]
@@ -1843,6 +2149,51 @@ internal static unsafe class ManagedKernelContract
         return InvalidArgument;
     }
 
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase14")]
+    internal static uint RunPhase14(uint stage)
+    {
+        if (!IsInitialized || s_lifecycleState != (int)LifecycleState.Started)
+            return IsInitialized ? InvalidState : NotInitialized;
+        if (stage == 1)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_dmaServicesInstalled == 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            ManagedE1000Driver? candidate = ManagedE1000Driver.TryCreate();
+            if (candidate == null || !candidate.TryStart())
+            {
+                KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_PHASE14_BLOCKED=DRIVER_START\r\n"u8);
+                return InvalidState;
+            }
+            s_phase14Driver = candidate;
+            s_phase14Run = 1;
+            return ManagedOk;
+        }
+        if (stage == 2)
+        {
+            if (s_phase14Run == 0 || s_phase14TeardownRun != 0 ||
+                s_phase14Driver == null ||
+                s_phase14Driver.State != ManagedE1000DriverState.Running ||
+                !s_phase14Driver.TryStop() ||
+                s_phase14Driver.State != ManagedE1000DriverState.Stopped ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            bool rxProof = s_phase14Driver.RxProofReceived;
+            s_phase14TeardownRun = 1;
+            if (!KernelLog.Write(rxProof
+                    ? "PHASE 14 FIRST MANAGED PCI DRIVER COMPLETE — DMA TX/RX PROVEN\r\n"u8
+                    : "PHASE 14 MANAGED PCI TX COMPLETE — RX HARNESS DEFERRED\r\n"u8) ||
+                !KernelLog.Write("MANAGED_KERNEL_PHASE14_PASS\r\n"u8))
+                return InvalidState;
+            s_phase14Driver = null;
+            return ManagedOk;
+        }
+        return InvalidArgument;
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallPciServices")]
     internal static uint InstallPciServices(uint requestedAbiVersion,
                                              nuint servicesAddress)
@@ -1887,18 +2238,20 @@ internal static unsafe class ManagedKernelContract
             (services.Capabilities & PciServicesRequiredCapabilities) !=
                 PciServicesRequiredCapabilities ||
             services.ConfigReadAddress == 0 || services.Reserved0 != 0 ||
-            services.Reserved1 != 0)
+            services.Reserved1 != 0 || services.ConfigCommandAddress == 0)
         {
             return InvalidArgument;
         }
         s_pciCapabilities = services.Capabilities;
         s_pciConfigReadAddress = (nuint)services.ConfigReadAddress;
+        s_pciConfigCommandAddress = (nuint)services.ConfigCommandAddress;
         s_pciServicesInstalled = 1;
         if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PCI_SERVICES_INSTALLED\r\n"u8))
         {
             s_pciServicesInstalled = 0;
             s_pciCapabilities = 0;
             s_pciConfigReadAddress = 0;
+            s_pciConfigCommandAddress = 0;
             return InvalidState;
         }
         return ManagedOk;

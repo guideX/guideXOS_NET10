@@ -197,6 +197,25 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
         return false;
     }
 
+    internal static bool TryGetNativeClaimHandle(in ManagedDeviceResource resource,
+                                                 uint driverId,
+                                                 out ulong nativeHandle)
+    {
+        nativeHandle = 0;
+        if (s_installed == 0 || driverId == 0 ||
+            !resource.HasCatalogOwnership ||
+            resource.CatalogIdentity != s_catalogIdentity) return false;
+        for (uint index = 0; index != s_resourceCount; ++index)
+        {
+            if (Descriptors[index].ResourceId != resource.ResourceId ||
+                s_claims.Owners[index] != driverId ||
+                s_claims.NativeHandles[index] == 0) continue;
+            nativeHandle = s_claims.NativeHandles[index];
+            return true;
+        }
+        return false;
+    }
+
     internal static bool TryRelease(in ManagedDeviceResource resource,
                                     uint driverId)
     {
@@ -225,7 +244,8 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
                                 out ManagedMmioMapping? mapping)
     {
         mapping = null;
-        if (s_installed == 0 || driverId == 0 || length == 0 || access != 1 ||
+        if (s_installed == 0 || driverId == 0 || length == 0 ||
+            (access != 1 && access != 3) ||
             !resource.HasCatalogOwnership || resource.CatalogIdentity != s_catalogIdentity ||
             resource.ResourceType != GxManagedKernelDeviceResourceV1.ResourceTypeMmio ||
             resource.PhysicalBase > ulong.MaxValue - resource.Length ||
@@ -244,7 +264,7 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
                     access, resource.ResourceId, out ulong mappingHandle)) return false;
             s_claims.MappingCounts[index]++;
             mapping = new ManagedMmioMapping(resource.ResourceId, driverId,
-                                              mappingHandle, length);
+                                              mappingHandle, length, access);
             return true;
         }
         return false;

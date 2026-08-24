@@ -224,6 +224,7 @@ GXOS_MANAGED_KERNEL_RESOURCE_STATUS gxos_managed_kernel_append_pci_mmio_resource
     resource.ResourceIndex = bar_index;
     resource.ResourceType = GX_MANAGED_DEVICE_RESOURCE_TYPE_MMIO;
     resource.Flags = GX_MANAGED_DEVICE_RESOURCE_FLAG_READABLE |
+                     GX_MANAGED_DEVICE_RESOURCE_FLAG_WRITABLE |
                      GX_MANAGED_DEVICE_RESOURCE_FLAG_MEMORY |
                      GX_MANAGED_DEVICE_RESOURCE_FLAG_CACHE_UNCACHED |
                      GX_MANAGED_DEVICE_RESOURCE_FLAG_PCI_ASSIGNED |

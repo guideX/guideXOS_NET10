@@ -11,20 +11,23 @@ internal sealed class ManagedMmioMapping
     private readonly uint _driverId;
     private readonly ulong _handle;
     private readonly ulong _length;
+    private readonly uint _access;
     private int _live = 1;
 
     internal ManagedMmioMapping(ulong resourceId, uint driverId,
-                                 ulong handle, ulong length)
+                                 ulong handle, ulong length, uint access = 1)
     {
         _resourceId = resourceId;
         _driverId = driverId;
         _handle = handle;
         _length = length;
+        _access = access;
     }
 
     internal ulong Handle => _handle;
     internal ulong Length => _length;
     internal bool IsLive => _live != 0;
+    internal bool CanWrite => (_access & 2U) != 0;
 
     internal bool TryRead8(ulong offset, out byte value)
     {
@@ -53,6 +56,14 @@ internal sealed class ManagedMmioMapping
     internal bool TryRead64(ulong offset, out ulong value)
     {
         return TryRead(offset, 8, out value);
+    }
+
+    internal bool TryWrite32(ulong offset, uint value)
+    {
+        if (_live == 0 || !CanWrite || offset > ulong.MaxValue - 4 ||
+            offset + 4 > _length || (offset & 3) != 0) return false;
+        return ManagedKernelContract.TryMmioWrite(_handle, _driverId,
+                                                  offset, 4, value);
     }
 
     internal bool TryUnmap()

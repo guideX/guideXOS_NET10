@@ -78,6 +78,8 @@ typedef struct {
     uint64_t requested_offset;
     uint64_t requested_length;
     uint64_t mapped_length;
+    uint32_t access;
+    uint32_t reserved0;
     uint64_t generation;
 } GXOS_MMIO_MAPPING_RECORD;
 
@@ -167,6 +169,20 @@ GXOS_MMIO_SERVICE_STATUS gxos_mmio_read(
     uint64_t offset,
     uint32_t width,
     uint64_t *value_out);
+GXOS_MMIO_SERVICE_STATUS gxos_mmio_write(
+    GXOS_MMIO_SERVICE *service,
+    uint64_t mapping_handle,
+    uint32_t driver_id,
+    uint64_t offset,
+    uint32_t width,
+    uint64_t value);
+int gxos_mmio_validate_claim(
+    const GXOS_MMIO_SERVICE *service,
+    uint64_t claim_handle,
+    uint32_t driver_id,
+    uint64_t *resource_id_out,
+    uint32_t *owner_kind_out,
+    uint32_t *owner_id_out);
 
 /* These are the only callbacks exposed to managed code. They carry opaque
    handles and validated ranges, never a physical or virtual address. */
@@ -185,6 +201,9 @@ uint32_t gxos_mmio_unmap_callback(uint64_t mapping_handle,
 uint32_t gxos_mmio_read_callback(
     uint64_t mapping_handle, uint32_t driver_id, uint64_t offset,
     uint32_t width, uintptr_t result_address, uintptr_t result_capacity);
+uint32_t gxos_mmio_write_callback(
+    uint64_t mapping_handle, uint32_t driver_id, uint64_t offset,
+    uint32_t width, uint64_t value);
 void gxos_mmio_set_callback_service(GXOS_MMIO_SERVICE *service);
 
 #endif

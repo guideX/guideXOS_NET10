@@ -54,18 +54,26 @@
 #define GX_MANAGED_KERNEL_DEVICE_RESOURCE_MAX_CLAIMS 16U
 #define GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1 1U
 #define GX_MANAGED_KERNEL_PCI_SERVICES_VERSION_V1 1U
-#define GX_MANAGED_KERNEL_PCI_SERVICES_V1_SIZE 48U
+#define GX_MANAGED_KERNEL_PCI_SERVICES_V1_SIZE 56U
 #define GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE 32U
+#define GX_MANAGED_KERNEL_PCI_COMMAND_RESULT_V1_SIZE 24U
 #define GX_MANAGED_KERNEL_PCI_CONFIG_SPACE_SIZE 256U
 #define GX_MANAGED_KERNEL_PCI_READ_WIDTH_8 1U
 #define GX_MANAGED_KERNEL_PCI_READ_WIDTH_16 2U
 #define GX_MANAGED_KERNEL_PCI_READ_WIDTH_32 4U
 #define GX_MANAGED_KERNEL_MMIO_SERVICES_ABI_V1 1U
 #define GX_MANAGED_KERNEL_MMIO_SERVICES_VERSION_V1 1U
-#define GX_MANAGED_KERNEL_MMIO_SERVICES_V1_SIZE 88U
+#define GX_MANAGED_KERNEL_MMIO_SERVICES_V1_SIZE 96U
 #define GX_MANAGED_KERNEL_MMIO_CLAIM_RESULT_V1_SIZE 24U
 #define GX_MANAGED_KERNEL_MMIO_MAPPING_RESULT_V1_SIZE 48U
 #define GX_MANAGED_KERNEL_MMIO_READ_RESULT_V1_SIZE 32U
+#define GX_MANAGED_KERNEL_DMA_SERVICES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_DMA_SERVICES_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_DMA_SERVICES_V1_SIZE 104U
+#define GX_MANAGED_KERNEL_DMA_ALLOCATION_RESULT_V1_SIZE 56U
+#define GX_MANAGED_KERNEL_DMA_MAX_ALLOCATIONS 8U
+#define GX_MANAGED_KERNEL_DMA_MAX_PAGES_PER_ALLOCATION 32U
+#define GX_MANAGED_KERNEL_DMA_MAX_TOTAL_PAGES 64U
 #define GX_MANAGED_KERNEL_SERIAL_SERVICES_ABI_V1 1U
 #define GX_MANAGED_KERNEL_SERIAL_SERVICES_VERSION_V1 1U
 #define GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1_SIZE 32U
@@ -175,6 +183,13 @@ enum {
 
 enum {
     GX_MANAGED_PCI_CAPABILITY_CONFIG_READ = 1ULL << 0
+    ,GX_MANAGED_PCI_CAPABILITY_COMMAND_RMW = 1ULL << 4
+};
+
+enum {
+    GX_MANAGED_PCI_COMMAND_ENABLE = 1U,
+    GX_MANAGED_PCI_COMMAND_RESTORE = 2U,
+    GX_MANAGED_PCI_COMMAND_DISABLE_BUS_MASTER = 3U
 };
 
 enum {
@@ -182,7 +197,18 @@ enum {
     GX_MANAGED_MMIO_CAPABILITY_MAP = 1ULL << 1,
     GX_MANAGED_MMIO_CAPABILITY_UNMAP = 1ULL << 2,
     GX_MANAGED_MMIO_CAPABILITY_READ = 1ULL << 3,
-    GX_MANAGED_MMIO_CAPABILITY_UNCACHEABLE = 1ULL << 4
+    GX_MANAGED_MMIO_CAPABILITY_UNCACHEABLE = 1ULL << 4,
+    GX_MANAGED_MMIO_CAPABILITY_WRITE = 1ULL << 5
+};
+
+enum {
+    GX_MANAGED_DMA_CAPABILITY_ALLOCATE = 1ULL << 0,
+    GX_MANAGED_DMA_CAPABILITY_RELEASE = 1ULL << 1,
+    GX_MANAGED_DMA_CAPABILITY_READ = 1ULL << 2,
+    GX_MANAGED_DMA_CAPABILITY_WRITE = 1ULL << 3,
+    GX_MANAGED_DMA_CAPABILITY_RETAIN = 1ULL << 4,
+    GX_MANAGED_DMA_CAPABILITY_RELEASE_REFERENCE = 1ULL << 5,
+    GX_MANAGED_DMA_FLAG_NONE = 0U
 };
 
 enum {
@@ -465,6 +491,7 @@ typedef struct {
     uint64_t ConfigReadAddress;
     uint64_t Reserved0;
     uint64_t Reserved1;
+    uint64_t ConfigCommandAddress;
 } GX_MANAGED_KERNEL_PCI_SERVICES_V1;
 
 typedef struct {
@@ -475,6 +502,15 @@ typedef struct {
     uint64_t Value;
     uint64_t Reserved1;
 } GX_MANAGED_KERNEL_PCI_READ_RESULT_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t OriginalCommand;
+    uint32_t RequestedBits;
+    uint32_t ResultingCommand;
+    uint32_t Reserved;
+} GX_MANAGED_KERNEL_PCI_COMMAND_RESULT_V1;
 
 typedef struct {
     uint32_t Size;
@@ -491,6 +527,7 @@ typedef struct {
     uint32_t MaxMappings;
     uint64_t WindowBase;
     uint64_t WindowLength;
+    uint64_t WriteAddress;
 } GX_MANAGED_KERNEL_MMIO_SERVICES_V1;
 
 typedef struct {
@@ -519,6 +556,36 @@ typedef struct {
     uint64_t Value;
     uint64_t Reserved1;
 } GX_MANAGED_KERNEL_MMIO_READ_RESULT_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t Handle;
+    uint64_t BusAddress;
+    uint64_t ByteLength;
+    uint64_t PageCount;
+    uint64_t Alignment;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_DMA_ALLOCATION_RESULT_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint64_t Capabilities;
+    uint64_t AllocateAddress;
+    uint64_t ReleaseAddress;
+    uint64_t ReadAddress;
+    uint64_t WriteAddress;
+    uint64_t RetainAddress;
+    uint64_t ReleaseReferenceAddress;
+    uint32_t MaxAllocations;
+    uint32_t MaxPagesPerAllocation;
+    uint64_t MaxTotalPages;
+    uint64_t MaxBusAddress;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_DMA_SERVICES_V1;
 
 typedef struct {
     uint32_t Size;
@@ -972,6 +1039,8 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Reserved0) == 32,
                "managed PCI services Reserved0 offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, Reserved1) == 40,
                "managed PCI services Reserved1 offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_SERVICES_V1, ConfigCommandAddress) == 48,
+               "managed PCI services ConfigCommandAddress offset");
 _Static_assert(sizeof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1) ==
                    GX_MANAGED_KERNEL_PCI_READ_RESULT_V1_SIZE,
                "managed PCI read result size");
@@ -985,6 +1054,9 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Value) == 16,
                "managed PCI read result Value offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_PCI_READ_RESULT_V1, Reserved1) == 24,
                "managed PCI read result Reserved1 offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_PCI_COMMAND_RESULT_V1) ==
+                   GX_MANAGED_KERNEL_PCI_COMMAND_RESULT_V1_SIZE,
+               "managed PCI command result size");
 _Static_assert(sizeof(GX_MANAGED_KERNEL_MMIO_SERVICES_V1) ==
                    GX_MANAGED_KERNEL_MMIO_SERVICES_V1_SIZE,
                "managed MMIO services size");
@@ -997,6 +1069,20 @@ _Static_assert(sizeof(GX_MANAGED_KERNEL_MMIO_MAPPING_RESULT_V1) ==
 _Static_assert(sizeof(GX_MANAGED_KERNEL_MMIO_READ_RESULT_V1) ==
                    GX_MANAGED_KERNEL_MMIO_READ_RESULT_V1_SIZE,
                "managed MMIO read result size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_MMIO_SERVICES_V1, WriteAddress) == 88,
+               "managed MMIO services WriteAddress offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_DMA_ALLOCATION_RESULT_V1) ==
+                   GX_MANAGED_KERNEL_DMA_ALLOCATION_RESULT_V1_SIZE,
+               "managed DMA allocation result size");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_DMA_SERVICES_V1) ==
+                   GX_MANAGED_KERNEL_DMA_SERVICES_V1_SIZE,
+               "managed DMA services size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DMA_SERVICES_V1, AllocateAddress) == 24,
+               "managed DMA services AllocateAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DMA_SERVICES_V1, MaxAllocations) == 72,
+               "managed DMA services MaxAllocations offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_DMA_SERVICES_V1, MaxBusAddress) == 88,
+               "managed DMA services MaxBusAddress offset");
 _Static_assert(sizeof(GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1) ==
                    GX_MANAGED_KERNEL_SERIAL_PLATFORM_DEVICE_V1_SIZE,
                "managed serial platform device size");

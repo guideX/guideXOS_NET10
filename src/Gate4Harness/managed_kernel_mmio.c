@@ -344,7 +344,7 @@ GXOS_MMIO_SERVICE_STATUS gxos_mmio_map(
     uint64_t last_virtual_start;
     if (mapping_handle_out != 0) *mapping_handle_out = 0;
     if (service == 0 || !service->initialized || mapping_handle_out == 0 ||
-        access != 1U || length == 0 || claim == 0) {
+        (access != 1U && access != 3U) || length == 0 || claim == 0) {
         return GXOS_MMIO_SERVICE_INVALID_ARGUMENT;
     }
     if (claim->owner_driver_id != driver_id) return GXOS_MMIO_SERVICE_OWNERSHIP_MISMATCH;
@@ -358,7 +358,9 @@ GXOS_MMIO_SERVICE_STATUS gxos_mmio_map(
             (GX_MANAGED_DEVICE_RESOURCE_FLAG_READABLE |
              GX_MANAGED_DEVICE_RESOURCE_FLAG_MEMORY |
              GX_MANAGED_DEVICE_RESOURCE_FLAG_PCI_ASSIGNED |
-             GX_MANAGED_DEVICE_RESOURCE_FLAG_CACHE_UNCACHED)) {
+             GX_MANAGED_DEVICE_RESOURCE_FLAG_CACHE_UNCACHED) ||
+        (access == 3U &&
+         (resource->Flags & GX_MANAGED_DEVICE_RESOURCE_FLAG_WRITABLE) == 0U)) {
         return GXOS_MMIO_SERVICE_UNSUPPORTED;
     }
     if (!range_contains(0, resource->Length, offset, length) ||
@@ -419,7 +421,7 @@ GXOS_MMIO_SERVICE_STATUS gxos_mmio_map(
         }
         if (gxos_vm_paging_map_range_with_flags_in_window(
                 service->paging, virtual_page, physical_start, page_count,
-                0, 0, service->cache_policy.pte_flags,
+                access == 3U ? 1U : 0U, 0, service->cache_policy.pte_flags,
                 service->window_base, service->window_length) !=
             GXOS_VM_PAGING_STATUS_OK) return GXOS_MMIO_SERVICE_RESOURCE_EXHAUSTED;
         mapping->live = 1;
@@ -432,6 +434,8 @@ GXOS_MMIO_SERVICE_STATUS gxos_mmio_map(
         mapping->requested_offset = offset;
         mapping->requested_length = length;
         mapping->mapped_length = mapped_length;
+        mapping->access = access;
+        mapping->reserved0 = 0;
         mapping->generation = service->next_mapping_generation++;
         claim->mapping_count++;
         *mapping_handle_out = (mapping->generation << 32) | (index + 1U);
@@ -496,6 +500,56 @@ GXOS_MMIO_SERVICE_STATUS gxos_mmio_read(
     }
     __asm__ volatile ("" : : : "memory");
     return GXOS_MMIO_SERVICE_OK;
+}
+
+GXOS_MMIO_SERVICE_STATUS gxos_mmio_write(
+    GXOS_MMIO_SERVICE *service, uint64_t mapping_handle, uint32_t driver_id,
+    uint64_t offset, uint32_t width, uint64_t value)
+{
+    GXOS_MMIO_MAPPING_RECORD *mapping = find_mapping(service, mapping_handle);
+    uint64_t address;
+    if (mapping == 0) return GXOS_MMIO_SERVICE_NOT_FOUND;
+    if (mapping->owner_driver_id != driver_id) {
+        return GXOS_MMIO_SERVICE_OWNERSHIP_MISMATCH;
+    }
+    if ((mapping->access & 2U) == 0U || width != 4U ||
+        offset > UINT64_MAX - width || offset + width > mapping->requested_length ||
+        (offset & 3U) != 0U) {
+        return GXOS_MMIO_SERVICE_INVALID_ARGUMENT;
+    }
+    if (mapping->virtual_base > UINT64_MAX -
+            (mapping->physical_base & (GXOS_VM_PAGE_SIZE - 1U)) ||
+        !add_u64(mapping->virtual_base +
+                     (mapping->physical_base & (GXOS_VM_PAGE_SIZE - 1U)),
+                 offset, &address) || width > UINT64_MAX - address ||
+        !range_contains(service->window_base, service->window_length,
+                        address, width)) {
+        return GXOS_MMIO_SERVICE_INVALID_STATE;
+    }
+    *(volatile uint32_t *)(uintptr_t)address = (uint32_t)value;
+    __asm__ volatile ("" : : : "memory");
+    return GXOS_MMIO_SERVICE_OK;
+}
+
+int gxos_mmio_validate_claim(
+    const GXOS_MMIO_SERVICE *service, uint64_t claim_handle,
+    uint32_t driver_id, uint64_t *resource_id_out,
+    uint32_t *owner_kind_out, uint32_t *owner_id_out)
+{
+    GXOS_MMIO_CLAIM_RECORD *claim;
+    const GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 *resource;
+    if (resource_id_out != 0) *resource_id_out = 0;
+    if (owner_kind_out != 0) *owner_kind_out = 0;
+    if (owner_id_out != 0) *owner_id_out = 0;
+    if (service == 0 || !service->initialized || driver_id == 0) return 0;
+    claim = find_claim((GXOS_MMIO_SERVICE *)service, claim_handle);
+    if (claim == 0 || claim->owner_driver_id != driver_id) return 0;
+    resource = find_resource(service, claim->resource_id, 0);
+    if (resource == 0) return 0;
+    if (resource_id_out != 0) *resource_id_out = resource->ResourceId;
+    if (owner_kind_out != 0) *owner_kind_out = resource->OwnerDeviceKind;
+    if (owner_id_out != 0) *owner_id_out = resource->OwnerDeviceId;
+    return 1;
 }
 
 void gxos_mmio_set_callback_service(GXOS_MMIO_SERVICE *service)
@@ -598,4 +652,12 @@ uint32_t gxos_mmio_read_callback(
     result->Value = value;
     result->Reserved1 = 0;
     return GX_MANAGED_OK;
+}
+
+uint32_t gxos_mmio_write_callback(
+    uint64_t mapping_handle, uint32_t driver_id, uint64_t offset,
+    uint32_t width, uint64_t value)
+{
+    return (uint32_t)gxos_mmio_write(g_callback_service, mapping_handle,
+                                     driver_id, offset, width, value);
 }
