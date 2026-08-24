@@ -229,3 +229,71 @@ IP networking, or Internet connectivity.  ARP, IPv4, IPv6, ICMP, UDP, TCP,
 DHCP, DNS, sockets, MSI/MSI-X, legacy NIC interrupts, jumbo/scatter-gather
 receive, checksum/segmentation offload, and multiple-NIC support remain
 outside Phase 15.
+
+## Phase 16: bounded managed Ethernet and ARP
+
+Phase 16 adds `ManagedEthernetLayer` and `ManagedArpLayer` above the existing
+e1000 transport.  The ownership boundary is strict:
+
+* `ManagedE1000Driver` owns PCI/MMIO/DMA, descriptors, device completion,
+  packet-buffer transport, and hardware teardown.
+* `ManagedEthernetLayer` owns bounded Ethernet II headers, destination policy,
+  EtherType dispatch, minimum-frame padding, and local-MAC handling.
+* `ManagedArpLayer` owns Ethernet/IPv4 ARP parsing and construction, one
+  pending resolution, the configured test addresses, responder policy, and
+  the bounded cache.
+
+Only EtherType `0x0806` is interpreted by the protocol layer.  Ethernet frames
+must be at least 60 bytes, no larger than the 2048-byte e1000 packet buffer,
+and addressed to the local MAC or broadcast.  ARP accepts only Ethernet/IPv4
+  packets with HLEN 6, PLEN 4, and Request or Reply opcodes.  Source-MAC and
+  ARP sender-MAC agreement is checked before dispatch.
+
+The deterministic Phase 16 topology is deliberately not IP networking:
+
+* guest IPv4: `10.15.0.1`
+* host IPv4: `10.15.0.2`
+* host test MAC: `02:15:00:00:00:02`
+* guest MAC: runtime `RAL/RAH` discovery (`52:54:00:12:34:56` in QEMU)
+
+The ARP cache has eight fixed entries.  It uses an empty slot first and then
+replaces the lowest generation; lookup refreshes generation.  The runtime
+learns only a validated Reply that satisfies the one pending host resolution,
+so malformed, unrelated, or unsolicited traffic cannot populate policy state.
+All protocol receive loops are finite.  Teardown stops protocol acceptance,
+clears the pending operation and cache, then follows the established e1000
+quiesce, DMA release, PCI restore, MMIO unmap, and accounting checks.
+
+The authoritative host peer uses QEMU's local UDP `dgram` netdev and no TAP,
+administrator privilege, Internet, or external NIC.  Each Phase 16 run
+validates these four exact 60-byte frames through QEMU `filter-dump`:
+
+`guest Request -> host Reply -> host Request -> guest Reply`
+
+`tools/Parse-ManagedE1000Phase16Pcap.ps1` checks Ethernet and ARP fields,
+padding, packet lengths, frame order/count, and SHA-256 values.  The focused
+host suite is `tools/Run-ManagedKernelPhase16HostTests.ps1`; the authoritative
+three-boot runner is `tools/Run-ManagedKernelPhase16FreshBoots.ps1`.
+
+The runtime proof markers are intentionally limited to the protocol milestones
+`MANAGED_ETHERNET_READY`, `MANAGED_ARP_READY`,
+`MANAGED_ARP_RESOLUTION_STARTED`, `MANAGED_ETHERNET_TX_ARP_REQUEST`,
+`MANAGED_ETHERNET_RX_ARP`, `MANAGED_ARP_REPLY_VALID`,
+`MANAGED_ARP_CACHE_LEARNED`, `MANAGED_ARP_RESOLUTION_COMPLETE`,
+`MANAGED_ARP_REQUEST_FOR_LOCAL`, `MANAGED_ARP_REPLY_SENT`,
+`MANAGED_ARP_RESPONDER_PASS`, `MANAGED_KERNEL_PHASE16_GC_SURVIVAL_PASSED`,
+and `MANAGED_KERNEL_PHASE16_PASS`.  The last marker is emitted only after
+both ARP directions pass and normal Phase 14 teardown samples that proof.
+
+Phase 16 proves Ethernet/ARP framing over the authentic managed e1000 TX/RX
+path.  It does not implement IPv4 packet processing, checksums, ICMP, ping,
+UDP, TCP, DHCP, DNS, sockets, routing, IPv6/ND, VLANs, promiscuous mode,
+interrupt-driven networking, multiple interfaces, jumbo/scatter-gather
+frames, offloads, TAP networking, or Internet access.
+
+The finalized acceptance evidence is under
+`evidence/phase16-authoritative-final-v2-20260824` (three fresh boots) with
+payload size `1,060,864` and SHA-256
+`BA70A8D58232A1F4489DBAAE1C247880D6C6FE61F6949A3D7A1A25711CA5A6B5`.
+The focused Phase 15 control also passes three fresh boots under
+`evidence/phase15-control-final-v2-20260824`.

@@ -2183,6 +2183,7 @@ internal static unsafe class ManagedKernelContract
                 return InvalidState;
             bool rxProof = s_phase14Driver.RxProofReceived;
             bool phase15RxProof = s_phase14Driver.RxPhase15Received;
+            bool phase16Proof = s_phase14Driver.Phase16Passed;
             s_phase14TeardownRun = 1;
             if (!KernelLog.Write(rxProof
                     ? "PHASE 14 FIRST MANAGED PCI DRIVER COMPLETE — DMA TX/RX PROVEN\r\n"u8
@@ -2193,7 +2194,9 @@ internal static unsafe class ManagedKernelContract
                     : "GXOS_NET10:MANAGED_KERNEL_PHASE15_RX_HARNESS_DEFERRED\r\n"u8) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE15_ACCOUNTING_RESTORED\r\n"u8) ||
                 (phase15RxProof &&
-                 !KernelLog.Write("MANAGED_KERNEL_PHASE15_PASS\r\n"u8)))
+                 !KernelLog.Write("MANAGED_KERNEL_PHASE15_PASS\r\n"u8)) ||
+                (phase16Proof &&
+                 !KernelLog.Write("MANAGED_KERNEL_PHASE16_PASS\r\n"u8)))
                 return InvalidState;
             s_phase14Driver = null;
             return ManagedOk;

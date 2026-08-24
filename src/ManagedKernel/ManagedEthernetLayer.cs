@@ -1,0 +1,105 @@
+using System;
+
+namespace GuideXOS.Net10.ManagedKernel;
+
+internal sealed class ManagedEthernetLayer
+{
+    internal const uint ReceivePollLimit = 1000000000;
+    private readonly ManagedE1000Driver _transport;
+    private readonly ManagedArpLayer _arp;
+    private readonly byte[] _localMac;
+    private readonly byte[] _txFrame;
+    private readonly byte[] _rxFrame;
+    private uint _unknownEtherTypeCount;
+    private uint _malformedFrameCount;
+    private bool _accepting = true;
+
+    internal ManagedEthernetLayer(ManagedE1000Driver transport)
+    {
+        _transport = transport;
+        _localMac = new byte[ManagedEthernetProtocol.MacLength];
+        _txFrame = new byte[ManagedEthernetProtocol.MaximumFrameLength];
+        _rxFrame = new byte[ManagedEthernetProtocol.MaximumFrameLength];
+        _arp = new ManagedArpLayer(this);
+    }
+
+    internal uint UnknownEtherTypeCount => _unknownEtherTypeCount;
+    internal uint MalformedFrameCount => _malformedFrameCount;
+    internal bool Phase16Passed => _arp.Phase16Passed;
+
+    internal bool TryRunPhase16()
+    {
+        return _arp.TryRunPhase16();
+    }
+
+    internal void InitializeMac()
+    {
+        uint macHigh = ManagedE1000Driver.Phase16MacHigh;
+        uint macLow = ManagedE1000Driver.Phase16MacLow;
+        _localMac[0] = (byte)(macHigh >> 8);
+        _localMac[1] = (byte)macHigh;
+        _localMac[2] = (byte)(macLow >> 24);
+        _localMac[3] = (byte)(macLow >> 16);
+        _localMac[4] = (byte)(macLow >> 8);
+        _localMac[5] = (byte)macLow;
+        _arp.InitializeMac();
+    }
+
+    internal bool TryTransmit(ushort etherType, byte[] destination,
+                              byte[] payload, int payloadLength)
+    {
+        if (!_accepting || destination == null || payload == null ||
+            payloadLength < 0 || payloadLength > payload.Length) return false;
+        Span<byte> frame = _txFrame;
+        if (!ManagedEthernetProtocol.TryBuildFrame(
+                frame, destination, _localMac, etherType,
+                payload.AsSpan(0, payloadLength), out ushort frameLength))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_ETHERNET_TX_BUILD_FAILED\r\n"u8);
+            return false;
+        }
+        return _transport.TryTransmitFrame(_txFrame, frameLength);
+    }
+
+    internal bool TryReceiveAndDispatch(ManagedArpLayer arp,
+                                         out ManagedArpHandleResult result)
+    {
+        result = ManagedArpHandleResult.Invalid;
+        if (!_accepting || arp == null) return false;
+
+        if (!_transport.TryReceiveProtocolFrame(
+                _rxFrame, _rxFrame.Length, ReceivePollLimit,
+                out ushort frameLength))
+            return false;
+        ReadOnlySpan<byte> received = _rxFrame.AsSpan(0, frameLength);
+        if (!ManagedEthernetProtocol.TryParseFrame(
+                received, _localMac, out ManagedEthernetFrame parsed))
+        {
+            _malformedFrameCount++;
+            return true;
+        }
+
+        if (parsed.EtherType != ManagedEthernetProtocol.ArpEtherType)
+        {
+            _unknownEtherTypeCount++;
+            result = ManagedArpHandleResult.Ignored;
+            return true;
+        }
+
+        result = arp.TryHandleEthernetArp(
+            _rxFrame, 0, 6, ManagedEthernetProtocol.HeaderLength,
+            parsed.Payload.Length);
+        return result != ManagedArpHandleResult.Failed;
+    }
+
+    internal bool TryVerifyTransportAfterGc()
+    {
+        return _transport.TryVerifyProtocolGcSurvival();
+    }
+
+    internal bool TryStop()
+    {
+        _accepting = false;
+        return _arp.TryStop();
+    }
+}

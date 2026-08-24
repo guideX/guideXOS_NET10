@@ -14,6 +14,7 @@ param(
     [switch]$Phase15KeepDefaultNic,
     [switch]$Phase15AllowHarnessDeferral,
     [switch]$Phase15AcceptEitherOutcome,
+    [switch]$EnablePhase16Protocol,
     [switch]$Phase15EnableFilterDump,
     [switch]$Phase15EnableQemuReceiveTrace,
     [ValidateSet('all', 'rx', 'tx')]
@@ -240,6 +241,84 @@ function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
     return ('MANAGED_E1000_PHASE15_INJECTED=PASS transport=dgram length={0} destination={1} source=021500000001 ethertype=88B5 sequence=0x15000001 frame_sha256={2} udp_source_port={3} udp_destination_port={4}' -f `
         $frame.Length, $destinationMac.ToUpperInvariant(), $frameHash,
         ([Net.IPEndPoint]$peerUdp.Client.LocalEndPoint).Port, $destinationPort)
+}
+
+function New-MacBytes16([string]$text) {
+    if ($text -notmatch '^[0-9A-Fa-f]{12}$') { throw "Invalid MAC: $text" }
+    $mac = New-Object byte[] 6
+    for ($index = 0; $index -lt 6; $index++) {
+        $mac[$index] = [Convert]::ToByte($text.Substring($index * 2, 2), 16)
+    }
+    return $mac
+}
+
+function Bytes-Equal16([byte[]]$left, [int]$offset, [byte[]]$right) {
+    if ($offset -lt 0 -or $offset + $right.Length -gt $left.Length) { return $false }
+    for ($index = 0; $index -lt $right.Length; $index++) {
+        if ($left[$offset + $index] -ne $right[$index]) { return $false }
+    }
+    return $true
+}
+
+function New-Phase16ArpFrame11([byte[]]$destination, [byte[]]$source,
+                                [byte]$operation, [byte[]]$senderIp,
+                                [byte[]]$targetMac, [byte[]]$targetIp) {
+    $frame = New-Object byte[] 60
+    [Array]::Copy($destination, 0, $frame, 0, 6)
+    [Array]::Copy($source, 0, $frame, 6, 6)
+    $frame[12] = 0x08; $frame[13] = 0x06
+    $frame[15] = 1; $frame[16] = 0x08; $frame[18] = 6; $frame[19] = 4
+    $frame[21] = $operation
+    [Array]::Copy($source, 0, $frame, 22, 6)
+    [Array]::Copy($senderIp, 0, $frame, 28, 4)
+    [Array]::Copy($targetMac, 0, $frame, 32, 6)
+    [Array]::Copy($targetIp, 0, $frame, 38, 4)
+    return $frame
+}
+
+function Hash-Phase16Frame11([byte[]]$frame) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($hash.ComputeHash($frame))).Replace('-', '').ToUpperInvariant() }
+    finally { $hash.Dispose() }
+}
+
+function Receive-ExpectedPhase16Frame11([Net.Sockets.UdpClient]$peerUdp,
+                                         [byte[]]$expected,
+                                         [string]$name,
+                                         [int]$timeoutSeconds) {
+    $peerUdp.Client.ReceiveTimeout = 1000
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $seen = 0
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+            $frame = $peerUdp.Receive([ref]$remote)
+        } catch [Net.Sockets.SocketException] {
+            continue
+        }
+        $seen++
+        if ($seen -gt 64) { throw "Too many guest Ethernet frames while waiting for $name." }
+        if ($frame.Length -eq $expected.Length) {
+            $match = $true
+            for ($index = 0; $index -lt $expected.Length; $index++) {
+                if ($frame[$index] -ne $expected[$index]) { $match = $false; break }
+            }
+            if ($match) { return ,$frame }
+        }
+    }
+    throw "Timed out waiting for exact guest $name Ethernet frame."
+}
+
+function Write-Phase16Frame11([IO.StreamWriter]$log, [string]$name,
+                              [byte[]]$frame) {
+    $hex = ([BitConverter]::ToString($frame)).Replace('-', '')
+    $hash = Hash-Phase16Frame11 $frame
+    $log.WriteLine(('MANAGED_PHASE16_{0}=PASS length={1} destination={2} source={3} ethertype=0806 operation={4} sender_mac={5} sender_ip={6} target_mac={7} target_ip={8} frame_sha256={9}' -f `
+        $name.ToUpperInvariant(), $frame.Length, $hex.Substring(0, 12),
+        $hex.Substring(12, 12), $frame[21], $hex.Substring(44, 12),
+        $hex.Substring(56, 8), $hex.Substring(64, 12), $hex.Substring(76, 8), $hash))
+    $log.WriteLine(('MANAGED_PHASE16_{0}_FRAME_HEX={1}' -f $name.ToUpperInvariant(), $hex))
+    $log.Flush()
 }
 
 Require11 ($RunCount -ge 3) 'Three fresh ManagedKernel Phase 11 boots are required.'
@@ -474,6 +553,62 @@ try {
                 } elseif ($Phase15AcceptEitherOutcome) {
                     $phase15Outcome = Wait-Phase15Outcome11 `
                         $deadline $process $stream $logStream $text $buffer
+                } elseif ($EnablePhase16Protocol) {
+                    Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_FRAME_OK' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $guestMacBytes = New-MacBytes16 $destinationMac
+                    $broadcastMac = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
+                    $hostMacBytes = [byte[]](0x02, 0x15, 0, 0, 0, 2)
+                    $guestIpBytes = [byte[]](10, 15, 0, 1)
+                    $hostIpBytes = [byte[]](10, 15, 0, 2)
+                    $zeroMac = [byte[]](0, 0, 0, 0, 0, 0)
+                    $guestRequest = New-Phase16ArpFrame11 `
+                        $broadcastMac $guestMacBytes 1 $guestIpBytes $zeroMac $hostIpBytes
+                    $hostReply = New-Phase16ArpFrame11 `
+                        $guestMacBytes $hostMacBytes 2 $hostIpBytes $guestMacBytes $guestIpBytes
+                    $hostRequest = New-Phase16ArpFrame11 `
+                        $broadcastMac $hostMacBytes 1 $hostIpBytes $zeroMac $guestIpBytes
+                    $guestReply = New-Phase16ArpFrame11 `
+                        $hostMacBytes $guestMacBytes 2 $guestIpBytes $hostMacBytes $hostIpBytes
+                    Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESOLUTION_STARTED' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $observedGuestRequest = Receive-ExpectedPhase16Frame11 `
+                        $peerUdp $guestRequest 'ARP request' $TimeoutSeconds
+                    Write-Phase16Frame11 $injectionLog 'guest_arp_request' $observedGuestRequest
+                    $sentReply = $peerUdp.Send($hostReply, $hostReply.Length,
+                                               '127.0.0.1', $rxPort)
+                    Require11 ($sentReply -eq $hostReply.Length) `
+                        'Host ARP reply send was short.'
+                    Write-Phase16Frame11 $injectionLog 'host_arp_reply' $hostReply
+                    Write-Timeline11 $timeline 'HOST_ARP_REPLY_SENT' `
+                        "destination=$destinationMac source=021500000002"
+                    Wait-Marker11 'GXOS_NET10:MANAGED_ARP_REPLY_VALID' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESOLUTION_COMPLETE' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $sentRequest = $peerUdp.Send($hostRequest, $hostRequest.Length,
+                                                 '127.0.0.1', $rxPort)
+                    Require11 ($sentRequest -eq $hostRequest.Length) `
+                        'Host ARP request send was short.'
+                    Write-Phase16Frame11 $injectionLog 'host_arp_request' $hostRequest
+                    Write-Timeline11 $timeline 'HOST_ARP_REQUEST_FOR_GUEST_SENT' `
+                        'source=021500000002 target_ipv4=0A0F0001'
+                    Wait-Marker11 'GXOS_NET10:MANAGED_ARP_REQUEST_FOR_LOCAL' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $observedGuestReply = Receive-ExpectedPhase16Frame11 `
+                        $peerUdp $guestReply 'ARP reply' $TimeoutSeconds
+                    Write-Phase16Frame11 $injectionLog 'guest_arp_reply' $observedGuestReply
+                    Wait-Marker11 'GXOS_NET10:MANAGED_ARP_REPLY_SENT' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESPONDER_PASS' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Wait-Marker11 'MANAGED_KERNEL_PHASE16_PASS' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $phase15Outcome = 'PASS_PHASE16'
                 } else {
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_FRAME_OK' $deadline $process $stream $logStream $text $buffer

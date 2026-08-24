@@ -26,9 +26,8 @@ Require15 (Test-Path -LiteralPath $phase11Runner) 'Phase 11 fresh-boot runner is
 
 & $phase11Runner -GateDirectory $gate -EvidenceDirectory $evidence `
     -PayloadSha256 $expectedHash -PayloadSize $PayloadSize -RunCount $RunCount `
-    -TimeoutSeconds $TimeoutSeconds -PostPhase11Marker `
-    'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' -EnablePhase15Rx -Phase15NetworkBackend dgram `
-    -Phase15EnableFilterDump -Phase15FilterDumpQueue tx
+    -TimeoutSeconds $TimeoutSeconds -EnablePhase15Rx -Phase15NetworkBackend dgram `
+    -EnablePhase16Protocol -Phase15EnableFilterDump -Phase15FilterDumpQueue tx
 
 $required = @(
     'GXOS_NET10:MANAGED_KERNEL_PHASE13_PASS',

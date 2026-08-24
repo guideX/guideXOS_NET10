@@ -27,6 +27,8 @@ internal sealed class ManagedE1000Driver
     private const uint RxPhase15PollLimit = 1000000000;
     private const uint RxReadyPollLimit = 5000000;
     private const uint RxRearmInterval = 1000000;
+    internal static uint Phase16MacHigh;
+    internal static uint Phase16MacLow;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -37,8 +39,11 @@ internal sealed class ManagedE1000Driver
     private ManagedDmaAllocation? _rxRing;
     private ManagedDmaAllocation? _txBuffers;
     private ManagedDmaAllocation? _rxBuffers;
+    private ManagedEthernetLayer? _ethernet;
     private readonly byte[] _mac = new byte[6];
     private readonly byte[] _txFrame = new byte[60];
+    private ulong _macValue;
+    private bool _phase16Passed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -52,16 +57,19 @@ internal sealed class ManagedE1000Driver
     {
         _device = device;
         _state = ManagedE1000DriverState.Created;
+        _ethernet = new ManagedEthernetLayer(this);
     }
 
     internal ManagedE1000DriverState State => _state;
-    internal ReadOnlySpan<byte> Mac => _mac;
+    internal ulong MacValue => _macValue;
     internal ulong TxRingBusAddress => _txRing?.BusAddress ?? 0;
     internal ulong RxRingBusAddress => _rxRing?.BusAddress ?? 0;
     internal uint OriginalCommand => _originalCommand;
     internal uint ResultingCommand => _resultingCommand;
     internal bool RxProofReceived => _rxProofReceived != 0;
     internal bool RxPhase15Received => _rxPhase15Received != 0;
+    internal bool Phase16Passed => _phase16Passed ||
+                                   (_ethernet != null && _ethernet.Phase16Passed);
 
     internal static ManagedE1000Driver? TryCreate()
     {
@@ -166,12 +174,35 @@ internal sealed class ManagedE1000Driver
             !KernelLog.Write("GXOS_NET10:MANAGED_E1000_RX_READY\r\n"u8))
             return AbortStart();
         if (!PollPhase15RxProof()) return AbortStart();
+        if (_rxPhase15Received != 0)
+        {
+            if (_mmio == null ||
+                !_mmio.TryRead32(ManagedE1000Protocol.RegRal, out uint ral) ||
+                !_mmio.TryRead32(ManagedE1000Protocol.RegRah, out uint rah))
+                return AbortStart();
+            byte mac0 = (byte)ral;
+            byte mac1 = (byte)(ral >> 8);
+            byte mac2 = (byte)(ral >> 16);
+            byte mac3 = (byte)(ral >> 24);
+            byte mac4 = (byte)rah;
+            byte mac5 = (byte)(rah >> 8);
+            Phase16MacHigh = (uint)((mac0 << 8) | mac1);
+            Phase16MacLow = ((uint)mac2 << 24) | ((uint)mac3 << 16) |
+                            ((uint)mac4 << 8) | mac5;
+            _ethernet.InitializeMac();
+            if (!_ethernet.TryRunPhase16()) return AbortStart();
+        }
         return true;
     }
 
     private bool AbortStart()
     {
         bool safe = true;
+        if (_ethernet != null)
+        {
+            safe = _ethernet.TryStop() && safe;
+            _ethernet = null;
+        }
         if (_state >= ManagedE1000DriverState.Initialized && _mmio != null)
             safe = WriteRegister(ManagedE1000Protocol.RegRctl, 0) &&
                    WriteRegister(ManagedE1000Protocol.RegTctl, 0) && safe;
@@ -215,8 +246,11 @@ internal sealed class ManagedE1000Driver
     {
         if (_state != ManagedE1000DriverState.Running) return false;
         _state = ManagedE1000DriverState.Stopping;
-        bool result = DisableEngines() && ReleaseDmaAndRestorePci();
+        if (_ethernet != null) _phase16Passed = _ethernet.Phase16Passed;
+        bool result = (_ethernet == null || _ethernet.TryStop()) &&
+                      DisableEngines() && ReleaseDmaAndRestorePci();
         if (!result) return false;
+        _ethernet = null;
         if (_mmio != null && _mmio.IsLive && !_mmio.TryUnmap()) return false;
         _mmio = null;
         if (!ManagedDeviceResourceRuntimeCatalog.TryRelease(in _resource, DriverId))
@@ -269,6 +303,7 @@ internal sealed class ManagedE1000Driver
         ulong macValue = ((ulong)_mac[0] << 40) | ((ulong)_mac[1] << 32) |
                          ((ulong)_mac[2] << 24) | ((ulong)_mac[3] << 16) |
                          ((ulong)_mac[4] << 8) | _mac[5];
+        _macValue = macValue;
         return !ManagedE1000Protocol.IsInvalidMac(_mac) &&
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x"u8,
                                       macValue);
@@ -436,18 +471,152 @@ internal sealed class ManagedE1000Driver
     private bool PollTxCompletion()
     {
         if (_txRing == null) return false;
+        if (!PollTxCompletionCore(_txIndex))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_TX_TIMEOUT\r\n"u8);
+            return false;
+        }
+        if (!ManagedE1000Protocol.TryAdvanceRing(
+                _txIndex, ManagedE1000Protocol.RingCount, out _txIndex))
+            return false;
+        return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_TX_COMPLETED\r\n"u8);
+    }
+
+    internal bool TryTransmitFrame(byte[] frame, int length)
+    {
+        if (_state != ManagedE1000DriverState.Running || _txRing == null ||
+            _txBuffers == null || frame == null || length <= 0 ||
+            length > frame.Length ||
+            length > ManagedE1000Protocol.PacketBufferSize ||
+            _txIndex >= ManagedE1000Protocol.RingCount)
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_PRECONDITION_FAILED\r\n"u8);
+            return false;
+        }
+
+        ulong bufferOffset = (ulong)_txIndex * ManagedE1000Protocol.PacketBufferSize;
+        if (bufferOffset > _txBuffers.ByteLength ||
+            (ulong)frame.Length > _txBuffers.ByteLength - bufferOffset ||
+            _txBuffers.BusAddress > ulong.MaxValue - bufferOffset)
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_BOUNDS_FAILED\r\n"u8);
+            return false;
+        }
+        Span<byte> descriptor = stackalloc byte[(int)ManagedE1000Protocol.DescriptorSize];
+        ReadOnlySpan<byte> frameSpan = frame.AsSpan(0, length);
+        if (!_txBuffers.TryWrite(bufferOffset, frameSpan))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_DMA_WRITE_FAILED\r\n"u8);
+            return false;
+        }
+        if (!ManagedE1000Protocol.TryBuildTxDescriptor(
+                descriptor, _txBuffers.BusAddress + bufferOffset,
+                (ushort)length))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_DESCRIPTOR_BUILD_FAILED\r\n"u8);
+            return false;
+        }
+        if (!_txRing.TryWrite(
+                (ulong)_txIndex * ManagedE1000Protocol.DescriptorSize, descriptor))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_DESCRIPTOR_WRITE_FAILED\r\n"u8);
+            return false;
+        }
+        if (!ManagedE1000Protocol.TryAdvanceRing(
+                _txIndex, ManagedE1000Protocol.RingCount, out uint nextIndex))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_RING_ADVANCE_FAILED\r\n"u8);
+            return false;
+        }
+        if (!WriteRegister(ManagedE1000Protocol.RegTxDescTail, nextIndex))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_TAIL_WRITE_FAILED\r\n"u8);
+            return false;
+        }
+        if (!PollTxCompletionCore(_txIndex))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_COMPLETION_TIMEOUT\r\n"u8);
+            return false;
+        }
+        _txIndex = nextIndex;
+        return true;
+    }
+
+    internal bool TryReceiveProtocolFrame(byte[] frame, int capacity,
+                                           uint pollLimit, out ushort length)
+    {
+        length = 0;
+        if (_state != ManagedE1000DriverState.Running || _rxRing == null ||
+            _rxBuffers == null || frame == null ||
+            capacity < ManagedE1000Protocol.MinimumEthernetFrameLength ||
+            capacity > frame.Length ||
+            capacity > ManagedE1000Protocol.PacketBufferSize || pollLimit == 0)
+            return false;
+
+        Span<byte> descriptor = stackalloc byte[(int)ManagedE1000Protocol.DescriptorSize];
+        for (uint spin = 0; spin != pollLimit; ++spin)
+        {
+            if (spin != 0 && spin % RxRearmInterval == 0 &&
+                !WriteRegister(ManagedE1000Protocol.RegRxDescTail,
+                               ManagedE1000Protocol.RingCount - 1))
+                return false;
+            if (!_rxRing.TryRead(
+                    (ulong)_rxIndex * ManagedE1000Protocol.DescriptorSize,
+                    descriptor))
+                return false;
+            if ((descriptor[12] & ManagedE1000Protocol.RxStatusDone) == 0) continue;
+            if (!ManagedE1000Protocol.TryReadRxDescriptor(
+                    descriptor, _rxIndex, ManagedE1000Protocol.RingCount,
+                    ManagedE1000Protocol.PacketBufferSize, out length,
+                    out _, out _) || length > frame.Length)
+            {
+                KernelLog.Write("GXOS_NET10:MANAGED_E1000_RX_PROTOCOL_DESCRIPTOR_REJECTED\r\n"u8);
+                return false;
+            }
+            uint observedIndex = _rxIndex;
+            ulong bufferOffset = (ulong)observedIndex * ManagedE1000Protocol.PacketBufferSize;
+            if (length > capacity ||
+                !_rxBuffers.TryRead(bufferOffset, frame.AsSpan(0, length)) ||
+                !RecycleRxDescriptor(observedIndex))
+                return false;
+            return true;
+        }
+        return false;
+    }
+
+    internal bool TryVerifyProtocolGcSurvival()
+    {
+        ulong txRingBus = TxRingBusAddress;
+        ulong rxRingBus = RxRingBusAddress;
+        ulong txBufferBus = _txBuffers?.BusAddress ?? 0;
+        ulong rxBufferBus = _rxBuffers?.BusAddress ?? 0;
+        GC.Collect();
+        GC.KeepAlive(_txRing);
+        GC.KeepAlive(_rxRing);
+        GC.KeepAlive(_txBuffers);
+        GC.KeepAlive(_rxBuffers);
+        return txRingBus == TxRingBusAddress && rxRingBus == RxRingBusAddress &&
+               txBufferBus == (_txBuffers?.BusAddress ?? 0) &&
+               rxBufferBus == (_rxBuffers?.BusAddress ?? 0) &&
+               _mmio != null &&
+               _mmio.TryRead32(ManagedE1000Protocol.RegStatus, out _);
+    }
+
+    private bool PollTxCompletionCore(uint index)
+    {
+        return _txRing != null && index < ManagedE1000Protocol.RingCount &&
+               PollTxCompletionCoreLoop(index);
+    }
+
+    private bool PollTxCompletionCoreLoop(uint index)
+    {
         for (uint spin = 0; spin != PollLimit; ++spin)
         {
-            if (_txRing.TryRead8(_txIndex * ManagedE1000Protocol.DescriptorSize + 12,
-                                 out byte status) &&
+            if (_txRing!.TryRead8(index * ManagedE1000Protocol.DescriptorSize + 12,
+                                  out byte status) &&
                 (status & ManagedE1000Protocol.TxStatusDone) != 0)
-            {
-                if (!ManagedE1000Protocol.TryAdvanceRing(
-                        _txIndex, ManagedE1000Protocol.RingCount, out _txIndex)) return false;
-                return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_TX_COMPLETED\r\n"u8);
-            }
+                return true;
         }
-        KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_TX_TIMEOUT\r\n"u8);
         return false;
     }
 
@@ -571,11 +740,8 @@ internal sealed class ManagedE1000Driver
             !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescHead, out uint rdh) ||
             !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescTail, out uint rdt))
             return false;
-        ulong mac = ((ulong)_mac[0] << 40) | ((ulong)_mac[1] << 32) |
-                    ((ulong)_mac[2] << 24) | ((ulong)_mac[3] << 16) |
-                    ((ulong)_mac[4] << 8) | _mac[5];
         return KernelLog.Write(marker) &&
-               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_MAC=0x"u8, mac) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_MAC=0x"u8, _macValue) &&
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_STATUS=0x"u8, status) &&
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_RCTL=0x"u8, rctl) &&
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_E1000_RX_RDBAL=0x"u8, rdbal) &&
