@@ -415,3 +415,88 @@ options, IPv6/ND, routing, sockets, and a public network configuration/API
 surface.  Interrupt-driven networking, offloads, VLANs, jumbo/scatter-
 gather frames, multiple interfaces, and Internet access also remain outside
 this phase.
+
+## Phase 18: bounded managed UDP foundation
+
+Phase 18 extends the existing managed path by one protocol layer:
+
+`E1000 RX -> managed Ethernet II -> managed IPv4 -> managed UDP`
+
+and for transmit:
+
+`managed UDP -> managed IPv4 -> managed ARP/Ethernet II -> E1000 TX`.
+
+There is no sockets API, port-thread abstraction, delegate callback, dynamic
+dictionary, or public network configuration surface.  `ManagedE1000Driver`
+continues to own PCI/MMIO/DMA, descriptor ownership, and the packet buffers;
+`ManagedEthernetLayer` continues to own Ethernet framing and dispatch;
+`ManagedIpv4Layer` owns the fixed UDP buffers, protocol state, endpoint table,
+and the one existing pending IPv4 transmission slot.
+
+### UDP wire subset
+
+The deterministic topology remains the Phase 17 topology.  Phase 18 uses
+local UDP port `15180` and peer UDP port `15181`, with the fixed endpoint table
+registering only the local port and the `Phase18Echo` handler identity.  The
+table has four bounded slots and supports register, lookup, unregister, full,
+duplicate, and teardown-clear behavior without retaining executable targets.
+
+`ManagedUdpProtocol` accepts the eight-byte UDP header, nonzero source and
+destination ports, a declared length from 8 through 520 bytes, and at most a
+512-byte payload.  The declared UDP length bounds the datagram view; trailing
+IPv4 padding is not treated as UDP data.  Nonzero checksums validate the IPv4
+pseudo-header (`source`, `destination`, protocol 17, UDP length) plus the
+complete datagram.  A received checksum of zero is accepted as checksum
+disabled.  A computed transmit checksum of numeric zero is encoded on the
+wire as `0xFFFF`.
+
+The managed proof payloads are `PHASE18-MANAGED-HELLO`,
+`PHASE18-PEER-ACK`, `PHASE18-PEER-HELLO`, and `PHASE18-MANAGED-ACK`.
+Managed-originated traffic proves the existing ARP/Ethernet/IPv4/E1000 TX
+path; peer-originated traffic proves endpoint dispatch and managed response.
+The Phase 18 path reuses the validated Phase 17 ARP cache rather than adding a
+second resolution state machine.  Five live malformed controls cover zero
+source port, zero destination port, invalid application payload, unknown
+destination port, and an over-limit UDP length.  Short/long declared lengths,
+bad checksums, odd payloads, pseudo-header mutation, zero-checksum receive, and
+computed-zero-to-FFFF transmit behavior are covered by the independent host
+suite.
+
+The E1000 receive polling rearm now posts the descriptor immediately before
+the current software cursor rather than unconditionally posting descriptor
+15.  This preserves the current descriptor at the 16-entry ring boundary
+when a packet arrives during a bounded polling interval.  The change keeps
+the existing ownership model and does not enlarge the ring or expose a raw
+buffer to managed protocol code.
+
+### GC, teardown, and authoritative wire proof
+
+Phase 18 runs the managed UDP exchange, peer response, zero-checksum receive,
+five malformed controls, a post-malformed peer exchange, managed GC survival,
+and a post-GC managed/peer exchange.  Teardown clears the endpoint table,
+fixed UDP buffers, counters, pending state, and protocol acceptance before
+the existing NIC quiesce, DMA release, PCI restore, MMIO unmap, claim release,
+and accounting restoration.
+
+The focused suite is `tools/Run-ManagedKernelPhase18HostTests.ps1` and passes
+55 cases.  Phase 15, Phase 16, and Phase 17 focused controls pass 28, 57, and
+48 cases respectively.  The authoritative three-boot runner is
+`tools/Run-ManagedKernelPhase18FreshBoots.ps1`; its independent wire parser is
+`tools/Parse-ManagedE1000Phase18Pcap.ps1`.  Each final PCAP contains 34
+packets, four ARP frames, six ICMP frames, twelve valid UDP frames, and five
+malformed UDP controls.  The final fresh-boot evidence is under
+`evidence/phase18-authoritative-v9-20260824`; all three boots report
+`PASS_PHASE18`, and all three PCAPs pass exact field, checksum, order, and
+count validation.
+
+The Phase 18 payload is `1,100,800` bytes with SHA-256
+`BA5ECCD1933EC8DE6DD0D49A086A94BBB22EB4D6D1F7AE64779E2CF6EC37DFE9`.
+The same payload passes three fresh Phase 17 regression boots under
+`evidence/phase17-regression-phase18-20260824`, three fresh Phase 16
+regression boots under `evidence/phase16-regression-phase18-v2-20260824`,
+and three fresh Phase 15 regression boots under
+`evidence/phase15-regression-phase18-v3-20260824`.
+UDP receive/transmit is now proven over the managed E1000 path, but UDP
+fragmentation/reassembly, TCP, DHCP, DNS, routing, IPv6/ND, interrupts,
+offloads, VLANs, jumbo/scatter-gather frames, multiple interfaces, sockets,
+and Internet access remain deferred.

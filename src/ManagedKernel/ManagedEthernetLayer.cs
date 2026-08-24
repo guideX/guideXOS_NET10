@@ -29,6 +29,7 @@ internal sealed class ManagedEthernetLayer
     internal uint MalformedFrameCount => _malformedFrameCount;
     internal bool Phase16Passed => _arp.Phase16Passed;
     internal bool Phase17Passed => _ipv4.Phase17Passed;
+    internal bool Phase18Passed => _ipv4.Phase18Passed;
 
     internal bool TryRunPhase16()
     {
@@ -38,6 +39,11 @@ internal sealed class ManagedEthernetLayer
     internal bool TryRunPhase17()
     {
         return _arp.TryRunPhase16() && _ipv4.TryRunPhase17();
+    }
+
+    internal bool TryRunPhase18()
+    {
+        return _arp.TryRunPhase16() && _ipv4.TryRunPhase18();
     }
 
     internal void InitializeMac()
@@ -183,5 +189,8 @@ internal enum ManagedNetworkDispatchResult : byte
     IcmpEchoReplyValidated = 4,
     IcmpResponderReplySent = 5,
     Malformed = 6,
-    Failed = 7
+    Failed = 7,
+    UdpEndpointResponseSent = 8,
+    UdpResponseValidated = 9,
+    UdpZeroChecksumAccepted = 10
 }

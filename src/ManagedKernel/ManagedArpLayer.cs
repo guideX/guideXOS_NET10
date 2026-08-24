@@ -55,6 +55,13 @@ internal sealed class ManagedArpLayer
     internal byte[] HostIpv4 => _hostIpv4;
     internal bool Phase16Passed { get; private set; }
 
+    internal bool TryResetCacheForPhase18()
+    {
+        if (_pending) return false;
+        _cache.Clear();
+        return true;
+    }
+
     internal bool TryRunPhase16()
     {
         if (_active || _cache.Count != 0) return false;

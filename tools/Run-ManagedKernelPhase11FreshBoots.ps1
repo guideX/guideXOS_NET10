@@ -16,6 +16,7 @@ param(
     [switch]$Phase15AcceptEitherOutcome,
     [switch]$EnablePhase16Protocol,
     [switch]$EnablePhase17Protocol,
+    [switch]$EnablePhase18Protocol,
     [switch]$Phase15EnableFilterDump,
     [switch]$Phase15EnableQemuReceiveTrace,
     [ValidateSet('all', 'rx', 'tx')]
@@ -207,7 +208,8 @@ function Send-Key11([Net.Sockets.TcpClient]$monitor, [System.Diagnostics.Process
     Write-Timeline11 $script:phase11Timeline 'HOST_KEY_INJECT' "after=$afterMarker key=$key"
 }
 
-function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false) {
+function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false,
+                             [bool]$phase18 = $false) {
     $destination = New-Object byte[] 6
     for ($index = 0; $index -lt 6; $index++) {
         $destination[$index] = [Convert]::ToByte($destinationMac.Substring($index * 2, 2), 16)
@@ -220,7 +222,8 @@ function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false) {
     $frame[12] = 0x88
     $frame[13] = 0xB5
     [Array]::Copy($signature, 0, $frame, 14, $signature.Length)
-    $sequence = if ($phase17) { 0x17000001 } else { 0x15000001 }
+    $sequence = if ($phase18) { 0x18000001 } `
+        elseif ($phase17) { 0x17000001 } else { 0x15000001 }
     $sequenceOffset = 14 + $signature.Length
     $frame[$sequenceOffset] = [byte](($sequence -shr 24) -band 0xFF)
     $frame[$sequenceOffset + 1] = [byte](($sequence -shr 16) -band 0xFF)
@@ -233,16 +236,19 @@ function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
                                   [int]$destinationPort,
                                   [string]$destinationMac,
                                   [string]$destinationHost = '127.0.0.1',
-                                  [bool]$phase17 = $false) {
-    $frame = New-Phase15Frame11 $destinationMac $phase17
+                                  [bool]$phase17 = $false,
+                                  [bool]$phase18 = $false) {
+    $frame = New-Phase15Frame11 $destinationMac $phase17 $phase18
     $sent = $peerUdp.Send($frame, $frame.Length, $destinationHost, $destinationPort)
     Require11 ($sent -eq $frame.Length) 'Phase 15 UDP injector sent a short Ethernet datagram.'
     $hash = [Security.Cryptography.SHA256]::Create()
     try { $frameHash = ([BitConverter]::ToString($hash.ComputeHash($frame))).Replace('-', '') }
     finally { $hash.Dispose() }
-    $marker = if ($phase17) { 'MANAGED_E1000_PHASE17_INJECTED' } `
+    $marker = if ($phase18) { 'MANAGED_E1000_PHASE18_INJECTED' } `
+        elseif ($phase17) { 'MANAGED_E1000_PHASE17_INJECTED' } `
         else { 'MANAGED_E1000_PHASE15_INJECTED' }
-    $sequenceText = if ($phase17) { '0x17000001' } else { '0x15000001' }
+    $sequenceText = if ($phase18) { '0x18000001' } `
+        elseif ($phase17) { '0x17000001' } else { '0x15000001' }
     return ('{0}=PASS transport=dgram length={1} destination={2} source=021500000001 ethertype=88B5 sequence={3} frame_sha256={4} udp_source_port={5} udp_destination_port={6}' -f `
         $marker, $frame.Length, $destinationMac.ToUpperInvariant(), $sequenceText,
         $frameHash, ([Net.IPEndPoint]$peerUdp.Client.LocalEndPoint).Port,
@@ -457,6 +463,141 @@ function Write-Phase17Frame([IO.StreamWriter]$log, [string]$name,
         $name.ToUpperInvariant(), $frame.Length, $hex.Substring(0, 12),
         $hex.Substring(12, 12), $etherType, (Hash-Phase17Frame $frame), $detail))
     $log.WriteLine(('MANAGED_PHASE17_{0}_FRAME_HEX={1}' -f $name.ToUpperInvariant(), $hex))
+    $log.Flush()
+}
+
+function Compute-UdpChecksum18([byte[]]$sourceIp, [byte[]]$destinationIp,
+                                [byte[]]$udp) {
+    [uint32]$sum = 0
+    foreach ($offset in @(0, 2)) {
+        $sum += (([uint32]$sourceIp[$offset] -shl 8) -bor
+            [uint32]$sourceIp[$offset + 1])
+        $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+        $sum += (([uint32]$destinationIp[$offset] -shl 8) -bor
+            [uint32]$destinationIp[$offset + 1])
+        $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+    }
+    $sum += 17
+    $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+    $sum += $udp.Length
+    $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+    $checksumBytes = [byte[]]$udp.Clone()
+    $checksumBytes[6] = 0
+    $checksumBytes[7] = 0
+    $index = 0
+    while ($index + 1 -lt $checksumBytes.Length) {
+        $sum += (([uint32]$checksumBytes[$index] -shl 8) -bor
+            [uint32]$checksumBytes[$index + 1])
+        $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+        $index += 2
+    }
+    if ($index -lt $checksumBytes.Length) {
+        $sum += [uint32]$checksumBytes[$index] -shl 8
+        $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+    }
+    $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+    $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+    return [uint16]((-bnot [int]$sum) -band 0xFFFF)
+}
+
+function New-UdpDatagram18([int]$sourcePort, [int]$destinationPort,
+                           [byte[]]$sourceIp, [byte[]]$destinationIp,
+                           [byte[]]$payload, [bool]$zeroChecksum = $false) {
+    $udp = New-Object byte[] (8 + $payload.Length)
+    Write-U16-Phase17 $udp 0 $sourcePort
+    Write-U16-Phase17 $udp 2 $destinationPort
+    Write-U16-Phase17 $udp 4 $udp.Length
+    [Array]::Copy($payload, 0, $udp, 8, $payload.Length)
+    if (-not $zeroChecksum) {
+        $checksum = Compute-UdpChecksum18 $sourceIp $destinationIp $udp
+        if ($checksum -eq 0) { $checksum = 0xFFFF }
+        Write-U16-Phase17 $udp 6 $checksum
+    }
+    return $udp
+}
+
+function New-Ipv4Udp18([byte[]]$destinationMac, [byte[]]$sourceMac,
+                       [byte[]]$sourceIp, [byte[]]$destinationIp,
+                       [byte[]]$udp, [int]$identification = 0x1901) {
+    $totalLength = 20 + $udp.Length
+    $wireLength = [Math]::Max(60, 14 + $totalLength)
+    $frame = New-Object byte[] $wireLength
+    [Array]::Copy($destinationMac, 0, $frame, 0, 6)
+    [Array]::Copy($sourceMac, 0, $frame, 6, 6)
+    $frame[12] = 0x08; $frame[13] = 0x00
+    $ip = 14
+    $frame[$ip] = 0x45
+    Write-U16-Phase17 $frame ($ip + 2) $totalLength
+    Write-U16-Phase17 $frame ($ip + 4) $identification
+    $frame[$ip + 8] = 64
+    $frame[$ip + 9] = 17
+    [Array]::Copy($sourceIp, 0, $frame, $ip + 12, 4)
+    [Array]::Copy($destinationIp, 0, $frame, $ip + 16, 4)
+    Write-U16-Phase17 $frame ($ip + 10) (Compute-Checksum-Phase17 $frame $ip 20)
+    [Array]::Copy($udp, 0, $frame, $ip + 20, $udp.Length)
+    return $frame
+}
+
+function Test-UdpFrame18([byte[]]$frame, [byte[]]$destinationMac,
+                          [byte[]]$sourceMac, [byte[]]$sourceIp,
+                          [byte[]]$destinationIp, [int]$sourcePort,
+                          [int]$destinationPort, [byte[]]$payload,
+                          [bool]$allowZeroChecksum = $false) {
+    $totalLength = 20 + 8 + $payload.Length
+    $wireLength = [Math]::Max(60, 14 + $totalLength)
+    if ($frame.Length -ne $wireLength -or
+        !(Bytes-Equal16 $frame 0 $destinationMac) -or
+        !(Bytes-Equal16 $frame 6 $sourceMac) -or $frame[12] -ne 8 -or
+        $frame[13] -ne 0 -or $frame[14] -ne 0x45 -or
+        (Read-U16-Phase17 $frame 16) -ne $totalLength -or
+        (Read-U16-Phase17 $frame 20) -ne 0 -or
+        $frame[22] -ne 64 -or $frame[23] -ne 17 -or
+        !(Bytes-Equal16 $frame 26 $sourceIp) -or
+        !(Bytes-Equal16 $frame 30 $destinationIp) -or
+        (Compute-Checksum-Phase17 $frame 14 20) -ne 0) { return $false }
+    $udp = 34
+    $udpLength = Read-U16-Phase17 $frame ($udp + 4)
+    if ($udpLength -ne 8 + $payload.Length -or
+        (Read-U16-Phase17 $frame $udp) -ne $sourcePort -or
+        (Read-U16-Phase17 $frame ($udp + 2)) -ne $destinationPort -or
+        !(Bytes-Equal16 $frame ($udp + 8) $payload)) { return $false }
+    $checksum = Read-U16-Phase17 $frame ($udp + 6)
+    if ($checksum -eq 0) { return $allowZeroChecksum }
+    $udpBytes = [byte[]]$frame[$udp..($udp + $udpLength - 1)]
+    $wireChecksum = $checksum
+    $udpBytes[6] = 0
+    $udpBytes[7] = 0
+    $computedChecksum = Compute-UdpChecksum18 $sourceIp $destinationIp $udpBytes
+    if ($computedChecksum -eq 0) { $computedChecksum = 0xFFFF }
+    return $wireChecksum -eq $computedChecksum
+}
+
+function Write-Phase18Frame([IO.StreamWriter]$log, [string]$name,
+                            [byte[]]$frame) {
+    $hex = ([BitConverter]::ToString($frame)).Replace('-', '')
+    $etherType = ('{0:X4}' -f (Read-U16-Phase17 $frame 12))
+    $detail = ''
+    if ($frame.Length -ge 42 -and $etherType -eq '0800' -and
+        $frame[14] -eq 0x45 -and $frame[23] -eq 17) {
+        $sourceIp = ([BitConverter]::ToString($frame[26..29])).Replace('-', '')
+        $destinationIp = ([BitConverter]::ToString($frame[30..33])).Replace('-', '')
+        $udp = 34
+        $payloadHex = if ($frame.Length -gt $udp + 8) {
+            ([BitConverter]::ToString(
+                [byte[]]$frame[($udp + 8)..($frame.Length - 1)])).Replace('-', '')
+        } else { '' }
+        $detail = ' ipv4_source={0} ipv4_destination={1} ipv4_total_length={2} ipv4_ttl={3} ipv4_protocol={4} ipv4_checksum={5} udp_source_port={6} udp_destination_port={7} udp_length={8} udp_checksum={9} udp_payload={10}' -f `
+            $sourceIp, $destinationIp, (Read-U16-Phase17 $frame 16), $frame[22],
+            $frame[23], ('{0:X4}' -f (Read-U16-Phase17 $frame 24)),
+            (Read-U16-Phase17 $frame $udp),
+            (Read-U16-Phase17 $frame ($udp + 2)),
+            (Read-U16-Phase17 $frame ($udp + 4)),
+            ('{0:X4}' -f (Read-U16-Phase17 $frame ($udp + 6))), $payloadHex
+    }
+    $log.WriteLine(('MANAGED_PHASE18_{0}=PASS length={1} destination={2} source={3} ethertype={4} frame_sha256={5}{6}' -f `
+        $name.ToUpperInvariant(), $frame.Length, $hex.Substring(0, 12),
+        $hex.Substring(12, 12), $etherType, (Hash-Phase17Frame $frame), $detail))
+    $log.WriteLine(('MANAGED_PHASE18_{0}_FRAME_HEX={1}' -f $name.ToUpperInvariant(), $hex))
     $log.Flush()
 }
 
@@ -677,8 +818,13 @@ try {
                     'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
                 Require11 $macMatch.Success 'Phase 15 did not publish the runtime e1000 MAC.'
                 $destinationMac = ($macMatch.Groups[1].Value + $macMatch.Groups[2].Value)
-                $injectOutput = @(Send-Phase15DgramFrame11 $peerUdp $rxPort `
-                    $destinationMac '127.0.0.1' ([bool]$EnablePhase17Protocol))
+                $injectOutput = if ($EnablePhase18Protocol) {
+                    @(Send-Phase15DgramFrame11 $peerUdp $rxPort $destinationMac `
+                        '127.0.0.1' $false $true)
+                } else {
+                    @(Send-Phase15DgramFrame11 $peerUdp $rxPort `
+                        $destinationMac '127.0.0.1' ([bool]$EnablePhase17Protocol))
+                }
                 $networkDetail = "backend=dgram port=$rxPort source_port=$peerPort"
                 foreach ($line in $injectOutput) {
                     $injectionLog.WriteLine([string]$line)
@@ -693,7 +839,8 @@ try {
                 } elseif ($Phase15AcceptEitherOutcome) {
                     $phase15Outcome = Wait-Phase15Outcome11 `
                         $deadline $process $stream $logStream $text $buffer
-                } elseif ($EnablePhase17Protocol -or $EnablePhase16Protocol) {
+                } elseif ($EnablePhase18Protocol -or $EnablePhase17Protocol -or
+                          $EnablePhase16Protocol) {
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' `
                         $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_FRAME_OK' `
@@ -744,7 +891,7 @@ try {
                         $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESPONDER_PASS' `
                         $deadline $process $stream $logStream $text $buffer
-                    if ($EnablePhase17Protocol) {
+                    if ($EnablePhase17Protocol -or $EnablePhase18Protocol) {
                         $peerPayload = [Text.Encoding]::ASCII.GetBytes(
                             'guideXOS Phase17 ping payload')
                         $peerRequestPayload = [Text.Encoding]::ASCII.GetBytes(
@@ -861,11 +1008,238 @@ try {
                         Write-Phase17Frame $injectionLog 'host_post_gc_echo_reply' $postReplyFrame
                         Wait-Marker11 'GXOS_NET10:MANAGED_ICMP_POST_GC_REPLY_VALID' `
                             $deadline $process $stream $logStream $text $buffer
-                        Wait-Marker11 'MANAGED_KERNEL_PHASE17_PASS' `
-                            $deadline $process $stream $logStream $text $buffer
+                        if ($EnablePhase18Protocol) {
+                            Wait-Marker11 'GXOS_NET10:MANAGED_IPV4_POST_GC_EXCHANGE_PASS' `
+                                $deadline $process $stream $logStream $text $buffer
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_READY' `
+                                $deadline $process $stream $logStream $text $buffer
+
+                            $udpManagedPayload = [Text.Encoding]::ASCII.GetBytes(
+                                'PHASE18-MANAGED-HELLO')
+                            $udpPeerAckPayload = [Text.Encoding]::ASCII.GetBytes(
+                                'PHASE18-PEER-ACK')
+                            $udpPeerRequestPayload = [Text.Encoding]::ASCII.GetBytes(
+                                'PHASE18-PEER-HELLO')
+                            $udpManagedAckPayload = [Text.Encoding]::ASCII.GetBytes(
+                                'PHASE18-MANAGED-ACK')
+                            $managedUdpRequest = New-UdpDatagram18 `
+                                15180 15181 $guestIpBytes $hostIpBytes $udpManagedPayload
+                            $peerUdpResponse = New-UdpDatagram18 `
+                                15181 15180 $hostIpBytes $guestIpBytes $udpPeerAckPayload
+                            $managedUdpRequestFrame = New-Ipv4Udp18 `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                $managedUdpRequest 0x1900
+                            $peerUdpResponseFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $peerUdpResponse 0x1902
+
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_MANAGED_REQUEST_SENT' `
+                                $deadline $process $stream $logStream $text $buffer
+                            $observedManagedUdpRequest = Receive-ExpectedPhase17Frame `
+                                $peerUdp $managedUdpRequestFrame 'managed UDP request' $TimeoutSeconds
+                            Require11 (Test-UdpFrame18 $observedManagedUdpRequest `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                15180 15181 $udpManagedPayload) `
+                                'Managed UDP request failed independent peer validation.'
+                            Write-Phase18Frame $injectionLog 'guest_udp_request' `
+                                $observedManagedUdpRequest
+                            $sentPeerUdpResponse = $peerUdp.Send($peerUdpResponseFrame,
+                                $peerUdpResponseFrame.Length, '127.0.0.1', $rxPort)
+                            Require11 ($sentPeerUdpResponse -eq $peerUdpResponseFrame.Length) `
+                                'Peer UDP response send was short.'
+                            Require11 (Test-UdpFrame18 $peerUdpResponseFrame `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                15181 15180 $udpPeerAckPayload) `
+                                'Peer UDP response failed independent validation.'
+                            Write-Phase18Frame $injectionLog 'host_udp_response' $peerUdpResponseFrame
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_MANAGED_RESPONSE_VALID' `
+                                $deadline $process $stream $logStream $text $buffer
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_MANAGED_EXCHANGE_PASS' `
+                                $deadline $process $stream $logStream $text $buffer
+
+                            $peerUdpRequest = New-UdpDatagram18 `
+                                15181 15180 $hostIpBytes $guestIpBytes $udpPeerRequestPayload
+                            $managedUdpAck = New-UdpDatagram18 `
+                                15180 15181 $guestIpBytes $hostIpBytes $udpManagedAckPayload
+                            $peerUdpRequestFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $peerUdpRequest 0x1903
+                            $managedUdpAckFrame = New-Ipv4Udp18 `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                $managedUdpAck 0x1901
+                            $managedUdpZeroAckFrame = New-Ipv4Udp18 `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                $managedUdpAck 0x1902
+                            $sentPeerUdpRequest = $peerUdp.Send($peerUdpRequestFrame,
+                                $peerUdpRequestFrame.Length, '127.0.0.1', $rxPort)
+                            Require11 ($sentPeerUdpRequest -eq $peerUdpRequestFrame.Length) `
+                                'Peer-originated UDP request send was short.'
+                            Write-Phase18Frame $injectionLog 'host_udp_request' $peerUdpRequestFrame
+                            $observedManagedUdpAck = Receive-ExpectedPhase17Frame `
+                                $peerUdp $managedUdpAckFrame 'managed UDP endpoint response' $TimeoutSeconds
+                            Require11 (Test-UdpFrame18 $observedManagedUdpAck `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                15180 15181 $udpManagedAckPayload) `
+                                'Managed UDP endpoint response failed validation.'
+                            Write-Phase18Frame $injectionLog 'guest_udp_endpoint_response' `
+                                $observedManagedUdpAck
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_PEER_RESPONSE_SENT' `
+                                $deadline $process $stream $logStream $text $buffer
+
+                            $zeroUdpRequest = New-UdpDatagram18 `
+                                15181 15180 $hostIpBytes $guestIpBytes $udpPeerRequestPayload $true
+                            $zeroUdpRequestFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $zeroUdpRequest 0x1905
+                            $sentZeroUdpRequest = $peerUdp.Send($zeroUdpRequestFrame,
+                                $zeroUdpRequestFrame.Length, '127.0.0.1', $rxPort)
+                            Require11 ($sentZeroUdpRequest -eq $zeroUdpRequestFrame.Length) `
+                                'Zero-checksum UDP request send was short.'
+                            Write-Phase18Frame $injectionLog 'host_udp_zero_checksum_request' `
+                                $zeroUdpRequestFrame
+                            $observedZeroUdpAck = Receive-ExpectedPhase17Frame `
+                                $peerUdp $managedUdpZeroAckFrame 'zero-checksum UDP response' $TimeoutSeconds
+                            Require11 (Test-UdpFrame18 $observedZeroUdpAck `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                15180 15181 $udpManagedAckPayload) `
+                                'Zero-checksum UDP response failed validation.'
+                            Write-Phase18Frame $injectionLog 'guest_udp_zero_checksum_response' `
+                                $observedZeroUdpAck
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_ZERO_CHECKSUM_ACCEPTED' `
+                                $deadline $process $stream $logStream $text $buffer
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_ZERO_CHECKSUM_RESPONSE_SENT' `
+                                $deadline $process $stream $logStream $text $buffer
+
+                            $zeroSourceUdp = New-UdpDatagram18 `
+                                0 15180 $hostIpBytes $guestIpBytes @()
+                            $zeroSourceFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $zeroSourceUdp 0x9201
+                            $zeroDestinationUdp = New-UdpDatagram18 `
+                                15181 0 $hostIpBytes $guestIpBytes @()
+                            $zeroDestinationFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $zeroDestinationUdp 0x9202
+                            $invalidPayloadUdp = New-UdpDatagram18 `
+                                15181 15180 $hostIpBytes $guestIpBytes ([byte[]](1, 2, 3))
+                            $invalidPayloadFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $invalidPayloadUdp 0x9203
+                            $unknownUdp = New-UdpDatagram18 `
+                                15181 15182 $hostIpBytes $guestIpBytes ([byte[]](4, 5))
+                            $unknownUdpFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $unknownUdp 0x9204
+                            $oversizedPayload = New-Object byte[] 513
+                            for ($index = 0; $index -lt $oversizedPayload.Length; $index++) {
+                                $oversizedPayload[$index] = [byte](($index + 1) -band 0xFF)
+                            }
+                            $oversizedUdp = New-UdpDatagram18 `
+                                15181 15180 $hostIpBytes $guestIpBytes $oversizedPayload
+                            $oversizedUdpFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $oversizedUdp 0x9205
+                            $udpMalformedFrames = @(
+                                $zeroSourceFrame, $zeroDestinationFrame, $invalidPayloadFrame,
+                                $unknownUdpFrame, $oversizedUdpFrame)
+                            for ($index = 0; $index -lt $udpMalformedFrames.Count; $index++) {
+                                $malformedUdp = $udpMalformedFrames[$index]
+                                $sentMalformedUdp = $peerUdp.Send($malformedUdp,
+                                    $malformedUdp.Length, '127.0.0.1', $rxPort)
+                                Require11 ($sentMalformedUdp -eq $malformedUdp.Length) `
+                                    "Malformed UDP frame $index send was short."
+                                Write-Phase18Frame $injectionLog `
+                                    ('malformed_udp_{0}' -f $index) $malformedUdp
+                                Wait-Marker11 `
+                                    ('GXOS_NET10:MANAGED_UDP_MALFORMED_FRAME_{0}' -f $index) `
+                                    $deadline $process $stream $logStream $text $buffer
+                            }
+                            Write-Timeline11 $timeline 'HOST_MALFORMED_UDP_CONTROLS_SENT' `
+                                'count=5 zero_source_port=1 zero_destination_port=1 invalid_payload=1 unknown_port=1 oversized_payload=1'
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_MALFORMED_CONTROLS_PASS' `
+                                $deadline $process $stream $logStream $text $buffer
+
+                            $postMalformedFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $peerUdpRequest 0x9301
+                            $managedUdpPostMalformedAckFrame = New-Ipv4Udp18 `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                $managedUdpAck 0x1903
+                            $sentPostMalformed = $peerUdp.Send($postMalformedFrame,
+                                $postMalformedFrame.Length, '127.0.0.1', $rxPort)
+                            Require11 ($sentPostMalformed -eq $postMalformedFrame.Length) `
+                                'Post-malformed UDP request send was short.'
+                            Write-Phase18Frame $injectionLog 'host_udp_post_malformed_request' `
+                                $postMalformedFrame
+                            $observedPostMalformed = Receive-ExpectedPhase17Frame `
+                                $peerUdp $managedUdpPostMalformedAckFrame 'post-malformed UDP response' $TimeoutSeconds
+                            Require11 (Test-UdpFrame18 $observedPostMalformed `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                15180 15181 $udpManagedAckPayload) `
+                                'Post-malformed UDP response failed validation.'
+                            Write-Phase18Frame $injectionLog 'guest_udp_post_malformed_response' `
+                                $observedPostMalformed
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_POST_MALFORMED_RESPONSE_SENT' `
+                                $deadline $process $stream $logStream $text $buffer
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_GC_SURVIVAL_PASSED' `
+                                $deadline $process $stream $logStream $text $buffer
+
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_POST_GC_REQUEST_SENT' `
+                                $deadline $process $stream $logStream $text $buffer
+                            $managedUdpPostGcRequestFrame = New-Ipv4Udp18 `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                $managedUdpRequest 0x1904
+                            $managedUdpPostGcAckFrame = New-Ipv4Udp18 `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                $managedUdpAck 0x1905
+                            $observedPostGcManaged = Receive-ExpectedPhase17Frame `
+                                $peerUdp $managedUdpPostGcRequestFrame 'post-GC managed UDP request' $TimeoutSeconds
+                            Require11 (Test-UdpFrame18 $observedPostGcManaged `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                15180 15181 $udpManagedPayload) `
+                                'Post-GC managed UDP request failed validation.'
+                            Write-Phase18Frame $injectionLog 'guest_udp_post_gc_request' `
+                                $observedPostGcManaged
+                            $sentPostGcPeerResponse = $peerUdp.Send($peerUdpResponseFrame,
+                                $peerUdpResponseFrame.Length, '127.0.0.1', $rxPort)
+                            Require11 ($sentPostGcPeerResponse -eq $peerUdpResponseFrame.Length) `
+                                'Post-GC peer UDP response send was short.'
+                            Write-Phase18Frame $injectionLog 'host_udp_post_gc_response' `
+                                $peerUdpResponseFrame
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_POST_GC_RESPONSE_VALID' `
+                                $deadline $process $stream $logStream $text $buffer
+
+                            $postGcPeerRequestFrame = New-Ipv4Udp18 `
+                                $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                                $peerUdpRequest 0x9302
+                            $sentPostGcPeerRequest = $peerUdp.Send($postGcPeerRequestFrame,
+                                $postGcPeerRequestFrame.Length, '127.0.0.1', $rxPort)
+                            Require11 ($sentPostGcPeerRequest -eq $postGcPeerRequestFrame.Length) `
+                                'Post-GC peer-originated UDP request send was short.'
+                            Write-Phase18Frame $injectionLog 'host_udp_post_gc_request' `
+                                $postGcPeerRequestFrame
+                            $observedPostGcPeerResponse = Receive-ExpectedPhase17Frame `
+                                $peerUdp $managedUdpPostGcAckFrame 'post-GC UDP endpoint response' $TimeoutSeconds
+                            Require11 (Test-UdpFrame18 $observedPostGcPeerResponse `
+                                $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                                15180 15181 $udpManagedAckPayload) `
+                                'Post-GC UDP endpoint response failed validation.'
+                            Write-Phase18Frame $injectionLog 'guest_udp_post_gc_response' `
+                                $observedPostGcPeerResponse
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_POST_GC_PEER_RESPONSE_SENT' `
+                                $deadline $process $stream $logStream $text $buffer
+                            Wait-Marker11 'GXOS_NET10:MANAGED_UDP_POST_GC_EXCHANGE_PASS' `
+                                $deadline $process $stream $logStream $text $buffer
+                            Wait-Marker11 'MANAGED_KERNEL_PHASE18_PASS' `
+                                $deadline $process $stream $logStream $text $buffer
+                            $phase15Outcome = 'PASS_PHASE18'
+                        } else {
+                            Wait-Marker11 'MANAGED_KERNEL_PHASE17_PASS' `
+                                $deadline $process $stream $logStream $text $buffer
+                            $phase15Outcome = 'PASS_PHASE17'
+                        }
                         Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' `
                             $deadline $process $stream $logStream $text $buffer
-                        $phase15Outcome = 'PASS_PHASE17'
                     }
                     else {
                         Wait-Marker11 'MANAGED_KERNEL_PHASE16_PASS' `
