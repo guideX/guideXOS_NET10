@@ -125,3 +125,58 @@ checksum offload, VLANs, jumbo frames, scatter/gather, and zero-copy packet
 frameworks are deferred.  The next phase can add a deterministic QEMU netdev
 peer for RX proof and then build higher-level networking on top of this bounded
 device capability.
+
+## Phase 15: deterministic managed e1000 receive
+
+Phase 15 extends the Phase 14 RX setup into a single-buffer, bounded receive
+proof.  The guest emits `MANAGED_E1000_RX_READY` only after the native-owned
+descriptor and packet-buffer allocations, RDBAL/RDBAH/RDLEN/RDH/RDT, and RCTL
+configuration are live.  The host harness then sends exactly one 60-byte
+Ethernet frame through QEMU's documented local UDP `dgram` backend.  The
+backend was selected because it is host-only, needs no Internet, TAP device,
+administrator privilege, or external infrastructure.  The installed Windows
+QEMU 11.0.0 dgram backend was also tested directly; it accepted the local
+configuration and host datagram but did not produce an RX descriptor
+completion in this environment, so the authoritative hardware result remains
+deferred (Outcome B) until a compatible local peer is available.
+
+The test frame is deterministic except for its destination, which is the
+runtime RAL/RAH MAC discovered by the managed driver:
+
+* destination: runtime e1000 MAC (`52:54:00:12:34:56` in the proof image)
+* source: `02:15:00:00:00:01`
+* EtherType: `0x88B5`
+* payload signature: `guideXOS ManagedKernel Phase15 RX`
+* sequence: big-endian `0x15000001`
+* total length: 60 bytes
+
+RCTL enables receive, broadcast filtering, 2048-byte buffers, and strip-CRC
+behavior.  Therefore the descriptor length expected by this proof is 60
+bytes: the emulated Ethernet FCS is not included in the DMA buffer.  The
+managed path validates DD, EOP, nonzero length, buffer capacity, receive
+errors, descriptor index, ring wraparound, the complete Ethernet header, the
+signature/sequence, and zero padding.  It copies only through the bounded
+opaque DMA capability.  A successful frame is recycled by clearing the
+descriptor status and advancing RDT; duplicate or out-of-order ownership is
+rejected.
+
+The synchronization is bounded: Phase 15 readiness is observed in serial
+evidence, the host sends one frame, and the guest must report
+`MANAGED_E1000_RX_COMPLETE`, `MANAGED_E1000_RX_FRAME_OK`, and
+`MANAGED_KERNEL_PHASE15_PASS`.  A missing or unsupported peer produces
+`MANAGED_E1000_RX_HARNESS_DEFERRED` and
+`MANAGED_KERNEL_PHASE15_RX_HARNESS_DEFERRED` after finite polling; it is never
+converted into a manufactured completion.  GC pressure runs while the native
+DMA resources remain live, and the existing stop/quiesce, bus-master restore,
+DMA release, MMIO unmap, claim release, and accounting checks run on both the
+receive-success and bounded-failure paths.
+
+This milestone's successful acceptance statement is:
+
+`REAL MANAGED E1000 RECEIVE DMA`
+
+It does not prove interrupt-driven NIC operation, an Ethernet/network stack,
+IP networking, or Internet connectivity.  ARP, IPv4, IPv6, ICMP, UDP, TCP,
+DHCP, DNS, sockets, MSI/MSI-X, legacy NIC interrupts, jumbo/scatter-gather
+receive, checksum/segmentation offload, and multiple-NIC support remain
+outside Phase 15.

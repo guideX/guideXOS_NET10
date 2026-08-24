@@ -2182,11 +2182,18 @@ internal static unsafe class ManagedKernelContract
                 ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
                 return InvalidState;
             bool rxProof = s_phase14Driver.RxProofReceived;
+            bool phase15RxProof = s_phase14Driver.RxPhase15Received;
             s_phase14TeardownRun = 1;
             if (!KernelLog.Write(rxProof
                     ? "PHASE 14 FIRST MANAGED PCI DRIVER COMPLETE — DMA TX/RX PROVEN\r\n"u8
                     : "PHASE 14 MANAGED PCI TX COMPLETE — RX HARNESS DEFERRED\r\n"u8) ||
-                !KernelLog.Write("MANAGED_KERNEL_PHASE14_PASS\r\n"u8))
+                !KernelLog.Write("MANAGED_KERNEL_PHASE14_PASS\r\n"u8) ||
+                !KernelLog.Write(phase15RxProof
+                    ? "GXOS_NET10:MANAGED_KERNEL_PHASE15_RX_DMA_PROVEN\r\n"u8
+                    : "GXOS_NET10:MANAGED_KERNEL_PHASE15_RX_HARNESS_DEFERRED\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE15_ACCOUNTING_RESTORED\r\n"u8) ||
+                (phase15RxProof &&
+                 !KernelLog.Write("MANAGED_KERNEL_PHASE15_PASS\r\n"u8)))
                 return InvalidState;
             s_phase14Driver = null;
             return ManagedOk;

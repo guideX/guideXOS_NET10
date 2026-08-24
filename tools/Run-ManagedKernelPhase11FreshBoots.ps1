@@ -6,7 +6,13 @@ param(
     [Parameter(Mandatory = $true)] [long]$PayloadSize,
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 180,
-    [string]$PostPhase11Marker = ''
+    [string]$PostPhase11Marker = '',
+    [switch]$EnablePhase15Rx,
+    [string]$Phase15InjectorPath = '',
+    [ValidateSet('dgram', 'user')]
+    [string]$Phase15NetworkBackend = 'dgram',
+    [switch]$Phase15KeepDefaultNic,
+    [switch]$Phase15AllowHarnessDeferral
 )
 
 Set-StrictMode -Version Latest
@@ -16,6 +22,9 @@ $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 $efi = Join-Path $gate 'ESP\EFI\BOOT\BOOTX64.EFI'
 $payload = Join-Path $gate 'ESP\GXOS\gxos-managed-kernel.dll'
 $expectedHash = $PayloadSha256.ToUpperInvariant()
+$phase15Injector = if ([string]::IsNullOrEmpty($Phase15InjectorPath)) {
+    Join-Path $PSScriptRoot 'Inject-ManagedE1000Phase15Frame.ps1'
+} else { [IO.Path]::GetFullPath($Phase15InjectorPath) }
 
 function Require11([bool]$condition, [string]$message) {
     if (!$condition) { throw $message }
@@ -59,6 +68,12 @@ function Connect-Tcp11([int]$port, [System.Diagnostics.Process]$process,
         Start-Sleep -Milliseconds 50
     }
     throw "Timed out connecting to QEMU $name TCP port $port."
+}
+
+function Get-FreeUdpPort11 {
+    $probe = [Net.Sockets.UdpClient]::new([Net.IPAddress]::Loopback, 0)
+    try { return ([Net.IPEndPoint]$probe.Client.LocalEndPoint).Port }
+    finally { $probe.Dispose() }
 }
 
 function Pump-Serial11([System.IO.Stream]$stream, [IO.FileStream]$logStream,
@@ -157,6 +172,43 @@ function Send-Key11([Net.Sockets.TcpClient]$monitor, [System.Diagnostics.Process
     Write-Timeline11 $script:phase11Timeline 'HOST_KEY_INJECT' "after=$afterMarker key=$key"
 }
 
+function New-Phase15Frame11([string]$destinationMac) {
+    $destination = New-Object byte[] 6
+    for ($index = 0; $index -lt 6; $index++) {
+        $destination[$index] = [Convert]::ToByte($destinationMac.Substring($index * 2, 2), 16)
+    }
+    $source = [byte[]](0x02, 0x15, 0x00, 0x00, 0x00, 0x01)
+    $signature = [Text.Encoding]::ASCII.GetBytes('guideXOS ManagedKernel Phase15 RX')
+    $frame = New-Object byte[] 60
+    [Array]::Copy($destination, 0, $frame, 0, 6)
+    [Array]::Copy($source, 0, $frame, 6, 6)
+    $frame[12] = 0x88
+    $frame[13] = 0xB5
+    [Array]::Copy($signature, 0, $frame, 14, $signature.Length)
+    $sequence = 0x15000001
+    $sequenceOffset = 14 + $signature.Length
+    $frame[$sequenceOffset] = [byte](($sequence -shr 24) -band 0xFF)
+    $frame[$sequenceOffset + 1] = [byte](($sequence -shr 16) -band 0xFF)
+    $frame[$sequenceOffset + 2] = [byte](($sequence -shr 8) -band 0xFF)
+    $frame[$sequenceOffset + 3] = [byte]($sequence -band 0xFF)
+    return $frame
+}
+
+function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
+                                  [int]$destinationPort,
+                                  [string]$destinationMac,
+                                  [string]$destinationHost = '127.0.0.1') {
+    $frame = New-Phase15Frame11 $destinationMac
+    $sent = $peerUdp.Send($frame, $frame.Length, $destinationHost, $destinationPort)
+    Require11 ($sent -eq $frame.Length) 'Phase 15 UDP injector sent a short Ethernet datagram.'
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { $frameHash = ([BitConverter]::ToString($hash.ComputeHash($frame))).Replace('-', '') }
+    finally { $hash.Dispose() }
+    return ('MANAGED_E1000_PHASE15_INJECTED=PASS transport=dgram length={0} destination={1} source=021500000001 ethertype=88B5 sequence=0x15000001 frame_sha256={2} udp_source_port={3} udp_destination_port={4}' -f `
+        $frame.Length, $destinationMac.ToUpperInvariant(), $frameHash,
+        ([Net.IPEndPoint]$peerUdp.Client.LocalEndPoint).Port, $destinationPort)
+}
+
 Require11 ($RunCount -ge 3) 'Three fresh ManagedKernel Phase 11 boots are required.'
 Require11 ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
     'ManagedKernel EFI or payload is missing.'
@@ -174,6 +226,9 @@ $share = Join-Path (Split-Path -Parent $qemu) 'share'
 $ovmf = Join-Path $share 'edk2-x86_64-code.fd'
 $varsTemplate = Join-Path $share 'edk2-i386-vars.fd'
 Require11 ((Test-Path -LiteralPath $ovmf) -and (Test-Path -LiteralPath $varsTemplate)) 'OVMF firmware is required.'
+if ($EnablePhase15Rx) {
+    Require11 (Test-Path -LiteralPath $phase15Injector) "Phase 15 injector is missing: $phase15Injector"
+}
 Require11 (@(Get-OwnedQemu11).Count -eq 0) 'An owned QEMU process is already running.'
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
 (& $qemu --version 2>&1) | Set-Content -LiteralPath (Join-Path $evidence 'qemu-version.log') -Encoding ascii
@@ -235,6 +290,20 @@ try {
         $probe.Start(); $serialPort = ([Net.IPEndPoint]$probe.LocalEndpoint).Port; $probe.Stop()
         $probe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
         $probe.Start(); $monitorPort = ([Net.IPEndPoint]$probe.LocalEndpoint).Port; $probe.Stop()
+        $rxPort = 0
+        $peerPort = 0
+        if ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') {
+            $rxPort = Get-FreeUdpPort11
+            $peerPort = Get-FreeUdpPort11
+        }
+        $peerUdp = $null
+        if ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') {
+            # QEMU's dgram backend requires a live remote endpoint.  Keep the
+            # host peer bound before QEMU starts so e1000 TX cannot stall on a
+            # missing peer; the one test frame is sent later after RX_READY.
+            $peerUdp = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
+            $peerUdp.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $peerPort))
+        }
         $arguments = @(
             '-machine', 'q35', '-accel', 'tcg,thread=single', '-m', '128M',
             '-drive', "if=pflash,format=raw,readonly=on,file=$code",
@@ -245,13 +314,27 @@ try {
             '-serial', 'none', '-device', 'isa-serial,chardev=serial0,iobase=0x3f8,irq=4,wakeup=on',
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
             '-display', 'none', '-no-reboot', '-no-shutdown')
+        if ($EnablePhase15Rx) {
+            if (-not $Phase15KeepDefaultNic) { $arguments += @('-nic', 'none') }
+            if ($Phase15NetworkBackend -eq 'dgram') {
+                $arguments += @(
+                    '-netdev', "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$rxPort,remote.type=inet,remote.host=127.0.0.1,remote.port=$peerPort")
+            } else {
+                $arguments += @('-netdev', 'user,id=net0')
+            }
+            $arguments += @('-device', 'e1000e,netdev=net0,addr=2')
+        }
         Set-Content -LiteralPath $commandLinePath -Value ('"{0}" {1}' -f $qemu, ($arguments -join ' ')) -Encoding ascii
         $process = $null; $client = $null; $monitor = $null; $stream = $null
         $logStream = $null; $injectionLog = $null; $timeline = $null
         try {
             $timeline = [IO.StreamWriter]::new($timelinePath, $false, [Text.Encoding]::ASCII)
             $script:phase11Timeline = $timeline
-            Write-Timeline11 $timeline 'HOST_LISTENERS_READY' "serial_port=$serialPort monitor_port=$monitorPort"
+            $listenerDetail = "serial_port=$serialPort monitor_port=$monitorPort"
+            if ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') {
+                $listenerDetail += " rx_port=$rxPort peer_port=$peerPort"
+            }
+            Write-Timeline11 $timeline 'HOST_LISTENERS_READY' $listenerDetail
             Write-Timeline11 $timeline 'FIRMWARE_IDENTITY' "code_sha256=$codeHash vars_sha256=$varsHash"
             $process = Start-Process -FilePath $qemu -ArgumentList $arguments -WorkingDirectory $gate `
                 -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
@@ -294,6 +377,29 @@ try {
             if (-not [string]::IsNullOrEmpty($PostPhase11Marker)) {
                 Wait-Marker11 $PostPhase11Marker $deadline $process $stream $logStream $text $buffer
             }
+            if ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') {
+                Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_READY' $deadline $process $stream $logStream $text $buffer
+                $macMatch = [regex]::Match($text.ToString(),
+                    'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
+                Require11 $macMatch.Success 'Phase 15 did not publish the runtime e1000 MAC.'
+                $destinationMac = ($macMatch.Groups[1].Value + $macMatch.Groups[2].Value)
+                $injectOutput = @(Send-Phase15DgramFrame11 $peerUdp $rxPort $destinationMac)
+                $networkDetail = "backend=dgram port=$rxPort source_port=$peerPort"
+                foreach ($line in $injectOutput) {
+                    $injectionLog.WriteLine([string]$line)
+                }
+                $injectionLog.Flush()
+                Write-Timeline11 $timeline 'HOST_E1000_RX_INJECT' `
+                    "$networkDetail destination=$destinationMac"
+                if ($Phase15AllowHarnessDeferral) {
+                    Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE15_RX_HARNESS_DEFERRED' `
+                        $deadline $process $stream $logStream $text $buffer
+                } else {
+                    Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' $deadline $process $stream $logStream $text $buffer
+                    Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_FRAME_OK' $deadline $process $stream $logStream $text $buffer
+                    Wait-Marker11 'MANAGED_KERNEL_PHASE15_PASS' $deadline $process $stream $logStream $text $buffer
+                }
+            }
             Pump-Serial11 $stream $logStream $text $buffer
             $finalText = $text.ToString()
         } finally {
@@ -301,6 +407,7 @@ try {
             if ($null -ne $logStream) { $logStream.Dispose() }
             if ($null -ne $stream) { $stream.Dispose() }
             if ($null -ne $client) { $client.Dispose() }
+            if ($null -ne $peerUdp) { $peerUdp.Dispose() }
             if ($null -ne $monitor) { $monitor.Dispose() }
             Stop-OwnedQemu11 $process
             if ($null -ne $timeline) { $timeline.Dispose() }
