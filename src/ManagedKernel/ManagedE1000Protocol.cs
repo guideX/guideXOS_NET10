@@ -17,7 +17,7 @@ internal static class ManagedE1000Protocol
 
     internal const ulong BarLength = 0x20000;
     internal const uint DescriptorSize = 16;
-    internal const uint RingCount = 8;
+    internal const uint RingCount = 16;
     internal const uint PacketBufferSize = 2048;
     internal const uint MinimumEthernetFrameLength = 60;
     internal const ushort ProofEtherType = 0x88B5;
@@ -28,6 +28,7 @@ internal static class ManagedE1000Protocol
     internal const byte RxErrorMask = 0xFF;
     internal const uint RxFrameLength = MinimumEthernetFrameLength;
     internal const uint RxTestSequence = 0x15000001;
+    internal const uint Phase17RxTestSequence = 0x17000001;
     internal const uint StatusLinkUp = 1U << 1;
 
     internal const ulong RegCtrl = 0x0000;
@@ -251,13 +252,28 @@ internal static class ManagedE1000Protocol
             !frame.Slice(14, RxPayloadSignature.Length)
                 .SequenceEqual(RxPayloadSignature)) return false;
         int sequenceOffset = 14 + RxPayloadSignature.Length;
-        if (frame[sequenceOffset] != unchecked((byte)(RxTestSequence >> 24)) ||
-            frame[sequenceOffset + 1] != unchecked((byte)(RxTestSequence >> 16)) ||
-            frame[sequenceOffset + 2] != unchecked((byte)(RxTestSequence >> 8)) ||
-            frame[sequenceOffset + 3] != unchecked((byte)RxTestSequence)) return false;
+        uint sequence = ((uint)frame[sequenceOffset] << 24) |
+                        ((uint)frame[sequenceOffset + 1] << 16) |
+                        ((uint)frame[sequenceOffset + 2] << 8) |
+                        frame[sequenceOffset + 3];
+        if (sequence != RxTestSequence && sequence != Phase17RxTestSequence)
+            return false;
         for (int index = sequenceOffset + 4; index != frame.Length; ++index)
             if (frame[index] != 0) return false;
         return true;
+    }
+
+    internal static bool IsPhase17RxTestFrame(ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length != RxFrameLength ||
+            !frame.Slice(14, RxPayloadSignature.Length)
+                .SequenceEqual(RxPayloadSignature)) return false;
+        int sequenceOffset = 14 + RxPayloadSignature.Length;
+        uint sequence = ((uint)frame[sequenceOffset] << 24) |
+                        ((uint)frame[sequenceOffset + 1] << 16) |
+                        ((uint)frame[sequenceOffset + 2] << 8) |
+                        frame[sequenceOffset + 3];
+        return sequence == Phase17RxTestSequence;
     }
 
     internal static bool TryValidateFrame(ReadOnlySpan<byte> frame,

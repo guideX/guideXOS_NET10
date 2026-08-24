@@ -7,6 +7,7 @@ internal sealed class ManagedEthernetLayer
     internal const uint ReceivePollLimit = 1000000000;
     private readonly ManagedE1000Driver _transport;
     private readonly ManagedArpLayer _arp;
+    private readonly ManagedIpv4Layer _ipv4;
     private readonly byte[] _localMac;
     private readonly byte[] _txFrame;
     private readonly byte[] _rxFrame;
@@ -21,15 +22,22 @@ internal sealed class ManagedEthernetLayer
         _txFrame = new byte[ManagedEthernetProtocol.MaximumFrameLength];
         _rxFrame = new byte[ManagedEthernetProtocol.MaximumFrameLength];
         _arp = new ManagedArpLayer(this);
+        _ipv4 = new ManagedIpv4Layer(this, _arp);
     }
 
     internal uint UnknownEtherTypeCount => _unknownEtherTypeCount;
     internal uint MalformedFrameCount => _malformedFrameCount;
     internal bool Phase16Passed => _arp.Phase16Passed;
+    internal bool Phase17Passed => _ipv4.Phase17Passed;
 
     internal bool TryRunPhase16()
     {
         return _arp.TryRunPhase16();
+    }
+
+    internal bool TryRunPhase17()
+    {
+        return _arp.TryRunPhase16() && _ipv4.TryRunPhase17();
     }
 
     internal void InitializeMac()
@@ -71,6 +79,11 @@ internal sealed class ManagedEthernetLayer
                 _rxFrame, _rxFrame.Length, ReceivePollLimit,
                 out ushort frameLength))
             return false;
+        if (frameLength == 0)
+        {
+            _malformedFrameCount++;
+            return true;
+        }
         ReadOnlySpan<byte> received = _rxFrame.AsSpan(0, frameLength);
         if (!ManagedEthernetProtocol.TryParseFrame(
                 received, _localMac, out ManagedEthernetFrame parsed))
@@ -89,7 +102,64 @@ internal sealed class ManagedEthernetLayer
         result = arp.TryHandleEthernetArp(
             _rxFrame, 0, 6, ManagedEthernetProtocol.HeaderLength,
             parsed.Payload.Length);
+        if (result == ManagedArpHandleResult.ReplySatisfied)
+            _ipv4.TryReleasePendingAfterArp();
         return result != ManagedArpHandleResult.Failed;
+    }
+
+    internal bool TryReceiveAndDispatch(out ManagedNetworkDispatchResult result)
+    {
+        result = ManagedNetworkDispatchResult.Invalid;
+        if (!_accepting) return false;
+        if (!_transport.TryReceiveProtocolFrame(
+                _rxFrame, _rxFrame.Length, ReceivePollLimit,
+                out ushort frameLength))
+            return false;
+        if (frameLength == 0)
+        {
+            _malformedFrameCount++;
+            result = ManagedNetworkDispatchResult.Malformed;
+            return true;
+        }
+        ReadOnlySpan<byte> received = _rxFrame.AsSpan(0, frameLength);
+        if (!ManagedEthernetProtocol.TryParseFrame(
+                received, _localMac, out ManagedEthernetFrame parsed))
+        {
+            _malformedFrameCount++;
+            result = ManagedNetworkDispatchResult.Malformed;
+            return true;
+        }
+
+        if (parsed.EtherType == ManagedEthernetProtocol.ArpEtherType)
+        {
+            ManagedArpHandleResult arpResult = _arp.TryHandleEthernetArp(
+                _rxFrame, 0, 6, ManagedEthernetProtocol.HeaderLength,
+                parsed.Payload.Length);
+            if (arpResult == ManagedArpHandleResult.ReplySatisfied)
+            {
+                _ipv4.TryReleasePendingAfterArp();
+                result = ManagedNetworkDispatchResult.ArpReplySatisfied;
+            }
+            else if (arpResult == ManagedArpHandleResult.ResponderReplySent)
+                result = ManagedNetworkDispatchResult.ArpResponderReplySent;
+            else if (arpResult == ManagedArpHandleResult.Ignored)
+                result = ManagedNetworkDispatchResult.Ignored;
+            else
+                result = ManagedNetworkDispatchResult.Malformed;
+            return arpResult != ManagedArpHandleResult.Failed;
+        }
+
+        if (parsed.EtherType == ManagedIpv4Protocol.EtherType)
+        {
+            ManagedIpv4HandleResult ipv4Result = _ipv4.TryHandle(
+                parsed.Payload);
+            result = (ManagedNetworkDispatchResult)ipv4Result;
+            return ipv4Result != ManagedIpv4HandleResult.Failed;
+        }
+
+        _unknownEtherTypeCount++;
+        result = ManagedNetworkDispatchResult.Ignored;
+        return true;
     }
 
     internal bool TryVerifyTransportAfterGc()
@@ -100,6 +170,18 @@ internal sealed class ManagedEthernetLayer
     internal bool TryStop()
     {
         _accepting = false;
-        return _arp.TryStop();
+        return _ipv4.TryStop() && _arp.TryStop();
     }
+}
+
+internal enum ManagedNetworkDispatchResult : byte
+{
+    Invalid = 0,
+    Ignored = 1,
+    ArpReplySatisfied = 2,
+    ArpResponderReplySent = 3,
+    IcmpEchoReplyValidated = 4,
+    IcmpResponderReplySent = 5,
+    Malformed = 6,
+    Failed = 7
 }

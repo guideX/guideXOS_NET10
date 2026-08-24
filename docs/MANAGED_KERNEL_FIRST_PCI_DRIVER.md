@@ -297,3 +297,121 @@ payload size `1,060,864` and SHA-256
 `BA70A8D58232A1F4489DBAAE1C247880D6C6FE61F6949A3D7A1A25711CA5A6B5`.
 The focused Phase 15 control also passes three fresh boots under
 `evidence/phase15-control-final-v2-20260824`.
+
+## Phase 17: bounded managed IPv4 and ICMP echo
+
+Phase 17 makes the managed kernel the owner of the first bounded IPv4 data
+path.  The pipeline is:
+
+`E1000 RX -> managed Ethernet II -> managed IPv4 -> managed ICMPv4`
+
+and, for transmit:
+
+`managed ICMPv4 -> managed IPv4 -> managed ARP/Ethernet II -> E1000 TX`.
+
+Native code remains limited to PCI, MMIO, DMA, descriptor, and ABI mechanics.
+`ManagedE1000Driver` still owns hardware and DMA buffers.  It copies a
+completed descriptor into a rooted managed RX buffer and recycles the
+descriptor before `ManagedEthernetLayer` dispatches the bounded copy.  The
+Ethernet layer owns EtherType dispatch; `ManagedIpv4Layer` owns IPv4 policy,
+ICMP echo policy, and the fixed diagnostic state.  No span or pointer into an
+RX descriptor survives ownership return to the E1000 ring.
+
+The driver uses a fixed 16-entry RX/TX descriptor ring and the existing
+2048-byte packet buffers.  The larger fixed ring leaves room for the
+Phase 17 proof sequence to drain deterministically without changing the
+ownership model.  ARP remains an eight-entry fixed cache.  IPv4 has one
+fixed-capacity pending transmission slot; a second pending packet fails
+closed and emits `MANAGED_IPV4_PENDING_OVERFLOW`.
+
+### Supported IPv4 subset
+
+The deterministic configuration is:
+
+* local IPv4: `10.15.0.1`
+* peer IPv4: `10.15.0.2`
+* subnet mask: `255.255.255.0`
+* peer MAC: `02:15:00:00:00:02`
+* guest MAC: runtime E1000 RAL/RAH (`52:54:00:12:34:56` in the proof image)
+
+Only same-subnet destinations are directly reachable.  No gateway or DHCP
+configuration exists.  IPv4 accepts version 4, IHL 5, a complete 20-byte
+header, a valid total length within the received Ethernet payload, and a
+valid one's-complement header checksum.  DSCP/ECN is zero, TTL is 64, and the
+identification is deterministic (`0x1700 + sequence` for managed pings and
+`0x1800 + sequence` for managed echo replies).  The only dispatched protocol
+is ICMP (`1`).
+
+IPv4 options (`IHL > 5`), IHL below 5, truncated headers, impossible lengths,
+bad checksums, nonlocal destinations, and unsupported protocols are rejected
+or ignored within the bounded dispatcher.  More Fragments and nonzero
+fragment offsets are rejected; Don't Fragment alone is accepted.  No
+fragment reassembly is implemented.
+
+### ICMPv4 echo behavior
+
+The managed ICMP layer supports only Echo Request (`type 8, code 0`) and Echo
+Reply (`type 0, code 0`).  It validates the eight-byte header, one's-
+complement checksum, code, and bounded payload length before dispatch.  Echo
+requests addressed to `10.15.0.1` receive a managed reply preserving the
+identifier, sequence, and payload.  Managed-originated pings use identifier
+and sequence pairs `(0x1701, 1)` and `(0x1702, 2)`.  The peer uses
+`(0xBEEF, 7)` for the responder proof.  Malformed requests never generate a
+reply.
+
+### GC, teardown, and malformed-input proof
+
+Protocol state is held in fixed arrays, fixed packet buffers, one fixed
+pending IPv4 copy, and bounded counters.  `TryStop` clears IPv4 configuration
+activity, request tracking, responder state, diagnostics, and pending bytes
+before the established E1000 stop path disables engines, releases DMA,
+restores PCI state, unmaps MMIO, and releases the device claim.
+
+Each authoritative boot performs valid traffic, five malformed wire controls
+(bad IPv4 header checksum, impossible total length, fragmentation, invalid
+ICMP Echo code, and a nonlocal destination), managed GC survival, and a
+second valid ping/reply after GC.  The malformed controls produce no replies
+and later traffic remains valid.  The host suite additionally covers a bad
+ICMP checksum, truncated IPv4/ICMP inputs, odd checksums, zero payload, and
+maximum bounded payload.  All parsing rejects before attacker-controlled
+lengths are used and no malformed packet exception escapes dispatch.
+
+### Authoritative boot and PCAP proof
+
+The Phase 17 host tests are run with
+`tools/Run-ManagedKernelPhase17HostTests.ps1`; the three-boot authoritative
+runner is `tools/Run-ManagedKernelPhase17FreshBoots.ps1`.  Each boot is a new
+QEMU process using the local UDP `dgram` peer and QEMU `filter-dump` with
+`queue=all`.  The independent parser is
+`tools/Parse-ManagedE1000Phase17Pcap.ps1`; serial or transmit logs alone are
+not accepted as wire proof.
+
+The final evidence is under
+`evidence/phase17-authoritative-final-v9-20260824`.  Every one of the three
+PCAPs contains 17 packets: two Phase 15 proof frames, then the following
+exact logical sequence:
+
+`guest ARP request -> host ARP reply -> host ARP request -> guest ARP reply ->`
+`guest Echo Request 0x1701/1 -> host Echo Reply ->`
+`bad-header-checksum -> impossible-length -> fragmented -> invalid-ICMP-code -> wrong-destination ->`
+`host Echo Request 0xBEEF/7 -> guest Echo Reply ->`
+`guest post-GC Echo Request 0x1702/2 -> host Echo Reply`.
+
+The validator independently checks Ethernet MACs and EtherTypes, ARP
+operation and addresses, IPv4 version/IHL/length/flags/offset/TTL/protocol/
+checksum/source/destination, ICMP type/code/checksum/identifier/sequence,
+exact payload bytes, packet order, and exact frame counts.  It reports
+`packets=17 arp=4 ipv4_icmp=6 malformed=5` for each fresh boot.
+
+The focused Phase 17 host suite passes 48 cases.  The Phase 15 host controls
+pass 28 cases, the Phase 16 host controls pass 57 cases, and the final
+Phase 16 three-boot regression passes under
+`evidence/phase16-regression-phase17-20260824`.  The Phase 17 payload is
+`1,083,392` bytes with SHA-256
+`7F39C6D082B2579BAD7867A29FD7F3C840E3A843D6419607A6F3B4F87409984A`.
+
+Phase 17 intentionally defers UDP, TCP, DHCP, DNS, IPv4 reassembly, IPv4
+options, IPv6/ND, routing, sockets, and a public network configuration/API
+surface.  Interrupt-driven networking, offloads, VLANs, jumbo/scatter-
+gather frames, multiple interfaces, and Internet access also remain outside
+this phase.

@@ -66,38 +66,41 @@ internal static class Program
                   ManagedE1000Protocol.RingCount, ManagedE1000Protocol.PacketBufferSize,
                   out _, out _, out _), "rx-descriptor-index-bounds-rejected");
 
+        uint lastRxIndex = ManagedE1000Protocol.RingCount - 1;
         Check(ManagedE1000Protocol.TryAcceptRxDescriptorIndex(
-                  7, 7, ManagedE1000Protocol.RingCount, out uint wrapped) && wrapped == 0,
+                  lastRxIndex, lastRxIndex, ManagedE1000Protocol.RingCount,
+                  out uint wrapped) && wrapped == 0,
             "rx-ring-wraparound");
         Check(!ManagedE1000Protocol.TryAcceptRxDescriptorIndex(
                   2, 3, ManagedE1000Protocol.RingCount, out _),
             "duplicate-or-out-of-order-rx-completion-rejected");
         Check(ManagedE1000Protocol.TryValidateRxReadyState(
                   ManagedE1000Protocol.StatusLinkUp,
-                  ManagedE1000Protocol.ReceiveEnable, 0, 7,
+                  ManagedE1000Protocol.ReceiveEnable, 0, lastRxIndex,
                   ManagedE1000Protocol.RingCount),
-            "rx-ready-state-with-seven-posted-descriptors");
+            "rx-ready-state-with-posted-descriptors");
         Check(!ManagedE1000Protocol.TryValidateRxReadyState(
                   ManagedE1000Protocol.StatusLinkUp,
                   ManagedE1000Protocol.ReceiveEnable, 0, 0,
                   ManagedE1000Protocol.RingCount),
             "rx-ready-state-empty-ring-rejected");
         Check(!ManagedE1000Protocol.TryValidateRxReadyState(
-                  0, ManagedE1000Protocol.ReceiveEnable, 0, 7,
+                  0, ManagedE1000Protocol.ReceiveEnable, 0, lastRxIndex,
                   ManagedE1000Protocol.RingCount),
             "rx-ready-state-link-down-rejected");
         Check(!ManagedE1000Protocol.TryValidateRxReadyState(
-                  ManagedE1000Protocol.StatusLinkUp, 0, 0, 7,
+                  ManagedE1000Protocol.StatusLinkUp, 0, 0, lastRxIndex,
                   ManagedE1000Protocol.RingCount),
             "rx-ready-state-disabled-rctl-rejected");
         Check(!ManagedE1000Protocol.TryValidateRxReadyState(
                   ManagedE1000Protocol.StatusLinkUp,
-                  ManagedE1000Protocol.ReceiveEnable, 8, 7,
+                  ManagedE1000Protocol.ReceiveEnable, ManagedE1000Protocol.RingCount,
+                  lastRxIndex,
                   ManagedE1000Protocol.RingCount),
             "rx-ready-state-head-bounds-rejected");
         Check(!ManagedE1000Protocol.TryValidateRxReadyState(
                   ManagedE1000Protocol.StatusLinkUp,
-                  ManagedE1000Protocol.ReceiveEnable, 0, 8,
+                  ManagedE1000Protocol.ReceiveEnable, 0, ManagedE1000Protocol.RingCount,
                   ManagedE1000Protocol.RingCount),
             "rx-ready-state-tail-bounds-rejected");
         Check(ManagedE1000Protocol.TryPrepareRxDescriptor(

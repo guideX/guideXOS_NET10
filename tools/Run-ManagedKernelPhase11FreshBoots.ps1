@@ -15,6 +15,7 @@ param(
     [switch]$Phase15AllowHarnessDeferral,
     [switch]$Phase15AcceptEitherOutcome,
     [switch]$EnablePhase16Protocol,
+    [switch]$EnablePhase17Protocol,
     [switch]$Phase15EnableFilterDump,
     [switch]$Phase15EnableQemuReceiveTrace,
     [ValidateSet('all', 'rx', 'tx')]
@@ -206,7 +207,7 @@ function Send-Key11([Net.Sockets.TcpClient]$monitor, [System.Diagnostics.Process
     Write-Timeline11 $script:phase11Timeline 'HOST_KEY_INJECT' "after=$afterMarker key=$key"
 }
 
-function New-Phase15Frame11([string]$destinationMac) {
+function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false) {
     $destination = New-Object byte[] 6
     for ($index = 0; $index -lt 6; $index++) {
         $destination[$index] = [Convert]::ToByte($destinationMac.Substring($index * 2, 2), 16)
@@ -219,7 +220,7 @@ function New-Phase15Frame11([string]$destinationMac) {
     $frame[12] = 0x88
     $frame[13] = 0xB5
     [Array]::Copy($signature, 0, $frame, 14, $signature.Length)
-    $sequence = 0x15000001
+    $sequence = if ($phase17) { 0x17000001 } else { 0x15000001 }
     $sequenceOffset = 14 + $signature.Length
     $frame[$sequenceOffset] = [byte](($sequence -shr 24) -band 0xFF)
     $frame[$sequenceOffset + 1] = [byte](($sequence -shr 16) -band 0xFF)
@@ -231,16 +232,21 @@ function New-Phase15Frame11([string]$destinationMac) {
 function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
                                   [int]$destinationPort,
                                   [string]$destinationMac,
-                                  [string]$destinationHost = '127.0.0.1') {
-    $frame = New-Phase15Frame11 $destinationMac
+                                  [string]$destinationHost = '127.0.0.1',
+                                  [bool]$phase17 = $false) {
+    $frame = New-Phase15Frame11 $destinationMac $phase17
     $sent = $peerUdp.Send($frame, $frame.Length, $destinationHost, $destinationPort)
     Require11 ($sent -eq $frame.Length) 'Phase 15 UDP injector sent a short Ethernet datagram.'
     $hash = [Security.Cryptography.SHA256]::Create()
     try { $frameHash = ([BitConverter]::ToString($hash.ComputeHash($frame))).Replace('-', '') }
     finally { $hash.Dispose() }
-    return ('MANAGED_E1000_PHASE15_INJECTED=PASS transport=dgram length={0} destination={1} source=021500000001 ethertype=88B5 sequence=0x15000001 frame_sha256={2} udp_source_port={3} udp_destination_port={4}' -f `
-        $frame.Length, $destinationMac.ToUpperInvariant(), $frameHash,
-        ([Net.IPEndPoint]$peerUdp.Client.LocalEndPoint).Port, $destinationPort)
+    $marker = if ($phase17) { 'MANAGED_E1000_PHASE17_INJECTED' } `
+        else { 'MANAGED_E1000_PHASE15_INJECTED' }
+    $sequenceText = if ($phase17) { '0x17000001' } else { '0x15000001' }
+    return ('{0}=PASS transport=dgram length={1} destination={2} source=021500000001 ethertype=88B5 sequence={3} frame_sha256={4} udp_source_port={5} udp_destination_port={6}' -f `
+        $marker, $frame.Length, $destinationMac.ToUpperInvariant(), $sequenceText,
+        $frameHash, ([Net.IPEndPoint]$peerUdp.Client.LocalEndPoint).Port,
+        $destinationPort)
 }
 
 function New-MacBytes16([string]$text) {
@@ -318,6 +324,139 @@ function Write-Phase16Frame11([IO.StreamWriter]$log, [string]$name,
         $hex.Substring(12, 12), $frame[21], $hex.Substring(44, 12),
         $hex.Substring(56, 8), $hex.Substring(64, 12), $hex.Substring(76, 8), $hash))
     $log.WriteLine(('MANAGED_PHASE16_{0}_FRAME_HEX={1}' -f $name.ToUpperInvariant(), $hex))
+    $log.Flush()
+}
+
+function Write-U16-Phase17([byte[]]$bytes, [int]$offset, [int]$value) {
+    $bytes[$offset] = [byte](($value -shr 8) -band 0xFF)
+    $bytes[$offset + 1] = [byte]($value -band 0xFF)
+}
+
+function Read-U16-Phase17([byte[]]$bytes, [int]$offset) {
+    return (([int]$bytes[$offset] -shl 8) -bor [int]$bytes[$offset + 1])
+}
+
+function Compute-Checksum-Phase17([byte[]]$bytes, [int]$offset,
+                                   [int]$length) {
+    [uint32]$sum = 0
+    $index = 0
+    while ($index + 1 -lt $length) {
+        $sum += ([uint32]([int]$bytes[$offset + $index] -shl 8) -bor
+            [uint32]$bytes[$offset + $index + 1])
+        $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+        $index += 2
+    }
+    if ($index -lt $length) {
+        $sum += [uint32]([int]$bytes[$offset + $index] -shl 8)
+        $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+    }
+    $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+    $sum = ($sum -band 0xFFFF) + ($sum -shr 16)
+    return [uint16]((-bnot [int]$sum) -band 0xFFFF)
+}
+
+function New-IcmpEcho-Phase17([byte]$type, [int]$identifier,
+                               [int]$sequence, [byte[]]$payload,
+                               [byte]$code = 0) {
+    $icmp = New-Object byte[] (8 + $payload.Length)
+    $icmp[0] = $type
+    $icmp[1] = $code
+    Write-U16-Phase17 $icmp 4 $identifier
+    Write-U16-Phase17 $icmp 6 $sequence
+    [Array]::Copy($payload, 0, $icmp, 8, $payload.Length)
+    Write-U16-Phase17 $icmp 2 (Compute-Checksum-Phase17 $icmp 0 $icmp.Length)
+    return $icmp
+}
+
+function New-Ipv4Icmp-Phase17([byte[]]$destinationMac,
+                               [byte[]]$sourceMac, [byte[]]$sourceIp,
+                               [byte[]]$destinationIp, [byte[]]$icmp,
+                               [int]$identification = 0x1701,
+                               [int]$flagsOffset = 0) {
+    $totalLength = 20 + $icmp.Length
+    $wireLength = [Math]::Max(60, 14 + $totalLength)
+    $frame = New-Object byte[] $wireLength
+    [Array]::Copy($destinationMac, 0, $frame, 0, 6)
+    [Array]::Copy($sourceMac, 0, $frame, 6, 6)
+    $frame[12] = 0x08; $frame[13] = 0x00
+    $ip = 14
+    $frame[$ip] = 0x45
+    Write-U16-Phase17 $frame ($ip + 2) $totalLength
+    Write-U16-Phase17 $frame ($ip + 4) $identification
+    Write-U16-Phase17 $frame ($ip + 6) $flagsOffset
+    $frame[$ip + 8] = 64
+    $frame[$ip + 9] = 1
+    [Array]::Copy($sourceIp, 0, $frame, $ip + 12, 4)
+    [Array]::Copy($destinationIp, 0, $frame, $ip + 16, 4)
+    Write-U16-Phase17 $frame ($ip + 10) `
+        (Compute-Checksum-Phase17 $frame $ip 20)
+    [Array]::Copy($icmp, 0, $frame, $ip + 20, $icmp.Length)
+    return $frame
+}
+
+function Hash-Phase17Frame([byte[]]$frame) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($hash.ComputeHash($frame))).Replace('-', '').ToUpperInvariant() }
+    finally { $hash.Dispose() }
+}
+
+function Receive-ExpectedPhase17Frame([Net.Sockets.UdpClient]$peerUdp,
+                                       [byte[]]$expected,
+                                       [string]$name, [int]$timeoutSeconds) {
+    $peerUdp.Client.ReceiveTimeout = 1000
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $seen = 0
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+            $frame = $peerUdp.Receive([ref]$remote)
+        } catch [Net.Sockets.SocketException] {
+            continue
+        }
+        $seen++
+        if ($seen -gt 64) { throw "Too many guest Ethernet frames while waiting for $name." }
+        if ($frame.Length -eq $expected.Length) {
+            $match = $true
+            for ($index = 0; $index -lt $expected.Length; $index++) {
+                if ($frame[$index] -ne $expected[$index]) { $match = $false; break }
+            }
+            if ($match) { return ,$frame }
+        }
+    }
+    throw "Timed out waiting for exact guest $name Ethernet frame."
+}
+
+function Write-Phase17Frame([IO.StreamWriter]$log, [string]$name,
+                             [byte[]]$frame) {
+    $hex = ([BitConverter]::ToString($frame)).Replace('-', '')
+    $etherType = ('{0:X4}' -f (Read-U16-Phase17 $frame 12))
+    $detail = ''
+    if ($frame.Length -ge 34 -and $etherType -eq '0800') {
+        $ip = 14
+        $ihl = ($frame[$ip] -band 0x0F) * 4
+        if ($ihl -ge 20 -and $frame.Length -ge $ip + $ihl + 8) {
+            $icmp = $ip + $ihl
+            $sourceIp = ([BitConverter]::ToString($frame[($ip + 12)..($ip + 15)])).Replace('-', '')
+            $destinationIp = ([BitConverter]::ToString($frame[($ip + 16)..($ip + 19)])).Replace('-', '')
+            $icmpPayloadHex = if ($frame.Length -gt $icmp + 8) {
+                ([BitConverter]::ToString(
+                    [byte[]]$frame[($icmp + 8)..($frame.Length - 1)])).Replace('-', '')
+            } else { '' }
+            $detail = ' ipv4_source={0} ipv4_destination={1} ipv4_total_length={2} ipv4_flags_offset={3} ipv4_ttl={4} ipv4_protocol={5} ipv4_checksum={6} icmp_type={7} icmp_code={8} icmp_checksum={9} icmp_identifier={10} icmp_sequence={11} icmp_payload={12}' -f `
+                $sourceIp, $destinationIp, (Read-U16-Phase17 $frame ($ip + 2)),
+                ('{0:X4}' -f (Read-U16-Phase17 $frame ($ip + 6))), $frame[$ip + 8],
+                $frame[$ip + 9], ('{0:X4}' -f (Read-U16-Phase17 $frame ($ip + 10))),
+                $frame[$icmp], $frame[$icmp + 1],
+                ('{0:X4}' -f (Read-U16-Phase17 $frame ($icmp + 2))),
+                ('{0:X4}' -f (Read-U16-Phase17 $frame ($icmp + 4))),
+                ('{0:X4}' -f (Read-U16-Phase17 $frame ($icmp + 6))),
+                $icmpPayloadHex
+        }
+    }
+    $log.WriteLine(('MANAGED_PHASE17_{0}=PASS length={1} destination={2} source={3} ethertype={4} frame_sha256={5}{6}' -f `
+        $name.ToUpperInvariant(), $frame.Length, $hex.Substring(0, 12),
+        $hex.Substring(12, 12), $etherType, (Hash-Phase17Frame $frame), $detail))
+    $log.WriteLine(('MANAGED_PHASE17_{0}_FRAME_HEX={1}' -f $name.ToUpperInvariant(), $hex))
     $log.Flush()
 }
 
@@ -538,7 +677,8 @@ try {
                     'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
                 Require11 $macMatch.Success 'Phase 15 did not publish the runtime e1000 MAC.'
                 $destinationMac = ($macMatch.Groups[1].Value + $macMatch.Groups[2].Value)
-                $injectOutput = @(Send-Phase15DgramFrame11 $peerUdp $rxPort $destinationMac)
+                $injectOutput = @(Send-Phase15DgramFrame11 $peerUdp $rxPort `
+                    $destinationMac '127.0.0.1' ([bool]$EnablePhase17Protocol))
                 $networkDetail = "backend=dgram port=$rxPort source_port=$peerPort"
                 foreach ($line in $injectOutput) {
                     $injectionLog.WriteLine([string]$line)
@@ -553,7 +693,7 @@ try {
                 } elseif ($Phase15AcceptEitherOutcome) {
                     $phase15Outcome = Wait-Phase15Outcome11 `
                         $deadline $process $stream $logStream $text $buffer
-                } elseif ($EnablePhase16Protocol) {
+                } elseif ($EnablePhase17Protocol -or $EnablePhase16Protocol) {
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' `
                         $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_FRAME_OK' `
@@ -604,11 +744,136 @@ try {
                         $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESPONDER_PASS' `
                         $deadline $process $stream $logStream $text $buffer
-                    Wait-Marker11 'MANAGED_KERNEL_PHASE16_PASS' `
-                        $deadline $process $stream $logStream $text $buffer
-                    Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' `
-                        $deadline $process $stream $logStream $text $buffer
-                    $phase15Outcome = 'PASS_PHASE16'
+                    if ($EnablePhase17Protocol) {
+                        $peerPayload = [Text.Encoding]::ASCII.GetBytes(
+                            'guideXOS Phase17 ping payload')
+                        $peerRequestPayload = [Text.Encoding]::ASCII.GetBytes(
+                            'peer-to-guideXOS Phase17 responder')
+                        $guestIpOther = [byte[]](10, 15, 0, 9)
+                        $guestEchoRequest = New-IcmpEcho-Phase17 8 0x1701 1 $peerPayload
+                        $guestEchoReply = New-IcmpEcho-Phase17 0 0x1701 1 $peerPayload
+                        $guestRequestFrame = New-Ipv4Icmp-Phase17 `
+                            $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                            $guestEchoRequest 0x1701
+                        $hostReplyFrame = New-Ipv4Icmp-Phase17 `
+                            $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                            $guestEchoReply 0x1801
+                        Wait-Marker11 'GXOS_NET10:MANAGED_IPV4_READY' `
+                            $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'GXOS_NET10:MANAGED_IPV4_FIRST_PING_SENT' `
+                            $deadline $process $stream $logStream $text $buffer
+                        $observedGuestPing = Receive-ExpectedPhase17Frame `
+                            $peerUdp $guestRequestFrame 'IPv4 echo request' $TimeoutSeconds
+                        Write-Phase17Frame $injectionLog 'guest_ipv4_echo_request' `
+                            $observedGuestPing
+                        $sentReply = $peerUdp.Send($hostReplyFrame, $hostReplyFrame.Length,
+                                                   '127.0.0.1', $rxPort)
+                        Require11 ($sentReply -eq $hostReplyFrame.Length) `
+                            'Host IPv4 echo reply send was short.'
+                        Write-Phase17Frame $injectionLog 'host_ipv4_echo_reply' $hostReplyFrame
+                        Write-Timeline11 $timeline 'HOST_IPV4_ECHO_REPLY_SENT' `
+                            'identifier=1701 sequence=0001'
+                        Wait-Marker11 'GXOS_NET10:MANAGED_ICMP_FIRST_REPLY_VALID' `
+                            $deadline $process $stream $logStream $text $buffer
+
+                        Wait-Marker11 'GXOS_NET10:MANAGED_IPV4_MALFORMED_READY' `
+                            $deadline $process $stream $logStream $text $buffer
+                        $badHeaderFrame = New-Ipv4Icmp-Phase17 `
+                            $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                            (New-IcmpEcho-Phase17 8 0x9001 1 ([byte[]](1, 2, 3))) 0x9001
+                        $badHeaderFrame[24] = $badHeaderFrame[24] -bxor 1
+                        $impossibleLengthFrame = New-Ipv4Icmp-Phase17 `
+                            $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                            (New-IcmpEcho-Phase17 8 0x9002 2 ([byte[]](4, 5, 6))) 0x9002
+                        $impossibleLengthFrame[16] = 0x05
+                        $impossibleLengthFrame[17] = 0xDC
+                        $fragmentedFrame = New-Ipv4Icmp-Phase17 `
+                            $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                            (New-IcmpEcho-Phase17 8 0x9003 3 ([byte[]](7, 8, 9))) 0x9003 0x2000
+                        $invalidCodeFrame = New-Ipv4Icmp-Phase17 `
+                            $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                            (New-IcmpEcho-Phase17 8 0x9004 4 ([byte[]](10, 11, 12)) 1) 0x9004
+                        $wrongDestinationFrame = New-Ipv4Icmp-Phase17 `
+                            $broadcastMac $hostMacBytes $hostIpBytes $guestIpOther `
+                            (New-IcmpEcho-Phase17 8 0x9005 5 ([byte[]](13, 14, 15))) 0x9005
+                        $malformedFrames = @(
+                            $badHeaderFrame, $impossibleLengthFrame,
+                            $fragmentedFrame, $invalidCodeFrame, $wrongDestinationFrame)
+                        $malformedIndex = 0
+                        foreach ($malformed in $malformedFrames) {
+                            $sentMalformed = $peerUdp.Send($malformed, $malformed.Length,
+                                                           '127.0.0.1', $rxPort)
+                            Require11 ($sentMalformed -eq $malformed.Length) `
+                                "Malformed IPv4 frame $malformedIndex send was short."
+                            Write-Phase17Frame $injectionLog `
+                                ('malformed_{0}' -f $malformedIndex) $malformed
+                            Wait-Marker11 ('GXOS_NET10:MANAGED_IPV4_MALFORMED_FRAME_{0}' -f $malformedIndex) `
+                                $deadline $process $stream $logStream $text $buffer
+                            $malformedIndex++
+                        }
+                        Write-Timeline11 $timeline 'HOST_MALFORMED_IPV4_CONTROLS_SENT' `
+                            'count=5 bad_header=1 impossible_length=1 fragmented=1 invalid_icmp_code=1 wrong_destination=1'
+                        Wait-Marker11 'GXOS_NET10:MANAGED_IPV4_MALFORMED_CONTROLS_PASS' `
+                            $deadline $process $stream $logStream $text $buffer
+
+                        $peerRequest = New-IcmpEcho-Phase17 8 0xBEEF 7 $peerRequestPayload
+                        $peerReply = New-IcmpEcho-Phase17 0 0xBEEF 7 $peerRequestPayload
+                        $peerRequestFrame = New-Ipv4Icmp-Phase17 `
+                            $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                            $peerRequest 0x1807
+                        $peerReplyFrame = New-Ipv4Icmp-Phase17 `
+                            $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                            $peerReply 0x1807
+                        $sentPeerRequest = $peerUdp.Send($peerRequestFrame,
+                                                         $peerRequestFrame.Length,
+                                                         '127.0.0.1', $rxPort)
+                        Require11 ($sentPeerRequest -eq $peerRequestFrame.Length) `
+                            'Peer IPv4 echo request send was short.'
+                        Write-Phase17Frame $injectionLog 'host_ipv4_echo_request' $peerRequestFrame
+                        Write-Timeline11 $timeline 'HOST_IPV4_ECHO_REQUEST_SENT' `
+                            'identifier=BEEF sequence=0007'
+                        $observedPeerReply = Receive-ExpectedPhase17Frame `
+                            $peerUdp $peerReplyFrame 'managed IPv4 echo reply' $TimeoutSeconds
+                        Write-Phase17Frame $injectionLog 'guest_ipv4_echo_reply' $observedPeerReply
+                        Wait-Marker11 'GXOS_NET10:MANAGED_ICMP_RESPONDER_PASS' `
+                            $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE17_GC_SURVIVAL_PASSED' `
+                            $deadline $process $stream $logStream $text $buffer
+
+                        $postRequest = New-IcmpEcho-Phase17 8 0x1702 2 $peerPayload
+                        $postReply = New-IcmpEcho-Phase17 0 0x1702 2 $peerPayload
+                        $postRequestFrame = New-Ipv4Icmp-Phase17 `
+                            $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes `
+                            $postRequest 0x1702
+                        $postReplyFrame = New-Ipv4Icmp-Phase17 `
+                            $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                            $postReply 0x1802
+                        Wait-Marker11 'GXOS_NET10:MANAGED_IPV4_POST_GC_PING_SENT' `
+                            $deadline $process $stream $logStream $text $buffer
+                        $observedPostRequest = Receive-ExpectedPhase17Frame `
+                            $peerUdp $postRequestFrame 'post-GC IPv4 echo request' $TimeoutSeconds
+                        Write-Phase17Frame $injectionLog 'guest_post_gc_echo_request' `
+                            $observedPostRequest
+                        $sentPostReply = $peerUdp.Send($postReplyFrame, $postReplyFrame.Length,
+                                                       '127.0.0.1', $rxPort)
+                        Require11 ($sentPostReply -eq $postReplyFrame.Length) `
+                            'Post-GC IPv4 echo reply send was short.'
+                        Write-Phase17Frame $injectionLog 'host_post_gc_echo_reply' $postReplyFrame
+                        Wait-Marker11 'GXOS_NET10:MANAGED_ICMP_POST_GC_REPLY_VALID' `
+                            $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'MANAGED_KERNEL_PHASE17_PASS' `
+                            $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' `
+                            $deadline $process $stream $logStream $text $buffer
+                        $phase15Outcome = 'PASS_PHASE17'
+                    }
+                    else {
+                        Wait-Marker11 'MANAGED_KERNEL_PHASE16_PASS' `
+                            $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' `
+                            $deadline $process $stream $logStream $text $buffer
+                        $phase15Outcome = 'PASS_PHASE16'
+                    }
                 } else {
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_FRAME_OK' $deadline $process $stream $logStream $text $buffer

@@ -26,7 +26,7 @@ internal sealed class ManagedE1000Driver
        adding a wall-clock sleep to the guest. */
     private const uint RxPhase15PollLimit = 1000000000;
     private const uint RxReadyPollLimit = 5000000;
-    private const uint RxRearmInterval = 1000000;
+    private const uint RxRearmInterval = 1;
     internal static uint Phase16MacHigh;
     internal static uint Phase16MacLow;
 
@@ -44,6 +44,7 @@ internal sealed class ManagedE1000Driver
     private readonly byte[] _txFrame = new byte[60];
     private ulong _macValue;
     private bool _phase16Passed;
+    private bool _phase17Passed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -51,6 +52,7 @@ internal sealed class ManagedE1000Driver
     private uint _rxIndex;
     private int _rxProofReceived;
     private int _rxPhase15Received;
+    private bool _phase17Requested;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -70,6 +72,7 @@ internal sealed class ManagedE1000Driver
     internal bool RxPhase15Received => _rxPhase15Received != 0;
     internal bool Phase16Passed => _phase16Passed ||
                                    (_ethernet != null && _ethernet.Phase16Passed);
+    internal bool Phase17Passed => _phase17Passed;
 
     internal static ManagedE1000Driver? TryCreate()
     {
@@ -190,7 +193,11 @@ internal sealed class ManagedE1000Driver
             Phase16MacLow = ((uint)mac2 << 24) | ((uint)mac3 << 16) |
                             ((uint)mac4 << 8) | mac5;
             _ethernet.InitializeMac();
-            if (!_ethernet.TryRunPhase16()) return AbortStart();
+            if (_phase17Requested)
+            {
+                if (!_ethernet.TryRunPhase17()) return AbortStart();
+            }
+            else if (!_ethernet.TryRunPhase16()) return AbortStart();
         }
         return true;
     }
@@ -246,7 +253,11 @@ internal sealed class ManagedE1000Driver
     {
         if (_state != ManagedE1000DriverState.Running) return false;
         _state = ManagedE1000DriverState.Stopping;
-        if (_ethernet != null) _phase16Passed = _ethernet.Phase16Passed;
+        if (_ethernet != null)
+        {
+            _phase16Passed = _ethernet.Phase16Passed;
+            _phase17Passed = _ethernet.Phase17Passed;
+        }
         bool result = (_ethernet == null || _ethernet.TryStop()) &&
                       DisableEngines() && ReleaseDmaAndRestorePci();
         if (!result) return false;
@@ -571,7 +582,9 @@ internal sealed class ManagedE1000Driver
                     out _, out _) || length > frame.Length)
             {
                 KernelLog.Write("GXOS_NET10:MANAGED_E1000_RX_PROTOCOL_DESCRIPTOR_REJECTED\r\n"u8);
-                return false;
+                if (!RecycleRxDescriptor(_rxIndex)) return false;
+                length = 0;
+                return true;
             }
             uint observedIndex = _rxIndex;
             ulong bufferOffset = (ulong)observedIndex * ManagedE1000Protocol.PacketBufferSize;
@@ -681,6 +694,8 @@ internal sealed class ManagedE1000Driver
                 KernelLog.Write("GXOS_NET10:MANAGED_E1000_RX_FRAME_REJECTED\r\n"u8);
                 return false;
             }
+            _phase17Requested = ManagedE1000Protocol.IsPhase17RxTestFrame(
+                frame.Slice(0, length));
             if (!WriteRxStateSnapshot(
                     "GXOS_NET10:MANAGED_E1000_RX_STATE=AFTER_COMPLETION\r\n"u8) ||
                 !RecycleRxDescriptor(_rxIndex)) return false;
