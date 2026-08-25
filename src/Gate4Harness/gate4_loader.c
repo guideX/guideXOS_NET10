@@ -33,6 +33,7 @@
 #include "nativeaot_callback_bridge.h"
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
 #include "managed_kernel_abi.h"
+#include "managed_kernel_entropy.h"
 #include "managed_kernel_boot_resources.h"
 #include "managed_kernel_host_services.h"
 #include "managed_kernel_memory.h"
@@ -365,6 +366,8 @@ typedef uint32_t (EFIAPI *ManagedKernelQueryMemoryRegionEntry)(
     uintptr_t output_address, uintptr_t output_capacity);
 typedef uint32_t (EFIAPI *ManagedKernelInstallHostServicesEntry)(
     uint32_t requested_abi_version, uintptr_t host_services_address);
+typedef uint32_t (EFIAPI *ManagedKernelInstallEntropyServicesEntry)(
+    uint32_t requested_abi_version, uintptr_t entropy_services_address);
 typedef uint32_t (EFIAPI *ManagedKernelStartEntry)(void);
 typedef uint32_t (EFIAPI *ManagedKernelInstallMemoryServicesEntry)(
     uint32_t requested_abi_version, uintptr_t memory_services_address);
@@ -412,6 +415,7 @@ typedef uint32_t (EFIAPI *ManagedKernelRunPhase13Entry)(uint32_t stage);
 typedef uint32_t (EFIAPI *ManagedKernelInstallDmaServicesEntry)(
     uint32_t requested_abi_version, uintptr_t services_address);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase14Entry)(uint32_t stage);
+typedef uint32_t (EFIAPI *ManagedKernelRunPhase25Entry)(void);
 #endif
 
 enum {
@@ -1609,6 +1613,7 @@ static uint32_t EFIAPI managed_kernel_host_log_utf8(
     return (uint32_t)status;
 }
 
+#ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE25_STANDALONE
 static uint32_t EFIAPI managed_kernel_host_query_monotonic_time(
     uint32_t requested_abi_version, uintptr_t output_address,
     uintptr_t output_capacity)
@@ -1641,6 +1646,7 @@ static uint32_t EFIAPI managed_kernel_host_query_monotonic_time(
     ++g_managed_kernel_host_time_calls;
     return GX_MANAGED_OK;
 }
+#endif
 
 static uint32_t EFIAPI managed_kernel_memory_allocate_pages(
     uint64_t page_count, uint32_t flags, uintptr_t output_address,
@@ -4663,6 +4669,7 @@ typedef struct {
     uint32_t managed_kernel_query_boot_resources_rva;
     uint32_t managed_kernel_query_memory_region_rva;
     uint32_t managed_kernel_install_host_services_rva;
+    uint32_t managed_kernel_install_entropy_services_rva;
     uint32_t managed_kernel_install_memory_services_rva;
     uint32_t managed_kernel_install_device_inventory_rva;
     uint32_t managed_kernel_query_device_inventory_summary_rva;
@@ -4691,6 +4698,7 @@ typedef struct {
     uint32_t managed_kernel_run_phase13_rva;
     uint32_t managed_kernel_install_dma_services_rva;
     uint32_t managed_kernel_run_phase14_rva;
+    uint32_t managed_kernel_run_phase25_rva;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     uint32_t managed_gc_probe_rva;
@@ -4706,6 +4714,13 @@ typedef struct {
     uint32_t executable_region_count;
     GXOS_CRT_INITTERM_E_EXECUTABLE_REGION executable_regions[GXOS_CRT_INITTERM_E_MAX_EXECUTABLE_REGIONS];
 } PE_IMAGE;
+
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+/* Keep this ABI table out of efi_main's already-large freestanding stack
+   frame.  The UEFI loader has no compiler stack-probe runtime. */
+static GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1
+    g_managed_kernel_entropy_services;
+#endif
 
 #if defined(GXOS_ENABLE_EXCEPTION_SYNTHETIC_PROBE) || defined(GXOS_ENABLE_VECTORED_EXCEPTION_HANDLER)
 static const void *g_veh_harness_identity;
@@ -12410,12 +12425,14 @@ static void managed_kernel_host_services_make_valid(void)
         GX_MANAGED_HOST_CAPABILITY_LOG_UTF8;
     g_managed_kernel_host_services.LogUtf8Address =
         (uint64_t)(uintptr_t)managed_kernel_host_log_utf8;
+#ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE25_STANDALONE
     if (gxos_perf_is_initialized()) {
         g_managed_kernel_host_services.Capabilities |=
             GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME;
         g_managed_kernel_host_services.MonotonicTimeAddress =
             (uint64_t)(uintptr_t)managed_kernel_host_query_monotonic_time;
     }
+#endif
 }
 
 static void managed_kernel_memory_services_make_valid(void)
@@ -13139,7 +13156,9 @@ static void managed_kernel_memory_prestart_negative_tests(void)
 static void managed_kernel_phase3_host_services_and_start(
     ManagedKernelInstallHostServicesEntry install_host_services,
     ManagedKernelInstallMemoryServicesEntry install_memory_services,
-    ManagedKernelStartEntry start)
+    ManagedKernelInstallEntropyServicesEntry install_entropy_services,
+    ManagedKernelStartEntry start,
+    GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1 *entropy_services)
 {
     GX_MANAGED_KERNEL_HOST_SERVICES_V1 candidate;
     GX_MANAGED_KERNEL_MEMORY_SERVICES_V1 memory_candidate;
@@ -13162,6 +13181,24 @@ static void managed_kernel_phase3_host_services_and_start(
     g_managed_kernel_memory_service_installed = 1;
     serial_text("GXOS_NET10:MANAGED_KERNEL_MEMORY_SERVICES_INSTALLED\r\n");
     managed_kernel_memory_prestart_negative_tests();
+
+    if (entropy_services == 0 ||
+        install_entropy_services(GX_MANAGED_KERNEL_ENTROPY_SERVICES_ABI_V1,
+                                 0) != GX_MANAGED_INVALID_ARGUMENT ||
+        install_entropy_services(GX_MANAGED_KERNEL_ENTROPY_SERVICES_ABI_V1 + 1U,
+                                 (uintptr_t)entropy_services) != GX_MANAGED_UNSUPPORTED_ABI ||
+        install_entropy_services(GX_MANAGED_KERNEL_ENTROPY_SERVICES_ABI_V1,
+                                 (uintptr_t)entropy_services) != GX_MANAGED_OK ||
+        install_entropy_services(GX_MANAGED_KERNEL_ENTROPY_SERVICES_ABI_V1,
+                                 (uintptr_t)entropy_services) != GX_MANAGED_ALREADY_INITIALIZED) {
+        fail("managed-kernel-entropy-services-install");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_ENTROPY_SERVICES_INSTALLED\r\n");
+    if ((entropy_services->Capabilities & GX_MANAGED_ENTROPY_CAPABILITY_HARDWARE) != 0) {
+        serial_text("GXOS_NET10:MANAGED_ENTROPY_PROVIDER_CAPABILITY_DETECTED=1\r\n");
+    } else {
+        serial_text("GXOS_NET10:MANAGED_ENTROPY_PROVIDER_UNAVAILABLE=1\r\n");
+    }
 
     candidate = g_managed_kernel_host_services;
     if (install_host_services(GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1, 0) !=
@@ -14011,8 +14048,13 @@ static int managed_kernel_interrupt_wait_for_worker_rearmed(
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker)
 {
     uint32_t iteration;
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
+    const uint32_t maximum_iterations = 1000000U;
+#else
+    const uint32_t maximum_iterations = 100000U;
+#endif
     if (boot_services == 0 || worker == 0) return 0;
-    for (iteration = 0; iteration != 100000U; ++iteration) {
+    for (iteration = 0; iteration != maximum_iterations; ++iteration) {
         managed_kernel_interrupt_enable_cpu();
         if (managed_kernel_interrupt_worker_rearmed(worker)) return 1;
         if (gxos_managed_kernel_driver_worker_pump(worker)) continue;
@@ -17550,6 +17592,7 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION boot_resources_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION memory_region_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_host_services_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION install_entropy_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_memory_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_device_inventory_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION query_device_inventory_summary_resolution = {0};
@@ -17578,6 +17621,7 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase13_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_dma_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase14_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase25_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_STATUS initialize_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInitialize",
@@ -17602,6 +17646,10 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInstallHostServices",
                                    &install_host_services_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS install_entropy_services_status =
+        gxos_nativeaot_find_export(&export_image,
+                                   "GxManagedKernelInstallEntropyServices",
+                                   &install_entropy_services_resolution);
     GXOS_NATIVEAOT_EXPORT_STATUS install_memory_services_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInstallMemoryServices",
@@ -17698,6 +17746,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_STATUS run_phase14_status =
         gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase14",
                                    &run_phase14_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS run_phase25_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase25",
+                                   &run_phase25_resolution);
     if (initialize_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInitialize-export-missing");
     }
@@ -17715,6 +17766,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     }
     if (install_host_services_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInstallHostServices-export-missing");
+    }
+    if (install_entropy_services_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelInstallEntropyServices-export-missing");
     }
     if (start_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelStart-export-missing");
@@ -17800,6 +17854,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     if (run_phase14_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelRunPhase14-export-missing");
     }
+    if (run_phase25_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelRunPhase25-export-missing");
+    }
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
     image->managed_kernel_install_boot_resources_rva = install_resolution.rva;
@@ -17807,6 +17864,8 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     image->managed_kernel_query_memory_region_rva = memory_region_resolution.rva;
     image->managed_kernel_install_host_services_rva =
         install_host_services_resolution.rva;
+    image->managed_kernel_install_entropy_services_rva =
+        install_entropy_services_resolution.rva;
     image->managed_kernel_install_memory_services_rva =
         install_memory_services_resolution.rva;
     image->managed_kernel_install_device_inventory_rva =
@@ -17850,6 +17909,7 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     image->managed_kernel_install_dma_services_rva =
         install_dma_services_resolution.rva;
     image->managed_kernel_run_phase14_rva = run_phase14_resolution.rva;
+    image->managed_kernel_run_phase25_rva = run_phase25_resolution.rva;
 }
 #endif
 
@@ -19307,6 +19367,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_boot_resources_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_memory_region_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_host_services_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_entropy_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_memory_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_device_inventory_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_query_device_inventory_summary_resolution = {0};
@@ -19335,12 +19396,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase13_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_dma_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase14_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase25_resolution = {0};
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
     ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
     ManagedKernelQueryBootResourcesEntry managed_kernel_query_boot_resources;
     ManagedKernelQueryMemoryRegionEntry managed_kernel_query_memory_region;
     ManagedKernelInstallHostServicesEntry managed_kernel_install_host_services;
+    ManagedKernelInstallEntropyServicesEntry managed_kernel_install_entropy_services;
     ManagedKernelInstallMemoryServicesEntry managed_kernel_install_memory_services;
     ManagedKernelInstallDeviceInventoryEntry managed_kernel_install_device_inventory;
     ManagedKernelQueryDeviceInventorySummaryEntry managed_kernel_query_device_inventory_summary;
@@ -19369,6 +19432,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     ManagedKernelRunPhase13Entry managed_kernel_run_phase13;
     ManagedKernelInstallDmaServicesEntry managed_kernel_install_dma_services;
     ManagedKernelRunPhase14Entry managed_kernel_run_phase14;
+    ManagedKernelRunPhase25Entry managed_kernel_run_phase25;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 managed_kernel_boot_resource_publication = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_system_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_repeat_info = {0};
@@ -19617,6 +19681,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         image.managed_kernel_install_host_services_rva;
     managed_kernel_install_host_services_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_install_host_services_rva);
+    managed_kernel_install_entropy_services_resolution.rva =
+        image.managed_kernel_install_entropy_services_rva;
+    managed_kernel_install_entropy_services_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_install_entropy_services_rva);
     managed_kernel_install_memory_services_resolution.rva =
         image.managed_kernel_install_memory_services_rva;
     managed_kernel_install_memory_services_resolution.address =
@@ -19716,6 +19784,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     managed_kernel_run_phase14_resolution.rva = image.managed_kernel_run_phase14_rva;
     managed_kernel_run_phase14_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_run_phase14_rva);
+    managed_kernel_run_phase25_resolution.rva = image.managed_kernel_run_phase25_rva;
+    managed_kernel_run_phase25_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_phase25_rva);
     managed_kernel_initialize = (ManagedKernelInitializeEntry)
         managed_kernel_initialize_resolution.address;
     managed_kernel_query_system_info = (ManagedKernelQuerySystemInfoEntry)
@@ -19728,6 +19799,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_memory_region_resolution.address;
     managed_kernel_install_host_services = (ManagedKernelInstallHostServicesEntry)
         managed_kernel_install_host_services_resolution.address;
+    managed_kernel_install_entropy_services =
+        (ManagedKernelInstallEntropyServicesEntry)
+        managed_kernel_install_entropy_services_resolution.address;
     managed_kernel_install_memory_services =
         (ManagedKernelInstallMemoryServicesEntry)
         managed_kernel_install_memory_services_resolution.address;
@@ -19796,6 +19870,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_install_dma_services_resolution.address;
     managed_kernel_run_phase14 = (ManagedKernelRunPhase14Entry)
         managed_kernel_run_phase14_resolution.address;
+    managed_kernel_run_phase25 = (ManagedKernelRunPhase25Entry)
+        managed_kernel_run_phase25_resolution.address;
     serial_text("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT=GxManagedKernelInitialize\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT_RVA=0x",
                      image.managed_kernel_initialize_rva);
@@ -20521,6 +20597,25 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     initialize_managed_kernel_dma_service_table();
     prepare_managed_kernel_boot_resources();
     prepare_managed_kernel_device_inventory();
+    gxos_managed_kernel_entropy_prepare(&g_managed_kernel_entropy_services);
+    serial_field_hex("GXOS_NET10:MANAGED_ENTROPY_CPUID_MAX_BASIC=0x",
+                     gxos_managed_kernel_entropy_max_basic_leaf());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_ENTROPY_CPUID_LEAF1_ECX=0x",
+                     gxos_managed_kernel_entropy_leaf1_ecx());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_ENTROPY_CPUID_LEAF7_EBX=0x",
+                     gxos_managed_kernel_entropy_leaf7_ebx());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_ENTROPY_FEATURE_FLAGS=0x",
+                     gxos_managed_kernel_entropy_feature_flags());
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_ENTROPY_MAX_BYTES_PER_FILL=0x",
+                     g_managed_kernel_entropy_services.MaxBytesPerFill);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_ENTROPY_RETRY_COUNT=0x",
+                     g_managed_kernel_entropy_services.RetryCount);
+    serial_text("\r\n");
 #endif
     g_boot_info_address = (uint64_t)(uintptr_t)&g_boot_info;
     g_boot_info.Magic = GUIDEX_BOOT_MAGIC;
@@ -20879,9 +20974,25 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     activate_nativeaot_tls();
     managed_kernel_phase3_host_services_and_start(
         managed_kernel_install_host_services, managed_kernel_install_memory_services,
-        managed_kernel_start);
+        managed_kernel_install_entropy_services, managed_kernel_start,
+        &g_managed_kernel_entropy_services);
     restore_nativeaot_tls();
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS\r\n");
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25_STANDALONE
+    activate_nativeaot_tls();
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE25_BEGIN\r\n");
+    managed_kernel_status = managed_kernel_run_phase25();
+    if (managed_kernel_status != GX_MANAGED_OK) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-phase25");
+    }
+    restore_nativeaot_tls();
+    /* The dedicated Phase 25 runner consumes the markers and terminates
+       this owned QEMU instance.  Do not enter the later interrupt/network
+       proof sequence for this narrow cryptographic boot. */
+    halt_forever();
+    return EFI_SUCCESS;
+#endif
     activate_nativeaot_tls();
     managed_kernel_phase4_memory(managed_kernel_run_phase4);
     restore_nativeaot_tls();
@@ -20932,6 +21043,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("managed-kernel-resource-teardown");
     }
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE13_SEQUENCE_COMPLETE\r\n");
+    restore_nativeaot_tls();
+#endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
+    activate_nativeaot_tls();
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE25_BEGIN\r\n");
+    managed_kernel_status = managed_kernel_run_phase25();
+    if (managed_kernel_status != GX_MANAGED_OK) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-phase25");
+    }
     restore_nativeaot_tls();
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK

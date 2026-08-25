@@ -1050,3 +1050,99 @@ managed or fully proven NativeAOT cryptographic substrate with independent
 known-answer vectors. Only after those prerequisites pass should one TLS 1.2
 cipher suite, pinned-peer authentication, bounded record protection, and the
 DNS -> TCP -> TLS acceptance path be implemented.
+
+## Phase 25: Managed Cryptographic Foundation I — Outcome C
+
+Phase 25 adds the first independently testable cryptographic substrate without
+adding TLS records, a handshake, AES-GCM, RSA, ECDH, ECDSA, X.509, or HTTPS.
+The owned managed implementation is `ManagedSha256`: incremental SHA-256 with
+fixed 64-byte block storage, an eight-word state, a 64-word schedule, correct
+FIPS padding, and 64-bit big-endian message-length encoding. It accepts
+arbitrarily segmented input, including zero length, and returns exactly 32
+digest bytes without unbounded allocation, reflection, dynamic code, or
+`System.Security.Cryptography`.
+
+`ManagedHmacSha256` composes that primitive with the RFC HMAC construction: a
+64-byte block, 32-byte digest, short/exact/long key handling, long-key
+pre-hashing, incremental message updates, reset/reuse, and explicit clearing
+of pads and temporary key blocks. `ManagedCryptoComparison.FixedTimeEquals`
+handles equal and unequal lengths with an accumulated difference and no
+early mismatch return; the implementation makes no claim beyond that
+observable bounded structure.
+
+The independent vectors are FIPS 180-4 SHA-256 vectors and RFC 4231 HMAC
+vectors. SHA tests cover empty input, `abc`, a standard multi-block message,
+55/56/63/64/65-byte boundaries, segmented and byte-at-a-time updates,
+reset/reuse, finalized-state rejection, short-output rejection, and GC
+survival. HMAC tests cover short, repeated-byte, exact/long, empty, segmented,
+reset/reuse, corrupted-MAC mismatch, and GC lifecycle behavior. The dedicated
+host suite is `tools/Run-ManagedKernelPhase25HostTests.ps1` and passes exactly
+113 cases, including explicit deterministic test entropy, unavailable and
+partial/failure providers, the 1,024-byte maximum, max-plus-one rejection,
+and production-provider separation.
+
+### Entropy boundary and policy
+
+Production `ManagedSecureRandom` exposes `IsAvailable` and bounded
+`TryFill(Span<byte>)` through the existing managed/native ABI conventions. It
+does not use time, TSC, MAC addresses, PCI enumeration, stack addresses, ASLR,
+fixed seeds, or QEMU timing. The native x64 service performs CPUID leaf 1
+ECX bit 30 detection for RDRAND and leaf 7 EBX bit 18 detection for RDSEED.
+Each 64-bit word prefers RDSEED and falls back to RDRAND when available; the
+carry flag is checked, retries are bounded at 10, and exhaustion returns an
+explicit failure after clearing the destination. Maximum fill size is 1,024
+bytes. No DRBG was introduced because the target currently has no proven
+hardware seed source, and no UEFI RNG or virtio-rng protocol is assumed after
+the boot boundary.
+
+The host deterministic provider is injected only by the Phase 25 host-test
+project. Production construction points to `NativeHardwareEntropy` and has no
+fallback to the deterministic provider. An unavailable provider is surfaced
+to consumers and the kernel proof records a fail-closed marker without
+emitting random bytes or secret state.
+
+### NativeAOT and fresh-boot proof
+
+The native ABI is `GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1`; installation checks
+size, ABI/version, architecture, capabilities, function address, capacity,
+retry policy, and reserved fields. The authoritative runner is
+`tools/Run-ManagedKernelPhase25FreshBoots.ps1`. It uses the real NativeAOT
+payload and existing QEMU/OVMF conventions, but halts after the narrow Phase
+25 proof so unrelated Phase 11 keyboard/interrupt timing cannot obscure the
+crypto result. Three fresh boots passed all managed SHA-256, HMAC, constant-
+time, GC-survival, reset, and teardown markers. The QEMU command line uses
+q35, single-threaded TCG, 128 MiB, and no explicit `-cpu` override.
+
+All three boots reported maximum basic CPUID leaf `0xD`, leaf-1 ECX
+`0x80002001`, leaf-7 EBX `0x0`, and entropy feature flags `0x0`: neither
+RDRAND nor RDSEED is exposed by the authoritative environment. Consequently
+the production random provider was unavailable and proved fail-closed on all
+three boots. This is Outcome C because the platform lacks a credible runtime
+entropy source; uniqueness of logs or any statistical property is not treated
+as a security proof.
+
+The Phase 25 managed payload is 1,253,888 bytes with SHA-256
+`98D945E9508FF83ADC9C536D68CE59072F113435210DFF664DE539B260061735`.
+The import audit compares normalized import names against the Phase 23
+payload and finds no new OS crypto import. `bcrypt.dll!BCryptGenRandom`
+remains the existing NativeAOT runtime/PAL import identified in
+`docs/DEPENDENCY_CENSUS.md`; Phase 25 source does not reference it, the
+service does not route through it, and none of the three boots reached the
+loader fail-fast unexpected-import marker. Audit output and boot logs are
+under `evidence/phase25-crypto-foundation-20260825-final4/`.
+
+### Remaining TLS prerequisite matrix after Phase 25
+
+| TLS prerequisite | Status after Phase 25 |
+| --- | --- |
+| Secure entropy | Blocked: target CPUID exposes neither RDRAND nor RDSEED; service fails closed |
+| SHA-256 | Proven: owned managed implementation, standardized vectors, three bare-metal boots |
+| HMAC-SHA256 | Proven: owned managed implementation, RFC 4231 vectors, three bare-metal boots |
+| Constant-time equality | Proven for bounded byte comparison; no broader timing claim |
+| TLS 1.2 PRF building blocks | Available as primitives; integration deferred |
+| AES-128 | Missing |
+| GCM | Missing |
+| ECDH P-256 | Missing |
+| RSA/ECDSA verification | Missing |
+| X.509 narrow parser | Missing |
+| TLS state machine and records | Deferred |

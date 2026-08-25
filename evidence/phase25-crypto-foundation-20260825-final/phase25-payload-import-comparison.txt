@@ -1,0 +1,25 @@
+CURRENT_PAYLOAD_IMPORTS
+DLL Name: ADVAPI32.dll
+DLL Name: bcrypt.dll
+000b93f8  <none>  001f  BCryptGenRandom
+DLL Name: KERNEL32.dll
+DLL Name: ole32.dll
+DLL Name: api-ms-win-crt-math-l1-1-0.dll
+DLL Name: api-ms-win-crt-string-l1-1-0.dll
+DLL Name: api-ms-win-crt-convert-l1-1-0.dll
+DLL Name: api-ms-win-crt-stdio-l1-1-0.dll
+DLL Name: api-ms-win-crt-runtime-l1-1-0.dll
+DLL Name: api-ms-win-crt-heap-l1-1-0.dll
+PREVIOUS_PHASE23_PAYLOAD_IMPORTS
+DLL Name: ADVAPI32.dll
+DLL Name: bcrypt.dll
+000b83f8  <none>  001f  BCryptGenRandom
+DLL Name: KERNEL32.dll
+DLL Name: ole32.dll
+DLL Name: api-ms-win-crt-math-l1-1-0.dll
+DLL Name: api-ms-win-crt-string-l1-1-0.dll
+DLL Name: api-ms-win-crt-convert-l1-1-0.dll
+DLL Name: api-ms-win-crt-stdio-l1-1-0.dll
+DLL Name: api-ms-win-crt-runtime-l1-1-0.dll
+DLL Name: api-ms-win-crt-heap-l1-1-0.dll
+NORMALIZED_NEW_IMPORT_NAMES

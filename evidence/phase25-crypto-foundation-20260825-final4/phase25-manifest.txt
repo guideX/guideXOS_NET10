@@ -1,0 +1,67 @@
+guideXOS Managed Kernel Phase 25 evidence manifest
+Created: 2026-08-25
+
+[starting-git]
+branch=nativeaot-managed-kernel-integration
+head=67b67b0b21a08befce7ca6d0891a29301a30d090
+subject=## Managed Cryptographic Foundation I — SHA-256, HMAC-SHA256, and Secure Entropy
+starting-worktree=clean
+phase24-audit-work=preserved; existing Phase 24 artifacts were not reset, stashed, discarded, amended, or rewritten
+
+[implementation]
+sha256=owned incremental managed FIPS-compatible SHA-256; fixed 64-byte block, fixed 64-word schedule, 64-bit length padding
+hmac=owned incremental HMAC-SHA256 over ManagedSha256; 64-byte block; long keys pre-hashed; temporary key material cleared
+constant-time=ManagedCryptoComparison.FixedTimeEquals; equal-length bounded comparison with no mismatch early return
+secure-random=ManagedSecureRandom; caller buffer capped at 1024 bytes; unavailable and provider failures return false with no deterministic fallback
+production-entropy=NativeHardwareEntropy via CPUID-gated RDSEED/RDRAND native boundary; RDSEED preferred, RDRAND fallback
+drbg=not implemented; direct hardware fill selected because the target CPU capability is absent and no speculative DRBG would create entropy
+test-entropy=explicit deterministic injected provider only in ManagedKernelPhase25HostTests; production path cannot select it
+
+[vectors]
+sha256=empty, abc, standard multi-block, 55/56/63/64/65-byte boundaries, segmented, byte-at-a-time, reset/reuse, GC survival all pass
+hmac=rfc4231 short/repeated/long-key vectors, Jefe, long data, empty key/message, segmented, reset/reuse, mismatch all pass
+host-tests=113 pass
+
+[entropy-audit]
+cpuid-max-basic=0x000000000000000D
+cpuid-leaf1-ecx=0x0000000080002001
+cpuid-leaf7-ebx=0x0000000000000000
+entropy-feature-flags=0x0000000000000000
+rdseed=runtimesafe opcode boundary present; unavailable on authoritative QEMU CPU
+rdrand=runtimesafe opcode boundary present; unavailable on authoritative QEMU CPU
+retry-policy=10 bounded attempts per hardware word; carry flag checked; failed words never accepted; exhaustion clears output and fails closed
+other-sources=firmware RNG not used after ExitBootServices; no virtio-rng device; no timestamp/TSC/MAC/PCI/timing fallback
+
+[nativeaot-proof]
+qemu=QEMU 11.0.0; q35; TCG single-thread; 128M; no explicit -cpu; fresh OVMF code/vars per run
+fresh-boots=3/3 pass; all three correctly report ENTROPY_UNAVAILABLE and secure-random fail-closed pass
+gc=managed GC forced between partial crypto input and completion; post-GC SHA/HMAC known answers pass
+teardown=reset/teardown marker passes on all three boots
+serial=serial logs contain markers and diagnostics only; no raw random bytes or key material
+
+[dependency-audit]
+managed-framework-crypto-references=none
+new-normalized-crypto-os-import=none compared with Phase 23 payload
+bcryptgenrandom=import retained from existing NativeAOT runtime/PAL random-byte path; dependency census marks it fail-fast/unreached; Phase 25 does not reference or reach it
+other-imports=existing runtime imports include ADVAPI32, bcrypt, KERNEL32, ole32, and CRT DLLs; no new OpenSSL/libcrypto/crypt32 path
+
+[regressions]
+phase15=28 pass
+phase16=57 pass
+phase17=48 pass
+phase18=55 pass
+phase19=39 pass
+phase20=123 pass
+phase21=42 pass
+phase22=56 pass
+phase23=60 pass
+
+[payload]
+size=1253888
+sha256=98D945E9508FF83ADC9C536D68CE59072F113435210DFF664DE539B260061735
+
+[outcome]
+classification=Outcome C — secure entropy unavailable on the actual target CPU configuration
+proven=managed SHA-256, managed HMAC-SHA256, constant-time comparison, fail-closed entropy boundary, NativeAOT execution, GC survival, no new OS crypto dependency, host tests, regressions, three fresh boots
+blocking-primitive=authoritative QEMU CPUID exposes neither RDSEED nor RDRAND; no credible runtime entropy source is available under the current platform contract
+qemu-cleanup=all runner-owned QEMU processes terminated; final runner exited successfully

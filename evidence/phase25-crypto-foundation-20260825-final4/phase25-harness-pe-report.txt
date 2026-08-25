@@ -1,0 +1,201 @@
+
+D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration\artifacts\gate4-phase25\ESP\EFI\BOOT\BOOTX64.EFI:     file format pei-x86-64
+
+Characteristics 0x226
+	executable
+	line numbers stripped
+	large address aware
+	debugging information removed
+
+Time/Date		Wed Dec 31 16:00:00 1969
+Magic			020b	(PE32+)
+MajorLinkerVersion	2
+MinorLinkerVersion	46
+SizeOfCode		000000000005a400
+SizeOfInitializedData	0000000000022000
+SizeOfUninitializedData	0000000000115a00
+AddressOfEntryPoint	0000000000038600
+BaseOfCode		0000000000001000
+ImageBase		0000000000100000
+SectionAlignment	00001000
+FileAlignment		00000200
+MajorOSystemVersion	4
+MinorOSystemVersion	0
+MajorImageVersion	0
+MinorImageVersion	0
+MajorSubsystemVersion	5
+MinorSubsystemVersion	2
+Win32Version		00000000
+SizeOfImage		00197000
+SizeOfHeaders		00000400
+CheckSum		00096b3b
+Subsystem		0000000a	(EFI application)
+DllCharacteristics	00000160
+					HIGH_ENTROPY_VA
+					DYNAMIC_BASE
+					NX_COMPAT
+SizeOfStackReserve	0000000000200000
+SizeOfStackCommit	0000000000001000
+SizeOfHeapReserve	0000000000100000
+SizeOfHeapCommit	0000000000001000
+LoaderFlags		00000000
+NumberOfRvaAndSizes	00000010
+
+The Data Directory
+Entry 0 0000000000000000 00000000 Export Directory [.edata (or where ever we found it)]
+Entry 1 0000000000195000 00000018 Import Directory [parts of .idata]
+Entry 2 0000000000000000 00000000 Resource Directory [.rsrc]
+Entry 3 0000000000000000 00000000 Exception Directory [.pdata]
+Entry 4 0000000000000000 00000000 Security Directory
+Entry 5 0000000000196000 0000010c Base Relocation Directory [.reloc]
+Entry 6 0000000000000000 00000000 Debug Directory
+Entry 7 0000000000000000 00000000 Description Directory
+Entry 8 0000000000000000 00000000 Special Directory
+Entry 9 0000000000000000 00000000 Thread Storage Directory [.tls]
+Entry a 0000000000000000 00000000 Load Configuration Directory
+Entry b 0000000000000000 00000000 Bound Import Directory
+Entry c 0000000000000000 00000000 Import Address Table Directory
+Entry d 0000000000000000 00000000 Delay Import Directory
+Entry e 0000000000000000 00000000 CLR Runtime Header
+Entry f 0000000000000000 00000000 Reserved
+
+There is an import table in .idata at 0x295000
+
+The Import Tables (interpreted .idata section contents)
+ vma:            Hint    Time      Forward  DLL       First
+                 Table   Stamp     Chain    Name      Thunk
+ 00195000	00000000 00000000 00000000 00000000 00000000
+
+
+PE File Base Relocations (interpreted .reloc section contents)
+
+Virtual Address: 0007d000 Chunk size 140 (0x8c) Number of fixups 66
+	reloc    0 offset   b0 [7d0b0] DIR64
+	reloc    1 offset   e8 [7d0e8] DIR64
+	reloc    2 offset  100 [7d100] DIR64
+	reloc    3 offset  110 [7d110] DIR64
+	reloc    4 offset  120 [7d120] DIR64
+	reloc    5 offset  128 [7d128] DIR64
+	reloc    6 offset  130 [7d130] DIR64
+	reloc    7 offset  138 [7d138] DIR64
+	reloc    8 offset  1e8 [7d1e8] DIR64
+	reloc    9 offset  1f0 [7d1f0] DIR64
+	reloc   10 offset  1f8 [7d1f8] DIR64
+	reloc   11 offset  200 [7d200] DIR64
+	reloc   12 offset  208 [7d208] DIR64
+	reloc   13 offset  210 [7d210] DIR64
+	reloc   14 offset  218 [7d218] DIR64
+	reloc   15 offset  220 [7d220] DIR64
+	reloc   16 offset  228 [7d228] DIR64
+	reloc   17 offset  230 [7d230] DIR64
+	reloc   18 offset  238 [7d238] DIR64
+	reloc   19 offset  240 [7d240] DIR64
+	reloc   20 offset  248 [7d248] DIR64
+	reloc   21 offset  320 [7d320] DIR64
+	reloc   22 offset  328 [7d328] DIR64
+	reloc   23 offset  330 [7d330] DIR64
+	reloc   24 offset  338 [7d338] DIR64
+	reloc   25 offset  340 [7d340] DIR64
+	reloc   26 offset  348 [7d348] DIR64
+	reloc   27 offset  350 [7d350] DIR64
+	reloc   28 offset  358 [7d358] DIR64
+	reloc   29 offset  360 [7d360] DIR64
+	reloc   30 offset  368 [7d368] DIR64
+	reloc   31 offset  370 [7d370] DIR64
+	reloc   32 offset  420 [7d420] DIR64
+	reloc   33 offset  428 [7d428] DIR64
+	reloc   34 offset  430 [7d430] DIR64
+	reloc   35 offset  438 [7d438] DIR64
+	reloc   36 offset  440 [7d440] DIR64
+	reloc   37 offset  448 [7d448] DIR64
+	reloc   38 offset  450 [7d450] DIR64
+	reloc   39 offset  458 [7d458] DIR64
+	reloc   40 offset  460 [7d460] DIR64
+	reloc   41 offset  468 [7d468] DIR64
+	reloc   42 offset  470 [7d470] DIR64
+	reloc   43 offset  478 [7d478] DIR64
+	reloc   44 offset  480 [7d480] DIR64
+	reloc   45 offset  488 [7d488] DIR64
+	reloc   46 offset  490 [7d490] DIR64
+	reloc   47 offset  498 [7d498] DIR64
+	reloc   48 offset  580 [7d580] DIR64
+	reloc   49 offset  588 [7d588] DIR64
+	reloc   50 offset  590 [7d590] DIR64
+	reloc   51 offset  598 [7d598] DIR64
+	reloc   52 offset  5a0 [7d5a0] DIR64
+	reloc   53 offset  5a8 [7d5a8] DIR64
+	reloc   54 offset  5b0 [7d5b0] DIR64
+	reloc   55 offset  5b8 [7d5b8] DIR64
+	reloc   56 offset  5c0 [7d5c0] DIR64
+	reloc   57 offset  5c8 [7d5c8] DIR64
+	reloc   58 offset  5d0 [7d5d0] DIR64
+	reloc   59 offset  5d8 [7d5d8] DIR64
+	reloc   60 offset  5e0 [7d5e0] DIR64
+	reloc   61 offset  5e8 [7d5e8] DIR64
+	reloc   62 offset  5f0 [7d5f0] DIR64
+	reloc   63 offset  5f8 [7d5f8] DIR64
+	reloc   64 offset  c28 [7dc28] DIR64
+	reloc   65 offset    0 [7d000] ABSOLUTE
+
+Virtual Address: 0007e000 Chunk size 128 (0x80) Number of fixups 60
+	reloc    0 offset   40 [7e040] DIR64
+	reloc    1 offset  480 [7e480] DIR64
+	reloc    2 offset  490 [7e490] DIR64
+	reloc    3 offset  4a0 [7e4a0] DIR64
+	reloc    4 offset  4b0 [7e4b0] DIR64
+	reloc    5 offset  4c0 [7e4c0] DIR64
+	reloc    6 offset  4d0 [7e4d0] DIR64
+	reloc    7 offset  4e0 [7e4e0] DIR64
+	reloc    8 offset  4f0 [7e4f0] DIR64
+	reloc    9 offset  500 [7e500] DIR64
+	reloc   10 offset  510 [7e510] DIR64
+	reloc   11 offset  520 [7e520] DIR64
+	reloc   12 offset  530 [7e530] DIR64
+	reloc   13 offset  540 [7e540] DIR64
+	reloc   14 offset  550 [7e550] DIR64
+	reloc   15 offset  560 [7e560] DIR64
+	reloc   16 offset  570 [7e570] DIR64
+	reloc   17 offset  580 [7e580] DIR64
+	reloc   18 offset  590 [7e590] DIR64
+	reloc   19 offset  5a0 [7e5a0] DIR64
+	reloc   20 offset  5b0 [7e5b0] DIR64
+	reloc   21 offset  5c0 [7e5c0] DIR64
+	reloc   22 offset  5d0 [7e5d0] DIR64
+	reloc   23 offset  5e0 [7e5e0] DIR64
+	reloc   24 offset  5f0 [7e5f0] DIR64
+	reloc   25 offset  600 [7e600] DIR64
+	reloc   26 offset  610 [7e610] DIR64
+	reloc   27 offset  620 [7e620] DIR64
+	reloc   28 offset  630 [7e630] DIR64
+	reloc   29 offset  640 [7e640] DIR64
+	reloc   30 offset  650 [7e650] DIR64
+	reloc   31 offset  660 [7e660] DIR64
+	reloc   32 offset  670 [7e670] DIR64
+	reloc   33 offset  680 [7e680] DIR64
+	reloc   34 offset  690 [7e690] DIR64
+	reloc   35 offset  6a0 [7e6a0] DIR64
+	reloc   36 offset  6b0 [7e6b0] DIR64
+	reloc   37 offset  6c0 [7e6c0] DIR64
+	reloc   38 offset  6d0 [7e6d0] DIR64
+	reloc   39 offset  6e0 [7e6e0] DIR64
+	reloc   40 offset  6f0 [7e6f0] DIR64
+	reloc   41 offset  700 [7e700] DIR64
+	reloc   42 offset  710 [7e710] DIR64
+	reloc   43 offset  720 [7e720] DIR64
+	reloc   44 offset  730 [7e730] DIR64
+	reloc   45 offset  740 [7e740] DIR64
+	reloc   46 offset  750 [7e750] DIR64
+	reloc   47 offset  760 [7e760] DIR64
+	reloc   48 offset  770 [7e770] DIR64
+	reloc   49 offset  780 [7e780] DIR64
+	reloc   50 offset  790 [7e790] DIR64
+	reloc   51 offset  7a0 [7e7a0] DIR64
+	reloc   52 offset  7b0 [7e7b0] DIR64
+	reloc   53 offset  7c0 [7e7c0] DIR64
+	reloc   54 offset  7d0 [7e7d0] DIR64
+	reloc   55 offset  7e0 [7e7e0] DIR64
+	reloc   56 offset  7f0 [7e7f0] DIR64
+	reloc   57 offset  800 [7e800] DIR64
+	reloc   58 offset  810 [7e810] DIR64
+	reloc   59 offset  820 [7e820] DIR64
+

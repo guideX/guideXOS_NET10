@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase25HostTests</PathMap>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\ManagedKernel\ManagedSha256.cs" Link="ManagedSha256.cs" />
+    <Compile Include="..\ManagedKernel\ManagedHmacSha256.cs" Link="ManagedHmacSha256.cs" />
+    <Compile Include="..\ManagedKernel\ManagedSecureRandom.cs" Link="ManagedSecureRandom.cs" />
+  </ItemGroup>
+</Project>

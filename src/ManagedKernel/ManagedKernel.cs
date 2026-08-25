@@ -115,6 +115,25 @@ internal struct GxManagedKernelHostServicesV1
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelEntropyServicesV1
+{
+    internal const uint ExpectedSize = 48;
+    internal const ulong CapabilityHardware = 1UL << 0;
+    internal const ulong CapabilityRdrand = 1UL << 1;
+    internal const ulong CapabilityRdseed = 1UL << 2;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint ServiceVersion;
+    internal uint Architecture;
+    internal ulong Capabilities;
+    internal ulong FillAddress;
+    internal uint MaxBytesPerFill;
+    internal uint RetryCount;
+    internal ulong Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
 internal struct GxManagedKernelMonotonicTimeV1
 {
     internal const uint ExpectedSize = 40;
@@ -481,6 +500,7 @@ internal static unsafe class ManagedKernelLayout
                sizeof(GxManagedKernelBootResourceRegionV1) == 32 &&
                sizeof(GxManagedKernelBootResourcePublicationV1) == 48 &&
                sizeof(GxManagedKernelHostServicesV1) == 56 &&
+               sizeof(GxManagedKernelEntropyServicesV1) == 48 &&
                sizeof(GxManagedKernelMonotonicTimeV1) == 40 &&
                sizeof(GxManagedKernelMemoryServicesV1) == 72 &&
                sizeof(GxManagedKernelMemoryAllocationV1) == 56 &&
@@ -549,6 +569,15 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.MonotonicTimeAddress)).ToInt32() == 32 &&
                Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.Reserved0)).ToInt32() == 40 &&
                Marshal.OffsetOf<GxManagedKernelHostServicesV1>(nameof(GxManagedKernelHostServicesV1.Reserved1)).ToInt32() == 48 &&
+               Marshal.OffsetOf<GxManagedKernelEntropyServicesV1>(nameof(GxManagedKernelEntropyServicesV1.Size)).ToInt32() == 0 &&
+               Marshal.OffsetOf<GxManagedKernelEntropyServicesV1>(nameof(GxManagedKernelEntropyServicesV1.AbiVersion)).ToInt32() == 4 &&
+               Marshal.OffsetOf<GxManagedKernelEntropyServicesV1>(nameof(GxManagedKernelEntropyServicesV1.ServiceVersion)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelEntropyServicesV1>(nameof(GxManagedKernelEntropyServicesV1.Architecture)).ToInt32() == 12 &&
+               Marshal.OffsetOf<GxManagedKernelEntropyServicesV1>(nameof(GxManagedKernelEntropyServicesV1.Capabilities)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelEntropyServicesV1>(nameof(GxManagedKernelEntropyServicesV1.FillAddress)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelEntropyServicesV1>(nameof(GxManagedKernelEntropyServicesV1.MaxBytesPerFill)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelEntropyServicesV1>(nameof(GxManagedKernelEntropyServicesV1.RetryCount)).ToInt32() == 36 &&
+               Marshal.OffsetOf<GxManagedKernelEntropyServicesV1>(nameof(GxManagedKernelEntropyServicesV1.Reserved)).ToInt32() == 40 &&
                Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Size)).ToInt32() == 0 &&
                Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.AbiVersion)).ToInt32() == 4 &&
                Marshal.OffsetOf<GxManagedKernelMonotonicTimeV1>(nameof(GxManagedKernelMonotonicTimeV1.Ticks)).ToInt32() == 8 &&
@@ -682,6 +711,12 @@ internal static unsafe class ManagedKernelContract
     private const ulong RequiredHostServicesCapabilities =
         GxManagedKernelHostServicesV1.CapabilityAbi |
         GxManagedKernelHostServicesV1.CapabilityLogUtf8;
+    private const uint EntropyServicesAbiVersionV1 = 1;
+    private const uint EntropyServicesServiceVersionV1 = 1;
+    private const ulong EntropyServicesKnownCapabilities =
+        GxManagedKernelEntropyServicesV1.CapabilityHardware |
+        GxManagedKernelEntropyServicesV1.CapabilityRdrand |
+        GxManagedKernelEntropyServicesV1.CapabilityRdseed;
     private const ulong MonotonicTimeKnownFlags =
         GxManagedKernelMonotonicTimeV1.FlagNormalizedFromStart;
     private const uint MemoryServicesAbiVersionV1 = 1;
@@ -759,6 +794,12 @@ internal static unsafe class ManagedKernelContract
     private static ulong s_hostCapabilities;
     private static nuint s_hostLogUtf8Address;
     private static nuint s_hostMonotonicTimeAddress;
+    private static int s_entropyServicesInstalled;
+    private static ulong s_entropyCapabilities;
+    private static nuint s_entropyFillAddress;
+    private static uint s_entropyMaxBytesPerFill;
+    private static uint s_entropyRetryCount;
+    private static ManagedSecureRandom? s_secureRandom;
     private static int s_memoryServicesInstalled;
     private static ulong s_memoryCapabilities;
     private static ulong s_memoryPageSize;
@@ -818,6 +859,11 @@ internal static unsafe class ManagedKernelContract
     internal static bool DeviceInventoryInstalled => s_deviceInventoryInstalled != 0;
     internal static bool DeviceResourcesInstalled => s_deviceResourcesInstalled != 0;
     internal static bool HostServicesInstalled => s_hostServicesInstalled != 0;
+    internal static bool EntropyServicesInstalled => s_entropyServicesInstalled != 0;
+    internal static ulong EntropyCapabilities => s_entropyCapabilities;
+    internal static uint EntropyMaxBytesPerFill => s_entropyMaxBytesPerFill;
+    internal static uint EntropyRetryCount => s_entropyRetryCount;
+    internal static ManagedSecureRandom? SecureRandom => s_secureRandom;
     internal static bool PciServicesInstalled => s_pciServicesInstalled != 0;
     internal static nuint PciConfigReadAddress => s_pciConfigReadAddress;
     internal static ManagedDeviceInventory? OperationalDeviceInventory =>
@@ -1155,6 +1201,60 @@ internal static unsafe class ManagedKernelContract
         s_memoryAllocatePagesAddress = (nuint)services.AllocatePagesAddress;
         s_memoryReleasePagesAddress = (nuint)services.ReleasePagesAddress;
         s_memoryServicesInstalled = 1;
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallEntropyServices")]
+    internal static uint InstallEntropyServices(uint requestedAbiVersion,
+                                                 nuint entropyServicesAddress)
+    {
+        GxManagedKernelEntropyServicesV1 services;
+        if (requestedAbiVersion != EntropyServicesAbiVersionV1)
+        {
+            return UnsupportedAbi;
+        }
+        if (!IsInitialized)
+        {
+            return NotInitialized;
+        }
+        if (s_entropyServicesInstalled != 0)
+        {
+            return AlreadyInitialized;
+        }
+        if (s_lifecycleState != (int)LifecycleState.EnvironmentInstalling ||
+            entropyServicesAddress == 0 ||
+            !IsRangeValid(entropyServicesAddress,
+                          (nuint)GxManagedKernelEntropyServicesV1.ExpectedSize))
+        {
+            return s_lifecycleState != (int)LifecycleState.EnvironmentInstalling
+                ? InvalidState : InvalidArgument;
+        }
+
+        services = *(GxManagedKernelEntropyServicesV1*)entropyServicesAddress;
+        if (services.Size != GxManagedKernelEntropyServicesV1.ExpectedSize ||
+            services.AbiVersion != EntropyServicesAbiVersionV1 ||
+            services.ServiceVersion != EntropyServicesServiceVersionV1 ||
+            services.Architecture != ArchitectureX64 ||
+            (services.Capabilities & ~EntropyServicesKnownCapabilities) != 0 ||
+            services.FillAddress == 0 ||
+            services.MaxBytesPerFill == 0 ||
+            services.MaxBytesPerFill > ManagedSecureRandom.MaximumBytesPerFill ||
+            services.RetryCount == 0 || services.Reserved != 0)
+        {
+            return InvalidArgument;
+        }
+
+        s_entropyCapabilities = services.Capabilities;
+        s_entropyFillAddress = (nuint)services.FillAddress;
+        s_entropyMaxBytesPerFill = services.MaxBytesPerFill;
+        s_entropyRetryCount = services.RetryCount;
+        s_secureRandom = (s_entropyCapabilities &
+                          GxManagedKernelEntropyServicesV1.CapabilityHardware) != 0
+            ? new ManagedSecureRandom(new NativeHardwareEntropy(
+                s_entropyFillAddress, s_entropyCapabilities,
+                s_entropyMaxBytesPerFill))
+            : null;
+        s_entropyServicesInstalled = 1;
         return ManagedOk;
     }
 

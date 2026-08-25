@@ -28,6 +28,11 @@
 #define GX_MANAGED_KERNEL_HOST_SERVICES_V1_SIZE 56U
 #define GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE 40U
 #define GX_MANAGED_KERNEL_HOST_LOG_MAX_BYTES 1024U
+#define GX_MANAGED_KERNEL_ENTROPY_SERVICES_ABI_V1 1U
+#define GX_MANAGED_KERNEL_ENTROPY_SERVICES_VERSION_V1 1U
+#define GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1_SIZE 48U
+#define GX_MANAGED_KERNEL_ENTROPY_MAX_BYTES_PER_FILL 1024U
+#define GX_MANAGED_KERNEL_ENTROPY_MAX_RETRIES 10U
 #define GX_MANAGED_KERNEL_MEMORY_SERVICES_ABI_V1 1U
 #define GX_MANAGED_KERNEL_MEMORY_SERVICES_VERSION_V1 1U
 #define GX_MANAGED_KERNEL_MEMORY_SERVICES_V1_SIZE 72U
@@ -106,7 +111,9 @@ typedef enum {
     GX_MANAGED_RESOURCE_EXHAUSTED = 8U,
     GX_MANAGED_NOT_FOUND = 9U,
     GX_MANAGED_OWNERSHIP_MISMATCH = 10U,
-    GX_MANAGED_TIMEOUT = 11U
+    GX_MANAGED_TIMEOUT = 11U,
+    GX_MANAGED_ENTROPY_UNAVAILABLE = 12U,
+    GX_MANAGED_ENTROPY_RETRY_EXHAUSTED = 13U
 } GX_MANAGED_STATUS;
 
 /* Public capabilities describe useful interfaces, not proof markers. */
@@ -119,6 +126,12 @@ enum {
     GX_MANAGED_HOST_CAPABILITY_ABI = 1ULL << 0,
     GX_MANAGED_HOST_CAPABILITY_LOG_UTF8 = 1ULL << 1,
     GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME = 1ULL << 2
+};
+
+enum {
+    GX_MANAGED_ENTROPY_CAPABILITY_HARDWARE = 1ULL << 0,
+    GX_MANAGED_ENTROPY_CAPABILITY_RDRAND = 1ULL << 1,
+    GX_MANAGED_ENTROPY_CAPABILITY_RDSEED = 1ULL << 2
 };
 
 enum {
@@ -345,6 +358,18 @@ typedef struct {
     uint64_t Reserved0;
     uint64_t Reserved1;
 } GX_MANAGED_KERNEL_HOST_SERVICES_V1;
+
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint32_t ServiceVersion;
+    uint32_t Architecture;
+    uint64_t Capabilities;
+    uint64_t FillAddress;
+    uint32_t MaxBytesPerFill;
+    uint32_t RetryCount;
+    uint64_t Reserved;
+} GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1;
 
 typedef struct {
     uint32_t Size;
@@ -819,6 +844,27 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, Reserved0) == 40,
                "managed host services Reserved0 offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_HOST_SERVICES_V1, Reserved1) == 48,
                "managed host services Reserved1 offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1) ==
+                   GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1_SIZE,
+               "managed entropy services size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1, Size) == 0,
+               "managed entropy services Size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1, AbiVersion) == 4,
+               "managed entropy services AbiVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1, ServiceVersion) == 8,
+               "managed entropy services ServiceVersion offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1, Architecture) == 12,
+               "managed entropy services Architecture offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1, Capabilities) == 16,
+               "managed entropy services Capabilities offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1, FillAddress) == 24,
+               "managed entropy services FillAddress offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1, MaxBytesPerFill) == 32,
+               "managed entropy services MaxBytesPerFill offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1, RetryCount) == 36,
+               "managed entropy services RetryCount offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_ENTROPY_SERVICES_V1, Reserved) == 40,
+               "managed entropy services Reserved offset");
 _Static_assert(sizeof(GX_MANAGED_KERNEL_MONOTONIC_TIME_V1) ==
                    GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE,
                "managed monotonic time size");
