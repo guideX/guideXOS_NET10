@@ -585,3 +585,92 @@ Phase 19 is Outcome A for the bounded DHCPv4 scope.  Full lease renewal and
 rebinding, lease persistence, DNS, TCP, sockets, IPv6/ND, relays, routing,
 APIPA, multiple interfaces, offloads, VLANs, jumbo/scatter-gather frames,
 interrupt-driven networking, and Internet access are intentionally deferred.
+
+## Phase 20: bounded managed DNS resolver
+
+Phase 20 extends the same path without adding a socket or DNS-specific packet
+bypass:
+
+`managed DNS -> managed UDP -> managed IPv4 -> managed ARP/Ethernet II -> E1000 TX/RX`
+
+`ManagedDnsResolver` owns one fixed server address, one fixed encoded query
+name, one resolved IPv4 result, one TTL, and one active transaction.  The
+resolver uses UDP destination port `53` and deterministic client source port
+`15200`.  It permits exactly one outstanding query; a second query is rejected
+deterministically.  Transaction IDs start at `0x2001`, are nonzero, and advance
+for every new query or retry.  There is no persistent DNS cache in this phase.
+
+### DHCP Option 6 and supported DNS subset
+
+The bounded DHCP parser stores one or two Option 6 addresses in fixed candidate
+and leased slots.  Only an ACK-committed lease can install the DNS server into
+the resolver.  The authoritative peer advertises `10.15.0.2` through DHCP
+Option 6, while the resolver itself contains no authoritative server address.
+The managed client receives `10.15.0.42/24`, installs the DHCP-provided DNS
+server, and uses ordinary ARP when the DNS ARP cache is cold.
+
+The supported DNS wire subset is one standard query with one A/IN question,
+bounded QNAME encoding up to 253 characters and 255 encoded bytes, and a
+maximum 512-byte message.  Responses require a matching transaction ID, QR,
+standard opcode, one validated question, zero authority/additional records,
+and at most eight answers.  The name decoder accepts ordinary labels and
+compression pointers with a maximum of 16 pointer hops, validates pointer
+targets, rejects self/cyclic pointers, and keeps consumed stream bytes
+separate from followed pointer bytes.  Only a direct A/IN answer with
+RDLENGTH 4 is resolved; the TTL is retained with the result and the fixed
+authoritative TTL is 300 seconds.  Well-formed unsupported records are
+skipped, but CNAME chains are not followed.  NXDOMAIN is a bounded negative
+result, TC is rejected without TCP fallback, and malformed or unsupported
+RCODE responses fail closed.  DNS-over-UDP checksum handling continues to use
+the Phase 18 policy, including acceptance of an IPv4 zero checksum on receive.
+
+### Resolved-address, negative, GC, and teardown proof
+
+The authoritative query is `phase20.test A IN`, encoded as
+`07 phase20 04 test 00 00 01 00 01`; the deterministic peer returns a direct
+compressed-owner A answer (`C0 0C`) for `10.15.0.2` with TTL 300.  The managed
+kernel then sends both ICMP Echo and the Phase 18 UDP exchange to the address
+returned by the resolver.  It also queries `missing.phase20.test`, accepts
+NXDOMAIN without retaining an address, and proves a later valid query still
+works.  Five malformed wire controls are injected (wrong ID, truncated
+response, pointer out of range, pointer loop, and invalid A RDLENGTH), plus a
+wrong-source-port response.  None produces traffic from a bogus result.
+
+After the first resolution and resolved-address exchanges, the existing
+managed GC-survival mechanism runs.  DHCP state and the DNS server remain
+authoritative, a fresh transaction resolves `phase20.test` again, and the
+post-GC ICMP/UDP exchanges again use the returned A record.  Teardown clears
+the DNS endpoint, active query, transaction/result state, DNS server, DHCP
+state, UDP state, IPv4 state, ARP state, and the bounded pending transmission
+before the established E1000 quiesce, DMA release, PCI restore, MMIO unmap,
+and claim release sequence.
+
+### Host, PCAP, and fresh-boot evidence
+
+The focused suite is
+`tools/Run-ManagedKernelPhase20HostTests.ps1`; it passes 123 cases covering
+query/header/name/RR parsing, compression bounds and loops, NXDOMAIN/TC,
+one-outstanding-query state, DHCP Option 6 commit timing, ports/checksums,
+resolved-address data flow, GC, teardown, and reinitialization.  The dedicated
+fresh-boot runner is `tools/Run-ManagedKernelPhase20FreshBoots.ps1`, and the
+independent validator is `tools/Parse-ManagedE1000Phase20Pcap.ps1`.
+
+The authoritative evidence is under
+`evidence/phase20-final-20260824`.  Three independent QEMU processes
+completed `PASS_PHASE20`; each PCAP independently validates 30 packets: two
+E1000 proof frames, four DHCP messages including Option 6, two DNS ARP frames,
+four DNS queries, nine valid-checksummed DNS responses including the malformed
+controls and NXDOMAIN, two resolved-destination ICMP requests, and two
+resolved-destination UDP requests.  The validator reports
+`dns_queries=4 dns_responses=9 resolved_icmp=2 resolved_udp=2
+resolved_ipv4=0A0F0002` for every boot.  The same payload passes three Phase 19
+regression boots under
+`evidence/phase19-regression-phase20-20260824`.  Phase 15 through Phase 19
+host suites remain green at `28/28`, `57/57`, `48/48`, `55/55`, and `39/39`.
+
+The Phase 20 payload is `1,147,392` bytes with SHA-256
+`846CA6887E569FE113E766A473C88F5A51D340F94359DC626376AD5D3A352EEB`.
+TCP DNS fallback, DNSSEC, EDNS, AAAA/IPv6, full CNAME recursion, SRV, TXT,
+MX, PTR, mDNS, LLMNR, search domains, full cache infrastructure, retries
+beyond the fixed three-attempt bound, sockets, routing, and multiple
+interfaces remain deferred.

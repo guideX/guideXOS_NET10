@@ -17,7 +17,12 @@ internal enum ManagedIpv4HandleResult : byte
     UdpZeroChecksumAccepted = 10,
     DhcpRequestSent = 11,
     DhcpBound = 12,
-    DhcpNak = 13
+    DhcpNak = 13,
+    DnsResponseIgnored = 14,
+    DnsResponseMalformed = 15,
+    DnsResponseTruncated = 16,
+    DnsNxDomain = 17,
+    DnsResolved = 18
 }
 
 internal sealed class ManagedIpv4Layer
@@ -32,6 +37,11 @@ internal sealed class ManagedIpv4Layer
     internal const ushort Phase18PeerPort = 15181;
     internal const ushort DhcpClientPort = 68;
     internal const ushort DhcpServerPort = 67;
+    internal const ushort DnsClientPort = ManagedDnsResolver.ClientPort;
+    internal const ushort DnsServerPort = ManagedDnsResolver.ServerPort;
+    internal static ReadOnlySpan<byte> Phase20QueryName => "phase20.test"u8;
+    internal static ReadOnlySpan<byte> Phase20MissingQueryName =>
+        "missing.phase20.test"u8;
 
     private readonly ManagedEthernetLayer _ethernet;
     private readonly ManagedArpLayer _arp;
@@ -51,8 +61,11 @@ internal sealed class ManagedIpv4Layer
     private readonly byte[] _peerUdpAckPayload = new byte[ManagedUdpProtocol.MaximumPayloadLength];
     private readonly byte[] _peerUdpRequestPayload = new byte[ManagedUdpProtocol.MaximumPayloadLength];
     private readonly byte[] _managedUdpAckPayload = new byte[ManagedUdpProtocol.MaximumPayloadLength];
+    private readonly byte[] _dnsQuery = new byte[ManagedDnsProtocol.MaximumMessageLength];
+    private readonly byte[] _awaitedDestinationIpv4 = new byte[4];
     private readonly ManagedUdpEndpointTable _udpEndpoints = new();
     private readonly ManagedDhcpv4Client _dhcp = new();
+    private readonly ManagedDnsResolver _dns = new();
     private readonly byte[] _pingPayload = new byte[32];
     private readonly ManagedIpv4PendingTransmission _pending = new();
     private uint _localIpv4Value;
@@ -75,6 +88,7 @@ internal sealed class ManagedIpv4Layer
     private uint _pendingOverflowCount;
     private bool _phase18Passed;
     private bool _phase19Passed;
+    private bool _phase20Passed;
     private uint _udpRxValidCount;
     private uint _udpRxMalformedCount;
     private uint _udpChecksumFailureCount;
@@ -127,6 +141,7 @@ internal sealed class ManagedIpv4Layer
     internal bool ResponderReplySent => _responderReplySent;
     internal bool Phase18Passed => _phase18Passed;
     internal bool Phase19Passed => _phase19Passed;
+    internal bool Phase20Passed => _phase20Passed;
     internal ManagedDhcpv4State DhcpState => _dhcp.State;
     internal uint DhcpTransactionId => _dhcp.TransactionId;
     internal ReadOnlySpan<byte> DhcpLeasedIpv4 => _dhcp.LeasedIpv4;
@@ -140,6 +155,12 @@ internal sealed class ManagedIpv4Layer
     internal uint UdpEndpointDispatchCount => _udpEndpointDispatchCount;
     internal uint UdpTxCount => _udpTxCount;
     internal uint UdpPendingRejectCount => _udpPendingRejectCount;
+    internal ManagedDnsResult DnsResult => _dns.Result;
+    internal bool DnsHasServer => _dns.HasServer;
+    internal bool DnsQueryActive => _dns.IsActive;
+    internal ushort DnsTransactionId => _dns.TransactionId;
+    internal ReadOnlySpan<byte> DnsServerIpv4 => _dns.ServerIpv4;
+    internal ReadOnlySpan<byte> DnsResolvedIpv4 => _dns.ResolvedIpv4;
 
     internal bool TryRunPhase17()
     {
@@ -217,6 +238,103 @@ internal sealed class ManagedIpv4Layer
         return KernelLog.Write("GXOS_NET10:MANAGED_DHCP_PHASE19_PASS\r\n"u8);
     }
 
+    internal bool TryRunPhase20()
+    {
+        if (_phase20Passed || _active || !_arp.TryBeginDhcp()) return false;
+        _active = true;
+        _dns.ResetForDhcp();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                        ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_DNS_DHCP_READY\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true) ||
+            !_dns.HasServer ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                        ManagedUdpEndpointHandler.DnsResolver) ||
+            !_udpEndpoints.TryRegister(Phase18LocalPort,
+                                        ManagedUdpEndpointHandler.Phase18Echo) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_DNS_READY\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DNS_CLIENT_PORT=0x"u8,
+                                    DnsClientPort) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DNS_SERVER_PORT=0x"u8,
+                                    DnsServerPort) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_DNS_SERVER=0x"u8,
+                                    ManagedEthernetProtocol.ReadUInt32Network(
+                                        _dns.ServerIpv4, 0)) ||
+            !TryResolveDns(Phase20QueryName, expectResolved: true) ||
+            !TryRunResolvedTraffic(firstRun: true) ||
+            !TryResolveDns(Phase20MissingQueryName, expectResolved: false) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_DNS_NXDOMAIN_PASS\r\n"u8) ||
+            !TryResolveDns(Phase20QueryName, expectResolved: true) ||
+            !_ethernet.TryVerifyTransportAfterGc() ||
+            _dhcp.State != ManagedDhcpv4State.Bound || !_dns.HasServer ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_DNS_GC_SURVIVAL_PASSED\r\n"u8) ||
+            !TryResolveDns(Phase20QueryName, expectResolved: true) ||
+            !TryRunResolvedTraffic(firstRun: false))
+            return false;
+
+        _phase20Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE20_PASS\r\n"u8);
+    }
+
+    private bool TryResolveDns(ReadOnlySpan<byte> name, bool expectResolved)
+    {
+        if (!_dns.TryStartQuery(name) ||
+            !_dns.TryBuildQuery(_dnsQuery, out ushort queryLength) ||
+            !TrySendUdpDatagram(DnsClientPort, DnsServerPort,
+                                 _dnsQuery.AsSpan(0, queryLength),
+                                 _dns.ServerIpv4, out _) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_DNS_QUERY_SENT\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DNS_TRANSACTION_ID=0x"u8,
+                                    _dns.TransactionId))
+            return false;
+
+        for (int frame = 0; frame != MaximumProtocolFrames; ++frame)
+        {
+            if (!_ethernet.TryReceiveAndDispatch(
+                    out ManagedNetworkDispatchResult result)) return false;
+            if (result == ManagedNetworkDispatchResult.DnsResolved)
+                return expectResolved && _dns.HasResolvedAddress;
+            if (result == ManagedNetworkDispatchResult.DnsNxDomain)
+                return !expectResolved && !_dns.HasResolvedAddress;
+            if (result == ManagedNetworkDispatchResult.Failed) return false;
+        }
+        return false;
+    }
+
+    private bool TryRunResolvedTraffic(bool firstRun)
+    {
+        if (!_dns.HasResolvedAddress ||
+            !ManagedIpv4Protocol.IsDirectlyReachable(
+                _localIpv4Value, _subnetMaskValue,
+                ManagedEthernetProtocol.ReadUInt32Network(
+                    _dns.ResolvedIpv4, 0)))
+            return false;
+        ushort identifier = firstRun ? (ushort)0x2001 : (ushort)0x2002;
+        ushort sequence = firstRun ? (ushort)1 : (ushort)2;
+        if (!TrySendPing(_dns.ResolvedIpv4, identifier, sequence) ||
+            !KernelLog.Write(firstRun
+                ? "GXOS_NET10:MANAGED_DNS_RESOLVED_ICMP_SENT\r\n"u8
+                : "GXOS_NET10:MANAGED_DNS_POST_GC_ICMP_SENT\r\n"u8) ||
+            !WaitForReply(identifier, sequence) ||
+            !TrySendUdpDatagram(Phase18LocalPort, Phase18PeerPort,
+                                 _managedUdpPayload.AsSpan(0,
+                                     _managedUdpPayloadLength),
+                                 _dns.ResolvedIpv4, out _) ||
+            !KernelLog.Write(firstRun
+                ? "GXOS_NET10:MANAGED_DNS_RESOLVED_UDP_SENT\r\n"u8
+                : "GXOS_NET10:MANAGED_DNS_POST_GC_UDP_SENT\r\n"u8) ||
+            !WaitForUdpResponse(firstRun ? 1U : 2U))
+            return false;
+        return KernelLog.Write(firstRun
+            ? "GXOS_NET10:MANAGED_DNS_RESOLVED_TRAFFIC_PASS\r\n"u8
+            : "GXOS_NET10:MANAGED_DNS_POST_GC_TRAFFIC_PASS\r\n"u8);
+    }
+
     private bool TryRunUdpCore()
     {
         if (!_udpEndpoints.TryRegister(Phase18LocalPort,
@@ -258,7 +376,7 @@ internal sealed class ManagedIpv4Layer
         return true;
     }
 
-    private bool TryRunDhcpDora()
+    private bool TryRunDhcpDora(bool requireDnsServer = false)
     {
         for (int attempt = 0; attempt != ManagedDhcpv4Client.MaximumDiscoverAttempts;
              ++attempt)
@@ -282,7 +400,7 @@ internal sealed class ManagedIpv4Layer
             }
             if (completed)
             {
-                if (!ApplyDhcpLease() ||
+                if (!ApplyDhcpLease(requireDnsServer) ||
                     !KernelLog.Write("GXOS_NET10:MANAGED_DHCP_ACK_ACCEPTED\r\n"u8) ||
                     !KernelLog.Write("GXOS_NET10:MANAGED_DHCP_BOUND\r\n"u8) ||
                     !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_LEASED_IPV4=0x"u8,
@@ -302,9 +420,10 @@ internal sealed class ManagedIpv4Layer
         return KernelLog.Write("GXOS_NET10:MANAGED_DHCP_FAILED\r\n"u8);
     }
 
-    private bool ApplyDhcpLease()
+    private bool ApplyDhcpLease(bool requireDnsServer = false)
     {
-        if (!_dhcp.HasLease)
+        if (!_dhcp.HasLease ||
+            (requireDnsServer && !_dhcp.LeasedHasDnsServer1))
             return false;
         _dhcp.LeasedIpv4.CopyTo(_localIpv4);
         _dhcp.LeasedMask.CopyTo(_subnetMask);
@@ -312,6 +431,8 @@ internal sealed class ManagedIpv4Layer
         _localIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_localIpv4, 0);
         _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
         _subnetMaskValue = ManagedEthernetProtocol.ReadUInt32Network(_subnetMask, 0);
+        if (requireDnsServer && !_dns.TryInstallServer(_dhcp.LeasedDnsServer1))
+            return false;
         if (!ManagedIpv4Protocol.IsDirectlyReachable(
                 _localIpv4Value, _subnetMaskValue, _peerIpv4Value))
             return false;
@@ -418,13 +539,23 @@ internal sealed class ManagedIpv4Layer
         _localIpv4Value = 0;
         _subnetMaskValue = 0;
         _phase19Passed = false;
+        _phase20Passed = false;
+        _dns.ResetForTeardown();
+        _awaitedDestinationIpv4.AsSpan().Clear();
         return true;
     }
 
     private bool TrySendPing(ushort identifier, ushort sequence)
     {
+        return TrySendPing(_peerIpv4, identifier, sequence);
+    }
+
+    private bool TrySendPing(ReadOnlySpan<byte> destinationIpv4,
+                             ushort identifier, ushort sequence)
+    {
         if (!ManagedIpv4Protocol.IsDirectlyReachable(
-                _localIpv4Value, _subnetMaskValue, _peerIpv4Value) ||
+                _localIpv4Value, _subnetMaskValue,
+                ManagedEthernetProtocol.ReadUInt32Network(destinationIpv4, 0)) ||
             !ManagedIcmpv4Protocol.TryBuildEchoRequest(
                 _txIcmp, identifier, sequence,
                 _pingPayload.AsSpan(0, _pingPayloadLength),
@@ -432,10 +563,11 @@ internal sealed class ManagedIpv4Layer
             !ManagedIpv4Protocol.TryBuild(
                 _txPacket, (ushort)(0x1700 + sequence), 0,
                 ManagedIpv4Protocol.DefaultTtl, ManagedIpv4Protocol.IcmpProtocol,
-                _localIpv4, _peerIpv4, _txIcmp.AsSpan(0, icmpLength),
+                _localIpv4, destinationIpv4, _txIcmp.AsSpan(0, icmpLength),
                 out ushort packetLength) ||
-            !TrySendPacket(_peerIpv4, _txPacket.AsSpan(0, packetLength)))
+            !TrySendPacket(destinationIpv4, _txPacket.AsSpan(0, packetLength)))
             return false;
+        destinationIpv4.CopyTo(_awaitedDestinationIpv4);
         _awaitedIdentifier = identifier;
         _awaitedSequence = sequence;
         _awaitingReply = true;
@@ -480,6 +612,8 @@ internal sealed class ManagedIpv4Layer
         _udpEndpointDispatchCount++;
         if (handler == ManagedUdpEndpointHandler.Dhcpv4Client)
             return TryHandleDhcpUdp(packet, datagram);
+        if (handler == ManagedUdpEndpointHandler.DnsResolver)
+            return TryHandleDnsUdp(packet, datagram);
         if (handler != ManagedUdpEndpointHandler.Phase18Echo)
             return ManagedIpv4HandleResult.Ignored;
         return TryHandlePhase18Udp(packet, datagram);
@@ -518,6 +652,45 @@ internal sealed class ManagedIpv4Layer
         return response == ManagedDhcpv4ReceiveResult.Malformed
             ? ManagedIpv4HandleResult.Malformed
             : ManagedIpv4HandleResult.Ignored;
+    }
+
+    private ManagedIpv4HandleResult TryHandleDnsUdp(
+        ManagedIpv4Packet packet, ManagedUdpDatagram datagram)
+    {
+        if (!_dns.HasServer ||
+            ManagedEthernetProtocol.ReadUInt32Network(packet.SourceAddress, 0) !=
+                ManagedEthernetProtocol.ReadUInt32Network(_dns.ServerIpv4, 0) ||
+            ManagedEthernetProtocol.ReadUInt32Network(packet.DestinationAddress, 0) !=
+                _localIpv4Value || datagram.SourcePort != DnsServerPort ||
+            datagram.DestinationPort != DnsClientPort)
+            return ManagedIpv4HandleResult.DnsResponseIgnored;
+
+        ManagedDnsResult result = _dns.TryProcessResponse(
+            datagram.SourcePort, datagram.DestinationPort, datagram.Payload);
+        return result switch
+        {
+            ManagedDnsResult.Resolved =>
+                KernelLog.Write("GXOS_NET10:MANAGED_DNS_RESPONSE_VALID\r\n"u8) &&
+                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DNS_RESOLVED_IPV4=0x"u8,
+                                       ManagedEthernetProtocol.ReadUInt32Network(
+                                           _dns.ResolvedIpv4, 0))
+                    ? ManagedIpv4HandleResult.DnsResolved
+                    : ManagedIpv4HandleResult.Failed,
+            ManagedDnsResult.NxDomain =>
+                KernelLog.Write("GXOS_NET10:MANAGED_DNS_NXDOMAIN_RECEIVED\r\n"u8)
+                    ? ManagedIpv4HandleResult.DnsNxDomain
+                    : ManagedIpv4HandleResult.Failed,
+            ManagedDnsResult.Truncated =>
+                KernelLog.Write("GXOS_NET10:MANAGED_DNS_TRUNCATED_REJECTED\r\n"u8)
+                    ? ManagedIpv4HandleResult.DnsResponseTruncated
+                    : ManagedIpv4HandleResult.Failed,
+            ManagedDnsResult.Malformed or ManagedDnsResult.UnsupportedOpcode or
+            ManagedDnsResult.UnsupportedRcode =>
+                KernelLog.Write("GXOS_NET10:MANAGED_DNS_MALFORMED_REJECTED\r\n"u8)
+                    ? ManagedIpv4HandleResult.DnsResponseMalformed
+                    : ManagedIpv4HandleResult.Failed,
+            _ => ManagedIpv4HandleResult.DnsResponseIgnored
+        };
     }
 
     private ManagedIpv4HandleResult TryHandlePhase18Udp(
@@ -612,12 +785,15 @@ internal sealed class ManagedIpv4Layer
             return false;
         }
         destinationIpv4.CopyTo(_pendingIpv4);
-        if (!_arp.TryResolve(destinationIpv4) || _pending.IsActive)
+        if (!_arp.TryResolve(destinationIpv4))
         {
             _pending.Clear();
             return false;
         }
-        return true;
+        // ARP resolution consumes the ARP layer's pending state, but the
+        // packet staged above still belongs to this IPv4 layer.  Release that
+        // single bounded slot only after the cache has been populated.
+        return TryReleasePendingAfterArp();
     }
 
     private bool WaitForReply(ushort identifier, ushort sequence)
@@ -745,7 +921,8 @@ internal sealed class ManagedIpv4Layer
     {
         if (!_awaitingReply ||
             ManagedEthernetProtocol.ReadUInt32Network(packet.SourceAddress, 0) !=
-                _peerIpv4Value ||
+                ManagedEthernetProtocol.ReadUInt32Network(
+                    _awaitedDestinationIpv4, 0) ||
             ManagedEthernetProtocol.ReadUInt32Network(packet.DestinationAddress, 0) !=
                 _localIpv4Value || icmp.Identifier != _awaitedIdentifier ||
             icmp.Sequence != _awaitedSequence ||

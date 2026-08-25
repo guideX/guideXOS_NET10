@@ -26,7 +26,8 @@ internal enum ManagedUdpEndpointHandler : byte
 {
     None = 0,
     Phase18Echo = 1,
-    Dhcpv4Client = 2
+    Dhcpv4Client = 2,
+    DnsResolver = 3
 }
 
 /* Phase 18 intentionally has no delegate or socket surface.  A fixed table of

@@ -47,6 +47,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase17Passed;
     private bool _phase18Passed;
     private bool _phase19Passed;
+    private bool _phase20Passed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -57,6 +58,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase17Requested;
     private bool _phase18Requested;
     private bool _phase19Requested;
+    private bool _phase20Requested;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -79,6 +81,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase17Passed => _phase17Passed;
     internal bool Phase18Passed => _phase18Passed;
     internal bool Phase19Passed => _phase19Passed;
+    internal bool Phase20Passed => _phase20Passed;
 
     internal static ManagedE1000Driver? TryCreate()
     {
@@ -199,7 +202,11 @@ internal sealed class ManagedE1000Driver
             Phase16MacLow = ((uint)mac2 << 24) | ((uint)mac3 << 16) |
                             ((uint)mac4 << 8) | mac5;
             _ethernet!.InitializeMac();
-            if (_phase19Requested)
+            if (_phase20Requested)
+            {
+                if (!_ethernet.TryRunPhase20()) return AbortStart();
+            }
+            else if (_phase19Requested)
             {
                 if (!_ethernet.TryRunPhase19()) return AbortStart();
             }
@@ -273,6 +280,7 @@ internal sealed class ManagedE1000Driver
             _phase17Passed = _ethernet.Phase17Passed;
             _phase18Passed = _ethernet.Phase18Passed;
             _phase19Passed = _ethernet.Phase19Passed;
+            _phase20Passed = _ethernet.Phase20Passed;
         }
         bool result = (_ethernet == null || _ethernet.TryStop()) &&
                       DisableEngines() && ReleaseDmaAndRestorePci();
@@ -717,6 +725,8 @@ internal sealed class ManagedE1000Driver
             _phase18Requested = ManagedE1000Protocol.IsPhase18RxTestFrame(
                 frame.Slice(0, length));
             _phase19Requested = ManagedE1000Protocol.IsPhase19RxTestFrame(
+                frame.Slice(0, length));
+            _phase20Requested = ManagedE1000Protocol.IsPhase20RxTestFrame(
                 frame.Slice(0, length));
             if (!WriteRxStateSnapshot(
                     "GXOS_NET10:MANAGED_E1000_RX_STATE=AFTER_COMPLETION\r\n"u8) ||

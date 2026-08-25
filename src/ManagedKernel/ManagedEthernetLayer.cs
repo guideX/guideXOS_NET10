@@ -34,6 +34,7 @@ internal sealed class ManagedEthernetLayer
     internal bool Phase17Passed => _ipv4.Phase17Passed;
     internal bool Phase18Passed => _ipv4.Phase18Passed;
     internal bool Phase19Passed => _ipv4.Phase19Passed;
+    internal bool Phase20Passed => _ipv4.Phase20Passed;
     internal ReadOnlySpan<byte> LocalMac => _localMac;
 
     internal bool TryRunPhase16()
@@ -54,6 +55,11 @@ internal sealed class ManagedEthernetLayer
     internal bool TryRunPhase19()
     {
         return _ipv4.TryRunPhase19();
+    }
+
+    internal bool TryRunPhase20()
+    {
+        return _ipv4.TryRunPhase20();
     }
 
     internal void InitializeMac()
@@ -222,5 +228,10 @@ internal enum ManagedNetworkDispatchResult : byte
     UdpZeroChecksumAccepted = 10,
     DhcpRequestSent = 11,
     DhcpBound = 12,
-    DhcpNak = 13
+    DhcpNak = 13,
+    DnsResponseIgnored = 14,
+    DnsResponseMalformed = 15,
+    DnsResponseTruncated = 16,
+    DnsNxDomain = 17,
+    DnsResolved = 18
 }
