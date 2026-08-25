@@ -497,6 +497,91 @@ regression boots under `evidence/phase16-regression-phase18-v2-20260824`,
 and three fresh Phase 15 regression boots under
 `evidence/phase15-regression-phase18-v3-20260824`.
 UDP receive/transmit is now proven over the managed E1000 path, but UDP
-fragmentation/reassembly, TCP, DHCP, DNS, routing, IPv6/ND, interrupts,
+fragmentation/reassembly, TCP, DNS, routing, IPv6/ND, interrupts,
 offloads, VLANs, jumbo/scatter-gather frames, multiple interfaces, sockets,
 and Internet access remain deferred.
+
+## Phase 19: bounded managed DHCPv4 bootstrap
+
+Phase 19 adds a DHCPv4 client without creating a second packet path:
+
+`E1000 RX/TX -> managed Ethernet II -> managed IPv4 -> managed UDP -> DHCPv4`
+
+`ManagedDhcpv4Client` owns the fixed DHCP state and candidate/leased
+configuration.  `ManagedIpv4Layer` owns the DHCP endpoint and uses the
+existing bounded UDP endpoint table, UDP builder/parser, IPv4 builder/parser,
+and Ethernet transmit path.  There are no sockets, timers, dictionaries,
+option maps, unbounded queues, or retained RX spans.
+
+### Bootstrap wire policy and state machine
+
+Before binding, the only exceptional IPv4 receive case is UDP destined for
+`255.255.255.255` while the DHCP client has no lease.  The DHCP endpoint still
+requires server port `67`, client port `68`, a valid IPv4/UDP packet, the DHCP
+cookie, and a matching transaction before state can change.  Normal Ethernet
+unicast transmit continues to require a learned ARP destination; DHCP uses an
+explicit Ethernet-broadcast primitive and never ARPs for the server during
+DORA.
+
+The client state is `Disabled -> Init -> Selecting -> Requesting -> Bound`.
+The first deterministic transaction ID is `0x19000001`; subsequent attempts
+advance a bounded monotonic counter.  There are at most three DISCOVER
+attempts and three REQUEST attempts.  A valid OFFER copies only candidate
+fields and enters `Requesting`; only a matching ACK atomically copies the
+leased fields and enters `Bound`.  A matching NAK clears the candidate and
+returns to `Init`.  Wrong xid, hardware type/length, runtime MAC, server,
+ports, message type, cookie, or fixed-width/option data is ignored or
+rejected without changing the active IPv4 identity.
+
+The client emits BOOTP `REQUEST`, Ethernet hardware type `1`, hardware length
+`6`, hops `0`, zero `ciaddr`, the broadcast flag, the runtime E1000 MAC, the
+DHCP cookie `63 82 53 63`, and a bounded parameter request list for subnet
+mask, router, DNS, and lease time.  The parser supports PAD, END, subnet mask,
+router, one or two DNS addresses, requested IP, lease time, message type,
+server identifier, and parameter request list.  Unknown options are skipped
+only after their declared length is proven in bounds; conflicting duplicate
+critical values are rejected, while identical duplicates are deterministic.
+
+The deterministic peer is raw-frame based and uses server `10.15.0.2` with
+MAC `02:15:00:00:00:02`.  It offers and ACKs `10.15.0.42` with mask
+`255.255.255.0` and lease duration `3600` seconds.  Router and DNS are not
+advertised in the authoritative ACK; the client can parse and retain bounded
+values for future use.  DHCP renewal T1, rebinding T2, expiration processing,
+persistent leases, DNS resolution, relays, APIPA, routing, and DHCPv6 remain
+deferred.
+
+After ACK, the leased address is installed into ARP/IPv4 ownership.  The
+existing ARP proof then resolves the peer, and the Phase 17/18 ICMP and UDP
+proofs run with source `10.15.0.42`; the independent PCAP check rejects any
+post-bind guest frame using the old static `10.15.0.1` identity.  GC survival
+and post-GC ICMP/UDP exchanges preserve the leased source.  DHCP teardown
+clears the endpoint, transaction, candidate, lease, counters, stored option
+state, IPv4 state, and ARP state before the established NIC teardown.  The
+host suite also performs client re-init and verifies a fresh transaction
+rejects a stale reply; the authoritative runtime repeats the complete fresh
+boot three times.
+
+### Host, wire, and fresh-boot evidence
+
+`tools/Run-ManagedKernelPhase19HostTests.ps1` passes 39 bounded DHCP cases,
+including parser/options, exact DISCOVER/REQUEST construction, candidate vs
+ACK commit, stale and wrong-peer rejection, retry limits, NAK, teardown, and
+re-init.  The prior focused suites remain green: Phase 15 `28/28`, Phase 16
+`57/57`, Phase 17 `48/48`, and Phase 18 `55/55`.
+
+The authoritative runner is `tools/Run-ManagedKernelPhase19FreshBoots.ps1`
+with independent validation from `tools/Parse-ManagedE1000Phase19Pcap.ps1`.
+All three boots pass with payload size `1,127,936` bytes and SHA-256
+`CA0C47D1C7CB6979C8A49B2D532BF18F120122DDD2B7D8A71253AD131A8B0EF2` under
+`evidence/phase19-dev7-20260824`.  Each PCAP contains 43 packets, including
+the DHCPDISCOVER/OFFER/REQUEST/ACK sequence, five malformed DHCP controls,
+four ARP frames, three leased-source ICMP frames, and six leased-source UDP
+frames.  The malformed controls are bad cookie, wrong xid, wrong chaddr,
+missing message type, and malformed option length; valid DORA and ordinary
+traffic continue afterward.  The three boots report `PASS_PHASE19`, complete
+GC and teardown checks, and leave no owned QEMU process.
+
+Phase 19 is Outcome A for the bounded DHCPv4 scope.  Full lease renewal and
+rebinding, lease persistence, DNS, TCP, sockets, IPv6/ND, relays, routing,
+APIPA, multiple interfaces, offloads, VLANs, jumbo/scatter-gather frames,
+interrupt-driven networking, and Internet access are intentionally deferred.

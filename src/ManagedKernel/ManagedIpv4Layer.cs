@@ -14,7 +14,10 @@ internal enum ManagedIpv4HandleResult : byte
     Failed = 7,
     UdpEndpointResponseSent = 8,
     UdpResponseValidated = 9,
-    UdpZeroChecksumAccepted = 10
+    UdpZeroChecksumAccepted = 10,
+    DhcpRequestSent = 11,
+    DhcpBound = 12,
+    DhcpNak = 13
 }
 
 internal sealed class ManagedIpv4Layer
@@ -27,6 +30,8 @@ internal sealed class ManagedIpv4Layer
     private const ushort SecondSequence = 2;
     internal const ushort Phase18LocalPort = 15180;
     internal const ushort Phase18PeerPort = 15181;
+    internal const ushort DhcpClientPort = 68;
+    internal const ushort DhcpServerPort = 67;
 
     private readonly ManagedEthernetLayer _ethernet;
     private readonly ManagedArpLayer _arp;
@@ -41,16 +46,18 @@ internal sealed class ManagedIpv4Layer
         ManagedIcmpv4Protocol.HeaderLength +
         ManagedIcmpv4Protocol.MaximumEchoPayloadLength];
     private readonly byte[] _txUdp = new byte[ManagedUdpProtocol.MaximumDatagramLength];
+    private readonly byte[] _dhcpPacket = new byte[ManagedDhcpv4Protocol.MaximumPacketLength];
     private readonly byte[] _managedUdpPayload = new byte[ManagedUdpProtocol.MaximumPayloadLength];
     private readonly byte[] _peerUdpAckPayload = new byte[ManagedUdpProtocol.MaximumPayloadLength];
     private readonly byte[] _peerUdpRequestPayload = new byte[ManagedUdpProtocol.MaximumPayloadLength];
     private readonly byte[] _managedUdpAckPayload = new byte[ManagedUdpProtocol.MaximumPayloadLength];
     private readonly ManagedUdpEndpointTable _udpEndpoints = new();
+    private readonly ManagedDhcpv4Client _dhcp = new();
     private readonly byte[] _pingPayload = new byte[32];
     private readonly ManagedIpv4PendingTransmission _pending = new();
-    private readonly uint _localIpv4Value;
-    private readonly uint _peerIpv4Value;
-    private readonly uint _subnetMaskValue;
+    private uint _localIpv4Value;
+    private uint _peerIpv4Value;
+    private uint _subnetMaskValue;
     private byte _pingPayloadLength;
     private byte _managedUdpPayloadLength;
     private byte _peerUdpAckPayloadLength;
@@ -67,6 +74,7 @@ internal sealed class ManagedIpv4Layer
     private uint _unsupportedOptionsCount;
     private uint _pendingOverflowCount;
     private bool _phase18Passed;
+    private bool _phase19Passed;
     private uint _udpRxValidCount;
     private uint _udpRxMalformedCount;
     private uint _udpChecksumFailureCount;
@@ -105,6 +113,11 @@ internal sealed class ManagedIpv4Layer
         _managedUdpAckPayloadLength = (byte)managedUdpAckPayload.Length;
     }
 
+    internal void InitializeMac()
+    {
+        _dhcp.Initialize(_ethernet.LocalMac);
+    }
+
     internal bool Phase17Passed { get; private set; }
     internal bool PendingTransmissionActive => _pending.IsActive;
     internal uint MalformedPacketCount => _malformedPacketCount;
@@ -113,6 +126,11 @@ internal sealed class ManagedIpv4Layer
     internal uint PendingOverflowCount => _pendingOverflowCount;
     internal bool ResponderReplySent => _responderReplySent;
     internal bool Phase18Passed => _phase18Passed;
+    internal bool Phase19Passed => _phase19Passed;
+    internal ManagedDhcpv4State DhcpState => _dhcp.State;
+    internal uint DhcpTransactionId => _dhcp.TransactionId;
+    internal ReadOnlySpan<byte> DhcpLeasedIpv4 => _dhcp.LeasedIpv4;
+    internal uint DhcpLeaseTime => _dhcp.LeasedLeaseTime;
     internal ManagedUdpEndpointTable UdpEndpoints => _udpEndpoints;
     internal uint UdpRxValidCount => _udpRxValidCount;
     internal uint UdpRxMalformedCount => _udpRxMalformedCount;
@@ -127,6 +145,11 @@ internal sealed class ManagedIpv4Layer
     {
         if (_active || _arp.Cache.Count == 0) return false;
         _active = true;
+        return TryRunPhase17Core();
+    }
+
+    private bool TryRunPhase17Core()
+    {
         if (!KernelLog.Write("GXOS_NET10:MANAGED_IPV4_READY\r\n"u8) ||
             !KernelLog.Write("GXOS_NET10:MANAGED_ICMPV4_READY\r\n"u8) ||
             !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_IPV4_LOCAL=0x"u8,
@@ -161,7 +184,42 @@ internal sealed class ManagedIpv4Layer
     {
         if (_phase18Passed || _arp.Cache.Count == 0 ||
             !TryRunPhase17() ||
-            !_udpEndpoints.TryRegister(Phase18LocalPort,
+            !TryRunUdpCore())
+            return false;
+
+        _phase18Passed = true;
+        return true;
+    }
+
+    internal bool TryRunPhase19()
+    {
+        if (_phase19Passed || _active || !_arp.TryBeginDhcp()) return false;
+        _active = true;
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                        ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_DHCP_READY\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_CLIENT_PORT=0x"u8,
+                                    DhcpClientPort) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_SERVER_PORT=0x"u8,
+                                    DhcpServerPort) ||
+            !TryRunDhcpDora() ||
+            !_arp.TryRunPhase16() ||
+            !TryRunPhase17Core() ||
+            !TryRunUdpCore())
+            return false;
+
+        _phase19Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_DHCP_PHASE19_PASS\r\n"u8);
+    }
+
+    private bool TryRunUdpCore()
+    {
+        if (!_udpEndpoints.TryRegister(Phase18LocalPort,
                                         ManagedUdpEndpointHandler.Phase18Echo) ||
             !KernelLog.Write("GXOS_NET10:MANAGED_UDP_READY\r\n"u8) ||
             !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_UDP_LOCAL_PORT=0x"u8,
@@ -197,8 +255,88 @@ internal sealed class ManagedIpv4Layer
             !KernelLog.Write("GXOS_NET10:MANAGED_UDP_POST_GC_EXCHANGE_PASS\r\n"u8))
             return false;
 
-        _phase18Passed = true;
         return true;
+    }
+
+    private bool TryRunDhcpDora()
+    {
+        for (int attempt = 0; attempt != ManagedDhcpv4Client.MaximumDiscoverAttempts;
+             ++attempt)
+        {
+            if (!_dhcp.TryBuildDiscover(_dhcpPacket, out ushort discoverLength) ||
+                !TrySendDhcpPacket(_dhcpPacket.AsSpan(0, discoverLength)) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_DHCP_DISCOVER_SENT\r\n"u8))
+                return false;
+            bool completed = false;
+            for (int frame = 0; frame != MaximumProtocolFrames; ++frame)
+            {
+                if (!_ethernet.TryReceiveAndDispatch(
+                        out ManagedNetworkDispatchResult result))
+                    break;
+                if (_dhcp.State == ManagedDhcpv4State.Bound)
+                {
+                    completed = true;
+                    break;
+                }
+                if (result == ManagedNetworkDispatchResult.Failed) return false;
+            }
+            if (completed)
+            {
+                if (!ApplyDhcpLease() ||
+                    !KernelLog.Write("GXOS_NET10:MANAGED_DHCP_ACK_ACCEPTED\r\n"u8) ||
+                    !KernelLog.Write("GXOS_NET10:MANAGED_DHCP_BOUND\r\n"u8) ||
+                    !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_LEASED_IPV4=0x"u8,
+                                            _localIpv4Value) ||
+                    !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_SUBNET_MASK=0x"u8,
+                                            _subnetMaskValue) ||
+                    !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_LEASE_TIME=0x"u8,
+                                            _dhcp.LeasedLeaseTime))
+                    return false;
+                return true;
+            }
+            if (!_dhcp.TryRetry()) return false;
+            if (!KernelLog.Write("GXOS_NET10:MANAGED_DHCP_RETRY\r\n"u8))
+                return false;
+        }
+        _dhcp.TryRetry();
+        return KernelLog.Write("GXOS_NET10:MANAGED_DHCP_FAILED\r\n"u8);
+    }
+
+    private bool ApplyDhcpLease()
+    {
+        if (!_dhcp.HasLease)
+            return false;
+        _dhcp.LeasedIpv4.CopyTo(_localIpv4);
+        _dhcp.LeasedMask.CopyTo(_subnetMask);
+        _dhcp.LeasedServerIdentifier.CopyTo(_peerIpv4);
+        _localIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_localIpv4, 0);
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        _subnetMaskValue = ManagedEthernetProtocol.ReadUInt32Network(_subnetMask, 0);
+        if (!ManagedIpv4Protocol.IsDirectlyReachable(
+                _localIpv4Value, _subnetMaskValue, _peerIpv4Value))
+            return false;
+        return _arp.TryInstallLocalIpv4(_localIpv4);
+    }
+
+    private bool TrySendDhcpPacket(ReadOnlySpan<byte> dhcpPacket)
+    {
+        if (dhcpPacket.Length < ManagedDhcpv4Protocol.MinimumPacketLength ||
+            dhcpPacket.Length > ManagedDhcpv4Protocol.MaximumPacketLength)
+            return false;
+        Span<byte> zeroAddress = stackalloc byte[4];
+        Span<byte> broadcastAddress = stackalloc byte[4];
+        broadcastAddress.Fill(0xFF);
+        if (!ManagedUdpProtocol.TryBuild(
+                _txUdp, DhcpClientPort, DhcpServerPort, zeroAddress,
+                broadcastAddress, dhcpPacket, out ushort udpLength) ||
+            !ManagedIpv4Protocol.TryBuild(
+                _txPacket, (ushort)(0x1D00 + _dhcp.DiscoverAttempts), 0,
+                ManagedIpv4Protocol.DefaultTtl, ManagedUdpProtocol.Protocol,
+                zeroAddress, broadcastAddress, _txUdp.AsSpan(0, udpLength),
+                out ushort packetLength))
+            return false;
+        return _ethernet.TryTransmitBroadcast(ManagedIpv4Protocol.EtherType,
+                                               _txPacket, packetLength);
     }
 
     internal ManagedIpv4HandleResult TryHandle(ReadOnlySpan<byte> packet)
@@ -207,7 +345,12 @@ internal sealed class ManagedIpv4Layer
         if (packet.Length >= 1 && (packet[0] & 0x0F) >
             ManagedIpv4Protocol.SupportedHeaderWords)
             _unsupportedOptionsCount++;
+        bool allowDhcpBroadcast = !_dhcp.HasLease &&
+            packet.Length >= ManagedIpv4Protocol.MinimumHeaderLength &&
+            packet[9] == ManagedUdpProtocol.Protocol &&
+            ManagedEthernetProtocol.ReadUInt32Network(packet, 16) == 0xFFFFFFFFU;
         if (!ManagedIpv4Protocol.TryParse(packet, _localIpv4Value,
+                                          allowDhcpBroadcast,
                                           out ManagedIpv4Packet parsed))
         {
             _malformedPacketCount++;
@@ -268,6 +411,13 @@ internal sealed class ManagedIpv4Layer
         _udpManagedResponseCount = 0;
         _udpPeerResponseCount = 0;
         _txUdp.AsSpan().Clear();
+        _dhcpPacket.AsSpan().Clear();
+        _dhcp.ResetForTeardown();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _phase19Passed = false;
         return true;
     }
 
@@ -328,9 +478,46 @@ internal sealed class ManagedIpv4Layer
             return ManagedIpv4HandleResult.Ignored;
         }
         _udpEndpointDispatchCount++;
+        if (handler == ManagedUdpEndpointHandler.Dhcpv4Client)
+            return TryHandleDhcpUdp(packet, datagram);
         if (handler != ManagedUdpEndpointHandler.Phase18Echo)
             return ManagedIpv4HandleResult.Ignored;
         return TryHandlePhase18Udp(packet, datagram);
+    }
+
+    private ManagedIpv4HandleResult TryHandleDhcpUdp(
+        ManagedIpv4Packet packet, ManagedUdpDatagram datagram)
+    {
+        if (_dhcp.HasLease || datagram.SourcePort != DhcpServerPort ||
+            datagram.DestinationPort != DhcpClientPort ||
+            ManagedEthernetProtocol.ReadUInt32Network(packet.DestinationAddress, 0) !=
+                0xFFFFFFFFU)
+            return ManagedIpv4HandleResult.Ignored;
+
+        ManagedDhcpv4ReceiveResult response = _dhcp.TryProcessResponse(
+            packet.SourceAddress, datagram.Payload, _dhcpPacket,
+            out ushort requestLength);
+        if (response == ManagedDhcpv4ReceiveResult.RequestReady)
+        {
+            if (!TrySendDhcpPacket(_dhcpPacket.AsSpan(0, requestLength)) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_DHCP_REQUEST_SENT\r\n"u8))
+                return ManagedIpv4HandleResult.Failed;
+            return ManagedIpv4HandleResult.DhcpRequestSent;
+        }
+        if (response == ManagedDhcpv4ReceiveResult.Bound)
+        {
+            if (!ApplyDhcpLease()) return ManagedIpv4HandleResult.Failed;
+            return KernelLog.Write("GXOS_NET10:MANAGED_DHCP_ACK_RECEIVED\r\n"u8)
+                ? ManagedIpv4HandleResult.DhcpBound
+                : ManagedIpv4HandleResult.Failed;
+        }
+        if (response == ManagedDhcpv4ReceiveResult.Nak)
+            return KernelLog.Write("GXOS_NET10:MANAGED_DHCP_NAK_RECEIVED\r\n"u8)
+                ? ManagedIpv4HandleResult.DhcpNak
+                : ManagedIpv4HandleResult.Failed;
+        return response == ManagedDhcpv4ReceiveResult.Malformed
+            ? ManagedIpv4HandleResult.Malformed
+            : ManagedIpv4HandleResult.Ignored;
     }
 
     private ManagedIpv4HandleResult TryHandlePhase18Udp(

@@ -19,6 +19,7 @@ internal sealed class ManagedArpLayer
     private readonly byte[] _targetMac = new byte[ManagedEthernetProtocol.MacLength];
     private readonly byte[] _targetIpv4 = new byte[ManagedEthernetProtocol.ProtocolAddressLength];
     private bool _active;
+    private bool _dhcpBootstrapMode;
     private bool _pending;
     private uint _pendingIpv4;
     private bool _responderReplySent;
@@ -62,10 +63,29 @@ internal sealed class ManagedArpLayer
         return true;
     }
 
+    internal bool TryBeginDhcp()
+    {
+        if (_active || _pending) return false;
+        _cache.Clear();
+        _localIpv4.AsSpan().Clear();
+        _dhcpBootstrapMode = true;
+        _active = true;
+        return true;
+    }
+
+    internal bool TryInstallLocalIpv4(ReadOnlySpan<byte> localIpv4)
+    {
+        if (!IsUsableIpv4(localIpv4) || _pending) return false;
+        localIpv4.CopyTo(_localIpv4);
+        _active = true;
+        return true;
+    }
+
     internal bool TryRunPhase16()
     {
-        if (_active || _cache.Count != 0) return false;
-        _active = true;
+        bool dhcpBootstrap = _dhcpBootstrapMode;
+        if ((!dhcpBootstrap && _active) || _cache.Count != 0) return false;
+        if (!dhcpBootstrap) _active = true;
         if (!KernelLog.Write("GXOS_NET10:MANAGED_ETHERNET_READY\r\n"u8) ||
             !KernelLog.Write("GXOS_NET10:MANAGED_ARP_READY\r\n"u8) ||
             !KernelLog.Write("GXOS_NET10:MANAGED_ARP_CACHE_EMPTY\r\n"u8) ||
@@ -100,6 +120,8 @@ internal sealed class ManagedArpLayer
             !ethernetSource.SequenceEqual(packet.SenderMac) ||
             !ManagedEthernetProtocol.IsUsableSourceMac(ethernetSource))
             return ManagedArpHandleResult.Invalid;
+        if (!IsUsableIpv4(_localIpv4))
+            return ManagedArpHandleResult.Ignored;
 
         if (!KernelLog.Write("GXOS_NET10:MANAGED_ETHERNET_RX_ARP\r\n"u8))
             return ManagedArpHandleResult.Failed;
@@ -153,7 +175,9 @@ internal sealed class ManagedArpLayer
         _active = false;
         _pending = false;
         _responderReplySent = false;
+        _dhcpBootstrapMode = false;
         _cache.Clear();
+        _localIpv4.AsSpan().Clear();
         return true;
     }
 
@@ -174,11 +198,10 @@ internal sealed class ManagedArpLayer
         if (!KernelLog.Write("GXOS_NET10:MANAGED_ARP_RESOLUTION_STARTED\r\n"u8))
             return false;
 
-        byte[] broadcast = _broadcastMac;
         if (!TryBuildRuntimeRequest(targetIpv4)) return false;
-        if (!_ethernet.TryTransmit(ManagedEthernetProtocol.ArpEtherType,
-                                   broadcast, _requestPayload,
-                                   ManagedArpProtocol.PayloadLength))
+        if (!_ethernet.TryTransmitBroadcast(ManagedEthernetProtocol.ArpEtherType,
+                                             _requestPayload,
+                                             ManagedArpProtocol.PayloadLength))
         {
             return false;
         }
@@ -270,10 +293,7 @@ internal sealed class ManagedArpLayer
         _requestPayload[11] = (byte)(_localMacValue >> 16);
         _requestPayload[12] = (byte)(_localMacValue >> 8);
         _requestPayload[13] = (byte)_localMacValue;
-        _requestPayload[14] = 10;
-        _requestPayload[15] = 15;
-        _requestPayload[16] = 0;
-        _requestPayload[17] = 1;
+        _localIpv4.CopyTo(_requestPayload.AsSpan(14, 4));
         targetIpv4.CopyTo(_requestPayload.AsSpan(24, 4));
         return _requestPayload[18] == 0 && _requestPayload[19] == 0 &&
                _requestPayload[20] == 0 && _requestPayload[21] == 0 &&
@@ -300,10 +320,7 @@ internal sealed class ManagedArpLayer
         _replyPayload[11] = (byte)(_localMacValue >> 16);
         _replyPayload[12] = (byte)(_localMacValue >> 8);
         _replyPayload[13] = (byte)_localMacValue;
-        _replyPayload[14] = 10;
-        _replyPayload[15] = 15;
-        _replyPayload[16] = 0;
-        _replyPayload[17] = 1;
+        _localIpv4.CopyTo(_replyPayload.AsSpan(14, 4));
         for (int macIndex = 0; macIndex != ManagedEthernetProtocol.MacLength;
              ++macIndex)
             _replyPayload[18 + macIndex] = _targetMac[macIndex];
@@ -345,6 +362,14 @@ internal sealed class ManagedArpLayer
             allOnes &= address[index] == 0xFF;
         }
         return !allZero && !allOnes;
+    }
+
+    private static bool IsUsableIpv4(ReadOnlySpan<byte> address)
+    {
+        if (address.Length != ManagedEthernetProtocol.ProtocolAddressLength)
+            return false;
+        uint value = ManagedEthernetProtocol.ReadUInt32Network(address, 0);
+        return value != 0 && value != 0xFFFFFFFFU;
     }
 
 }

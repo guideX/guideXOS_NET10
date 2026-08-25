@@ -9,6 +9,7 @@ internal sealed class ManagedEthernetLayer
     private readonly ManagedArpLayer _arp;
     private readonly ManagedIpv4Layer _ipv4;
     private readonly byte[] _localMac;
+    private readonly byte[] _broadcastMac;
     private readonly byte[] _txFrame;
     private readonly byte[] _rxFrame;
     private uint _unknownEtherTypeCount;
@@ -19,6 +20,8 @@ internal sealed class ManagedEthernetLayer
     {
         _transport = transport;
         _localMac = new byte[ManagedEthernetProtocol.MacLength];
+        _broadcastMac = new byte[ManagedEthernetProtocol.MacLength];
+        _broadcastMac.AsSpan().Fill(0xFF);
         _txFrame = new byte[ManagedEthernetProtocol.MaximumFrameLength];
         _rxFrame = new byte[ManagedEthernetProtocol.MaximumFrameLength];
         _arp = new ManagedArpLayer(this);
@@ -30,6 +33,8 @@ internal sealed class ManagedEthernetLayer
     internal bool Phase16Passed => _arp.Phase16Passed;
     internal bool Phase17Passed => _ipv4.Phase17Passed;
     internal bool Phase18Passed => _ipv4.Phase18Passed;
+    internal bool Phase19Passed => _ipv4.Phase19Passed;
+    internal ReadOnlySpan<byte> LocalMac => _localMac;
 
     internal bool TryRunPhase16()
     {
@@ -46,6 +51,11 @@ internal sealed class ManagedEthernetLayer
         return _arp.TryRunPhase16() && _ipv4.TryRunPhase18();
     }
 
+    internal bool TryRunPhase19()
+    {
+        return _ipv4.TryRunPhase19();
+    }
+
     internal void InitializeMac()
     {
         uint macHigh = ManagedE1000Driver.Phase16MacHigh;
@@ -57,6 +67,7 @@ internal sealed class ManagedEthernetLayer
         _localMac[4] = (byte)(macLow >> 8);
         _localMac[5] = (byte)macLow;
         _arp.InitializeMac();
+        _ipv4.InitializeMac();
     }
 
     internal bool TryTransmit(ushort etherType, byte[] destination,
@@ -64,12 +75,28 @@ internal sealed class ManagedEthernetLayer
     {
         if (!_accepting || destination == null || payload == null ||
             payloadLength < 0 || payloadLength > payload.Length) return false;
+        if (ManagedEthernetProtocol.IsBroadcast(destination)) return false;
         Span<byte> frame = _txFrame;
         if (!ManagedEthernetProtocol.TryBuildFrame(
                 frame, destination, _localMac, etherType,
                 payload.AsSpan(0, payloadLength), out ushort frameLength))
         {
             KernelLog.Write("GXOS_NET10:MANAGED_ETHERNET_TX_BUILD_FAILED\r\n"u8);
+            return false;
+        }
+        return _transport.TryTransmitFrame(_txFrame, frameLength);
+    }
+
+    internal bool TryTransmitBroadcast(ushort etherType, byte[] payload,
+                                        int payloadLength)
+    {
+        if (!_accepting || payload == null || payloadLength < 0 ||
+            payloadLength > payload.Length) return false;
+        if (!ManagedEthernetProtocol.TryBuildFrame(
+                _txFrame, _broadcastMac, _localMac, etherType,
+                payload.AsSpan(0, payloadLength), out ushort frameLength))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_ETHERNET_BROADCAST_TX_BUILD_FAILED\r\n"u8);
             return false;
         }
         return _transport.TryTransmitFrame(_txFrame, frameLength);
@@ -192,5 +219,8 @@ internal enum ManagedNetworkDispatchResult : byte
     Failed = 7,
     UdpEndpointResponseSent = 8,
     UdpResponseValidated = 9,
-    UdpZeroChecksumAccepted = 10
+    UdpZeroChecksumAccepted = 10,
+    DhcpRequestSent = 11,
+    DhcpBound = 12,
+    DhcpNak = 13
 }

@@ -52,6 +52,14 @@ internal static class ManagedIpv4Protocol
                                   uint localAddress,
                                   out ManagedIpv4Packet parsed)
     {
+        return TryParse(packet, localAddress, false, out parsed);
+    }
+
+    internal static bool TryParse(ReadOnlySpan<byte> packet,
+                                  uint localAddress,
+                                  bool allowBootstrapBroadcast,
+                                  out ManagedIpv4Packet parsed)
+    {
         parsed = default;
         if (packet.Length < MinimumHeaderLength ||
             (packet[0] >> 4) != Version)
@@ -74,7 +82,10 @@ internal static class ManagedIpv4Protocol
             return false;
         if (ComputeChecksum(packet.Slice(0, headerLength)) != 0)
             return false;
-        if (ManagedEthernetProtocol.ReadUInt32Network(packet, 16) != localAddress)
+        uint destinationAddress = ManagedEthernetProtocol.ReadUInt32Network(
+            packet, 16);
+        if (destinationAddress != localAddress &&
+            (!allowBootstrapBroadcast || destinationAddress != 0xFFFFFFFFU))
             return false;
 
         parsed = new ManagedIpv4Packet(packet, totalLength);

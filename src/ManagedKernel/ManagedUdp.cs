@@ -25,7 +25,8 @@ internal readonly ref struct ManagedUdpDatagram
 internal enum ManagedUdpEndpointHandler : byte
 {
     None = 0,
-    Phase18Echo = 1
+    Phase18Echo = 1,
+    Dhcpv4Client = 2
 }
 
 /* Phase 18 intentionally has no delegate or socket surface.  A fixed table of
