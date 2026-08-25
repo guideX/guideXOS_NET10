@@ -48,6 +48,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase18Passed;
     private bool _phase19Passed;
     private bool _phase20Passed;
+    private bool _phase21Passed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -59,6 +60,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase18Requested;
     private bool _phase19Requested;
     private bool _phase20Requested;
+    private bool _phase21Requested;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -82,6 +84,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase18Passed => _phase18Passed;
     internal bool Phase19Passed => _phase19Passed;
     internal bool Phase20Passed => _phase20Passed;
+    internal bool Phase21Passed => _phase21Passed;
 
     internal static ManagedE1000Driver? TryCreate()
     {
@@ -202,7 +205,11 @@ internal sealed class ManagedE1000Driver
             Phase16MacLow = ((uint)mac2 << 24) | ((uint)mac3 << 16) |
                             ((uint)mac4 << 8) | mac5;
             _ethernet!.InitializeMac();
-            if (_phase20Requested)
+            if (_phase21Requested)
+            {
+                if (!_ethernet.TryRunPhase21()) return AbortStart();
+            }
+            else if (_phase20Requested)
             {
                 if (!_ethernet.TryRunPhase20()) return AbortStart();
             }
@@ -274,15 +281,19 @@ internal sealed class ManagedE1000Driver
     {
         if (_state != ManagedE1000DriverState.Running) return false;
         _state = ManagedE1000DriverState.Stopping;
-        if (_ethernet != null)
+        ManagedEthernetLayer? ethernet = _phase21Requested
+            ? ManagedNetworkServiceBackend.LiveEthernet ?? _ethernet
+            : _ethernet;
+        if (ethernet != null)
         {
-            _phase16Passed = _ethernet.Phase16Passed;
-            _phase17Passed = _ethernet.Phase17Passed;
-            _phase18Passed = _ethernet.Phase18Passed;
-            _phase19Passed = _ethernet.Phase19Passed;
-            _phase20Passed = _ethernet.Phase20Passed;
+            _phase16Passed = ethernet.Phase16Passed;
+            _phase17Passed = ethernet.Phase17Passed;
+            _phase18Passed = ethernet.Phase18Passed;
+            _phase19Passed = ethernet.Phase19Passed;
+            _phase20Passed = ethernet.Phase20Passed;
+            _phase21Passed = ethernet.Phase21Passed;
         }
-        bool result = (_ethernet == null || _ethernet.TryStop()) &&
+        bool result = (ethernet == null || ethernet.TryStop()) &&
                       DisableEngines() && ReleaseDmaAndRestorePci();
         if (!result) return false;
         _ethernet = null;
@@ -727,6 +738,8 @@ internal sealed class ManagedE1000Driver
             _phase19Requested = ManagedE1000Protocol.IsPhase19RxTestFrame(
                 frame.Slice(0, length));
             _phase20Requested = ManagedE1000Protocol.IsPhase20RxTestFrame(
+                frame.Slice(0, length));
+            _phase21Requested = ManagedE1000Protocol.IsPhase21RxTestFrame(
                 frame.Slice(0, length));
             if (!WriteRxStateSnapshot(
                     "GXOS_NET10:MANAGED_E1000_RX_STATE=AFTER_COMPLETION\r\n"u8) ||

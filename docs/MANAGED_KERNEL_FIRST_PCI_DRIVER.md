@@ -674,3 +674,105 @@ TCP DNS fallback, DNSSEC, EDNS, AAAA/IPv6, full CNAME recursion, SRV, TXT,
 MX, PTR, mDNS, LLMNR, search domains, full cache infrastructure, retries
 beyond the fixed three-attempt bound, sockets, routing, and multiple
 interfaces remain deferred.
+
+## Phase 21: bounded managed network service boundary
+
+Phase 21 adds the first deliberate application-facing service boundary without
+adding a protocol:
+
+`managed application -> ManagedNetworkService -> DNS/ICMP/UDP -> IPv4/ARP/Ethernet -> E1000`
+
+The existing ownership remains authoritative. `ManagedE1000Driver` owns PCI,
+MMIO, DMA, descriptors, and hardware teardown. `ManagedEthernetLayer` owns
+Ethernet dispatch and RX-frame lifetime. `ManagedIpv4Layer` continues to own
+IPv4 policy, DHCP commit state, DNS resolver state, ICMP validation, UDP
+construction/parsing, the single pending IPv4 transmit, and the fixed UDP
+endpoint table. `ManagedNetworkServiceBackend` is the only adapter that knows
+those implementation types. `ManagedPhase21TestConsumer` uses only
+`ManagedNetworkService`; it does not reference `ManagedDnsResolver`,
+`ManagedUdp`, `ManagedIpv4Layer`, `ManagedArpLayer`, `ManagedEthernetLayer`, or
+`ManagedE1000Driver`.
+
+### Service API and bounds
+
+The consumer-facing API consists of value/result types and bounded operations:
+
+* `NetworkStatus GetStatus()` returns a copied snapshot containing link/driver
+  readiness, DHCP-bound/configured state, the six-byte MAC in a low-48-bit
+  value, IPv4 address, subnet mask, and DHCP-provided DNS server.
+* `BeginResolveIpv4` plus cooperative `Poll` exposes `Idle`, `Pending`,
+  `Success`, `NxDomain`, and `Failed`. There is exactly one active DNS query;
+  the underlying encoded hostname storage remains bounded at 253 characters.
+* `BeginPingIpv4` plus `Poll` exposes one active bounded ping operation.
+  ICMP headers, identifiers, and payload ownership remain internal.
+* `BindUdpEndpoint`, `UnregisterUdpEndpoint`, and `SendUdp` expose the existing
+  fixed endpoint model. The endpoint table remains capacity four, payloads are
+  limited to 512 bytes, and one pending IPv4 transmit remains the only staged
+  transmit slot. Resource contention returns explicit `Busy`, `NoResource`,
+  or `Rejected` results rather than exceptions.
+* `TryReceiveUdp` copies a validated datagram into the caller's buffer from one
+  owned service receive slot. The slot has capacity one and 512 bytes; a second
+  arrival is rejected as overflow and cannot silently overwrite the first.
+
+`Ipv4Address` is a heap-free value type storing a network-order `uint` with
+deterministic equality. The service never exposes Ethernet frames, ARP entries,
+packet builders, checksums, DNS transaction IDs, descriptor state, DMA buffers,
+or RX spans. No `Task`, `async`, socket, file-descriptor, callback, or general
+async framework was added. The service boundary is operation-level, so packet
+hot paths remain fixed-buffer and allocation-conscious.
+
+### Consumer, GC, teardown, and reinitialization
+
+The deterministic Phase 21 consumer reads DHCP status, resolves
+`phase21.test`, feeds the returned `10.15.0.2` value into the service ping and
+UDP calls, binds local port `15210`, and validates the peer response on port
+`15211`. The exact payload is `PHASE21-API-HELLO`; the exact reply is
+`PHASE21-API-ACK`. The consumer contains no `10.15.0.2` destination
+substitution. The peer validates the actual packet on the dgram wire.
+
+The service holds no native pointers or borrowed RX spans. An explicit GC
+collection occurs after the first DNS/ICMP/UDP exchange; the same service then
+performs a second DNS/ICMP/UDP exchange. `Teardown()` clears operation state,
+bound service endpoints, and the receive slot and makes all subsequent service
+operations unavailable. The established driver stop path then clears DHCP,
+DNS, UDP, IPv4, ARP, Ethernet, and E1000 state and restores PCI/DMA/MMIO
+accounting. Service, consumer, and receive storage are constructed before the
+managed-kernel baseline collection; the runtime adapter rebinds the live
+protocol objects and publishes a copied status snapshot at protocol start so
+the post-GC path does not allocate or retain borrowed protocol state. A newly
+constructed service begins a fresh generation; no prior result or registration
+is reused.
+
+### Phase 21 evidence
+
+The focused host suite is
+`tools/Run-ManagedKernelPhase21HostTests.ps1`; it passes 42 cases covering
+status snapshots, DHCP/configuration gating, DNS success/NXDOMAIN/busy and
+hostname validation, ICMP busy/not-configured/result propagation, endpoint
+duplicates/capacity/unregister, UDP payload and pending-send bounds, copied
+receive delivery, GC, teardown, and fresh-generation reset. The dedicated
+fresh-boot runner is `tools/Run-ManagedKernelPhase21FreshBoots.ps1`; its
+independent validator is `tools/Parse-ManagedE1000Phase21Pcap.ps1`.
+
+Each authoritative Phase 21 PCAP validates DHCP DORA with Option 6, two
+`phase21.test` DNS queries and A responses for `10.15.0.2`, two ICMP requests
+and replies whose destination is the resolver result, and two exact UDP
+application exchanges. All captured IPv4/UDP checksums and lengths are
+validated, and the parser rejects the pre-DHCP static identity on the wire.
+Three fresh QEMU processes are required. Phase 20 remains independently
+available through its existing runner and parser; the Phase 15–20 host suites
+remain regression gates. The final AOT payload is `1,182,720` bytes with
+SHA-256
+`9FF5C4428395CBC342E185735F6D23FCCD0A8785B4105EF1F819BBBE08436868`.
+The authoritative evidence is under
+`evidence/phase21-final-20260825/`; all three fresh boots and all three PCAP
+parser runs report PASS. This is Outcome A for the bounded Phase 21 scope.
+The final payload also passes three fresh Phase 20 regression boots recorded
+under `evidence/phase20-regression-20260825/`. Host regression counts remain
+Phase 15 `28`, Phase 16 `57`, Phase 17 `48`, Phase 18 `55`, and Phase 19 `39`,
+with Phase 20 `123` and Phase 21 `42`.
+
+TCP, sockets, System.Net.Sockets compatibility, multiple concurrent DNS
+requests, general async APIs, blocking network APIs, select/poll, streaming,
+TLS, HTTP, IPv6, routing, gateways, and multiple interfaces are explicitly
+deferred to later phases.

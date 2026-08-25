@@ -19,6 +19,7 @@ param(
     [switch]$EnablePhase18Protocol,
     [switch]$EnablePhase19Protocol,
     [switch]$EnablePhase20Protocol,
+    [switch]$EnablePhase21Protocol,
     [switch]$Phase15EnableFilterDump,
     [switch]$Phase15EnableQemuReceiveTrace,
     [ValidateSet('all', 'rx', 'tx')]
@@ -212,7 +213,7 @@ function Send-Key11([Net.Sockets.TcpClient]$monitor, [System.Diagnostics.Process
 
 function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false,
                              [bool]$phase18 = $false, [bool]$phase19 = $false,
-                             [bool]$phase20 = $false) {
+                             [bool]$phase20 = $false, [bool]$phase21 = $false) {
     $destination = New-Object byte[] 6
     for ($index = 0; $index -lt 6; $index++) {
         $destination[$index] = [Convert]::ToByte($destinationMac.Substring($index * 2, 2), 16)
@@ -225,7 +226,8 @@ function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false,
     $frame[12] = 0x88
     $frame[13] = 0xB5
     [Array]::Copy($signature, 0, $frame, 14, $signature.Length)
-    $sequence = if ($phase20) { 0x20000001 } `
+    $sequence = if ($phase21) { 0x21000001 } `
+        elseif ($phase20) { 0x20000001 } `
         elseif ($phase19) { 0x19000001 } `
         elseif ($phase18) { 0x18000001 } `
         elseif ($phase17) { 0x17000001 } else { 0x15000001 }
@@ -242,21 +244,24 @@ function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
                                   [string]$destinationMac,
                                   [string]$destinationHost = '127.0.0.1',
                                    [bool]$phase17 = $false,
-                                   [bool]$phase18 = $false,
-                                   [bool]$phase19 = $false,
-                                   [bool]$phase20 = $false) {
-    $frame = New-Phase15Frame11 $destinationMac $phase17 $phase18 $phase19 $phase20
+                                    [bool]$phase18 = $false,
+                                    [bool]$phase19 = $false,
+                                    [bool]$phase20 = $false,
+                                    [bool]$phase21 = $false) {
+    $frame = New-Phase15Frame11 $destinationMac $phase17 $phase18 $phase19 $phase20 $phase21
     $sent = $peerUdp.Send($frame, $frame.Length, $destinationHost, $destinationPort)
     Require11 ($sent -eq $frame.Length) 'Phase 15 UDP injector sent a short Ethernet datagram.'
     $hash = [Security.Cryptography.SHA256]::Create()
     try { $frameHash = ([BitConverter]::ToString($hash.ComputeHash($frame))).Replace('-', '') }
     finally { $hash.Dispose() }
-    $marker = if ($phase20) { 'MANAGED_E1000_PHASE20_INJECTED' } `
+    $marker = if ($phase21) { 'MANAGED_E1000_PHASE21_INJECTED' } `
+        elseif ($phase20) { 'MANAGED_E1000_PHASE20_INJECTED' } `
         elseif ($phase19) { 'MANAGED_E1000_PHASE19_INJECTED' } `
         elseif ($phase18) { 'MANAGED_E1000_PHASE18_INJECTED' } `
         elseif ($phase17) { 'MANAGED_E1000_PHASE17_INJECTED' } `
         else { 'MANAGED_E1000_PHASE15_INJECTED' }
-    $sequenceText = if ($phase20) { '0x20000001' } `
+    $sequenceText = if ($phase21) { '0x21000001' } `
+        elseif ($phase20) { '0x20000001' } `
         elseif ($phase19) { '0x19000001' } `
         elseif ($phase18) { '0x18000001' } `
         elseif ($phase17) { '0x17000001' } else { '0x15000001' }
@@ -1044,7 +1049,10 @@ try {
                     'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
                 Require11 $macMatch.Success 'Phase 15 did not publish the runtime e1000 MAC.'
                 $destinationMac = ($macMatch.Groups[1].Value + $macMatch.Groups[2].Value)
-                $injectOutput = if ($EnablePhase20Protocol) {
+                $injectOutput = if ($EnablePhase21Protocol) {
+                    @(Send-Phase15DgramFrame11 $peerUdp $rxPort $destinationMac `
+                        '127.0.0.1' $false $false $false $false $true)
+                } elseif ($EnablePhase20Protocol) {
                     @(Send-Phase15DgramFrame11 $peerUdp $rxPort $destinationMac `
                         '127.0.0.1' $false $false $false $true)
                 } elseif ($EnablePhase19Protocol) {
@@ -1071,7 +1079,7 @@ try {
                 } elseif ($Phase15AcceptEitherOutcome) {
                     $phase15Outcome = Wait-Phase15Outcome11 `
                         $deadline $process $stream $logStream $text $buffer
-                } elseif ($EnablePhase20Protocol -or $EnablePhase19Protocol -or $EnablePhase18Protocol -or $EnablePhase17Protocol -or
+                } elseif ($EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol -or $EnablePhase18Protocol -or $EnablePhase17Protocol -or
                           $EnablePhase16Protocol) {
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' `
                         $deadline $process $stream $logStream $text $buffer
@@ -1080,12 +1088,118 @@ try {
                     $guestMacBytes = New-MacBytes16 $destinationMac
                     $broadcastMac = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
                     $hostMacBytes = [byte[]](0x02, 0x15, 0, 0, 0, 2)
-                    $guestIpBytes = if ($EnablePhase20Protocol -or $EnablePhase19Protocol) {
+                    $guestIpBytes = if ($EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol) {
                         [byte[]](10, 15, 0, 42)
                     } else { [byte[]](10, 15, 0, 1) }
                     $hostIpBytes = [byte[]](10, 15, 0, 2)
                     $broadcastIpBytes = [byte[]](255, 255, 255, 255)
-                    if ($EnablePhase20Protocol) {
+                    if ($EnablePhase21Protocol) {
+                        # Phase 21 uses the same bounded DHCP/DNS peer but the
+                        # managed application consumer drives all post-DNS
+                        # operations through ManagedNetworkService.
+                        Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_DISCOVER_SENT' `
+                            $deadline $process $stream $logStream $text $buffer
+                        $discoverFrame = Receive-AnyPhase19Frame $peerUdp $TimeoutSeconds 'DHCPDISCOVER'
+                        $discoverPayload = Get-DhcpPayload19 $discoverFrame
+                        Require11 ($null -ne $discoverPayload) 'Phase 21 DHCPDISCOVER is not IPv4/UDP.'
+                        Write-Phase20Frame $injectionLog 'dhcpdiscover' $discoverFrame
+                        $xid = Read-U32-Phase19 $discoverPayload 4
+                        $offerPayload = New-DhcpReply19 $discoverPayload 2 $guestIpBytes $hostIpBytes $true $true $true
+                        $offerFrame = New-Ipv4Udp18 $broadcastMac $hostMacBytes $hostIpBytes $broadcastIpBytes `
+                            (New-UdpDatagram18 67 68 $hostIpBytes $broadcastIpBytes $offerPayload) 0x2D11
+                        Require11 ($peerUdp.Send($offerFrame, $offerFrame.Length, '127.0.0.1', $rxPort) -eq $offerFrame.Length) 'Phase 21 DHCPOFFER send was short.'
+                        Write-Phase20Frame $injectionLog 'dhcpoffer' $offerFrame
+                        Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_REQUEST_SENT' $deadline $process $stream $logStream $text $buffer
+                        $requestFrame = Receive-AnyPhase19Frame $peerUdp $TimeoutSeconds 'DHCPREQUEST'
+                        $requestPayload = Get-DhcpPayload19 $requestFrame
+                        Require11 ($null -ne $requestPayload) 'Phase 21 DHCPREQUEST is not IPv4/UDP.'
+                        Write-Phase20Frame $injectionLog 'dhcprequest' $requestFrame
+                        $ackPayload = New-DhcpReply19 $requestPayload 5 $guestIpBytes $hostIpBytes $true $true $true
+                        $ackFrame = New-Ipv4Udp18 $broadcastMac $hostMacBytes $hostIpBytes $broadcastIpBytes `
+                            (New-UdpDatagram18 67 68 $hostIpBytes $broadcastIpBytes $ackPayload) 0x2D12
+                        Require11 ($peerUdp.Send($ackFrame, $ackFrame.Length, '127.0.0.1', $rxPort) -eq $ackFrame.Length) 'Phase 21 DHCPACK send was short.'
+                        Write-Phase20Frame $injectionLog 'dhcpack' $ackFrame
+                        Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_BOUND' $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_CONFIGURED' $deadline $process $stream $logStream $text $buffer
+
+                        $zeroMac = [byte[]](0, 0, 0, 0, 0, 0)
+                        $arpRequest = New-Phase16ArpFrame11 $broadcastMac $guestMacBytes 1 $guestIpBytes $zeroMac $hostIpBytes
+                        $observedArp = Receive-ExpectedPhase16Frame11 $peerUdp $arpRequest 'Phase 21 DNS ARP request' $TimeoutSeconds
+                        Write-Phase20Frame $injectionLog 'dns_arp_request' $observedArp
+                        $arpReply = New-Phase16ArpFrame11 $guestMacBytes $hostMacBytes 2 $hostIpBytes $guestMacBytes $guestIpBytes
+                        Require11 ($peerUdp.Send($arpReply, $arpReply.Length, '127.0.0.1', $rxPort) -eq $arpReply.Length) 'Phase 21 DNS ARP reply send was short.'
+                        Write-Phase20Frame $injectionLog 'dns_arp_reply' $arpReply
+
+                        $dnsQueryFrame = Receive-AnyDns20Frame $peerUdp $TimeoutSeconds 'phase21.test'
+                        $dnsQueryPayload = Get-DnsPayload20 $dnsQueryFrame
+                        $expectedQuestion = [byte[]](7,112,104,97,115,101,50,49,4,116,101,115,116,0,0,1,0,1)
+                        Require11 ($null -ne $dnsQueryPayload -and $dnsQueryPayload.Length -eq 30 -and
+                            (Bytes-Equal16 $dnsQueryPayload 12 $expectedQuestion)) 'Phase 21 DNS query name was invalid.'
+                        Write-Phase20Frame $injectionLog 'dns_phase21_query' $dnsQueryFrame
+                        $dnsResponse = New-DnsResponse20 $dnsQueryPayload 'valid'
+                        $dnsResponseFrame = New-Ipv4Udp18 $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                            (New-UdpDatagram18 53 15200 $hostIpBytes $guestIpBytes $dnsResponse) 0x2E11
+                        Require11 ($peerUdp.Send($dnsResponseFrame, $dnsResponseFrame.Length, '127.0.0.1', $rxPort) -eq $dnsResponseFrame.Length) 'Phase 21 DNS response send was short.'
+                        Write-Phase20Frame $injectionLog 'dns_phase21_response' $dnsResponseFrame
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_DNS_SUCCESS' $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_RESOLVED_IPV4=0x000000000A0F0002' $deadline $process $stream $logStream $text $buffer
+
+                        $icmpPayload = [Text.Encoding]::ASCII.GetBytes('guideXOS Phase17 ping payload')
+                        $icmpRequest = New-IcmpEcho-Phase17 8 0x2101 1 $icmpPayload
+                        $icmpRequestFrame = New-Ipv4Icmp-Phase17 $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes $icmpRequest 0x2E12
+                        $observedIcmp = Receive-ExpectedPhase17Frame $peerUdp $icmpRequestFrame 'Phase 21 API ICMP request' $TimeoutSeconds
+                        Require11 ((Bytes-Equal16 $observedIcmp 30 $hostIpBytes)) 'Phase 21 ICMP destination was not resolver output.'
+                        Write-Phase20Frame $injectionLog 'phase21_icmp_request' $observedIcmp
+                        $icmpReply = New-IcmpEcho-Phase17 0 0x2101 1 $icmpPayload
+                        $icmpReplyFrame = New-Ipv4Icmp-Phase17 $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes $icmpReply 0x2E13
+                        Require11 ($peerUdp.Send($icmpReplyFrame, $icmpReplyFrame.Length, '127.0.0.1', $rxPort) -eq $icmpReplyFrame.Length) 'Phase 21 ICMP reply send was short.'
+                        Write-Phase20Frame $injectionLog 'phase21_icmp_reply' $icmpReplyFrame
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_ICMP_SUCCESS' $deadline $process $stream $logStream $text $buffer
+
+                        $appRequestPayload = [Text.Encoding]::ASCII.GetBytes('PHASE21-API-HELLO')
+                        $appRequest = New-UdpDatagram18 15210 15211 $guestIpBytes $hostIpBytes $appRequestPayload
+                        $appRequestFrame = New-Ipv4Udp18 $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes $appRequest 0x2E14
+                        $observedAppRequest = Receive-ExpectedPhase17Frame $peerUdp $appRequestFrame 'Phase 21 API UDP request' $TimeoutSeconds
+                        Require11 ((Bytes-Equal16 $observedAppRequest 30 $hostIpBytes) -and
+                            (Bytes-Equal16 $observedAppRequest 42 $appRequestPayload)) 'Phase 21 UDP request was not exact.'
+                        Write-Phase20Frame $injectionLog 'phase21_udp_request' $observedAppRequest
+                        $appReplyPayload = [Text.Encoding]::ASCII.GetBytes('PHASE21-API-ACK')
+                        $appReply = New-UdpDatagram18 15211 15210 $hostIpBytes $guestIpBytes $appReplyPayload
+                        $appReplyFrame = New-Ipv4Udp18 $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes $appReply 0x2E15
+                        Require11 ($peerUdp.Send($appReplyFrame, $appReplyFrame.Length, '127.0.0.1', $rxPort) -eq $appReplyFrame.Length) 'Phase 21 UDP reply send was short.'
+                        Write-Phase20Frame $injectionLog 'phase21_udp_reply' $appReplyFrame
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_UDP_REPLY_VALID' $deadline $process $stream $logStream $text $buffer
+
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_GC_SURVIVAL_PASSED' $deadline $process $stream $logStream $text $buffer
+                        $postQueryFrame = Receive-AnyDns20Frame $peerUdp $TimeoutSeconds 'phase21.test post-GC'
+                        $postQueryPayload = Get-DnsPayload20 $postQueryFrame
+                        Write-Phase20Frame $injectionLog 'phase21_post_gc_dns_query' $postQueryFrame
+                        $postResponse = New-DnsResponse20 $postQueryPayload 'valid'
+                        $postResponseFrame = New-Ipv4Udp18 $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+                            (New-UdpDatagram18 53 15200 $hostIpBytes $guestIpBytes $postResponse) 0x2E16
+                        Require11 ($peerUdp.Send($postResponseFrame, $postResponseFrame.Length, '127.0.0.1', $rxPort) -eq $postResponseFrame.Length) 'Phase 21 post-GC DNS response send was short.'
+                        Write-Phase20Frame $injectionLog 'phase21_post_gc_dns_response' $postResponseFrame
+                        $postIcmp = New-IcmpEcho-Phase17 8 0x2102 2 $icmpPayload
+                        $postIcmpFrame = New-Ipv4Icmp-Phase17 $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes $postIcmp 0x2E17
+                        $observedPostIcmp = Receive-ExpectedPhase17Frame $peerUdp $postIcmpFrame 'Phase 21 post-GC ICMP request' $TimeoutSeconds
+                        Write-Phase20Frame $injectionLog 'phase21_post_gc_icmp_request' $observedPostIcmp
+                        $postIcmpReply = New-IcmpEcho-Phase17 0 0x2102 2 $icmpPayload
+                        $postIcmpReplyFrame = New-Ipv4Icmp-Phase17 $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes $postIcmpReply 0x2E18
+                        Require11 ($peerUdp.Send($postIcmpReplyFrame, $postIcmpReplyFrame.Length, '127.0.0.1', $rxPort) -eq $postIcmpReplyFrame.Length) 'Phase 21 post-GC ICMP reply send was short.'
+                        Write-Phase20Frame $injectionLog 'phase21_post_gc_icmp_reply' $postIcmpReplyFrame
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_POST_GC_ICMP_SUCCESS' $deadline $process $stream $logStream $text $buffer
+                        $postAppRequest = New-UdpDatagram18 15210 15211 $guestIpBytes $hostIpBytes $appRequestPayload
+                        $postAppRequestFrame = New-Ipv4Udp18 $hostMacBytes $guestMacBytes $guestIpBytes $hostIpBytes $postAppRequest 0x2E19
+                        $observedPostApp = Receive-ExpectedPhase17Frame $peerUdp $postAppRequestFrame 'Phase 21 post-GC UDP request' $TimeoutSeconds
+                        Write-Phase20Frame $injectionLog 'phase21_post_gc_udp_request' $observedPostApp
+                        Require11 ($peerUdp.Send($appReplyFrame, $appReplyFrame.Length, '127.0.0.1', $rxPort) -eq $appReplyFrame.Length) 'Phase 21 post-GC UDP reply send was short.'
+                        Write-Phase20Frame $injectionLog 'phase21_post_gc_udp_reply' $appReplyFrame
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_POST_GC_UDP_SUCCESS' $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_TEARDOWN_PASSED' $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'GXOS_NET10:MANAGED_NETWORK_SERVICE_PHASE21_PASS' $deadline $process $stream $logStream $text $buffer
+                        Wait-Marker11 'MANAGED_KERNEL_PHASE21_PASS' $deadline $process $stream $logStream $text $buffer
+                        $phase15Outcome = 'PASS_PHASE21'
+                    } elseif ($EnablePhase20Protocol) {
                         Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_DISCOVER_SENT' `
                             $deadline $process $stream $logStream $text $buffer
                         $discoverFrame = Receive-AnyPhase19Frame $peerUdp $TimeoutSeconds `
@@ -1408,7 +1522,7 @@ try {
                         Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_BOUND' `
                             $deadline $process $stream $logStream $text $buffer
                     }
-                    if (-not $EnablePhase20Protocol) {
+                    if (-not $EnablePhase20Protocol -and -not $EnablePhase21Protocol) {
                     $zeroMac = [byte[]](0, 0, 0, 0, 0, 0)
                     $guestRequest = New-Phase16ArpFrame11 `
                         $broadcastMac $guestMacBytes 1 $guestIpBytes $zeroMac $hostIpBytes
@@ -1452,7 +1566,9 @@ try {
                     Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESPONDER_PASS' `
                         $deadline $process $stream $logStream $text $buffer
                     }
-                    if ($EnablePhase20Protocol) {
+                    if ($EnablePhase21Protocol) {
+                        $phase15Outcome = 'PASS_PHASE21'
+                    } elseif ($EnablePhase20Protocol) {
                         $phase15Outcome = 'PASS_PHASE20'
                     } elseif ($EnablePhase17Protocol -or $EnablePhase18Protocol -or
                         $EnablePhase19Protocol) {

@@ -8,6 +8,7 @@ internal sealed class ManagedEthernetLayer
     private readonly ManagedE1000Driver _transport;
     private readonly ManagedArpLayer _arp;
     private readonly ManagedIpv4Layer _ipv4;
+    private readonly ManagedNetworkService _networkService;
     private readonly byte[] _localMac;
     private readonly byte[] _broadcastMac;
     private readonly byte[] _txFrame;
@@ -26,6 +27,11 @@ internal sealed class ManagedEthernetLayer
         _rxFrame = new byte[ManagedEthernetProtocol.MaximumFrameLength];
         _arp = new ManagedArpLayer(this);
         _ipv4 = new ManagedIpv4Layer(this, _arp);
+        _networkService = new ManagedNetworkService(
+            new ManagedNetworkServiceBackend(this, _ipv4));
+        ((ManagedNetworkServiceBackend)_networkService.Backend)
+            .AttachService(_networkService);
+        _ipv4.AttachNetworkService(_networkService);
     }
 
     internal uint UnknownEtherTypeCount => _unknownEtherTypeCount;
@@ -35,7 +41,11 @@ internal sealed class ManagedEthernetLayer
     internal bool Phase18Passed => _ipv4.Phase18Passed;
     internal bool Phase19Passed => _ipv4.Phase19Passed;
     internal bool Phase20Passed => _ipv4.Phase20Passed;
+    internal bool Phase21Passed => _ipv4.Phase21Passed;
     internal ReadOnlySpan<byte> LocalMac => _localMac;
+    internal bool IsAccepting => _accepting;
+    internal bool DriverReady => _transport.State == ManagedE1000DriverState.Running;
+    internal ManagedNetworkService NetworkService => _networkService!;
 
     internal bool TryRunPhase16()
     {
@@ -60,6 +70,14 @@ internal sealed class ManagedEthernetLayer
     internal bool TryRunPhase20()
     {
         return _ipv4.TryRunPhase20();
+    }
+
+    internal bool TryRunPhase21()
+    {
+        ManagedNetworkServiceBackend runtime =
+            (ManagedNetworkServiceBackend)_networkService.Backend;
+        runtime.Rebind(this, _ipv4);
+        return _ipv4.TryRunPhase21();
     }
 
     internal void InitializeMac()
@@ -209,7 +227,12 @@ internal sealed class ManagedEthernetLayer
     internal bool TryStop()
     {
         _accepting = false;
-        return _ipv4.TryStop() && _arp.TryStop();
+        ManagedNetworkService service =
+            ManagedNetworkServiceBackend.LiveService ?? _networkService;
+        ManagedIpv4Layer ipv4 =
+            ManagedNetworkServiceBackend.LiveIpv4 ?? _ipv4;
+        service.OnProtocolTeardown();
+        return ipv4.TryStop() && _arp.TryStop();
     }
 }
 
@@ -226,6 +249,8 @@ internal enum ManagedNetworkDispatchResult : byte
     UdpEndpointResponseSent = 8,
     UdpResponseValidated = 9,
     UdpZeroChecksumAccepted = 10,
+    UdpServiceReceived = 19,
+    UdpReceiveOverflow = 20,
     DhcpRequestSent = 11,
     DhcpBound = 12,
     DhcpNak = 13,

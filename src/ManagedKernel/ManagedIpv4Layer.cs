@@ -22,7 +22,9 @@ internal enum ManagedIpv4HandleResult : byte
     DnsResponseMalformed = 15,
     DnsResponseTruncated = 16,
     DnsNxDomain = 17,
-    DnsResolved = 18
+    DnsResolved = 18,
+    UdpServiceReceived = 19,
+    UdpReceiveOverflow = 20
 }
 
 internal sealed class ManagedIpv4Layer
@@ -68,6 +70,8 @@ internal sealed class ManagedIpv4Layer
     private readonly ManagedDnsResolver _dns = new();
     private readonly byte[] _pingPayload = new byte[32];
     private readonly ManagedIpv4PendingTransmission _pending = new();
+    private ManagedNetworkService? _networkService;
+    private ManagedPhase21TestConsumer? _phase21Consumer;
     private uint _localIpv4Value;
     private uint _peerIpv4Value;
     private uint _subnetMaskValue;
@@ -89,6 +93,9 @@ internal sealed class ManagedIpv4Layer
     private bool _phase18Passed;
     private bool _phase19Passed;
     private bool _phase20Passed;
+    private bool _phase21Passed;
+    private ushort _servicePingIdentifier = 0x2101;
+    private ushort _servicePingSequence = 1;
     private uint _udpRxValidCount;
     private uint _udpRxMalformedCount;
     private uint _udpChecksumFailureCount;
@@ -96,6 +103,7 @@ internal sealed class ManagedIpv4Layer
     private uint _udpUnknownPortCount;
     private uint _udpEndpointDispatchCount;
     private uint _udpTxCount;
+    private uint _serviceUdpTxCount;
     private uint _udpPendingRejectCount;
     private uint _udpManagedResponseCount;
     private uint _udpPeerResponseCount;
@@ -142,6 +150,7 @@ internal sealed class ManagedIpv4Layer
     internal bool Phase18Passed => _phase18Passed;
     internal bool Phase19Passed => _phase19Passed;
     internal bool Phase20Passed => _phase20Passed;
+    internal bool Phase21Passed => _phase21Passed;
     internal ManagedDhcpv4State DhcpState => _dhcp.State;
     internal uint DhcpTransactionId => _dhcp.TransactionId;
     internal ReadOnlySpan<byte> DhcpLeasedIpv4 => _dhcp.LeasedIpv4;
@@ -161,6 +170,20 @@ internal sealed class ManagedIpv4Layer
     internal ushort DnsTransactionId => _dns.TransactionId;
     internal ReadOnlySpan<byte> DnsServerIpv4 => _dns.ServerIpv4;
     internal ReadOnlySpan<byte> DnsResolvedIpv4 => _dns.ResolvedIpv4;
+    internal uint LocalIpv4Value => _localIpv4Value;
+    internal uint SubnetMaskValue => _subnetMaskValue;
+    internal uint DnsServerValue => _dns.HasServer
+        ? ManagedEthernetProtocol.ReadUInt32Network(_dns.ServerIpv4, 0) : 0;
+    internal uint DnsResolvedIpv4Value => _dns.HasResolvedAddress
+        ? ManagedEthernetProtocol.ReadUInt32Network(_dns.ResolvedIpv4, 0) : 0;
+    internal bool DnsHasResolvedAddress => _dns.HasResolvedAddress;
+    internal bool ServicePingActive => _awaitingReply;
+
+    internal void AttachNetworkService(ManagedNetworkService service)
+    {
+        _networkService = service;
+        _phase21Consumer = new ManagedPhase21TestConsumer(service);
+    }
 
     internal bool TryRunPhase17()
     {
@@ -279,6 +302,50 @@ internal sealed class ManagedIpv4Layer
 
         _phase20Passed = true;
         return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE20_PASS\r\n"u8);
+    }
+
+    internal bool TryRunPhase21()
+    {
+        if (_phase21Passed || _active || !_arp.TryBeginDhcp() ||
+            _networkService == null) return false;
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_NETWORK_SERVICE_READY\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort) ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                       ManagedUdpEndpointHandler.DnsResolver) ||
+            !PublishNetworkServiceStatus() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_NETWORK_SERVICE_CONFIGURED\r\n"u8))
+            return false;
+
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        if (_phase21Consumer == null || !_phase21Consumer.TryRun()) return false;
+        _phase21Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE21_PASS\r\n"u8);
+    }
+
+    private bool PublishNetworkServiceStatus()
+    {
+        if (_networkService == null) return false;
+        ulong mac = 0;
+        ReadOnlySpan<byte> localMac = _ethernet.LocalMac;
+        for (int index = 0; index != localMac.Length; ++index)
+            mac = (mac << 8) | localMac[index];
+        _networkService.SetRuntimeStatus(new NetworkStatus(
+            true, true, true, true, mac,
+            new Ipv4Address(_localIpv4Value),
+            new Ipv4Address(_subnetMaskValue),
+            new Ipv4Address(DnsServerValue)));
+        return true;
     }
 
     private bool TryResolveDns(ReadOnlySpan<byte> name, bool expectResolved)
@@ -528,6 +595,7 @@ internal sealed class ManagedIpv4Layer
         _udpUnknownPortCount = 0;
         _udpEndpointDispatchCount = 0;
         _udpTxCount = 0;
+        _serviceUdpTxCount = 0;
         _udpPendingRejectCount = 0;
         _udpManagedResponseCount = 0;
         _udpPeerResponseCount = 0;
@@ -540,18 +608,110 @@ internal sealed class ManagedIpv4Layer
         _subnetMaskValue = 0;
         _phase19Passed = false;
         _phase20Passed = false;
+        _phase21Passed = false;
+        _servicePingIdentifier = 0x2101;
+        _servicePingSequence = 1;
         _dns.ResetForTeardown();
         _awaitedDestinationIpv4.AsSpan().Clear();
         return true;
     }
 
+    internal bool TryBeginServiceResolve(ReadOnlySpan<byte> name)
+    {
+        if (!_active || _dhcp.State != ManagedDhcpv4State.Bound ||
+            !_dns.HasServer || _dns.IsActive ||
+            !_dns.TryStartQuery(name) ||
+            !_dns.TryBuildQuery(_dnsQuery, out ushort queryLength) ||
+            !TrySendUdpDatagram(DnsClientPort, DnsServerPort,
+                                _dnsQuery.AsSpan(0, queryLength),
+                                _dns.ServerIpv4, out _))
+        {
+            _dns.CancelActiveQuery();
+            return false;
+        }
+        return true;
+    }
+
+    internal bool TryGetServiceResolved(out Ipv4Address address)
+    {
+        address = new Ipv4Address(DnsResolvedIpv4Value);
+        return DnsHasResolvedAddress;
+    }
+
+    internal bool TryBeginServicePing(Ipv4Address destination)
+    {
+        if (!_active || _dhcp.State != ManagedDhcpv4State.Bound ||
+            !destination.IsUsable || _awaitingReply || _pending.IsActive)
+            return false;
+        Span<byte> address = stackalloc byte[4];
+        destination.CopyTo(address);
+        ushort identifier = _servicePingIdentifier++;
+        if (_servicePingIdentifier == 0) _servicePingIdentifier = 1;
+        ushort sequence = _servicePingSequence++;
+        if (_servicePingSequence == 0) _servicePingSequence = 1;
+        ushort ipIdentifier = sequence == 1 ? (ushort)0x2E12 : (ushort)0x2E17;
+        return TrySendPing(address, identifier, sequence, ipIdentifier);
+    }
+
+    internal bool TryRegisterServiceEndpoint(ushort port)
+    {
+        return _active && _dhcp.State == ManagedDhcpv4State.Bound &&
+               _udpEndpoints.TryRegister(port,
+                                          ManagedUdpEndpointHandler.Phase21Service);
+    }
+
+    internal bool TryUnregisterServiceEndpoint(ushort port)
+    {
+        return _udpEndpoints.TryUnregister(port);
+    }
+
+    internal bool TryServiceSendUdp(Ipv4Address destination,
+                                    ushort destinationPort, ushort sourcePort,
+                                    ReadOnlySpan<byte> payload)
+    {
+        if (!_udpEndpoints.TryLookup(sourcePort,
+                                     out ManagedUdpEndpointHandler handler) ||
+            handler != ManagedUdpEndpointHandler.Phase21Service)
+            return false;
+        Span<byte> address = stackalloc byte[4];
+        destination.CopyTo(address);
+        ushort ipIdentifier = _serviceUdpTxCount == 0
+            ? (ushort)0x2E14
+            : (ushort)0x2E19;
+        if (!TrySendUdpDatagram(sourcePort, destinationPort, payload,
+                                address, ipIdentifier, out _))
+            return false;
+        _serviceUdpTxCount++;
+        return true;
+    }
+
+    internal bool TryServiceTeardown()
+    {
+        _udpEndpoints.TryUnregisterHandler(ManagedUdpEndpointHandler.Phase21Service);
+        _dns.CancelActiveQuery();
+        _awaitingReply = false;
+        _replyValidated = false;
+        _awaitedIdentifier = 0;
+        _awaitedSequence = 0;
+        return true;
+    }
+
     private bool TrySendPing(ushort identifier, ushort sequence)
     {
-        return TrySendPing(_peerIpv4, identifier, sequence);
+        return TrySendPing(_peerIpv4, identifier, sequence,
+                           (ushort)(0x1700 + sequence));
     }
 
     private bool TrySendPing(ReadOnlySpan<byte> destinationIpv4,
                              ushort identifier, ushort sequence)
+    {
+        return TrySendPing(destinationIpv4, identifier, sequence,
+                           (ushort)(0x1700 + sequence));
+    }
+
+    private bool TrySendPing(ReadOnlySpan<byte> destinationIpv4,
+                             ushort identifier, ushort sequence,
+                             ushort ipIdentifier)
     {
         if (!ManagedIpv4Protocol.IsDirectlyReachable(
                 _localIpv4Value, _subnetMaskValue,
@@ -561,7 +721,7 @@ internal sealed class ManagedIpv4Layer
                 _pingPayload.AsSpan(0, _pingPayloadLength),
                 out ushort icmpLength) ||
             !ManagedIpv4Protocol.TryBuild(
-                _txPacket, (ushort)(0x1700 + sequence), 0,
+                _txPacket, ipIdentifier, 0,
                 ManagedIpv4Protocol.DefaultTtl, ManagedIpv4Protocol.IcmpProtocol,
                 _localIpv4, destinationIpv4, _txIcmp.AsSpan(0, icmpLength),
                 out ushort packetLength) ||
@@ -614,9 +774,26 @@ internal sealed class ManagedIpv4Layer
             return TryHandleDhcpUdp(packet, datagram);
         if (handler == ManagedUdpEndpointHandler.DnsResolver)
             return TryHandleDnsUdp(packet, datagram);
+        if (handler == ManagedUdpEndpointHandler.Phase21Service)
+            return TryHandleServiceUdp(packet, datagram);
         if (handler != ManagedUdpEndpointHandler.Phase18Echo)
             return ManagedIpv4HandleResult.Ignored;
         return TryHandlePhase18Udp(packet, datagram);
+    }
+
+    private ManagedIpv4HandleResult TryHandleServiceUdp(
+        ManagedIpv4Packet packet, ManagedUdpDatagram datagram)
+    {
+        if (_networkService == null) return ManagedIpv4HandleResult.Failed;
+        Ipv4Address source = new Ipv4Address(
+            ManagedEthernetProtocol.ReadUInt32Network(packet.SourceAddress, 0));
+        Ipv4Address destination = new Ipv4Address(
+            ManagedEthernetProtocol.ReadUInt32Network(packet.DestinationAddress, 0));
+        return _networkService.TryCaptureReceivedUdp(
+                   source, destination, datagram.SourcePort,
+                   datagram.DestinationPort, datagram.Payload)
+            ? ManagedIpv4HandleResult.UdpServiceReceived
+            : ManagedIpv4HandleResult.UdpReceiveOverflow;
     }
 
     private ManagedIpv4HandleResult TryHandleDhcpUdp(
@@ -745,6 +922,18 @@ internal sealed class ManagedIpv4Layer
                                     ReadOnlySpan<byte> destinationIpv4,
                                     out ushort packetLength)
     {
+        return TrySendUdpDatagram(sourcePort, destinationPort, payload,
+                                  destinationIpv4,
+                                  (ushort)(0x1900 + _udpTxCount),
+                                  out packetLength);
+    }
+
+    private bool TrySendUdpDatagram(ushort sourcePort, ushort destinationPort,
+                                    ReadOnlySpan<byte> payload,
+                                    ReadOnlySpan<byte> destinationIpv4,
+                                    ushort ipIdentifier,
+                                    out ushort packetLength)
+    {
         packetLength = 0;
         if (_pending.IsActive)
         {
@@ -755,7 +944,7 @@ internal sealed class ManagedIpv4Layer
                 _txUdp, sourcePort, destinationPort, _localIpv4,
                 destinationIpv4, payload, out ushort udpLength) ||
             !ManagedIpv4Protocol.TryBuild(
-                _txPacket, (ushort)(0x1900 + _udpTxCount), 0,
+                _txPacket, ipIdentifier, 0,
                 ManagedIpv4Protocol.DefaultTtl, ManagedUdpProtocol.Protocol,
                 _localIpv4, destinationIpv4, _txUdp.AsSpan(0, udpLength),
                 out packetLength) ||

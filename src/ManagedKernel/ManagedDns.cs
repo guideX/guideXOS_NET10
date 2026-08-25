@@ -380,6 +380,19 @@ internal sealed class ManagedDnsResolver
         return true;
     }
 
+    internal void CancelActiveQuery()
+    {
+        if (!_active) return;
+        _active = false;
+        _queryNameLength = 0;
+        _transactionId = 0;
+        _attempts = 0;
+        Result = ManagedDnsResult.None;
+        Ttl = 0;
+        _resolvedIpv4.AsSpan().Clear();
+        _queryName.AsSpan().Clear();
+    }
+
     internal void ResetForDhcp()
     {
         ClearState(clearServer: true);
