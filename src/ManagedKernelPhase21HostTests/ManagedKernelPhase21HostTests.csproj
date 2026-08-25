@@ -11,5 +11,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\ManagedKernel\ManagedNetworkService.cs" Link="ManagedNetworkService.cs" />
+    <Compile Include="..\ManagedKernel\ManagedEthernet.cs" Link="ManagedEthernet.cs" />
+    <Compile Include="..\ManagedKernel\ManagedE1000Protocol.cs" Link="ManagedE1000Protocol.cs" />
+    <Compile Include="..\ManagedKernel\ManagedTcp.cs" Link="ManagedTcp.cs" />
+    <Compile Include="..\ManagedKernel\ManagedTcpConnection.cs" Link="ManagedTcpConnection.cs" />
   </ItemGroup>
 </Project>

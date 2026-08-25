@@ -24,10 +24,18 @@ internal enum ManagedIpv4HandleResult : byte
     DnsNxDomain = 17,
     DnsResolved = 18,
     UdpServiceReceived = 19,
-    UdpReceiveOverflow = 20
+    UdpReceiveOverflow = 20,
+    TcpEstablished = 21,
+    TcpDataAcknowledged = 22,
+    TcpDataReceived = 23,
+    TcpDuplicateData = 24,
+    TcpOutOfOrder = 25,
+    TcpRstReceived = 26,
+    TcpFinReceived = 27,
+    TcpReceiveUnavailable = 28
 }
 
-internal sealed class ManagedIpv4Layer
+internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
 {
     private const int MaximumProtocolFrames = 16;
     private const int MalformedControlFrames = 5;
@@ -44,6 +52,8 @@ internal sealed class ManagedIpv4Layer
     internal static ReadOnlySpan<byte> Phase20QueryName => "phase20.test"u8;
     internal static ReadOnlySpan<byte> Phase20MissingQueryName =>
         "missing.phase20.test"u8;
+    internal static ReadOnlySpan<byte> Phase22QueryName => "phase22.test"u8;
+    internal static ReadOnlySpan<byte> Phase23QueryName => "phase23.test"u8;
 
     private readonly ManagedEthernetLayer _ethernet;
     private readonly ManagedArpLayer _arp;
@@ -58,6 +68,8 @@ internal sealed class ManagedIpv4Layer
         ManagedIcmpv4Protocol.HeaderLength +
         ManagedIcmpv4Protocol.MaximumEchoPayloadLength];
     private readonly byte[] _txUdp = new byte[ManagedUdpProtocol.MaximumDatagramLength];
+    private readonly byte[] _txTcp = new byte[
+        ManagedTcpProtocol.HeaderLength + 4 + ManagedTcpProtocol.MaximumPayloadLength];
     private readonly byte[] _dhcpPacket = new byte[ManagedDhcpv4Protocol.MaximumPacketLength];
     private readonly byte[] _managedUdpPayload = new byte[ManagedUdpProtocol.MaximumPayloadLength];
     private readonly byte[] _peerUdpAckPayload = new byte[ManagedUdpProtocol.MaximumPayloadLength];
@@ -72,6 +84,9 @@ internal sealed class ManagedIpv4Layer
     private readonly ManagedIpv4PendingTransmission _pending = new();
     private ManagedNetworkService? _networkService;
     private ManagedPhase21TestConsumer? _phase21Consumer;
+    private ManagedPhase22TestConsumer? _phase22Consumer;
+    private ManagedPhase23TestConsumer? _phase23Consumer;
+    private readonly ManagedTcpConnection _tcp;
     private uint _localIpv4Value;
     private uint _peerIpv4Value;
     private uint _subnetMaskValue;
@@ -94,6 +109,12 @@ internal sealed class ManagedIpv4Layer
     private bool _phase19Passed;
     private bool _phase20Passed;
     private bool _phase21Passed;
+    private bool _phase22Passed;
+    private bool _phase23Passed;
+    private uint _tcpGeneration;
+    private uint _tcpRxValidCount;
+    private uint _tcpRxMalformedCount;
+    private uint _tcpChecksumFailureCount;
     private ushort _servicePingIdentifier = 0x2101;
     private ushort _servicePingSequence = 1;
     private uint _udpRxValidCount;
@@ -107,12 +128,14 @@ internal sealed class ManagedIpv4Layer
     private uint _udpPendingRejectCount;
     private uint _udpManagedResponseCount;
     private uint _udpPeerResponseCount;
+    private uint _tcpTxCount;
 
     internal ManagedIpv4Layer(ManagedEthernetLayer ethernet,
                               ManagedArpLayer arp)
     {
         _ethernet = ethernet;
         _arp = arp;
+        _tcp = new ManagedTcpConnection(this);
         arp.LocalIpv4.AsSpan().CopyTo(_localIpv4);
         arp.HostIpv4.AsSpan().CopyTo(_peerIpv4);
         _localIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_localIpv4, 0);
@@ -151,6 +174,18 @@ internal sealed class ManagedIpv4Layer
     internal bool Phase19Passed => _phase19Passed;
     internal bool Phase20Passed => _phase20Passed;
     internal bool Phase21Passed => _phase21Passed;
+    internal bool Phase22Passed => _phase22Passed;
+    internal bool Phase23Passed => _phase23Passed;
+    internal ManagedTcpConnectionState TcpState => _tcp.State;
+    internal bool TcpHasInFlight => _tcp.HasInFlight;
+    internal uint TcpGeneration => _tcp.Generation;
+    internal uint TcpLocalIsn => _tcp.LocalIsn;
+    internal uint TcpPeerIsn => _tcp.PeerIsn;
+    internal uint TcpSendNext => _tcp.SendNext;
+    internal uint TcpReceiveNext => _tcp.ReceiveNext;
+    internal uint TcpRxValidCount => _tcpRxValidCount;
+    internal uint TcpRxMalformedCount => _tcpRxMalformedCount;
+    internal uint TcpChecksumFailureCount => _tcpChecksumFailureCount;
     internal ManagedDhcpv4State DhcpState => _dhcp.State;
     internal uint DhcpTransactionId => _dhcp.TransactionId;
     internal ReadOnlySpan<byte> DhcpLeasedIpv4 => _dhcp.LeasedIpv4;
@@ -183,6 +218,8 @@ internal sealed class ManagedIpv4Layer
     {
         _networkService = service;
         _phase21Consumer = new ManagedPhase21TestConsumer(service);
+        _phase22Consumer = new ManagedPhase22TestConsumer(service);
+        _phase23Consumer = new ManagedPhase23TestConsumer(service);
     }
 
     internal bool TryRunPhase17()
@@ -331,6 +368,68 @@ internal sealed class ManagedIpv4Layer
         if (_phase21Consumer == null || !_phase21Consumer.TryRun()) return false;
         _phase21Passed = true;
         return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE21_PASS\r\n"u8);
+    }
+
+    internal bool TryRunPhase22()
+    {
+        if (_phase22Passed || _active || !_arp.TryBeginDhcp() ||
+            _networkService == null || _phase22Consumer == null)
+            return false;
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_NETWORK_SERVICE_TCP_READY\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort) ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                       ManagedUdpEndpointHandler.DnsResolver) ||
+            !PublishNetworkServiceStatus() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_NETWORK_SERVICE_TCP_CONFIGURED\r\n"u8))
+            return false;
+
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        if (!_phase22Consumer.TryRun()) return false;
+        _phase22Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE22_PASS\r\n"u8);
+    }
+
+    internal bool TryRunPhase23()
+    {
+        if (_phase23Passed || _active || !_arp.TryBeginDhcp() ||
+            _networkService == null || _phase23Consumer == null)
+            return false;
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTP_PHASE23_READY\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort) ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                       ManagedUdpEndpointHandler.DnsResolver) ||
+            !PublishNetworkServiceStatus() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTP_PHASE23_CONFIGURED\r\n"u8))
+            return false;
+
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        if (!_phase23Consumer.TryRun()) return false;
+        _phase23Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE23_PASS\r\n"u8);
     }
 
     private bool PublishNetworkServiceStatus()
@@ -544,6 +643,8 @@ internal sealed class ManagedIpv4Layer
             _malformedPacketCount++;
             return ManagedIpv4HandleResult.Malformed;
         }
+        if (parsed.Protocol == ManagedTcpProtocol.Protocol)
+            return TryHandleTcp(parsed);
         if (parsed.Protocol != ManagedIpv4Protocol.IcmpProtocol)
         {
             if (parsed.Protocol == ManagedUdpProtocol.Protocol)
@@ -600,6 +701,12 @@ internal sealed class ManagedIpv4Layer
         _udpManagedResponseCount = 0;
         _udpPeerResponseCount = 0;
         _txUdp.AsSpan().Clear();
+        _txTcp.AsSpan().Clear();
+        _tcp.ResetForTeardown();
+        _tcpRxValidCount = 0;
+        _tcpRxMalformedCount = 0;
+        _tcpChecksumFailureCount = 0;
+        _tcpTxCount = 0;
         _dhcpPacket.AsSpan().Clear();
         _dhcp.ResetForTeardown();
         _localIpv4.AsSpan().Clear();
@@ -609,6 +716,8 @@ internal sealed class ManagedIpv4Layer
         _phase19Passed = false;
         _phase20Passed = false;
         _phase21Passed = false;
+        _phase22Passed = false;
+        _phase23Passed = false;
         _servicePingIdentifier = 0x2101;
         _servicePingSequence = 1;
         _dns.ResetForTeardown();
@@ -685,6 +794,34 @@ internal sealed class ManagedIpv4Layer
         return true;
     }
 
+    internal bool TryBeginServiceTcpConnect(Ipv4Address destination,
+                                             ushort destinationPort)
+    {
+        if (!_active || _dhcp.State != ManagedDhcpv4State.Bound ||
+            !destination.IsUsable || destinationPort == 0 ||
+            _pending.IsActive || _tcp.State != ManagedTcpConnectionState.Closed)
+            return false;
+        _tcpGeneration = _tcpGeneration == uint.MaxValue ? 1 : _tcpGeneration + 1;
+        return _tcp.TryBeginConnect(new Ipv4Address(_localIpv4Value), destination,
+                                     destinationPort, _tcpGeneration);
+    }
+
+    internal bool TryServiceSendTcp(ReadOnlySpan<byte> payload)
+    {
+        if (!_active || _dhcp.State != ManagedDhcpv4State.Bound ||
+            _pending.IsActive)
+            return false;
+        return _tcp.TrySendApplication(payload);
+    }
+
+    internal bool TryServiceCloseTcp()
+    {
+        if (!_active || _dhcp.State != ManagedDhcpv4State.Bound ||
+            _pending.IsActive)
+            return false;
+        return _tcp.TryClose();
+    }
+
     internal bool TryServiceTeardown()
     {
         _udpEndpoints.TryUnregisterHandler(ManagedUdpEndpointHandler.Phase21Service);
@@ -693,6 +830,7 @@ internal sealed class ManagedIpv4Layer
         _replyValidated = false;
         _awaitedIdentifier = 0;
         _awaitedSequence = 0;
+        _tcp.ResetForTeardown();
         return true;
     }
 
@@ -733,6 +871,47 @@ internal sealed class ManagedIpv4Layer
         _awaitingReply = true;
         _replyValidated = false;
         return true;
+    }
+
+    private ManagedIpv4HandleResult TryHandleTcp(ManagedIpv4Packet packet)
+    {
+        if (!ManagedTcpProtocol.TryParse(
+                packet.Payload, packet.SourceAddress, packet.DestinationAddress,
+                out ManagedTcpSegment segment))
+        {
+            if (packet.Payload.Length >= ManagedTcpProtocol.HeaderLength &&
+                ManagedTcpProtocol.ComputeChecksum(
+                    packet.SourceAddress, packet.DestinationAddress,
+                    packet.Payload) != 0)
+                _tcpChecksumFailureCount++;
+            _tcpRxMalformedCount++;
+            return ManagedIpv4HandleResult.Malformed;
+        }
+
+        _tcpRxValidCount++;
+        ManagedTcpHandleResult result = _tcp.TryHandle(
+            segment, _networkService as IManagedTcpApplicationSink);
+        return result switch
+        {
+            ManagedTcpHandleResult.Established =>
+                ManagedIpv4HandleResult.TcpEstablished,
+            ManagedTcpHandleResult.DataAcknowledged =>
+                ManagedIpv4HandleResult.TcpDataAcknowledged,
+            ManagedTcpHandleResult.DataReceived =>
+                ManagedIpv4HandleResult.TcpDataReceived,
+            ManagedTcpHandleResult.DuplicateData =>
+                ManagedIpv4HandleResult.TcpDuplicateData,
+            ManagedTcpHandleResult.OutOfOrder =>
+                ManagedIpv4HandleResult.TcpOutOfOrder,
+            ManagedTcpHandleResult.RstReceived =>
+                ManagedIpv4HandleResult.TcpRstReceived,
+            ManagedTcpHandleResult.FinReceived =>
+                ManagedIpv4HandleResult.TcpFinReceived,
+            ManagedTcpHandleResult.ReceiveUnavailable =>
+                ManagedIpv4HandleResult.TcpReceiveUnavailable,
+            ManagedTcpHandleResult.Failed => ManagedIpv4HandleResult.Failed,
+            _ => ManagedIpv4HandleResult.Ignored
+        };
     }
 
     private ManagedIpv4HandleResult TryHandleUdp(ManagedIpv4Packet packet)
@@ -952,6 +1131,32 @@ internal sealed class ManagedIpv4Layer
                             _txPacket.AsSpan(0, packetLength)))
             return false;
         _udpTxCount++;
+        return true;
+    }
+
+    bool IManagedTcpPacketSender.TrySendTcp(
+        Ipv4Address destination, ushort sourcePort, ushort destinationPort,
+        uint sequenceNumber, uint acknowledgmentNumber, ManagedTcpFlags flags,
+        ushort window, ReadOnlySpan<byte> payload, bool advertiseMss)
+    {
+        Span<byte> destinationBytes = stackalloc byte[4];
+        destination.CopyTo(destinationBytes);
+        if (!_active || _dhcp.State != ManagedDhcpv4State.Bound ||
+            !destination.IsUsable ||
+            !ManagedTcpProtocol.TryBuild(
+                _txTcp, sourcePort, destinationPort, sequenceNumber,
+                acknowledgmentNumber, flags, window, _localIpv4,
+                destinationBytes, payload,
+                advertiseMss, ManagedTcpProtocol.MaximumMss, out ushort tcpLength) ||
+            !ManagedIpv4Protocol.TryBuild(
+                _txPacket, (ushort)(0x2A00 + _tcpTxCount), 0,
+                ManagedIpv4Protocol.DefaultTtl, ManagedTcpProtocol.Protocol,
+                _localIpv4, destinationBytes,
+                _txTcp.AsSpan(0, tcpLength), out ushort packetLength) ||
+            !TrySendPacket(destinationBytes,
+                            _txPacket.AsSpan(0, packetLength)))
+            return false;
+        _tcpTxCount++;
         return true;
     }
 

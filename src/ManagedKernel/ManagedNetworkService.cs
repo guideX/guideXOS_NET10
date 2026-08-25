@@ -32,6 +32,19 @@ public enum NetworkPingState : byte
     Failed = 3
 }
 
+public enum NetworkTcpState : byte
+{
+    Closed = 0,
+    SynSent = 1,
+    Established = 2,
+    FinWait1 = 3,
+    FinWait2 = 4,
+    CloseWait = 5,
+    LastAck = 6,
+    TimeWait = 7,
+    Failed = 8
+}
+
 public enum NetworkServiceEvent : byte
 {
     None = 0,
@@ -39,7 +52,11 @@ public enum NetworkServiceEvent : byte
     DnsNxDomain = 2,
     PingReply = 3,
     UdpReceived = 4,
-    UdpReceiveOverflow = 5
+    UdpReceiveOverflow = 5,
+    TcpEstablished = 6,
+    TcpReceived = 7,
+    TcpClosed = 8,
+    TcpFailed = 9
 }
 
 /* Network-order IPv4 value type.  It deliberately has no System.Net
@@ -136,7 +153,11 @@ internal enum ManagedNetworkServiceBackendEvent : byte
     DnsNxDomain = 2,
     PingReply = 3,
     UdpReceived = 4,
-    UdpReceiveOverflow = 5
+    UdpReceiveOverflow = 5,
+    TcpEstablished = 6,
+    TcpReceived = 7,
+    TcpClosed = 8,
+    TcpFailed = 9
 }
 
 /* The adapter is the only bridge from the public service to protocol
@@ -157,18 +178,27 @@ internal interface IManagedNetworkServiceBackend
                                                ushort destinationPort,
                                                ushort sourcePort,
                                                ReadOnlySpan<byte> payload);
+    ManagedTcpConnectionState TcpState { get; }
+    ManagedNetworkServiceBackendResult BeginTcpConnect(Ipv4Address destination,
+                                                        ushort destinationPort);
+    ManagedNetworkServiceBackendResult SendTcp(ReadOnlySpan<byte> payload);
+    ManagedNetworkServiceBackendResult CloseTcp();
     bool Teardown();
 }
 
-public sealed class ManagedNetworkService
+public sealed class ManagedNetworkService : IManagedTcpApplicationSink
 {
     public const int MaximumHostnameLength = 253;
     public const int MaximumUdpPayloadLength = 512;
+    public const int MaximumTcpPayloadLength = ManagedTcpProtocol.MaximumPayloadLength;
     /* Must remain equal to ManagedUdpEndpointTable.Capacity (Phase 18 = 4).
        Keeping the public contract independent lets the service host suite test
        the API without linking protocol parser implementation files. */
     public const int UdpEndpointCapacity = 4;
     public const int ReceiveMessageCapacity = 1;
+    public const int TcpConnectionCapacity = 1;
+    public const int TcpReceiveSlotCapacity = 1;
+    public const int TcpMaximumRetries = ManagedTcpConnection.MaximumRetries;
 
     private readonly IManagedNetworkServiceBackend _backend;
     private readonly byte[] _receiveSlot = new byte[MaximumUdpPayloadLength];
@@ -187,6 +217,14 @@ public sealed class ManagedNetworkService
     private ushort _receiveDestinationPort;
     private ushort _receiveLength;
     private uint _receiveOverflowCount;
+    private readonly byte[] _tcpReceiveSlot = new byte[MaximumTcpPayloadLength];
+    private bool _tcpReceiveReady;
+    private Ipv4Address _tcpReceiveSource;
+    private Ipv4Address _tcpReceiveDestination;
+    private ushort _tcpReceiveSourcePort;
+    private ushort _tcpReceiveDestinationPort;
+    private ushort _tcpReceiveLength;
+    private NetworkTcpState _tcpState;
 
     internal ManagedNetworkService(IManagedNetworkServiceBackend backend)
     {
@@ -210,6 +248,9 @@ public sealed class ManagedNetworkService
     public bool HasReceivedUdp => _receiveReady;
     public uint ReceiveOverflowCount => _receiveOverflowCount;
     public int BoundEndpointCount => _boundPortCount;
+    public NetworkTcpState TcpState => _tcpState;
+    public bool HasReceivedTcp => _tcpReceiveReady;
+    public bool TcpReceiveSlotOccupied => _tcpReceiveReady;
     public NetworkOperationResult BeginResolveIpv4(ReadOnlySpan<byte> hostname)
     {
         if (_tornDown || !IsAvailable) return NetworkOperationResult.Unavailable;
@@ -236,6 +277,9 @@ public sealed class ManagedNetworkService
                 _resolutionState = NetworkResolutionState.Failed;
             if (_pingState == NetworkPingState.Pending)
                 _pingState = NetworkPingState.Failed;
+            if (_tcpState != NetworkTcpState.Closed &&
+                _tcpState != NetworkTcpState.TimeWait)
+                _tcpState = NetworkTcpState.Failed;
             return NetworkOperationResult.Failed;
         }
 
@@ -267,9 +311,15 @@ public sealed class ManagedNetworkService
                 _receiveOverflowCount++;
                 return NetworkOperationResult.NoResource;
             case ManagedNetworkServiceBackendEvent.UdpReceived:
+            case ManagedNetworkServiceBackendEvent.TcpEstablished:
+            case ManagedNetworkServiceBackendEvent.TcpReceived:
+            case ManagedNetworkServiceBackendEvent.TcpClosed:
+            case ManagedNetworkServiceBackendEvent.TcpFailed:
             case ManagedNetworkServiceBackendEvent.None:
                 break;
         }
+
+        _tcpState = MapTcpState(_backend.TcpState);
 
         return NetworkOperationResult.Success;
     }
@@ -342,6 +392,45 @@ public sealed class ManagedNetworkService
         return Map(_backend.SendUdp(destination, destinationPort, sourcePort, payload));
     }
 
+    public NetworkOperationResult BeginTcpConnect(Ipv4Address destination,
+                                                   ushort destinationPort)
+    {
+        if (_tornDown || !IsAvailable) return NetworkOperationResult.Unavailable;
+        if (!destination.IsUsable || destinationPort == 0)
+            return NetworkOperationResult.InvalidArgument;
+        if (_tcpState != NetworkTcpState.Closed)
+            return _tcpState == NetworkTcpState.Failed
+                ? NetworkOperationResult.Failed : NetworkOperationResult.Busy;
+        if (!GetStatus().Configured) return NetworkOperationResult.NotConfigured;
+        ManagedNetworkServiceBackendResult result =
+            _backend.BeginTcpConnect(destination, destinationPort);
+        if (result == ManagedNetworkServiceBackendResult.Started)
+            _tcpState = NetworkTcpState.SynSent;
+        return Map(result);
+    }
+
+    public NetworkOperationResult SendTcp(ReadOnlySpan<byte> payload)
+    {
+        if (_tornDown || !IsAvailable) return NetworkOperationResult.Unavailable;
+        if (payload.Length == 0 || payload.Length > MaximumTcpPayloadLength)
+            return NetworkOperationResult.InvalidArgument;
+        if (_tcpState != NetworkTcpState.Established)
+            return _tcpState == NetworkTcpState.SynSent
+                ? NetworkOperationResult.Busy : NetworkOperationResult.Rejected;
+        return Map(_backend.SendTcp(payload));
+    }
+
+    public NetworkOperationResult CloseTcp()
+    {
+        if (_tornDown || !IsAvailable) return NetworkOperationResult.Unavailable;
+        if (_tcpState != NetworkTcpState.Established &&
+            _tcpState != NetworkTcpState.CloseWait)
+            return NetworkOperationResult.Rejected;
+        ManagedNetworkServiceBackendResult result = _backend.CloseTcp();
+        _tcpState = MapTcpState(_backend.TcpState);
+        return Map(result);
+    }
+
     public bool TryReceiveUdp(Span<byte> destination, out Ipv4Address source,
                               out ushort sourcePort, out ushort destinationPort,
                               out int length)
@@ -354,6 +443,22 @@ public sealed class ManagedNetworkService
         _receiveSlot.AsSpan(0, _receiveLength).CopyTo(destination);
         _receiveReady = false;
         _receiveLength = 0;
+        return true;
+    }
+
+    public bool TryReceiveTcp(Span<byte> destination, out Ipv4Address source,
+                              out ushort sourcePort, out ushort destinationPort,
+                              out int length)
+    {
+        source = _tcpReceiveSource;
+        sourcePort = _tcpReceiveSourcePort;
+        destinationPort = _tcpReceiveDestinationPort;
+        length = _tcpReceiveLength;
+        if (!_tcpReceiveReady || destination.Length < _tcpReceiveLength)
+            return false;
+        _tcpReceiveSlot.AsSpan(0, _tcpReceiveLength).CopyTo(destination);
+        _tcpReceiveReady = false;
+        _tcpReceiveLength = 0;
         return true;
     }
 
@@ -384,6 +489,23 @@ public sealed class ManagedNetworkService
         return true;
     }
 
+    bool IManagedTcpApplicationSink.TryCaptureReceivedTcp(
+        Ipv4Address source, Ipv4Address destination, ushort sourcePort,
+        ushort destinationPort, ReadOnlySpan<byte> payload)
+    {
+        if (_tornDown || _tcpReceiveReady ||
+            payload.Length > MaximumTcpPayloadLength)
+            return false;
+        payload.CopyTo(_tcpReceiveSlot);
+        _tcpReceiveSource = source;
+        _tcpReceiveDestination = destination;
+        _tcpReceiveSourcePort = sourcePort;
+        _tcpReceiveDestinationPort = destinationPort;
+        _tcpReceiveLength = (ushort)payload.Length;
+        _tcpReceiveReady = true;
+        return true;
+    }
+
     internal void BeginBoot()
     {
         _tornDown = false;
@@ -397,6 +519,9 @@ public sealed class ManagedNetworkService
         _receiveLength = 0;
         _boundPortCount = 0;
         _receiveOverflowCount = 0;
+        _tcpReceiveReady = false;
+        _tcpReceiveLength = 0;
+        _tcpState = NetworkTcpState.Closed;
     }
 
     internal void OnProtocolTeardown()
@@ -428,6 +553,14 @@ public sealed class ManagedNetworkService
         _receiveDestination = default;
         _receiveSourcePort = 0;
         _receiveDestinationPort = 0;
+        _tcpReceiveReady = false;
+        _tcpReceiveSource = default;
+        _tcpReceiveDestination = default;
+        _tcpReceiveSourcePort = 0;
+        _tcpReceiveDestinationPort = 0;
+        _tcpReceiveLength = 0;
+        _tcpState = NetworkTcpState.Closed;
+        _tcpReceiveSlot.AsSpan().Clear();
         for (int index = 0; index != _boundPorts.Length; ++index) _boundPorts[index] = 0;
         _boundPortCount = 0;
     }
@@ -454,6 +587,22 @@ public sealed class ManagedNetworkService
             ManagedNetworkServiceBackendResult.NoResource => NetworkOperationResult.NoResource,
             ManagedNetworkServiceBackendResult.Rejected => NetworkOperationResult.Rejected,
             _ => NetworkOperationResult.Failed
+        };
+    }
+
+    private static NetworkTcpState MapTcpState(ManagedTcpConnectionState state)
+    {
+        return state switch
+        {
+            ManagedTcpConnectionState.SynSent => NetworkTcpState.SynSent,
+            ManagedTcpConnectionState.Established => NetworkTcpState.Established,
+            ManagedTcpConnectionState.FinWait1 => NetworkTcpState.FinWait1,
+            ManagedTcpConnectionState.FinWait2 => NetworkTcpState.FinWait2,
+            ManagedTcpConnectionState.CloseWait => NetworkTcpState.CloseWait,
+            ManagedTcpConnectionState.LastAck => NetworkTcpState.LastAck,
+            ManagedTcpConnectionState.TimeWait => NetworkTcpState.TimeWait,
+            ManagedTcpConnectionState.Failed => NetworkTcpState.Failed,
+            _ => NetworkTcpState.Closed
         };
     }
 

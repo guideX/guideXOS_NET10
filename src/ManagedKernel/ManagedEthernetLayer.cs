@@ -42,6 +42,8 @@ internal sealed class ManagedEthernetLayer
     internal bool Phase19Passed => _ipv4.Phase19Passed;
     internal bool Phase20Passed => _ipv4.Phase20Passed;
     internal bool Phase21Passed => _ipv4.Phase21Passed;
+    internal bool Phase22Passed => _ipv4.Phase22Passed;
+    internal bool Phase23Passed => _ipv4.Phase23Passed;
     internal ReadOnlySpan<byte> LocalMac => _localMac;
     internal bool IsAccepting => _accepting;
     internal bool DriverReady => _transport.State == ManagedE1000DriverState.Running;
@@ -78,6 +80,22 @@ internal sealed class ManagedEthernetLayer
             (ManagedNetworkServiceBackend)_networkService.Backend;
         runtime.Rebind(this, _ipv4);
         return _ipv4.TryRunPhase21();
+    }
+
+    internal bool TryRunPhase22()
+    {
+        ManagedNetworkServiceBackend runtime =
+            (ManagedNetworkServiceBackend)_networkService.Backend;
+        runtime.Rebind(this, _ipv4);
+        return _ipv4.TryRunPhase22();
+    }
+
+    internal bool TryRunPhase23()
+    {
+        ManagedNetworkServiceBackend runtime =
+            (ManagedNetworkServiceBackend)_networkService.Backend;
+        runtime.Rebind(this, _ipv4);
+        return _ipv4.TryRunPhase23();
     }
 
     internal void InitializeMac()
@@ -251,6 +269,14 @@ internal enum ManagedNetworkDispatchResult : byte
     UdpZeroChecksumAccepted = 10,
     UdpServiceReceived = 19,
     UdpReceiveOverflow = 20,
+    TcpEstablished = 21,
+    TcpDataAcknowledged = 22,
+    TcpDataReceived = 23,
+    TcpDuplicateData = 24,
+    TcpOutOfOrder = 25,
+    TcpRstReceived = 26,
+    TcpFinReceived = 27,
+    TcpReceiveUnavailable = 28,
     DhcpRequestSent = 11,
     DhcpBound = 12,
     DhcpNak = 13,

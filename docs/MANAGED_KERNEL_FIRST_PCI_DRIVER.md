@@ -776,3 +776,217 @@ TCP, sockets, System.Net.Sockets compatibility, multiple concurrent DNS
 requests, general async APIs, blocking network APIs, select/poll, streaming,
 TLS, HTTP, IPv6, routing, gateways, and multiple interfaces are explicitly
 deferred to later phases.
+
+## Phase 22: bounded managed TCPv4 client
+
+Phase 22 adds one managed TCPv4 connection below the Phase 21 service boundary:
+
+`managed application -> ManagedNetworkService -> ManagedTcpConnection -> managed IPv4/ARP/Ethernet -> E1000`
+
+`ManagedTcpProtocol` owns strict TCP parsing, construction, options, and the
+RFC-style IPv4 pseudo-header checksum.  `ManagedTcpConnection` owns the tuple,
+wrap-aware sequence arithmetic, handshake and close state, one in-flight
+application record, receive delivery, retry accounting, and RST/FIN policy.
+`ManagedIpv4Layer` is the only TCP packet sender/parser integration point;
+E1000 and Ethernet remain responsible only for their existing frame and
+descriptor ownership.  The Phase 22 consumer uses only
+`ManagedNetworkService`, just as the Phase 21 consumer does.
+
+### TCP wire subset and fixed bounds
+
+The client uses local port `15221`, peer port `15222`, and a deterministic
+first client ISN of `0x22000001`.  Each connection generation advances the
+client ISN by `0x100`.  The peer advertises MSS `512`; the client advertises
+the same MSS on SYN and clamps application records to the negotiated bound.
+TCP headers are limited to 20–60 bytes, options are bounded and length-checked
+(MSS, NOP, EOL, and safely skippable well-formed options), payloads are capped
+at 512 bytes, and reserved/unsupported control bits are rejected.  Every
+segment is checked against the source/destination IPv4 pseudo-header checksum;
+the host suite includes independent checksum vectors and source/destination
+mutation tests.
+
+The connection state is `Closed`, `SynSent`, `Established`, `FinWait1`,
+`FinWait2`, `CloseWait`, `LastAck`, `TimeWait`, or `Failed`.  A valid SYNACK
+must acknowledge the exact SYN sequence, and the third ACK consumes no
+sequence space.  The active side permits one application segment in flight;
+only the exact cumulative ACK releases it.  Duplicate payload is ACKed without
+redelivery, future/out-of-order payload is not buffered, and the service owns
+one 512-byte copied receive slot.  Matching RST fails the active connection;
+stale RST and tuple mismatches are ignored.  FIN consumes one sequence number,
+drives the bounded close handshake, and leaves the tuple unavailable in
+TimeWait until explicit teardown.  GC survival relies on fixed managed arrays
+and copied service data, with no borrowed RX span crossing the service boundary.
+
+The connection exposes a deterministic `TryRetryPending` path with a maximum
+of three retransmissions and no double sequence advancement.  A wall-clock
+retransmission timer, congestion control, streaming, multiple connections,
+listen/accept, urgent data, SACK, window scaling, offloads, sockets,
+System.Net.Sockets compatibility, TLS, IPv6, routing, gateways, and multiple
+interfaces remain deferred.
+
+### Service API and deterministic consumer
+
+`ManagedNetworkService` exposes `TcpConnectionCapacity = 1`,
+`TcpReceiveSlotCapacity = 1`, `MaximumTcpPayloadLength = 512`, and
+`TcpMaximumRetries = 3`.  `BeginTcpConnect` consumes the resolver result;
+`SendTcp` reports `Busy` while the single in-flight record is outstanding;
+`TryReceiveTcp` copies a validated peer payload; `CloseTcp` starts the bounded
+FIN exchange; `Teardown` clears the connection and receive slot.  No packet
+builder, checksum, tuple, sequence number, ARP entry, descriptor, or native
+pointer is exposed by the public boundary.
+
+The authoritative peer resolves `phase22.test` to `10.15.0.2`, completes the
+managed SYN/SYNACK/ACK exchange, validates `PHASE22-MANAGED-HELLO`, returns
+`PHASE22-PEER-ACK`, forces GC while the connection is established, validates
+`PHASE22-POSTGC-HELLO`, returns `PHASE22-POSTGC-ACK`, and completes FIN/ACK
+close and teardown.  Before the valid SYNACK it injects checksum-invalid,
+truncated, invalid-offset, tuple-mismatch, wrong-ACK, and stale-RST controls;
+the connection remains in `SynSent` until the exact valid peer response.
+
+### Phase 22 evidence
+
+The focused suite is `tools/Run-ManagedKernelPhase22HostTests.ps1`; it passes
+56 cases covering parser/header/options/checksum bounds, wrap arithmetic,
+handshake, exact ACK/data sequencing, one-in-flight policy, duplicate and
+future data, GC, RST, FIN/TimeWait, bounded retries, service gating, copied
+receive delivery, and teardown.  The dedicated fresh-boot runner is
+`tools/Run-ManagedKernelPhase22FreshBoots.ps1`, with independent validation
+from `tools/Parse-ManagedE1000Phase22Pcap.ps1`.
+
+The authoritative three-boot evidence is under
+`evidence/phase22-final4-20260825`.  All three fresh QEMU boots report
+`PASS_PHASE22`; each independent PCAP parser reports 33 packets, four DHCP
+messages, one DNS query/response, 19 valid TCP packets, all 15 expected TCP
+flow transitions, and 14 malformed or rejected TCP controls.  The payload is
+`1,218,048` bytes with SHA-256
+`E456E1A514E5DAF281EE1D31BBC45728F572D51FDAFC6F0634DADD90FA58B4D9`.
+Phase 21 remains available as a regression path on the same payload; the
+three current-payload regression boots and independent PCAP checks are under
+`evidence/phase21-regression-phase22-final-20260825`.  The Phase 15–21 host
+suites remain required gates.
+
+## Phase 23: bounded managed HTTP/1.1 client
+
+Phase 23 adds the first managed application protocol above the bounded Phase
+22 TCPv4 service:
+
+`managed application -> ManagedHttpClient -> ManagedNetworkService -> bounded TCPv4 -> IPv4/ARP/Ethernet -> E1000`
+
+`ManagedHttpClient` owns one HTTP operation.  The application supplies a
+hostname and origin-form path and observes only HTTP request state, DNS/TCP
+progress, status, body length/data, failure state, cancel, reset, and
+completion.  It does not reference Ethernet, ARP, IPv4, TCP packets,
+sequence numbers, checksums, PCI, descriptor rings, or E1000 state.
+`ManagedHttpRequestBuilder` and `ManagedHttpResponseParser` are fixed-storage
+helpers behind that API; no general HTTP or socket stack was added.
+
+### Supported subset and exact bounds
+
+The client supports one client-side HTTP/1.1 `GET` per generation, hostname
+resolution through managed DNS, an origin-form target, `Host`, `Connection:
+close`, deterministic request serialization, a numeric 100–599 status code,
+bounded response headers, `Content-Length`, optional retained `Content-Type`,
+response body delivery, peer connection close, and deterministic teardown.
+TLS/HTTPS, redirects, cookies, authentication, proxies, compression, chunking,
+keep-alive pooling, concurrent requests, server/listener HTTP, IPv6, and a
+general URL parser are not implemented.
+
+Fixed capacities are: hostname 253 bytes with labels no longer than 63;
+origin-form path 128; serialized request 512; status line 64; header line 96;
+header count 16; aggregate response-header bytes 512; retained header name
+32; retained `Content-Type` 64; response body 256; and receive/parser staging
+512 bytes.  Phase 22 bounds remain one TCP connection, one copied receive
+slot, one application record in flight, a 512-byte TCP payload cap, and three
+bounded retries.
+
+### Request grammar and rejection policy
+
+The request is serialized exactly as:
+
+`GET <origin-form-path> HTTP/1.1\r\nHost: <hostname>\r\nConnection: close\r\n\r\n`
+
+Hostnames use printable DNS label characters with labels separated by dots;
+the path must begin with `/` and contain printable ASCII without controls or
+spaces.  The response parser accepts only `HTTP/1.1`, a three-digit status in
+100–599, CRLF-terminated status/header lines, header names made from ASCII
+letters, digits, and `-`, and a blank CRLF line ending the header block.  Names
+are case-insensitive.  `Content-Length` must be decimal, fit the 256-byte
+body capacity, and agree across duplicates; matching duplicates are accepted
+and conflicting duplicates fail.  `Connection` must contain the exact value
+`close`.  `Content-Length` and `Connection: close` are required before body
+delivery.  Unknown headers are ignored after all line/count/aggregate limits
+are checked.  `Transfer-Encoding`, including `chunked`, is explicitly
+rejected; connection close is never treated as unlimited body framing.
+
+Malformed status/version/code, line overflow, bare-LF framing, header syntax,
+header-count or aggregate overflow, malformed or conflicting content length,
+unsupported transfer encoding, missing required framing, body overflow,
+excess bytes beyond the declared length, and premature close fail closed.
+The parser is incremental across TCP deliveries and uses no recursion,
+dynamic dictionary, unbounded accumulation, or exception-based protocol
+control flow.
+
+### DNS, TCP, peer, and segmentation proof
+
+The Phase 23 application resolves `phase23.test` through managed DNS and
+consumes the returned `10.15.0.2` address.  The deterministic raw peer then
+performs DHCP/DNS as required, completes the existing TCP handshake on ports
+15221/15222, validates the exact 64-byte request
+
+`GET /phase23 HTTP/1.1\r\nHost: phase23.test\r\nConnection: close\r\n\r\n`
+
+and returns the authoritative 17-byte body `phase23-http-pass` with
+`Content-Length: 17`.  The response is emitted as three TCP payloads:
+`HTTP/1.1 200`, a second payload containing the remainder of the status line,
+headers, header terminator, and `phase23-`, and a final `http-pass` payload.
+This crosses status, header/body framing, and body boundaries.  The peer
+validates ACK progression for all three segments, sends FIN, receives the
+managed FIN/ACK sequence, and validates the final ACK.  The TCP client ISN
+remains Phase 22's deterministic `0x22000001`; HTTP reuses that transport
+contract.
+
+### Application proof, GC, and teardown
+
+`ManagedPhase23TestConsumer` uses only `ManagedNetworkService` and
+`ManagedHttpClient`.  Its markers prove network readiness, request start,
+DNS success and resolved address, TCP connection, request send, status 200,
+GC survival while parsing, body completion, exact body verification, and
+HTTP/TCP teardown.  A collection is forced after status parsing; parser
+state, response bytes, service ownership, and final completion remain valid.
+Completion, failure, cancellation, and reset clear or invalidate HTTP parser,
+request, receive, and response state; service teardown releases TCP/DNS
+resources and a fresh generation can be created.
+
+### Phase 23 evidence
+
+The focused suite is `tools/Run-ManagedKernelPhase23HostTests.ps1`; it passes
+60 cases covering canonical and boundary request construction, segmented and
+malformed status/header parsing, line/count/aggregate limits, duplicate and
+conflicting content lengths, unsupported chunking, body fragmentation and
+capacity, DNS/TCP/HTTP lifecycle failures, cancellation, reset/reuse, GC,
+and teardown.  Phase 15–23 host regression totals are respectively `28`,
+`57`, `48`, `55`, `39`, `123`, `42`, `56`, and `60`.
+
+The authoritative wrapper is `tools/Run-ManagedKernelPhase23FreshBoots.ps1`.
+It returned exit code 0 for three independent fresh QEMU processes under
+`evidence/phase23-final7-20260825/`; each boot reported the full
+network-ready -> DNS -> TCP -> HTTP status/body -> teardown marker sequence,
+exactly one Phase 23 E1000 proof injection, no guest fault markers, and no
+owned QEMU process left running.  The independent parser is
+`tools/Parse-ManagedE1000Phase23Pcap.ps1`.  Each of its three PCAP runs
+reports:
+
+`packets=25 dhcp=4 dns_queries=1 dns_responses=1 tcp_valid=15 tcp_flow=15 tcp_malformed=0 response_segments=3 request_bytes=64 response_body=phase23-http-pass`
+
+This independently proves DHCP/DNS, SYN/SYN-ACK/ACK, request bytes, all three
+response segments, cumulative ACKs, FIN/close, exact sequence progression,
+and no retransmission/control storm.  Host controls cover invalid
+status/version, line overflow, malformed/conflicting content length,
+oversized body, premature close, and unsupported chunking; none produces
+false success or blocks reset/reuse.
+
+The final NativeAOT payload is `1,237,504` bytes with SHA-256
+`D936958D695D970C63920885FECB6CEFBAF7C4AAB78EFE495DF93FB46E16CA35`.
+This is Outcome A for bounded HTTP/1.1 over managed TCP.  HTTPS is not
+implied: TLS, certificate handling, HTTP/2, HTTP/3, QUIC, and general HTTP
+features remain later boundaries.

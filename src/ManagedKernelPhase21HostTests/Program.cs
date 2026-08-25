@@ -200,6 +200,7 @@ internal static class Program
         private ManagedNetworkServiceBackendEvent _event;
         private ManagedNetworkService? _service;
         private Ipv4Address _resolved;
+        private ManagedTcpConnectionState _tcpState;
 
         internal FakeBackend(bool configured)
         {
@@ -216,6 +217,7 @@ internal static class Program
         internal byte[] LastPayload { get; private set; } = Array.Empty<byte>();
 
         public bool IsAvailable => true;
+        public ManagedTcpConnectionState TcpState => _tcpState;
         public NetworkStatus GetStatus() => _status;
         public void SetRuntimeStatus(NetworkStatus status) { }
 
@@ -284,9 +286,21 @@ internal static class Program
             return SendResult;
         }
 
+        public ManagedNetworkServiceBackendResult BeginTcpConnect(
+            Ipv4Address destination, ushort destinationPort) =>
+            ManagedNetworkServiceBackendResult.NoResource;
+
+        public ManagedNetworkServiceBackendResult SendTcp(
+            ReadOnlySpan<byte> payload) =>
+            ManagedNetworkServiceBackendResult.Rejected;
+
+        public ManagedNetworkServiceBackendResult CloseTcp() =>
+            ManagedNetworkServiceBackendResult.Rejected;
+
         public bool Teardown()
         {
             _eventPending = false;
+            _tcpState = ManagedTcpConnectionState.Closed;
             return true;
         }
 
