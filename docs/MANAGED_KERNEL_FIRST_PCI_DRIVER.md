@@ -990,3 +990,63 @@ The final NativeAOT payload is `1,237,504` bytes with SHA-256
 This is Outcome A for bounded HTTP/1.1 over managed TCP.  HTTPS is not
 implied: TLS, certificate handling, HTTP/2, HTTP/3, QUIC, and general HTTP
 features remain later boundaries.
+
+## Phase 24: managed TLS transport foundation — Outcome C
+
+Phase 24 begins with the required cryptographic capability audit. The audit is
+retained in [MANAGED_TLS_PHASE24_CRYPTO_AUDIT.md](MANAGED_TLS_PHASE24_CRYPTO_AUDIT.md)
+and can be reproduced with
+`tools/Invoke-ManagedTlsPhase24CryptoAudit.ps1`. It intentionally stops before
+adding a TLS-shaped protocol: the current NativeAOT bare-metal boundary has no
+cryptographically credible client entropy source and no proven asymmetric
+primitive for server authentication and key exchange.
+
+### Audit result and exact boundary
+
+The repository contains no owned SHA-256, HMAC-SHA256, AES/AES-GCM/AES-CBC,
+RSA, ECDSA, ECDH/P-256, constant-time comparison, or big-integer
+implementation. The host runtime exposes type names for these APIs, but host
+availability is not evidence that the implementation is self-contained in the
+freestanding NativeAOT payload. It may depend on Windows CNG, OpenSSL, a native
+PAL, OS certificate services, or other unavailable runtime facilities, so no
+host cryptographic call was admitted into the kernel.
+
+The current payload imports `bcrypt.dll!BCryptGenRandom`, but the existing
+dependency census classifies that PAL entry as fail-fast/unimplemented. No
+successful bare-metal trace reaches it. The proven UEFI time path is used by
+startup security-cookie initialization only; it is not a CSPRNG and cannot
+provide TLS ClientHello randomness, ephemeral private material, or nonce
+material. This is the first exact blocker. The independent second blocker is
+the absence of a bare-metal-proven RSA/ECDSA/ECDH implementation for
+authenticating a pinned deterministic peer.
+
+### Intended protocol and architecture
+
+TLS 1.2 is the intended next protocol because a bounded handshake is a better
+fit for the current Phase 23 TCP contract than prematurely adding TLS 1.3. No
+cipher suite was selected in Outcome C. `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`
+(`0xC02F`) remains an audit candidate only; it is not implemented or claimed
+as supported. The intended future stack is:
+
+```text
+managed application -> ManagedTlsClient -> ManagedNetworkService
+                    -> TCPv4 -> IPv4 / ARP / Ethernet -> E1000
+```
+
+No `ManagedTlsClient`, TLS record parser, handshake state machine, key
+schedule, TLS API, deterministic TLS peer, TLS PCAP parser, Phase 24 fresh-
+boot runner, or encrypted application-data exchange was added. Therefore no
+TLS capacities, randomness source, traffic-key ownership, secret-clearing
+evidence, TLS host-test total, Phase 24 fresh-boot result, or Phase 24 PCAP
+result is claimed. Existing Phase 23 DNS/TCP/HTTP behavior remains unchanged.
+
+### Outcome C and next logical boundary
+
+This is Outcome C rather than a partial TLS success. Adding fixed TLS
+capacities or plaintext/TLS-shaped records before the entropy and asymmetric
+boundaries are proven would create false security evidence. The next logical
+boundary is a genuine firmware/CPU entropy contract, followed by a small
+managed or fully proven NativeAOT cryptographic substrate with independent
+known-answer vectors. Only after those prerequisites pass should one TLS 1.2
+cipher suite, pinned-peer authentication, bounded record protection, and the
+DNS -> TCP -> TLS acceptance path be implemented.

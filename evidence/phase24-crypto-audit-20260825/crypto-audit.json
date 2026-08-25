@@ -1,0 +1,117 @@
+{
+  "Audit": "guideXOS Managed TLS Phase 24 cryptographic capability audit",
+  "CreatedUtc": "2026-08-25T17:22:21.5121987Z",
+  "Repository": "D:\\dev\\guideXOS_NET10_nativeaot-managed-kernel-integration",
+  "Branch": "nativeaot-managed-kernel-integration",
+  "Head": "0f0258b3b815cc91be4d02501a188bce7510d4fe",
+  "HeadSubject": "Outcome A — full Phase 23 success.",
+  "Worktree": [
+    "# branch.oid 0f0258b3b815cc91be4d02501a188bce7510d4fe",
+    "# branch.head nativeaot-managed-kernel-integration",
+    "# branch.upstream origin/nativeaot-managed-kernel-integration",
+    "# branch.ab +0 -0",
+    "1 .M N... 100644 100644 100644 f95cde029bb7affad70559416d32075ca441af69 f95cde029bb7affad70559416d32075ca441af69 docs/MANAGED_KERNEL_FIRST_PCI_DRIVER.md",
+    "? docs/MANAGED_TLS_PHASE24_CRYPTO_AUDIT.md",
+    "? evidence/phase24-crypto-audit-20260825/",
+    "? tools/Invoke-ManagedTlsPhase24CryptoAudit.ps1"
+  ],
+  "Payload": {
+    "Path": "D:\\dev\\guideXOS_NET10_nativeaot-managed-kernel-integration\\artifacts\\gate4-phase23\\ESP\\GXOS\\gxos-managed-kernel.dll",
+    "Size": 1237504,
+    "Sha256": "D936958D695D970C63920885FECB6CEFBAF7C4AAB78EFE495DF93FB46E16CA35",
+    "Imports": [
+      "DLL Name: ADVAPI32.dll",
+      "DLL Name: bcrypt.dll",
+      "000b83f8  <none>  001f  BCryptGenRandom",
+      "DLL Name: KERNEL32.dll",
+      "DLL Name: ole32.dll",
+      "DLL Name: api-ms-win-crt-math-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-string-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-convert-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-stdio-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-runtime-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "BCryptGenRandomImported": true,
+    "BareMetalCryptoCallProven": false
+  },
+  "FrameworkSurface": [
+    {
+      "Name": "System.Security.Cryptography.SHA256, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.HMACSHA256, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.RandomNumberGenerator, System.Security.Cryptography",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.Aes, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.AesGcm, System.Security.Cryptography",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.RSA, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.ECDsa, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.ECDiffieHellman, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.CryptographicOperations, System.Security.Cryptography.Primitives",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Numerics.BigInteger, System.Runtime.Numerics",
+      "AvailableInHost": true,
+      "Assembly": "System.Runtime.Numerics"
+    }
+  ],
+  "RepositorySourceFindings": {
+    "RepositoryOwnedSha256": false,
+    "RepositoryOwnedHmacSha256": false,
+    "RepositoryOwnedAes": false,
+    "RepositoryOwnedRsa": false,
+    "RepositoryOwnedEcc": false,
+    "FrameworkCryptoReferences": false,
+    "EntropyBoundaryReferences": false
+  },
+  "ProvenRuntimeCapabilities": {
+    "Sha256": false,
+    "HmacSha256": false,
+    "SecureRandomBytes": false,
+    "Aes": false,
+    "AesGcm": false,
+    "AesCbc": false,
+    "RsaSignatureVerification": false,
+    "EccP256": false,
+    "Ecdh": false,
+    "Ecdsa": false,
+    "ConstantTimeComparison": false,
+    "BigInteger": false
+  },
+  "HostOnlySurfaceMustNotBeUsed": true,
+  "FirstBlocker": "No cryptographically credible client entropy source is installed and proven through the actual bare-metal managed/native boundary.",
+  "AdditionalBlocker": "No bare-metal-proven asymmetric primitive exists for authenticating the deterministic TLS peer and performing the selected TLS 1.2 key exchange.",
+  "Outcome": "C"
+}
