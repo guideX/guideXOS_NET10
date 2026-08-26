@@ -107,9 +107,14 @@ $ovmf = Join-Path $share 'edk2-x86_64-code.fd'
 $varsTemplate = Join-Path $share 'edk2-i386-vars.fd'
 Require25 ((Test-Path -LiteralPath $ovmf) -and (Test-Path -LiteralPath $varsTemplate)) `
     'OVMF firmware is required.'
-Require25 (@(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'" |
-    Where-Object { ([string]$_.CommandLine).IndexOf($gate,
-        [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -eq 0) `
+try {
+    $ownedQemu = @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'" |
+        Where-Object { ([string]$_.CommandLine).IndexOf($gate,
+            [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+} catch {
+    $ownedQemu = @(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue)
+}
+Require25 ($ownedQemu.Count -eq 0) `
     'An owned Phase 25 QEMU process is already running.'
 
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
@@ -209,11 +214,16 @@ for ($sequence = 1; $sequence -le $RunCount; ++$sequence) {
         $sequence, $outcome, $serialHash, $serial)
 }
 
-$owned = @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'" |
-    Where-Object {
-        ([string]$_.CommandLine).IndexOf($gate, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        ([string]$_.CommandLine).IndexOf($evidence, [StringComparison]::OrdinalIgnoreCase) -ge 0
-    })
+$owned = @()
+try {
+    $owned = @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'" |
+        Where-Object {
+            ([string]$_.CommandLine).IndexOf($gate, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            ([string]$_.CommandLine).IndexOf($evidence, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        })
+} catch {
+    $owned = @(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue)
+}
 Require25 ($owned.Count -eq 0) 'An owned QEMU process remains after Phase 25 boots.'
 Write-Output "MANAGED_KERNEL_PHASE25_PAYLOAD_SHA256=$expectedHash"
 Write-Output "MANAGED_KERNEL_PHASE25_PAYLOAD_SIZE=$PayloadSize"

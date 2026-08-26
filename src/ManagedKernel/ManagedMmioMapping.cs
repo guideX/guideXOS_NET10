@@ -58,12 +58,35 @@ internal sealed class ManagedMmioMapping
         return TryRead(offset, 8, out value);
     }
 
+    internal bool TryWrite8(ulong offset, byte value)
+    {
+        if (_live == 0 || !CanWrite || offset >= _length) return false;
+        return ManagedKernelContract.TryMmioWrite(_handle, _driverId,
+                                                  offset, 1, value);
+    }
+
+    internal bool TryWrite16(ulong offset, ushort value)
+    {
+        if (_live == 0 || !CanWrite || offset > ulong.MaxValue - 2 ||
+            offset + 2 > _length || (offset & 1) != 0) return false;
+        return ManagedKernelContract.TryMmioWrite(_handle, _driverId,
+                                                  offset, 2, value);
+    }
+
     internal bool TryWrite32(ulong offset, uint value)
     {
         if (_live == 0 || !CanWrite || offset > ulong.MaxValue - 4 ||
             offset + 4 > _length || (offset & 3) != 0) return false;
         return ManagedKernelContract.TryMmioWrite(_handle, _driverId,
                                                   offset, 4, value);
+    }
+
+    internal bool TryWrite64(ulong offset, ulong value)
+    {
+        if (_live == 0 || !CanWrite || offset > ulong.MaxValue - 8 ||
+            offset + 8 > _length || (offset & 7) != 0) return false;
+        return ManagedKernelContract.TryMmioWrite(_handle, _driverId,
+                                                  offset, 8, value);
     }
 
     internal bool TryUnmap()

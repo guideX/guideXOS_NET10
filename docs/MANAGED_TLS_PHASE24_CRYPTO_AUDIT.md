@@ -66,8 +66,10 @@ success as kernel support.
 | Constant-time equality | none | present | none | blocked |
 | Big integer arithmetic | none | present | none | blocked |
 
-Phase 25 removed the hash and comparison rows from that blocker list, but the
-first remaining exact blocker is still the missing genuine entropy source. Even if a
+Phase 25 removed the hash and comparison rows from that blocker list. Phase 26
+now supplies a bounded QEMU virtio-rng provider for the managed-kernel
+integration proof, but the TLS blocker remains until the target TLS payload
+and its complete key-exchange/cipher dependency path are implemented. Even if a
 managed AES-GCM implementation were added, a TLS client with predictable
 ClientHello randomness, ephemeral private key, or nonce state would not meet
 the acceptance contract. The independent authentication/key-exchange blocker
@@ -130,6 +132,21 @@ Until then, Phase 24 must not claim HTTPS, public CA trust, X.509 validation,
 Internet TLS interoperability, encrypted application data, or a chosen cipher
 suite. The Phase 23 DNS -> TCP -> HTTP evidence remains authoritative and
 unmodified.
+
+## Phase 26 entropy follow-up
+
+Phase 26 adds `ManagedVirtioRngDriver.cs`, `ManagedVirtioRngProtocol.cs`, and
+the bounded router in `ManagedSecureRandom.cs`. Provider order is native
+RDSEED/RDRAND first, then modern non-transitional virtio-rng; there is no
+timing-derived or deterministic fallback. The host suite covers
+unavailable-provider fail-closed behavior and bounded queue semantics. Three
+QEMU fresh boots proved queue completion, explicit GC survival, teardown, and
+reinitialization reuse.
+
+This is a genuine entropy-provider integration proof for the QEMU target, not
+a TLS implementation or an Internet interoperability claim. The historical
+`bcrypt.dll!BCryptGenRandom` NativeAOT import remains in the PE surface as an
+unimplemented runtime/PAL boundary; Phase 26 does not call it.
 
 ## Phase 25 follow-up: managed cryptographic foundation
 

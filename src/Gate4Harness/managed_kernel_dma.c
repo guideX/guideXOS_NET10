@@ -4,6 +4,12 @@
 
 static GXOS_DMA_SERVICE *g_callback_service;
 
+static int dma_owner_supported(uint32_t owner_kind, uint32_t owner_id)
+{
+    return owner_kind == GX_MANAGED_DEVICE_KIND_PCI &&
+        (owner_id == 0x808610D3U || owner_id == 0x1AF41044U);
+}
+
 static void zero_bytes(void *memory, uint64_t bytes)
 {
     uint8_t *cursor = (uint8_t *)memory;
@@ -247,7 +253,7 @@ GXOS_DMA_SERVICE_STATUS gxos_dma_allocate(
         result_capacity > UINTPTR_MAX - result_address ||
         !gxos_mmio_validate_claim(service->mmio, claim_handle, driver_id,
                                   &resource_id, &owner_kind, &owner_id) ||
-        owner_kind != GX_MANAGED_DEVICE_KIND_PCI || owner_id != 0x808610D3U ||
+        !dma_owner_supported(owner_kind, owner_id) ||
         !gxos_dma_validate_request(requested_bytes, alignment,
                                     GX_MANAGED_KERNEL_DMA_MAX_PAGES_PER_ALLOCATION) ||
         !add_u64(requested_bytes, GXOS_VM_PAGE_SIZE - 1U, &rounded_bytes)) {

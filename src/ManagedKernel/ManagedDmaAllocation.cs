@@ -108,6 +108,14 @@ internal unsafe sealed class ManagedDmaAllocation
         return TryWrite(offset, bytes);
     }
 
+    internal bool TryWrite16(ulong offset, ushort value)
+    {
+        Span<byte> bytes = stackalloc byte[2];
+        bytes[0] = (byte)value;
+        bytes[1] = (byte)(value >> 8);
+        return TryWrite(offset, bytes);
+    }
+
     internal bool TryWrite64(ulong offset, ulong value)
     {
         Span<byte> bytes = stackalloc byte[8];
@@ -130,6 +138,16 @@ internal unsafe sealed class ManagedDmaAllocation
         value = 0;
         if (!TryRead(offset, bytes)) return false;
         value = (ushort)(bytes[0] | (bytes[1] << 8));
+        return true;
+    }
+
+    internal bool TryRead32(ulong offset, out uint value)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        value = 0;
+        if (!TryRead(offset, bytes)) return false;
+        value = (uint)(bytes[0] | (bytes[1] << 8) |
+                       (bytes[2] << 16) | (bytes[3] << 24));
         return true;
     }
 

@@ -24,6 +24,7 @@ param(
     [switch]$EnablePhase23Protocol,
     [switch]$Phase15EnableFilterDump,
     [switch]$Phase15EnableQemuReceiveTrace,
+    [switch]$EnablePhase26VirtioRng,
     [ValidateSet('all', 'rx', 'tx')]
     [string]$Phase15FilterDumpQueue = 'tx'
 )
@@ -45,13 +46,20 @@ function Require11([bool]$condition, [string]$message) {
 
 function Get-OwnedQemu11 {
     $scope = @([IO.Path]::GetFullPath($gate), [IO.Path]::GetFullPath($evidence))
-    return @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'" |
-        Where-Object {
-            $commandLine = [string]$_.CommandLine
-            $scope | Where-Object {
-                $commandLine.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            } | Select-Object -First 1
-        })
+    try {
+        return @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'" |
+            Where-Object {
+                $commandLine = [string]$_.CommandLine
+                $scope | Where-Object {
+                    $commandLine.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                } | Select-Object -First 1
+            })
+    } catch {
+        # Restricted Windows runners may deny process command-line inspection.
+        # Treat any visible QEMU process as owned so a concurrent boot cannot
+        # be mistaken for a clean fixture.
+        return @(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue)
+    }
 }
 
 function Stop-OwnedQemu11([System.Diagnostics.Process]$process) {
@@ -91,15 +99,11 @@ function Get-FreeUdpPort11 {
 
 function Pump-Serial11([System.IO.Stream]$stream, [IO.FileStream]$logStream,
                        [Text.StringBuilder]$text, [byte[]]$buffer) {
-    while ($true) {
-        if ($null -eq $script:phase11ReadTask) {
-            $script:phase11ReadTask = $stream.ReadAsync($buffer, 0, $buffer.Length)
-        }
-        if (!$script:phase11ReadTask.IsCompleted) { return }
-        $count = $script:phase11ReadTask.Result
-        $script:phase11ReadTask = $null
+    while ($stream.DataAvailable) {
+        $count = $stream.Read($buffer, 0, $buffer.Length)
         if ($count -le 0) { return }
         $logStream.Write($buffer, 0, $count)
+        $logStream.Flush()
         $chunk = [Text.Encoding]::ASCII.GetString($buffer, 0, $count)
         $text.Append($chunk) | Out-Null
         $script:phase11Tail = $script:phase11Tail + $chunk
@@ -1155,6 +1159,11 @@ try {
                 $arguments += @('-trace',
                     "events=$traceEventsPath,file=$tracePath")
             }
+        }
+        if ($EnablePhase26VirtioRng) {
+            $arguments += @(
+                '-object', 'rng-builtin,id=rng0',
+                '-device', 'virtio-rng-pci-non-transitional,rng=rng0,addr=3,max-bytes=1024,period=1')
         }
         Set-Content -LiteralPath $commandLinePath -Value ('"{0}" {1}' -f $qemu, ($arguments -join ' ')) -Encoding ascii
         $process = $null; $client = $null; $monitor = $null; $stream = $null

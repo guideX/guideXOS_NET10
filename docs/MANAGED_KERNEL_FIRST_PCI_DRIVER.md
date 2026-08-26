@@ -105,6 +105,19 @@ the managed object retains only opaque handles and validated bus-address
 data.  The driver re-reads `STATUS` after collection and checks that both ring
 bus addresses are unchanged.
 
+## Phase 26 shared PCI resource boundary
+
+The modern virtio-rng provider added in Phase 26 uses the same native resource
+catalog and claim-generation rules. Its QEMU identity is `1AF4:1044` at
+`0000:00:03.0`; it is intentionally separate from the e1000e owner
+`8086:10D3` at `0000:00:02.0`. A virtio driver claim is released before the
+Phase 14 e1000 claim is attempted. Claim assertions are owner-scoped because
+the catalog can legitimately contain claims belonging to another live driver.
+
+The resource catalog also records each native mapping handle. An early
+driver-proof exit can therefore unmap and release only the failed owner’s
+resources, preserving the e1000 lifecycle and the shared native accounting.
+
 ## Negative tests and accounting
 
 Managed host tests cover PCI command planning, MMIO write bounds/alignment and

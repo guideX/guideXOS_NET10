@@ -17,6 +17,7 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
         internal fixed uint Owners[64];
         internal fixed ulong NativeHandles[64];
         internal fixed uint MappingCounts[64];
+        internal fixed ulong MappingHandles[512];
     }
 
     private static nuint s_descriptorAddress;
@@ -39,6 +40,17 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
             }
             return count;
         }
+    }
+
+    internal static uint ActiveClaimCountForDriver(uint driverId)
+    {
+        if (s_installed == 0 || driverId == 0) return 0;
+        uint count = 0;
+        for (uint index = 0; index != s_resourceCount; ++index)
+        {
+            if (s_claims.Owners[index] == driverId) count++;
+        }
+        return count;
     }
 
     internal static bool TryInstallFromPublication(
@@ -108,6 +120,8 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
             s_claims.NativeHandles[index] = 0;
             s_claims.MappingCounts[index] = 0;
         }
+        for (uint index = 0; index != MaxResources * MaxMappings; ++index)
+            s_claims.MappingHandles[index] = 0;
         s_descriptorAddress = publication->DescriptorAddress;
         s_resourceCount = publication->DescriptorCount;
         s_catalogIdentity = 1;
@@ -234,6 +248,8 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
             s_claims.Owners[index] = 0;
             s_claims.NativeHandles[index] = 0;
             s_claims.MappingCounts[index] = 0;
+            for (uint slot = 0; slot != MaxMappings; ++slot)
+                s_claims.MappingHandles[index * MaxMappings + slot] = 0;
             return true;
         }
         return false;
@@ -244,6 +260,20 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
                                 out ManagedMmioMapping? mapping)
     {
         mapping = null;
+        if (!TryMapHandle(in resource, driverId, offset, length, access,
+                          out ulong mappingHandle)) return false;
+        mapping = new ManagedMmioMapping(resource.ResourceId, driverId,
+                                          mappingHandle, length, access);
+        return true;
+    }
+
+    /* Scalar-handle variant for NativeAOT drivers that must not put a newly
+       allocated mapping wrapper into their long-lived transport state. */
+    internal static bool TryMapHandle(in ManagedDeviceResource resource,
+                                      uint driverId, ulong offset, ulong length,
+                                      uint access, out ulong mappingHandle)
+    {
+        mappingHandle = 0;
         if (s_installed == 0 || driverId == 0 || length == 0 ||
             (access != 1 && access != 3) ||
             !resource.HasCatalogOwnership || resource.CatalogIdentity != s_catalogIdentity ||
@@ -261,10 +291,10 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
                 s_claims.MappingCounts[index] >= MaxMappings) continue;
             if (!ManagedKernelContract.TryMmioMap(
                     s_claims.NativeHandles[index], driverId, offset, length,
-                    access, resource.ResourceId, out ulong mappingHandle)) return false;
+                    access, resource.ResourceId, out mappingHandle)) return false;
+            s_claims.MappingHandles[index * MaxMappings +
+                                     s_claims.MappingCounts[index]] = mappingHandle;
             s_claims.MappingCounts[index]++;
-            mapping = new ManagedMmioMapping(resource.ResourceId, driverId,
-                                              mappingHandle, length, access);
             return true;
         }
         return false;
@@ -274,6 +304,7 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
                                   ulong mappingHandle)
     {
         uint claimIndex = MaxResources;
+        uint mappingIndex = MaxMappings;
         if (s_installed == 0 || resourceId == 0 || driverId == 0 ||
             mappingHandle == 0) return false;
         for (uint index = 0; index != s_resourceCount; ++index)
@@ -283,13 +314,56 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
                 s_claims.MappingCounts[index] != 0)
             {
                 claimIndex = index;
+                for (uint slot = 0; slot != MaxMappings; ++slot)
+                {
+                    if (s_claims.MappingHandles[index * MaxMappings + slot] ==
+                        mappingHandle)
+                    {
+                        mappingIndex = slot;
+                        break;
+                    }
+                }
                 break;
             }
         }
-        if (claimIndex == MaxResources ||
+        if (claimIndex == MaxResources || mappingIndex == MaxMappings ||
             !ManagedKernelContract.TryMmioUnmap(mappingHandle, driverId))
             return false;
+        s_claims.MappingHandles[claimIndex * MaxMappings + mappingIndex] = 0;
         s_claims.MappingCounts[claimIndex]--;
+        return true;
+    }
+
+    internal static bool TryAbortDriver(uint driverId)
+    {
+        if (s_installed == 0 || driverId == 0) return false;
+        for (uint index = 0; index != s_resourceCount; ++index)
+        {
+            if (s_claims.Owners[index] != driverId) continue;
+            while (s_claims.MappingCounts[index] != 0)
+            {
+                uint slot = MaxMappings;
+                for (uint candidate = 0; candidate != MaxMappings; ++candidate)
+                {
+                    if (s_claims.MappingHandles[index * MaxMappings + candidate] != 0)
+                    {
+                        slot = candidate;
+                        break;
+                    }
+                }
+                if (slot == MaxMappings || !ManagedKernelContract.TryMmioUnmap(
+                        s_claims.MappingHandles[index * MaxMappings + slot],
+                        driverId)) return false;
+                s_claims.MappingHandles[index * MaxMappings + slot] = 0;
+                s_claims.MappingCounts[index]--;
+            }
+            if (Descriptors[index].ResourceType ==
+                    GxManagedKernelDeviceResourceV1.ResourceTypeMmio &&
+                !ManagedKernelContract.TryMmioRelease(
+                    s_claims.NativeHandles[index], driverId)) return false;
+            s_claims.Owners[index] = 0;
+            s_claims.NativeHandles[index] = 0;
+        }
         return true;
     }
 
@@ -331,6 +405,8 @@ internal static unsafe class ManagedDeviceResourceRuntimeCatalog
             s_claims.NativeHandles[index] = 0;
             s_claims.MappingCounts[index] = 0;
         }
+        for (uint index = 0; index != MaxResources * MaxMappings; ++index)
+            s_claims.MappingHandles[index] = 0;
         s_descriptorAddress = 0;
         s_resourceCount = 0;
         s_catalogIdentity = 0;

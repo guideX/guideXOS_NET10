@@ -799,6 +799,7 @@ internal static unsafe class ManagedKernelContract
     private static nuint s_entropyFillAddress;
     private static uint s_entropyMaxBytesPerFill;
     private static uint s_entropyRetryCount;
+    private static ManagedEntropyService? s_entropyService;
     private static ManagedSecureRandom? s_secureRandom;
     private static int s_memoryServicesInstalled;
     private static ulong s_memoryCapabilities;
@@ -861,9 +862,30 @@ internal static unsafe class ManagedKernelContract
     internal static bool HostServicesInstalled => s_hostServicesInstalled != 0;
     internal static bool EntropyServicesInstalled => s_entropyServicesInstalled != 0;
     internal static ulong EntropyCapabilities => s_entropyCapabilities;
+    internal static nuint EntropyFillAddress => s_entropyFillAddress;
     internal static uint EntropyMaxBytesPerFill => s_entropyMaxBytesPerFill;
     internal static uint EntropyRetryCount => s_entropyRetryCount;
     internal static ManagedSecureRandom? SecureRandom => s_secureRandom;
+    internal static ManagedEntropyService? EntropyService => s_entropyService;
+
+    /* The no-hardware path is intentionally allocation-free during Phase 10,
+       but a device-backed provider may be installed later.  Keep that late
+       service in the same static roots used by the hardware path so a
+       collection cannot reclaim the provider graph while a DMA queue is live. */
+    internal static bool TryEnsureEntropyService()
+    {
+        if (s_entropyServicesInstalled == 0)
+            return false;
+        if (s_entropyService != null && s_secureRandom != null)
+            return true;
+
+        s_entropyService = new ManagedEntropyService(
+            s_entropyFillAddress, s_entropyCapabilities,
+            s_entropyMaxBytesPerFill);
+        s_secureRandom = new ManagedSecureRandom(s_entropyService);
+        return true;
+    }
+
     internal static bool PciServicesInstalled => s_pciServicesInstalled != 0;
     internal static nuint PciConfigReadAddress => s_pciConfigReadAddress;
     internal static ManagedDeviceInventory? OperationalDeviceInventory =>
@@ -1248,12 +1270,20 @@ internal static unsafe class ManagedKernelContract
         s_entropyFillAddress = (nuint)services.FillAddress;
         s_entropyMaxBytesPerFill = services.MaxBytesPerFill;
         s_entropyRetryCount = services.RetryCount;
-        s_secureRandom = (s_entropyCapabilities &
-                          GxManagedKernelEntropyServicesV1.CapabilityHardware) != 0
-            ? new ManagedSecureRandom(new NativeHardwareEntropy(
+        if ((s_entropyCapabilities & GxManagedKernelEntropyServicesV1.CapabilityHardware) != 0)
+        {
+            s_entropyService = new ManagedEntropyService(
                 s_entropyFillAddress, s_entropyCapabilities,
-                s_entropyMaxBytesPerFill))
-            : null;
+                s_entropyMaxBytesPerFill);
+            s_secureRandom = new ManagedSecureRandom(s_entropyService);
+        }
+        else
+        {
+            /* Keep the unsupported hardware path allocation-free until a
+               device-backed provider is actually attached in Phase 26. */
+            s_entropyService = null;
+            s_secureRandom = null;
+        }
         s_entropyServicesInstalled = 1;
         return ManagedOk;
     }
@@ -1902,7 +1932,8 @@ internal static unsafe class ManagedKernelContract
                                       ulong offset, uint width, ulong value)
     {
         if (s_mmioServicesInstalled == 0 || mappingHandle == 0 ||
-            driverId == 0 || s_mmioWriteAddress == 0 || width != 4) return false;
+            driverId == 0 || s_mmioWriteAddress == 0 ||
+            (width != 1 && width != 2 && width != 4 && width != 8)) return false;
         delegate* unmanaged<ulong, uint, ulong, uint, ulong, uint> callback =
             (delegate* unmanaged<ulong, uint, ulong, uint, ulong, uint>)
                 s_mmioWriteAddress;
@@ -2083,6 +2114,15 @@ internal static unsafe class ManagedKernelContract
         return InvalidArgument;
     }
 
+    private static void CleanupMmioProof(
+        in ManagedDeviceResource resource, uint driverId,
+        ManagedMmioMapping? mapping, bool claimLive)
+    {
+        if (mapping != null && mapping.IsLive) mapping.TryUnmap();
+        if (claimLive)
+            ManagedDeviceResourceRuntimeCatalog.TryAbortDriver(driverId);
+    }
+
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelRunPhase13")]
     internal static uint RunPhase13(uint stage)
     {
@@ -2092,6 +2132,7 @@ internal static unsafe class ManagedKernelContract
         const ulong mapLength = 0x10;
         ManagedDeviceResource targetResource = default;
         bool targetResourceFound = false;
+        ManagedMmioMapping? mapping = null;
 
         if (!IsInitialized || s_lifecycleState != (int)LifecycleState.Started)
             return IsInitialized ? InvalidState : NotInitialized;
@@ -2162,7 +2203,7 @@ internal static unsafe class ManagedKernelContract
 
             if (!ManagedDeviceResourceRuntimeCatalog.TryMap(
                     in targetResource, phase13DriverId, 0, mapLength, 1,
-                    out ManagedMmioMapping? mapping) || mapping == null)
+                    out mapping) || mapping == null)
             {
                 ManagedDeviceResourceRuntimeCatalog.TryRelease(in targetResource,
                                                                 phase13DriverId);
@@ -2171,19 +2212,28 @@ internal static unsafe class ManagedKernelContract
             if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_MAPPING_CREATED\r\n"u8) ||
                 !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_MAPPING_HANDLE=0x"u8,
                                         mapping.Handle))
+            {
+                CleanupMmioProof(in targetResource, phase13DriverId, mapping, true);
                 return InvalidState;
+            }
 
             if (!mapping.TryRead32(statusOffset, out uint statusValue) ||
                 statusValue == 0xFFFFFFFFU ||
                 !mapping.TryRead32(statusOffset, out uint repeatedStatus) ||
                 repeatedStatus != statusValue)
+            {
+                CleanupMmioProof(in targetResource, phase13DriverId, mapping, true);
                 return InvalidState;
+            }
             if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_READ\r\n"u8) ||
                 !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_REGISTER_OFFSET=0x"u8,
                                         statusOffset) ||
                 !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_MMIO_REGISTER_VALUE=0x"u8,
                                         statusValue))
+            {
+                CleanupMmioProof(in targetResource, phase13DriverId, mapping, true);
                 return InvalidState;
+            }
 
             if (ManagedDeviceResourceRuntimeCatalog.TryRelease(
                     in targetResource, phase13DriverId) ||
@@ -2192,41 +2242,64 @@ internal static unsafe class ManagedKernelContract
                 mapping.TryRead16(1, out _) ||
                 new ManagedMmioMapping(targetResource.ResourceId, phase13DriverId,
                                        0xFFFFFFFF00000001, 4).TryRead32(0, out _))
+            {
+                CleanupMmioProof(in targetResource, phase13DriverId, mapping, true);
                 return InvalidState;
+            }
 
             GC.Collect();
             GC.KeepAlive(mapping);
             if (!mapping.TryRead32(statusOffset, out uint gcStatus) ||
                 gcStatus != statusValue || !KernelLog.Write(
                     "GXOS_NET10:MANAGED_KERNEL_MMIO_GC_SURVIVAL_OK\r\n"u8))
+            {
+                CleanupMmioProof(in targetResource, phase13DriverId, mapping, true);
                 return InvalidState;
+            }
             if (!mapping.TryUnmap() || mapping.IsLive || mapping.TryUnmap() ||
                 mapping.TryRead32(statusOffset, out _) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_MAPPING_TEARDOWN\r\n"u8))
+            {
+                CleanupMmioProof(in targetResource, phase13DriverId, mapping, true);
                 return InvalidState;
+            }
             if (!ManagedDeviceResourceRuntimeCatalog.TryRelease(
                     in targetResource, phase13DriverId) ||
                 ManagedDeviceResourceRuntimeCatalog.TryMap(
                     in targetResource, phase13DriverId, 0, mapLength, 1,
                     out _))
+            {
+                CleanupMmioProof(in targetResource, phase13DriverId, mapping, true);
                 return InvalidState;
+            }
 
             for (uint cycle = 0; cycle != 3; ++cycle)
             {
-                if (!ManagedDeviceResourceRuntimeCatalog.TryClaim(
+                ManagedMmioMapping? cycleMapping = null;
+                bool cycleClaimLive =
+                    ManagedDeviceResourceRuntimeCatalog.TryClaim(
                         in targetResource, phase13DriverId,
-                        GxManagedKernelDeviceV1.DeviceKindPci, targetOwnerId) ||
+                        GxManagedKernelDeviceV1.DeviceKindPci, targetOwnerId);
+                if (!cycleClaimLive ||
                     !ManagedDeviceResourceRuntimeCatalog.TryMap(
                         in targetResource, phase13DriverId, 0, mapLength, 1,
-                        out ManagedMmioMapping? cycleMapping) ||
-                    cycleMapping == null || !cycleMapping.TryUnmap() ||
+                        out cycleMapping) || cycleMapping == null ||
+                    !cycleMapping.TryUnmap() ||
                     !ManagedDeviceResourceRuntimeCatalog.TryRelease(
                         in targetResource, phase13DriverId))
+                {
+                    CleanupMmioProof(in targetResource, phase13DriverId,
+                                     cycleMapping, cycleClaimLive);
                     return InvalidState;
+                }
             }
             if (!ManagedDeviceResourceRuntimeCatalog.ValidateInvariants() ||
                 ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+            {
+                CleanupMmioProof(in targetResource, phase13DriverId,
+                                 mapping, true);
                 return InvalidState;
+            }
             if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_MMIO_NEGATIVE_TESTS_OK\r\n"u8))
                 return InvalidState;
             s_phase13Run = 1;

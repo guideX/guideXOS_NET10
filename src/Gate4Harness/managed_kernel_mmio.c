@@ -512,9 +512,10 @@ GXOS_MMIO_SERVICE_STATUS gxos_mmio_write(
     if (mapping->owner_driver_id != driver_id) {
         return GXOS_MMIO_SERVICE_OWNERSHIP_MISMATCH;
     }
-    if ((mapping->access & 2U) == 0U || width != 4U ||
+    if ((mapping->access & 2U) == 0U ||
+        (width != 1U && width != 2U && width != 4U && width != 8U) ||
         offset > UINT64_MAX - width || offset + width > mapping->requested_length ||
-        (offset & 3U) != 0U) {
+        (width > 1U && (offset & (width - 1U)) != 0U)) {
         return GXOS_MMIO_SERVICE_INVALID_ARGUMENT;
     }
     if (mapping->virtual_base > UINT64_MAX -
@@ -526,7 +527,13 @@ GXOS_MMIO_SERVICE_STATUS gxos_mmio_write(
                         address, width)) {
         return GXOS_MMIO_SERVICE_INVALID_STATE;
     }
-    *(volatile uint32_t *)(uintptr_t)address = (uint32_t)value;
+    switch (width) {
+    case 1: *(volatile uint8_t *)(uintptr_t)address = (uint8_t)value; break;
+    case 2: *(volatile uint16_t *)(uintptr_t)address = (uint16_t)value; break;
+    case 4: *(volatile uint32_t *)(uintptr_t)address = (uint32_t)value; break;
+    case 8: *(volatile uint64_t *)(uintptr_t)address = value; break;
+    default: return GXOS_MMIO_SERVICE_INVALID_ARGUMENT;
+    }
     __asm__ volatile ("" : : : "memory");
     return GXOS_MMIO_SERVICE_OK;
 }

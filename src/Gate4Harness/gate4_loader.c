@@ -416,6 +416,7 @@ typedef uint32_t (EFIAPI *ManagedKernelInstallDmaServicesEntry)(
     uint32_t requested_abi_version, uintptr_t services_address);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase14Entry)(uint32_t stage);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase25Entry)(void);
+typedef uint32_t (EFIAPI *ManagedKernelRunPhase26Entry)(void);
 #endif
 
 enum {
@@ -635,9 +636,8 @@ managed_kernel_find_target_pci_resource(uint64_t resource_id)
         if (resource->ResourceId == resource_id &&
             resource->ResourceType == GX_MANAGED_DEVICE_RESOURCE_TYPE_MMIO &&
             resource->OwnerDeviceKind == GX_MANAGED_DEVICE_KIND_PCI &&
-            resource->OwnerDeviceId == 0x808610D3U &&
-            resource->OwnerSegment == 0 && resource->OwnerBus == 0 &&
-            resource->OwnerDevice == 2 && resource->OwnerFunction == 0) {
+            (resource->OwnerDeviceId == 0x808610D3U ||
+             resource->OwnerDeviceId == 0x1AF41044U)) {
             return resource;
         }
     }
@@ -667,10 +667,8 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
                                   &owner_kind, &owner_id) ||
         validated_resource_id != resource_id ||
         owner_kind != GX_MANAGED_DEVICE_KIND_PCI ||
-        owner_id != 0x808610D3U ||
-        (resource = managed_kernel_find_target_pci_resource(resource_id)) == 0 ||
-        resource->OwnerSegment != 0 || resource->OwnerBus != 0 ||
-        resource->OwnerDevice != 2 || resource->OwnerFunction != 0) {
+        (owner_id != 0x808610D3U && owner_id != 0x1AF41044U) ||
+        (resource = managed_kernel_find_target_pci_resource(resource_id)) == 0) {
         return GX_MANAGED_INVALID_ARGUMENT;
     }
     result = (GX_MANAGED_KERNEL_PCI_COMMAND_RESULT_V1 *)(uintptr_t)result_address;
@@ -698,7 +696,9 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
     } else {
         return GX_MANAGED_INVALID_ARGUMENT;
     }
-    current = gxos_managed_kernel_pci_config_read32(0, 0, 0, 2, 0, 4);
+    current = gxos_managed_kernel_pci_config_read32(
+        0, resource->OwnerSegment, resource->OwnerBus,
+        resource->OwnerDevice, resource->OwnerFunction, 4);
     if (current == UINT32_MAX) return GX_MANAGED_INVALID_STATE;
     if (operation == GX_MANAGED_PCI_COMMAND_ENABLE) {
         g_managed_kernel_pci_command_original = current & 0xFFFFU;
@@ -710,7 +710,10 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
     } else {
         resulting = (current & 0xFFFF0000U) | requested;
     }
-    address = 0x80000000U | (2U << 11) | 4U;
+    address = 0x80000000U |
+              ((uint32_t)resource->OwnerBus << 16) |
+              ((uint32_t)resource->OwnerDevice << 11) |
+              ((uint32_t)resource->OwnerFunction << 8) | 4U;
 #if defined(__x86_64__)
     __asm__ volatile ("outl %0, %1" : : "a"(address),
                       "Nd"(GXOS_PCI_CONFIG_ADDRESS_PORT));
@@ -4699,6 +4702,7 @@ typedef struct {
     uint32_t managed_kernel_install_dma_services_rva;
     uint32_t managed_kernel_run_phase14_rva;
     uint32_t managed_kernel_run_phase25_rva;
+    uint32_t managed_kernel_run_phase26_rva;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     uint32_t managed_gc_probe_rva;
@@ -12048,12 +12052,13 @@ static int managed_kernel_query_uefi_pci_bar(
    model exposes a 128 KiB BAR; the fallback publishes that complete bounded
    window so the managed driver can reach the descriptor and MAC registers. */
 static int managed_kernel_find_uefi_mmio_page(
-    uint64_t base, GXOS_PCI_FIRMWARE_BAR *bar_out)
+    uint64_t base, uint64_t required_length,
+    GXOS_PCI_FIRMWARE_BAR *bar_out)
 {
-    const uint64_t required_length = 0x20000ULL;
     uint32_t index;
     if (bar_out != 0) zero_bytes((uint8_t *)bar_out, sizeof(*bar_out));
-    if (base == 0 || base % GXOS_VM_PAGE_SIZE != 0 ||
+    if (base == 0 || required_length == 0 ||
+        base % GXOS_VM_PAGE_SIZE != 0 ||
         base > UINT64_MAX - required_length ||
         bar_out == 0 || !g_memory_map.valid) return 0;
     for (index = 0; index != g_memory_map.descriptor_count; ++index) {
@@ -12112,12 +12117,20 @@ static void prepare_managed_kernel_device_resources(
             const GXOS_MANAGED_KERNEL_PCI_DEVICE_INPUT *device =
                 &g_managed_kernel_pci_devices[pci_index];
             uint8_t bar_index;
-            if (device->vendor_id != 0x8086U || device->device_id != 0x10D3U ||
-                device->segment != 0U || device->bus != 0U ||
-                device->device != 2U || device->function != 0U ||
-                device->class_code != 0x02U || device->subclass != 0x00U ||
-                device->programming_interface != 0x00U) continue;
-            serial_text("GXOS_NET10:MANAGED_KERNEL_MMIO_PCI_TARGET=0000:00:02.0_8086:10D3\r\n");
+            uint32_t is_e1000 =
+                device->vendor_id == 0x8086U && device->device_id == 0x10D3U &&
+                device->segment == 0U && device->bus == 0U &&
+                device->device == 2U && device->function == 0U &&
+                device->class_code == 0x02U && device->subclass == 0x00U &&
+                device->programming_interface == 0x00U;
+            uint32_t is_virtio_rng =
+                device->vendor_id == 0x1AF4U && device->device_id == 0x1044U;
+            if (!is_e1000 && !is_virtio_rng) continue;
+            if (is_e1000) {
+                serial_text("GXOS_NET10:MANAGED_KERNEL_MMIO_PCI_TARGET=0000:00:02.0_8086:10D3\r\n");
+            } else {
+                serial_text("GXOS_NET10:MANAGED_KERNEL_MMIO_PCI_TARGET=VIRTIO_RNG_1AF4:1044\r\n");
+            }
             for (bar_index = 0; bar_index != 6U; ++bar_index) {
                 GXOS_PCI_FIRMWARE_BAR firmware_bar;
                 GXOS_PCI_BAR_DECODED decoded;
@@ -12127,6 +12140,9 @@ static void prepare_managed_kernel_device_resources(
                 uint32_t raw_high = 0;
                 uint64_t raw_base;
                 GXOS_MANAGED_KERNEL_RESOURCE_STATUS bar_status;
+                if (is_virtio_rng && bar_index != 1U && bar_index != 4U) {
+                    continue;
+                }
                 if ((raw_low & 1U) == 0U && ((raw_low >> 1) & 3U) == 2U) {
                     if (bar_index == 5U) continue;
                     raw_high = gxos_managed_kernel_pci_config_read32(
@@ -12138,12 +12154,26 @@ static void prepare_managed_kernel_device_resources(
                 serial_field_hex("GXOS_NET10:MANAGED_KERNEL_MMIO_BAR_RAW_BASE=0x",
                                  raw_base);
                 serial_text("\r\n");
+                if (is_virtio_rng) {
+                    serial_text("GXOS_NET10:MANAGED_KERNEL_MMIO_VIRTIO_BAR_QUERY_BEGIN\r\n");
+                }
                 if (!managed_kernel_query_uefi_pci_bar(
-                        boot_services, device->segment, device->bus,
-                        device->device, device->function, bar_index,
-                        &firmware_bar) &&
-                    !managed_kernel_find_uefi_mmio_page(raw_base,
-                                                        &firmware_bar)) continue;
+                    boot_services, device->segment, device->bus,
+                    device->device, device->function, bar_index,
+                    &firmware_bar)) {
+                    if (is_e1000) {
+                        if (!managed_kernel_find_uefi_mmio_page(
+                                raw_base, 0x20000ULL, &firmware_bar)) continue;
+                    } else if (bar_index == 1U) {
+                        if (!managed_kernel_find_uefi_mmio_page(
+                                raw_base, 0x1000ULL, &firmware_bar)) continue;
+                    } else if (bar_index == 4U) {
+                        if (!managed_kernel_find_uefi_mmio_page(
+                                raw_base, 0x4000ULL, &firmware_bar)) continue;
+                    } else {
+                        continue;
+                    }
+                }
                 bar_status = gxos_managed_kernel_append_pci_mmio_resource(
                     g_managed_kernel_device_resources,
                     GX_MANAGED_KERNEL_DEVICE_RESOURCE_MAX_DESCRIPTORS,
@@ -12160,7 +12190,7 @@ static void prepare_managed_kernel_device_resources(
                 serial_text(" FLAGS=0x");
                 serial_hex64(decoded.flags);
                 serial_text("\r\n");
-                break;
+                if (is_e1000) break;
             }
         }
     }
@@ -13624,7 +13654,8 @@ static void managed_kernel_phase13_mmio(
 
 static void managed_kernel_phase14_driver(
     ManagedKernelInstallDmaServicesEntry install_dma_services,
-    ManagedKernelRunPhase14Entry run_phase14)
+    ManagedKernelRunPhase14Entry run_phase14,
+    ManagedKernelRunPhase26Entry run_phase26)
 {
     GX_MANAGED_KERNEL_DMA_SERVICES_V1 bad_services;
     uint32_t status;
@@ -13652,6 +13683,15 @@ static void managed_kernel_phase14_driver(
             GX_MANAGED_ALREADY_INITIALIZED) {
         fail("managed-kernel-dma-service-install");
     }
+#ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE26
+    (void)run_phase26;
+#endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE26
+    if (run_phase26 == 0) fail("managed-kernel-phase26-export");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE26_BEGIN\r\n");
+    status = run_phase26();
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase26");
+#endif
     status = run_phase14(1U);
     if (status != GX_MANAGED_OK || run_phase14(1U) != GX_MANAGED_INVALID_STATE ||
         run_phase14(2U) != GX_MANAGED_OK ||
@@ -17621,7 +17661,10 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase13_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_dma_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase14_resolution = {0};
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase25_resolution = {0};
+#endif
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase26_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_STATUS initialize_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInitialize",
@@ -17746,9 +17789,14 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_STATUS run_phase14_status =
         gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase14",
                                    &run_phase14_resolution);
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
     GXOS_NATIVEAOT_EXPORT_STATUS run_phase25_status =
         gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase25",
                                    &run_phase25_resolution);
+#endif
+    GXOS_NATIVEAOT_EXPORT_STATUS run_phase26_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase26",
+                                   &run_phase26_resolution);
     if (initialize_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInitialize-export-missing");
     }
@@ -17854,8 +17902,13 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     if (run_phase14_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelRunPhase14-export-missing");
     }
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
     if (run_phase25_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelRunPhase25-export-missing");
+    }
+#endif
+    if (run_phase26_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelRunPhase26-export-missing");
     }
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
@@ -17909,7 +17962,10 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     image->managed_kernel_install_dma_services_rva =
         install_dma_services_resolution.rva;
     image->managed_kernel_run_phase14_rva = run_phase14_resolution.rva;
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
     image->managed_kernel_run_phase25_rva = run_phase25_resolution.rva;
+#endif
+    image->managed_kernel_run_phase26_rva = run_phase26_resolution.rva;
 }
 #endif
 
@@ -19396,7 +19452,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase13_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_dma_services_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase14_resolution = {0};
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase25_resolution = {0};
+#endif
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase26_resolution = {0};
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
     ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
@@ -19432,7 +19491,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     ManagedKernelRunPhase13Entry managed_kernel_run_phase13;
     ManagedKernelInstallDmaServicesEntry managed_kernel_install_dma_services;
     ManagedKernelRunPhase14Entry managed_kernel_run_phase14;
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
     ManagedKernelRunPhase25Entry managed_kernel_run_phase25;
+#endif
+    ManagedKernelRunPhase26Entry managed_kernel_run_phase26;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 managed_kernel_boot_resource_publication = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_system_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_repeat_info = {0};
@@ -19784,9 +19846,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     managed_kernel_run_phase14_resolution.rva = image.managed_kernel_run_phase14_rva;
     managed_kernel_run_phase14_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_run_phase14_rva);
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
     managed_kernel_run_phase25_resolution.rva = image.managed_kernel_run_phase25_rva;
     managed_kernel_run_phase25_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_run_phase25_rva);
+#endif
+    managed_kernel_run_phase26_resolution.rva = image.managed_kernel_run_phase26_rva;
+    managed_kernel_run_phase26_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_phase26_rva);
     managed_kernel_initialize = (ManagedKernelInitializeEntry)
         managed_kernel_initialize_resolution.address;
     managed_kernel_query_system_info = (ManagedKernelQuerySystemInfoEntry)
@@ -19870,8 +19937,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_install_dma_services_resolution.address;
     managed_kernel_run_phase14 = (ManagedKernelRunPhase14Entry)
         managed_kernel_run_phase14_resolution.address;
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25
     managed_kernel_run_phase25 = (ManagedKernelRunPhase25Entry)
         managed_kernel_run_phase25_resolution.address;
+#endif
+    managed_kernel_run_phase26 = (ManagedKernelRunPhase26Entry)
+        managed_kernel_run_phase26_resolution.address;
     serial_text("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT=GxManagedKernelInitialize\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT_RVA=0x",
                      image.managed_kernel_initialize_rva);
@@ -20587,7 +20658,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     /* Query firmware-assigned PCI BAR ranges before the final memory-map
        snapshot. GetBarAttributes is read-only and its temporary descriptor
        buffer is freed before the measured map is retained. */
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_RESOURCES_BEGIN\r\n");
     prepare_managed_kernel_device_resources(system_table->BootServices);
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DEVICE_RESOURCES_DONE\r\n");
 #endif
     capture_memory_snapshot();
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
@@ -21034,7 +21107,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     restore_nativeaot_tls();
     activate_nativeaot_tls();
     managed_kernel_phase14_driver(
-        managed_kernel_install_dma_services, managed_kernel_run_phase14);
+        managed_kernel_install_dma_services, managed_kernel_run_phase14,
+        managed_kernel_run_phase26);
     restore_nativeaot_tls();
     managed_kernel_phase14_native_teardown();
     activate_nativeaot_tls();
