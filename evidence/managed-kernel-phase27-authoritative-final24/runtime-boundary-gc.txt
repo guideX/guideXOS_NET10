@@ -1,0 +1,4 @@
+The Phase 27 runner intentionally requires MANAGED_AES128_GC_SURVIVAL_PASS and MANAGED_AES_GCM_GC_SURVIVAL_PASS.
+An experimental direct GC.Collect checkpoint after AES key initialization was run in multiple NativeAOT payload variants: array-backed schedule, primitive-only inline schedule, helper/no-helper, and static-root variants. Each boot emitted MANAGED_AES128_GC_BEGIN and then exited before GC_COMPLETE; the strict runner observed QEMU exit and no crypto pass marker from that checkpoint.
+The repository's established Phase 26 secure-random GC path succeeds in all three final combined boots, and host AES expanded-key GC survival succeeds. The direct Phase 27 crypto-state GC checkpoint therefore remains a clearly characterized NativeAOT/runtime limitation rather than being represented as a pass.
+This is the sole reason for Outcome B. AES/GHASH/GCM correctness and bare-metal known-answer execution are not being claimed as blocked.

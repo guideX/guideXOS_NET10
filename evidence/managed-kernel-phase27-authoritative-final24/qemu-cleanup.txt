@@ -1,0 +1,3 @@
+Owned Phase 27 QEMU processes remaining after the three final boots: 0
+The final serial logs and QEMU command lines were retained under runs/run-1 through runs/run-3.
+Any unrelated QEMU process was not terminated or counted as an owned Phase 27 process.

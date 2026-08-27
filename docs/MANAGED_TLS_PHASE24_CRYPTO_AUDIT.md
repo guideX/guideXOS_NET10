@@ -211,3 +211,57 @@ unexpected-import marker. The Phase 25 audit is reproducible with
 | RSA/ECDSA verification | Missing |
 | X.509 narrow parser | Missing |
 | TLS state machine/records | Deferred |
+
+## Phase 27 symmetric foundation follow-up — Outcome B
+
+Phase 27 now supplies a real managed AES-128, GHASH, and AES-GCM foundation
+without adding TLS records or handshake code. `ManagedAes128` implements the
+FIPS-197 AES-128 encryption schedule and rounds. `ManagedGhash` implements
+SP 800-38D fixed-state GHASH, including partial-block padding and the AAD/
+ciphertext bit-length block. `ManagedAesGcm` is intentionally narrow: exactly
+16-byte keys, 12-byte nonces, 16-byte tags, at most 256 bytes of AAD, and at
+most 16 KiB of plaintext/ciphertext. It constructs `J0 = nonce || 1`, uses a
+big-endian low-32-bit counter, rejects exhaustion, and exposes no public CTR
+mode.
+
+GCM decryption computes and compares the authentication tag before GCTR and
+before writing the caller's plaintext buffer. Authentication failure leaves
+the output untouched. Expected malformed calls fail explicitly without
+uncontrolled exceptions. State and temporary cryptographic material are
+cleared on operation completion or reset. Reusing a nonce with the same key
+is catastrophic and prohibited; nonce uniqueness is a caller policy, not a
+global registry or automatic GCM feature.
+
+The dedicated Phase 27 host suite passes 100/100 cases, including FIPS-197,
+SP 800-38A, SP 800-38D, GHASH, capacity, corruption, no-plaintext, recovery,
+lifecycle, GC, and independent host-oracle checks. Three fresh NativeAOT
+boots each execute and pass the AES, GHASH, GCM encryption/decryption,
+invalid-tag, no-plaintext, reset/reuse, and Phase 26 virtio-rng nonce markers.
+The strict Phase 27 runner does not classify the result as Outcome A because
+the direct crypto-state GC checkpoint exits after its begin marker in the
+current NativeAOT/kernel runtime. The established Phase 26 secure-random GC
+proof and host AES expanded-key GC proof remain passing. This is a runtime
+boundary and is recorded as Outcome B; it is not a vector-correctness failure.
+
+The final payload is 1,314,816 bytes with SHA-256
+`124B02BF07966654AC08D578F6BC07EB252EAD8BE28846D0EB1D1153F55C26A2`.
+Import inspection shows the pre-existing `bcrypt.dll!BCryptGenRandom` runtime
+PAL import and no BCrypt AES APIs, OpenSSL, libcrypto, CommonCrypto, or hosted
+AES PAL imports. The Phase 27 design, vectors, boot records, regression
+totals, and audit are retained under
+`evidence/managed-kernel-phase27-authoritative-final24/`.
+
+### Updated TLS prerequisite matrix
+
+| TLS prerequisite | Status after Phase 27 |
+| --- | --- |
+| Secure entropy | Proven |
+| SHA-256 | Proven |
+| HMAC-SHA256 | Proven |
+| TLS 1.2 PRF building blocks | Available |
+| AES-128 | Proven functional; Outcome B crypto-GC caveat |
+| GCM | Proven functional; Outcome B crypto-GC caveat |
+| ECDH P-256 | Missing |
+| RSA/ECDSA verification | Missing |
+| X.509 parser | Missing |
+| TLS state machine | Deferred |

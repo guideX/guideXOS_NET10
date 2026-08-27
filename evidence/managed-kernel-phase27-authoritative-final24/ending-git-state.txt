@@ -1,0 +1,9 @@
+repository=D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration
+branch=nativeaot-managed-kernel-integration
+head=99f7951ac594cccfe693c25dc7b25fd5d13cede0
+subject=Implemented Managed Kernel Phase 26 secure entropy integration from the pushed baseline.
+tracking=origin/nativeaot-managed-kernel-integration
+ending_worktree=uncommitted Phase 27 source, harness, tests, documentation, and evidence changes; prior Phase 24-26 work preserved
+git_diff_check=PASS
+commit_performed=no
+push_performed=no

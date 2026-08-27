@@ -1,0 +1,8 @@
+repository=D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration
+branch=nativeaot-managed-kernel-integration
+head=99f7951ac594cccfe693c25dc7b25fd5d13cede0
+subject=Implemented Managed Kernel Phase 26 secure entropy integration from the pushed baseline.
+initial_status=## nativeaot-managed-kernel-integration...origin/nativeaot-managed-kernel-integration
+initial_worktree=clean
+initial_origin_sync=branch was synchronized with origin
+phase26_baseline_note=The authoritative repository had Phase 26 committed at the starting HEAD, despite the prompt describing it as uncommitted. It was preserved unchanged; no reset, stash, discard, amend, commit, or push was performed.

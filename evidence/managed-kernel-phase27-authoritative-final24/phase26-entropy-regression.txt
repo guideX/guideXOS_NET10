@@ -1,0 +1,6 @@
+Phase 26 is present in all three combined fresh-boot serial logs.
+Each run proved modern non-transitional virtio-rng PCI discovery, queue configuration, provider availability, VIRTIO_RNG selection, secure-random fill, GC survival, queue release, teardown, reinitialize/reuse, and Phase 26 pass.
+Host Phase 26 suite: 70/70 PASS.
+Phase 25 host suite: 113/113 PASS.
+The prior no-provider Phase 25 fresh-boot regression remains recorded under evidence/managed-kernel-phase27-authoritative-final16/phase25-no-provider with expected ENTROPY_UNAVAILABLE fail-closed behavior.
+No crypto source calls into PCI/MMIO/DMA or changes the entropy provider policy.

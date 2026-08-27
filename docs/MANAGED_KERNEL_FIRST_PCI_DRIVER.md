@@ -1159,3 +1159,63 @@ under `evidence/phase25-crypto-foundation-20260825-final4/`.
 | RSA/ECDSA verification | Missing |
 | X.509 narrow parser | Missing |
 | TLS state machine and records | Deferred |
+
+## Phase 26 entropy follow-up
+
+Phase 26 subsequently added the hardware-first entropy router and modern
+non-transitional virtio-rng driver. Its host suite passed 70 cases, and its
+three fresh QEMU boots proved PCI discovery, queue ownership, provider
+selection, GC survival, teardown, and reinitialization. The Phase 25
+no-provider regression remains fail-closed with the expected
+`ENTROPY_UNAVAILABLE` result.
+
+## Phase 27: managed AES-128 and AES-GCM — Outcome B
+
+Phase 27 adds the narrow managed symmetric foundation in
+`ManagedAes128.cs`, `ManagedGhash.cs`, and `ManagedAesGcm.cs`. It is not a TLS
+implementation. AES-128 follows FIPS-197 encryption semantics with a
+primitive-only 176-byte expanded-key layout and a computed algebraic S-box;
+GHASH uses fixed-state MSB-first GF(2^128) multiplication, zero-padded partial
+blocks, and the SP 800-38D length block. GCM accepts exactly 16-byte keys,
+12-byte nonces, and 16-byte tags, with a 256-byte AAD cap and 16 KiB
+plaintext/ciphertext cap. GCM counter exhaustion is rejected before wrap.
+
+The one-shot API uses caller-owned bounded buffers and rejects overlaps. It
+authenticates ciphertext/AAD before decrypting or writing plaintext. On tag,
+ciphertext, AAD, nonce, or key failure the plaintext output remains untouched;
+temporary keys, GHASH state, counters, tags, and authentication intermediates
+are cleared. Nonce uniqueness remains the caller's responsibility: reusing a
+GCM nonce with the same key is catastrophic and prohibited.
+
+The Phase 27 host suite passes exactly 100 cases using FIPS/NIST vectors,
+incremental GHASH tests, corruption controls, exact capacities, recovery after
+failed authentication, GC/lifecycle tests, and an independent host-only
+`AesGcm` oracle. Three fresh NativeAOT QEMU boots execute the AES, GHASH, GCM,
+fail-closed, no-plaintext, reset/reuse, and Phase 26 virtio-rng nonce proofs.
+The direct Phase 27 crypto-state `GC.Collect()` checkpoint is a characterized
+NativeAOT runtime limitation: the existing Phase 26 GC proof succeeds, while
+the new checkpoint exits after its begin marker. The strict Phase 27 runner
+therefore reports Outcome B rather than overstating Outcome A.
+
+The final Phase 27 payload is 1,314,816 bytes with SHA-256
+`124B02BF07966654AC08D578F6BC07EB252EAD8BE28846D0EB1D1153F55C26A2`. Its
+imports retain only the existing `bcrypt.dll!BCryptGenRandom` runtime/PAL
+surface among crypto-related imports; no BCrypt AES APIs, OpenSSL, libcrypto,
+CommonCrypto, or hosted crypto PAL became reachable. Complete evidence is in
+`evidence/managed-kernel-phase27-authoritative-final24/` and the detailed
+design is in `docs/MANAGED_KERNEL_PHASE27_AES_GCM.md`.
+
+### TLS prerequisite matrix after Phase 27
+
+| TLS prerequisite | Status |
+| --- | --- |
+| Secure entropy | Proven |
+| SHA-256 | Proven |
+| HMAC-SHA256 | Proven |
+| TLS 1.2 PRF building blocks | Available |
+| AES-128 | Proven functional; Outcome B crypto-GC caveat |
+| GCM | Proven functional; Outcome B crypto-GC caveat |
+| ECDH P-256 | Missing |
+| RSA/ECDSA verification | Missing |
+| X.509 parser | Missing |
+| TLS state machine | Deferred |

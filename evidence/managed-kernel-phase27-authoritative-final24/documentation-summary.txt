@@ -1,0 +1,3 @@
+new=docs/MANAGED_KERNEL_PHASE27_AES_GCM.md
+extended=docs/MANAGED_KERNEL_FIRST_PCI_DRIVER.md; docs/MANAGED_TLS_PHASE24_CRYPTO_AUDIT.md
+documented=AES-128, GHASH, GCM flow, bounded profile, nonce/tag policy, fail-closed decryption, cleanup, vectors, host totals, bare-metal proof, GC limitation, entropy integration, import audit, limitations, TLS prerequisite matrix

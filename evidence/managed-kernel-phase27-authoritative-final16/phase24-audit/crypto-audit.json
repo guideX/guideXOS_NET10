@@ -1,0 +1,146 @@
+{
+  "Audit": "guideXOS Managed TLS Phase 24 cryptographic capability audit",
+  "CreatedUtc": "2026-08-27T13:40:24.2916832Z",
+  "Repository": "D:\\dev\\guideXOS_NET10_nativeaot-managed-kernel-integration",
+  "Branch": "nativeaot-managed-kernel-integration",
+  "Head": "99f7951ac594cccfe693c25dc7b25fd5d13cede0",
+  "HeadSubject": "Implemented Managed Kernel Phase 26 secure entropy integration from the pushed baseline.",
+  "Worktree": [
+    "# branch.oid 99f7951ac594cccfe693c25dc7b25fd5d13cede0",
+    "# branch.head nativeaot-managed-kernel-integration",
+    "# branch.upstream origin/nativeaot-managed-kernel-integration",
+    "# branch.ab +0 -0",
+    "1 .M N... 100644 100644 100644 fa96cd19e70d8a822fd6821855a47104920233bf fa96cd19e70d8a822fd6821855a47104920233bf src/Gate4Harness/gate4_loader.c",
+    "1 .M N... 100644 100644 100644 5a30575ade0634a41fbc7c292842f19f182cfcad 5a30575ade0634a41fbc7c292842f19f182cfcad tools/Build-Gate4Harness.ps1",
+    "1 .M N... 100644 100644 100644 25c00a8be193097fa077cb8180ee13eee28cf1cf 25c00a8be193097fa077cb8180ee13eee28cf1cf tools/Build-ManagedKernel.ps1",
+    "? evidence/managed-kernel-phase27-authoritative-final/",
+    "? evidence/managed-kernel-phase27-authoritative-final10/",
+    "? evidence/managed-kernel-phase27-authoritative-final11/",
+    "? evidence/managed-kernel-phase27-authoritative-final12/",
+    "? evidence/managed-kernel-phase27-authoritative-final13/",
+    "? evidence/managed-kernel-phase27-authoritative-final14/",
+    "? evidence/managed-kernel-phase27-authoritative-final15/",
+    "? evidence/managed-kernel-phase27-authoritative-final16/",
+    "? evidence/managed-kernel-phase27-authoritative-final2/",
+    "? evidence/managed-kernel-phase27-authoritative-final3/",
+    "? evidence/managed-kernel-phase27-authoritative-final4/",
+    "? evidence/managed-kernel-phase27-authoritative-final5/",
+    "? evidence/managed-kernel-phase27-authoritative-final6/",
+    "? evidence/managed-kernel-phase27-authoritative-final7/",
+    "? evidence/managed-kernel-phase27-authoritative-final8/",
+    "? evidence/managed-kernel-phase27-authoritative-final9/",
+    "? evidence/managed-kernel-phase27-authoritative/",
+    "? evidence/managed-kernel-phase27-diagnostic2/",
+    "? evidence/managed-kernel-phase27-final/",
+    "? evidence/managed-kernel-phase27-gcdiagnostic/",
+    "? evidence/managed-kernel-phase27-no27/",
+    "? evidence/managed-kernel-phase27-retry/",
+    "? evidence/managed-kernel-phase27-utc/",
+    "? src/ManagedKernel/ManagedAes128.cs",
+    "? src/ManagedKernel/ManagedAesGcm.cs",
+    "? src/ManagedKernel/ManagedAesGcmKernelProof.cs",
+    "? src/ManagedKernel/ManagedGhash.cs",
+    "? src/ManagedKernelPhase27HostTests/",
+    "? tools/Run-ManagedKernelPhase27FreshBoots.ps1",
+    "? tools/Run-ManagedKernelPhase27HostTests.ps1"
+  ],
+  "Payload": {
+    "Path": "D:\\dev\\guideXOS_NET10_nativeaot-managed-kernel-integration\\artifacts\\managed-kernel-phase27-final14\\publish\\gxos-managed-kernel.dll",
+    "Size": 1314816,
+    "Sha256": "D29687D40719544B3978697942B72F0B40F5CA98D89570E7E6A1926EBAF30166",
+    "Imports": [
+      "DLL Name: ADVAPI32.dll",
+      "DLL Name: bcrypt.dll",
+      "000c13f8  <none>  001f  BCryptGenRandom",
+      "DLL Name: KERNEL32.dll",
+      "DLL Name: ole32.dll",
+      "DLL Name: api-ms-win-crt-math-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-string-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-convert-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-stdio-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-runtime-l1-1-0.dll",
+      "DLL Name: api-ms-win-crt-heap-l1-1-0.dll"
+    ],
+    "BCryptGenRandomImported": true,
+    "BareMetalCryptoCallProven": false
+  },
+  "FrameworkSurface": [
+    {
+      "Name": "System.Security.Cryptography.SHA256, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.HMACSHA256, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.RandomNumberGenerator, System.Security.Cryptography",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.Aes, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.AesGcm, System.Security.Cryptography",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.RSA, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.ECDsa, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.ECDiffieHellman, System.Security.Cryptography.Algorithms",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Security.Cryptography.CryptographicOperations, System.Security.Cryptography.Primitives",
+      "AvailableInHost": true,
+      "Assembly": "System.Security.Cryptography"
+    },
+    {
+      "Name": "System.Numerics.BigInteger, System.Runtime.Numerics",
+      "AvailableInHost": true,
+      "Assembly": "System.Runtime.Numerics"
+    }
+  ],
+  "RepositorySourceFindings": {
+    "RepositoryOwnedSha256": true,
+    "RepositoryOwnedHmacSha256": true,
+    "RepositoryOwnedAes": true,
+    "RepositoryOwnedRsa": false,
+    "RepositoryOwnedEcc": false,
+    "FrameworkCryptoReferences": false,
+    "EntropyBoundaryReferences": true
+  },
+  "ProvenRuntimeCapabilities": {
+    "Sha256": false,
+    "HmacSha256": false,
+    "SecureRandomBytes": false,
+    "Aes": false,
+    "AesGcm": false,
+    "AesCbc": false,
+    "RsaSignatureVerification": false,
+    "EccP256": false,
+    "Ecdh": false,
+    "Ecdsa": false,
+    "ConstantTimeComparison": false,
+    "BigInteger": false
+  },
+  "HostOnlySurfaceMustNotBeUsed": true,
+  "FirstBlocker": "No cryptographically credible client entropy source is installed and proven through the actual bare-metal managed/native boundary.",
+  "AdditionalBlocker": "No bare-metal-proven asymmetric primitive exists for authenticating the deterministic TLS peer and performing the selected TLS 1.2 key exchange.",
+  "Outcome": "C"
+}

@@ -1,0 +1,9 @@
+payload=artifacts/managed-kernel-phase27-final24/publish/gxos-managed-kernel.dll
+size=1314816
+sha256=124B02BF07966654AC08D578F6BC07EB252EAD8BE28846D0EB1D1153F55C26A2
+imports=ADVAPI32.dll; bcrypt.dll!BCryptGenRandom; KERNEL32.dll; ole32.dll; api-ms-win-crt-math-l1-1-0.dll; api-ms-win-crt-string-l1-1-0.dll; api-ms-win-crt-convert-l1-1-0.dll; api-ms-win-crt-stdio-l1-1-0.dll; api-ms-win-crt-runtime-l1-1-0.dll; api-ms-win-crt-heap-l1-1-0.dll
+phase27_export=GxManagedKernelRunPhase27
+forbidden_crypto_imports=none
+forbidden_source_references_in_production_crypto=none
+host_only_oracle=System.Security.Cryptography.AesGcm appears only in ManagedKernelPhase27HostTests and is not a production project dependency
+BCryptGenRandom=unchanged existing entropy import; no BCryptEncrypt/Decrypt/OpenAlgorithmProvider/GenerateSymmetricKey, OpenSSL, libcrypto, CommonCrypto, or hosted AES PAL import

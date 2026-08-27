@@ -1,0 +1,3 @@
+MANAGED_KERNEL_PHASE27_HOST_TESTS_PASS cases=100
+MANAGED_KERNEL_PHASE27_PERF encrypt_16k_ms=37 decrypt_16k_ms=40
+coverage=AES-128 FIPS/NIST vectors; GHASH empty, block, multi-block, partial, AAD/ciphertext/length; GCM NIST encryption/decryption; corruption controls; untouched failure output; exact capacities; overlap and malformed-input rejection; GC/lifecycle/reuse; independent host AesGcm oracle; Phase 26 SecureRandom nonce integration
