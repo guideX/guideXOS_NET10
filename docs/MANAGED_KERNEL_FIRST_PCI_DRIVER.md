@@ -1219,3 +1219,53 @@ design is in `docs/MANAGED_KERNEL_PHASE27_AES_GCM.md`.
 | RSA/ECDSA verification | Missing |
 | X.509 parser | Missing |
 | TLS state machine | Deferred |
+
+## Phase 28: managed P-256 ECDH — Outcome A
+
+Phase 28 adds a narrow managed NIST P-256/secp256r1 ECDH primitive in
+`ManagedP256.cs`. It uses fixed-width eight-`uint` field elements, Jacobian
+point arithmetic, SEC1 uncompressed public keys, fixed 256-step scalar
+multiplication, and rejection-sampled private keys from the Phase 26
+virtio-rng-backed `ManagedSecureRandom`. It does not add certificates, ECDSA,
+TLS records, or a TLS handshake.
+
+The dedicated host suite passes 188/188 cases, including independent field and
+point checks, RFC 5903 and NIST CAVP ECC CDH vectors, malformed scalar/point
+rejection, output preservation on failure, supported overlap, entropy
+integration, teardown/reuse, GC survival, and Phase 26/27 regressions. The
+three authoritative fresh QEMU boots in
+`evidence/managed-kernel-phase28-authoritative-final7/` each reached
+`MANAGED_KERNEL_PHASE28_PASS` and retained the Phase 26 entropy, Phase 27
+AES/GHASH/GCM, and Phase 23 regression markers.
+
+The final Phase 28 payload is 1,341,952 bytes with SHA-256
+`DC431B422D1D8B53690A30882F24CA215A85A5FAC7D558C54AEA0984BA248211`.
+The combined Phase 15–27 host regression total remains 791/791 (the retained
+Phase 15–26 result is 691/691 and Phase 27 is 100/100). The import audit finds
+only the pre-existing `bcrypt.dll!BCryptGenRandom` runtime/PAL boundary among
+crypto-related imports; Phase 28 adds no BCrypt ECC/secret-agreement,
+NCrypt, OpenSSL, libcrypto, CommonCrypto, or hosted ECDH dependency.
+
+The inherited Phase 27 direct crypto-state `GC.Collect()` NativeAOT boundary
+remains documented and is not a Phase 28 acceptance failure. The Phase 28
+proof does not claim formal constant-time behavior, and its ECDH result is the
+raw 32-byte affine X coordinate. Detailed design, limitations, vectors, and
+boot evidence are in
+`docs/MANAGED_KERNEL_PHASE28_P256_ECDH.md` and the evidence directory above.
+
+### TLS prerequisite matrix after Phase 28
+
+| TLS prerequisite | Status |
+| --- | --- |
+| Secure entropy | Proven |
+| SHA-256 | Proven |
+| HMAC-SHA256 | Proven |
+| AES-128 | Proven |
+| GHASH | Proven |
+| AES-GCM | Proven |
+| TLS PRF building blocks | Available |
+| P-256 ECDH | Proven |
+| RSA verification | Missing |
+| ECDSA verification | Missing |
+| X.509 | Missing |
+| TLS handshake/state machine | Deferred |

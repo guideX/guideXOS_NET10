@@ -12,6 +12,8 @@ param(
     [switch]$EnableNativeAotSchedulerCallback,
     [switch]$EnableNativeAotManagedGcProbe,
     [switch]$EnableManagedKernelPhase27,
+    [switch]$EnableManagedKernelPhase28,
+    [switch]$EnableManagedKernelPhase28Standalone,
     [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
@@ -1167,6 +1169,12 @@ if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase26') 
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE26'
     if ($EnableManagedKernelPhase27) {
         $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE27'
+    }
+    if ($EnableManagedKernelPhase28) {
+        $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE28'
+    }
+    if ($EnableManagedKernelPhase28Standalone) {
+        $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE28_STANDALONE'
     }
 }
 if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase27') {

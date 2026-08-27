@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase28HostTests</PathMap>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\ManagedKernel\ManagedP256.cs" Link="ManagedP256.cs" />
+    <Compile Include="..\ManagedKernel\ManagedSecureRandom.cs" Link="ManagedSecureRandom.cs" />
+    <Compile Include="..\ManagedKernel\ManagedVirtioRngProtocol.cs" Link="ManagedVirtioRngProtocol.cs" />
+    <Compile Include="..\ManagedKernelPhase26HostTests\ManagedVirtioRngDriverStub.cs" Link="ManagedVirtioRngDriver.cs" />
+  </ItemGroup>
+</Project>

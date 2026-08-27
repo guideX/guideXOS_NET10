@@ -20,6 +20,31 @@ internal static unsafe class ManagedAesGcmKernelProof
             return ManagedKernelContract.InvalidState;
         }
 
+        if (!RunCore() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE27_PASS\r\n"u8))
+        {
+            return ManagedKernelContract.InvalidState;
+        }
+        s_run = 1;
+        return ManagedKernelContract.ManagedOk;
+    }
+
+    internal static bool RunForPhase28()
+    {
+        if (!ManagedKernelContract.IsStarted ||
+            !ManagedKernelContract.DeviceResourcesInstalled ||
+            !ManagedKernelContract.DmaServicesInstalled ||
+            !ManagedKernelContract.EntropyServicesInstalled)
+        {
+            return false;
+        }
+        return RunCore() &&
+               KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE27_PASS\r\n"u8);
+    }
+
+    private static bool RunCore()
+    {
+
         ManagedAes128 aes = new();
         Span<byte> aesKey = stackalloc byte[]
         {
@@ -89,7 +114,7 @@ internal static unsafe class ManagedAesGcmKernelProof
                 !ManagedCryptoComparison.FixedTimeEquals(block, aesCiphertext) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_AES128_KAT_PASS\r\n"u8))
             {
-                return ManagedKernelContract.InvalidState;
+                return false;
             }
 
             if (!ManagedGhash.TryCompute(ghashSubkey, ghashAad,
@@ -97,7 +122,7 @@ internal static unsafe class ManagedAesGcmKernelProof
                 !ManagedCryptoComparison.FixedTimeEquals(ghash, ghashExpected) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_GHASH_KAT_PASS\r\n"u8))
             {
-                return ManagedKernelContract.InvalidState;
+                return false;
             }
 
             if (!ManagedAesGcm.TryEncrypt(gcmKey, gcmNonce,
@@ -107,7 +132,7 @@ internal static unsafe class ManagedAesGcmKernelProof
                 !ManagedCryptoComparison.FixedTimeEquals(tag, gcmTag) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_AES_GCM_ENCRYPT_KAT_PASS\r\n"u8))
             {
-                return ManagedKernelContract.InvalidState;
+                return false;
             }
 
             if (!ManagedAesGcm.TryDecrypt(gcmKey, gcmNonce,
@@ -117,7 +142,7 @@ internal static unsafe class ManagedAesGcmKernelProof
                                                          zeroPlaintext) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_AES_GCM_DECRYPT_KAT_PASS\r\n"u8))
             {
-                return ManagedKernelContract.InvalidState;
+                return false;
             }
 
             failedPlaintext.Fill(0xA5);
@@ -135,7 +160,7 @@ internal static unsafe class ManagedAesGcmKernelProof
                     "GXOS_NET10:MANAGED_AES_GCM_NO_PLAINTEXT_ON_FAILURE_PASS\r\n"u8))
             {
                 invalidTag.Clear();
-                return ManagedKernelContract.InvalidState;
+                return false;
             }
             invalidTag.Clear();
 
@@ -148,25 +173,21 @@ internal static unsafe class ManagedAesGcmKernelProof
                 !KernelLog.Write(
                     "GXOS_NET10:MANAGED_AES_GCM_POST_FAILURE_RECOVERY_PASS\r\n"u8))
             {
-                return ManagedKernelContract.InvalidState;
+                return false;
             }
 
             aes.Reset();
             if (aes.IsInitialized || aes.TryEncryptBlock(aesPlaintext, block) ||
                 !KernelLog.Write("GXOS_NET10:MANAGED_AES_GCM_RESET_REUSE_PASS\r\n"u8))
             {
-                return ManagedKernelContract.InvalidState;
+                return false;
             }
 
             if (!RunEntropyNonceProof())
             {
-                return ManagedKernelContract.InvalidState;
+                return false;
             }
-
-            s_run = 1;
-            return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE27_PASS\r\n"u8)
-                ? ManagedKernelContract.ManagedOk
-                : ManagedKernelContract.InvalidState;
+            return true;
         }
         finally
         {

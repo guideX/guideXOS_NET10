@@ -265,3 +265,46 @@ totals, and audit are retained under
 | RSA/ECDSA verification | Missing |
 | X.509 parser | Missing |
 | TLS state machine | Deferred |
+
+## Phase 28 managed P-256 ECDH follow-up — Outcome A
+
+The managed TLS crypto substrate now includes a self-contained P-256 ECDH
+primitive. The implementation is limited to NIST P-256/secp256r1 and SEC1
+65-byte uncompressed points. It validates private scalars and peer points,
+uses fixed-width bounded arithmetic and a fixed 256-step scalar loop, and
+returns the raw 32-byte shared X coordinate. Key generation is rejection
+sampling exclusively through the Phase 26 virtio-rng-backed
+`ManagedSecureRandom`; unavailable entropy fails closed.
+
+The Phase 28 host suite passes 188/188 cases. The authoritative NativeAOT
+payload is 1,341,952 bytes with SHA-256
+`DC431B422D1D8B53690A30882F24CA215A85A5FAC7D558C54AEA0984BA248211`. Three
+fresh QEMU boots passed from the evidence directory
+`evidence/managed-kernel-phase28-authoritative-final7/`, including the
+Phase 26 secure-random proof, Phase 27 AES/GHASH/GCM regression, malformed
+point and scalar rejection, and unchanged-output-on-failure markers.
+
+This is an ECDH primitive milestone, not TLS capability: RSA verification,
+ECDSA verification, X.509 parsing, record protection integration, and the TLS
+handshake/state machine remain absent. The import audit retains only the
+pre-existing `bcrypt.dll!BCryptGenRandom` runtime/PAL import and found no
+hosted P-256 or forbidden ECC dependency. The known Phase 27 direct
+crypto-state `GC.Collect()` boundary remains documented and is not repeated as
+a mandatory Phase 28 criterion.
+
+### TLS prerequisite matrix after Phase 28
+
+| TLS prerequisite | Status |
+| --- | --- |
+| Secure entropy | Proven |
+| SHA-256 | Proven |
+| HMAC-SHA256 | Proven |
+| AES-128 | Proven |
+| GHASH | Proven |
+| AES-GCM | Proven |
+| TLS PRF building blocks | Available |
+| P-256 ECDH | Proven |
+| RSA verification | Missing |
+| ECDSA verification | Missing |
+| X.509 | Missing |
+| TLS handshake/state machine | Deferred |

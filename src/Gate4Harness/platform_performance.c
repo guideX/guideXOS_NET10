@@ -360,7 +360,10 @@ static int gxos_perf_read_source(uint64_t *raw)
     if (g_perf_source != GXOS_PERF_SOURCE_ACPI_PM_TIMER || !g_pm_timer.initialized) return 0;
     current = gxos_perf_read_pm_timer();
     delta = (current - g_pm_timer.last_raw) & g_pm_timer.mask;
-    if (delta > (g_pm_timer.mask >> 1) || g_pm_timer.extended > UINT64_MAX - delta) return 0;
+    if (g_pm_timer.extended > UINT64_MAX - delta) return 0;
+#ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE28_STANDALONE
+    if (delta > (g_pm_timer.mask >> 1)) return 0;
+#endif
     g_pm_timer.last_raw = current;
     g_pm_timer.extended += delta;
     *raw = g_pm_timer.extended;
