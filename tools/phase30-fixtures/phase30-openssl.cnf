@@ -1,0 +1,42 @@
+[ req ]
+distinguished_name = dn
+prompt = no
+
+[ dn ]
+C = US
+O = guideXOS
+CN = unused
+
+[ root_ext ]
+basicConstraints = critical,CA:TRUE,pathlen:1
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+
+[ intermediate_ext ]
+basicConstraints = critical,CA:TRUE,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+
+[ leaf_ext ]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = serverAuth
+subjectAltName = critical,DNS:www.example.com,DNS:*.example.com
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+
+[ leaf_no_san_ext ]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = serverAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+
+[ leaf_san_only_ext ]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = serverAuth
+subjectAltName = critical,DNS:www.example.com
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer

@@ -345,3 +345,30 @@ logs, and import evidence are recorded under
 
 ECDSA verification is an input primitive for future certificate processing;
 it is not certificate authentication by itself.
+
+## Phase 30 certificate-validation audit
+
+Phase 30 composes managed Phase 26 SHA-256 and Phase 29 P-256 ECDSA
+verification with a bounded DER/X.509 parser. The accepted profile is limited
+to ECDSA-SHA256, P-256, bounded v3 extensions, serverAuth, SAN/CN hostname
+rules, and explicitly configured roots. No hosted X.509/ASN.1 stack, RSA, OS
+trust store, revocation, or TLS state machine was introduced.
+
+The Phase 30 host suite passes 91/91 and retained Phase 15–29 regressions pass
+1,188/1,188. NativeAOT proof and import evidence are recorded in
+`docs/MANAGED_KERNEL_PHASE30_X509_VALIDATION.md`, with payload/import files in
+`artifacts/managed-kernel-phase30-final/` and serial/firmware files in
+`artifacts/managed-kernel-phase30-qemu-20260828-authoritative-final/`.
+
+| TLS prerequisite | Phase 30 status |
+| --- | --- |
+| Exact-TBS SHA-256 | Proven |
+| Bounded DER reader | Proven |
+| P-256 ECDSA certificate signature | Proven |
+| Narrow P-256 X.509 parsing | Proven |
+| SAN/CN hostname policy | Proven |
+| Bounded chain/trust/path-length policy | Proven |
+| RSA certificate verification | Missing |
+| General PKI/path building | Unsupported |
+| Revocation/OCSP/CRL | Unsupported |
+| TLS handshake/state machine | Deferred |

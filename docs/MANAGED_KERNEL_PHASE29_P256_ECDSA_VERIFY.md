@@ -247,3 +247,12 @@ substrate and the strict SEC1 public-key validation path. Certificate parsing,
 certificate-chain validation, trust anchors, hostname policy, TLS
 `CertificateVerify`, RSA verification, and the TLS state machine remain out of
 scope. ECDSA verification alone is not certificate authentication.
+
+## Phase 30 reuse note
+
+Phase 30 reuses the Phase 29 raw and canonical DER ECDSA-SHA256 verification
+path for certificate signatures, while adding its own bounded DER/X.509
+profile, exact-TBS hashing, SPKI extraction, chain rules, and hostname policy.
+The Phase 29 proof remains covered: the retained Phase 29 host suite passes
+209/209 and the Phase 30 NativeAOT proof emits
+`MANAGED_X509_PHASE29_ECDSA_REGRESSION_PASS`.

@@ -1304,3 +1304,43 @@ and import evidence is retained in
 | TLS handshake/state machine | Deferred |
 
 ECDSA verification alone does not claim certificate authentication.
+
+## Phase 30: narrow X.509 / DER certificate validation — Outcome A
+
+Phase 30 adds a bounded managed DER/X.509 parser and validator for a narrow
+P-256/ECDSA-SHA256 certificate profile. It supports exact-TBS signature
+verification, SPKI extraction, validity, basic constraints, key usage, EKU,
+SAN/CN hostname rules, bounded chains, exact configured-root trust, path
+length, and critical-extension rejection. It deliberately omits RSA, general
+X.509 policy processing, revocation, OS trust stores, and the TLS handshake.
+
+The Phase 30 host suite passes 91/91. Retained suites pass Phase 15–29
+1,188/1,188. Three fresh authoritative NativeAOT boots pass
+`MANAGED_KERNEL_PHASE30_PASS`; serial and firmware evidence is in
+`artifacts/managed-kernel-phase30-qemu-20260828-authoritative-final/`, while
+payload and import evidence is in `artifacts/managed-kernel-phase30-final/`
+and `artifacts/managed-kernel-phase30-gate/`. The design record is
+`docs/MANAGED_KERNEL_PHASE30_X509_VALIDATION.md`.
+
+### TLS prerequisite matrix after Phase 30
+
+| TLS prerequisite | Status |
+| --- | --- |
+| Secure entropy | Proven |
+| SHA-256 | Proven |
+| HMAC-SHA256 | Proven |
+| AES-128 | Proven |
+| GHASH | Proven |
+| AES-GCM | Proven |
+| TLS PRF building blocks | Available |
+| P-256 ECDH | Proven |
+| P-256 ECDSA verification | Proven |
+| Bounded DER reader | Proven |
+| Narrow X.509 certificate validation | Proven |
+| ECDSA P-256 certificate signature validation | Proven |
+| Bounded certificate-chain validation | Proven |
+| TLS server hostname validation | Proven |
+| RSA verification | Missing |
+| General PKI/path building | Unsupported |
+| Revocation/OCSP/CRL | Unsupported |
+| TLS handshake/state machine | Deferred |
