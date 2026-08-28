@@ -29,6 +29,23 @@ internal static unsafe class ManagedP256KernelProof
         return ManagedKernelContract.ManagedOk;
     }
 
+    internal static bool RunForPhase29()
+    {
+        if (!ManagedKernelContract.IsStarted ||
+            !ManagedKernelContract.DeviceResourcesInstalled ||
+            !ManagedKernelContract.DmaServicesInstalled ||
+            !ManagedKernelContract.EntropyServicesInstalled)
+        {
+            return false;
+        }
+
+        /* Phase 29 owns the outer proof entry, but deliberately reuses this
+           complete Phase 28 proof so the ECDH and Phase 27 regressions run in
+           the same authoritative boot without a second export invocation. */
+        return RunProof() &&
+               KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE28_PASS\r\n"u8);
+    }
+
     private static bool RunProof()
     {
         Span<byte> privateA = stackalloc byte[]

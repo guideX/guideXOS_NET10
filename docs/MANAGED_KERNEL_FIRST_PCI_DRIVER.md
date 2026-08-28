@@ -1269,3 +1269,38 @@ boot evidence are in
 | ECDSA verification | Missing |
 | X.509 | Missing |
 | TLS handshake/state machine | Deferred |
+
+## Phase 29: managed P-256 ECDSA verification — Outcome A
+
+Phase 29 adds digest-oriented managed ECDSA verification for NIST P-256. The
+implementation separates field modulus `p` from subgroup order `n`, uses
+bounded eight-limb scalar arithmetic and fixed 512-bit reduction, inverts by
+the fixed exponent `n-2`, and reuses the Phase 28 strict SEC1 public-key and
+Jacobian point paths. It also provides a narrow canonical DER parser for
+`SEQUENCE { INTEGER r, INTEGER s }` with a 72-byte maximum. Signing, X.509,
+certificate chains, RSA, and TLS handshake logic remain deferred.
+
+The Phase 29 host suite passes 209/209, with Phase 15–26 691/691, Phase 27
+100/100, and Phase 28 188/188 retained. Three fresh authoritative NativeAOT
+boots reached `MANAGED_KERNEL_PHASE29_PASS`; exact payload, serial, firmware,
+and import evidence is retained in
+`evidence/managed-kernel-phase29-authoritative-final5/`.
+
+### TLS prerequisite matrix after Phase 29
+
+| TLS prerequisite | Status |
+| --- | --- |
+| Secure entropy | Proven |
+| SHA-256 | Proven |
+| HMAC-SHA256 | Proven |
+| AES-128 | Proven |
+| GHASH | Proven |
+| AES-GCM | Proven |
+| TLS PRF building blocks | Available |
+| P-256 ECDH | Proven |
+| P-256 ECDSA verification | Proven |
+| RSA verification | Missing |
+| X.509 certificate validation | Missing |
+| TLS handshake/state machine | Deferred |
+
+ECDSA verification alone does not claim certificate authentication.

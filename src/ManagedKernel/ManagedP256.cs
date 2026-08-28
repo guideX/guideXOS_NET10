@@ -413,6 +413,369 @@ internal readonly struct ManagedP256FieldElement
     }
 }
 
+/*
+ * P-256's field prime and subgroup order are different moduli.  Keep the
+ * ECDSA scalar type separate from ManagedP256FieldElement so a value cannot
+ * silently cross the field/scalar boundary.  This type has the same bounded
+ * eight-limb storage, but all arithmetic below is modulo n, not p.
+ */
+internal readonly struct ManagedP256ScalarElement
+{
+    internal const int Size = 32;
+
+    internal readonly uint L0;
+    internal readonly uint L1;
+    internal readonly uint L2;
+    internal readonly uint L3;
+    internal readonly uint L4;
+    internal readonly uint L5;
+    internal readonly uint L6;
+    internal readonly uint L7;
+
+    internal ManagedP256ScalarElement(uint l0, uint l1, uint l2, uint l3,
+                                      uint l4, uint l5, uint l6, uint l7)
+    {
+        L0 = l0;
+        L1 = l1;
+        L2 = l2;
+        L3 = l3;
+        L4 = l4;
+        L5 = l5;
+        L6 = l6;
+        L7 = l7;
+    }
+
+    internal static readonly ManagedP256ScalarElement Zero =
+        new(0, 0, 0, 0, 0, 0, 0, 0);
+
+    internal static readonly ManagedP256ScalarElement One =
+        new(1, 0, 0, 0, 0, 0, 0, 0);
+
+    internal static readonly ManagedP256ScalarElement Order =
+        new(0xFC632551U, 0xF3B9CAC2U, 0xA7179E84U, 0xBCE6FAADU,
+            0xFFFFFFFFU, 0xFFFFFFFFU, 0x00000000U, 0xFFFFFFFFU);
+
+    internal static readonly ManagedP256ScalarElement OrderMinusOne =
+        new(0xFC632550U, 0xF3B9CAC2U, 0xA7179E84U, 0xBCE6FAADU,
+            0xFFFFFFFFU, 0xFFFFFFFFU, 0x00000000U, 0xFFFFFFFFU);
+
+    private static readonly ManagedP256ScalarElement OrderMinusTwo =
+        new(0xFC63254FU, 0xF3B9CAC2U, 0xA7179E84U, 0xBCE6FAADU,
+            0xFFFFFFFFU, 0xFFFFFFFFU, 0x00000000U, 0xFFFFFFFFU);
+
+    internal bool IsZero => (L0 | L1 | L2 | L3 | L4 | L5 | L6 | L7) == 0;
+
+    internal uint GetLimb(int index)
+    {
+        return index switch
+        {
+            0 => L0,
+            1 => L1,
+            2 => L2,
+            3 => L3,
+            4 => L4,
+            5 => L5,
+            6 => L6,
+            7 => L7,
+            _ => 0
+        };
+    }
+
+    internal uint GetBit(int bit)
+    {
+        return (GetLimb(bit >> 5) >> (bit & 31)) & 1U;
+    }
+
+    internal static bool Equals(in ManagedP256ScalarElement left,
+                                in ManagedP256ScalarElement right)
+    {
+        return left.L0 == right.L0 && left.L1 == right.L1 &&
+               left.L2 == right.L2 && left.L3 == right.L3 &&
+               left.L4 == right.L4 && left.L5 == right.L5 &&
+               left.L6 == right.L6 && left.L7 == right.L7;
+    }
+
+    internal static int Compare(in ManagedP256ScalarElement left,
+                                in ManagedP256ScalarElement right)
+    {
+        if (left.L7 != right.L7) return left.L7 < right.L7 ? -1 : 1;
+        if (left.L6 != right.L6) return left.L6 < right.L6 ? -1 : 1;
+        if (left.L5 != right.L5) return left.L5 < right.L5 ? -1 : 1;
+        if (left.L4 != right.L4) return left.L4 < right.L4 ? -1 : 1;
+        if (left.L3 != right.L3) return left.L3 < right.L3 ? -1 : 1;
+        if (left.L2 != right.L2) return left.L2 < right.L2 ? -1 : 1;
+        if (left.L1 != right.L1) return left.L1 < right.L1 ? -1 : 1;
+        if (left.L0 != right.L0) return left.L0 < right.L0 ? -1 : 1;
+        return 0;
+    }
+
+    internal static ManagedP256ScalarElement Add(
+        in ManagedP256ScalarElement left,
+        in ManagedP256ScalarElement right)
+    {
+        Span<uint> result = stackalloc uint[9];
+        ulong carry = 0;
+        for (int index = 0; index != 8; ++index)
+        {
+            ulong sum = (ulong)left.GetLimb(index) + right.GetLimb(index) + carry;
+            result[index] = (uint)sum;
+            carry = sum >> 32;
+        }
+        result[8] = (uint)carry;
+        if (result[8] != 0 || Compare(result, Order) >= 0)
+        {
+            SubtractOrder(result);
+        }
+        return FromLimbs(result);
+    }
+
+    internal static ManagedP256ScalarElement Subtract(
+        in ManagedP256ScalarElement left,
+        in ManagedP256ScalarElement right)
+    {
+        Span<uint> result = stackalloc uint[8];
+        ulong borrow = 0;
+        for (int index = 0; index != 8; ++index)
+        {
+            ulong leftLimb = left.GetLimb(index);
+            ulong rightLimb = (ulong)right.GetLimb(index) + borrow;
+            result[index] = (uint)(leftLimb - rightLimb);
+            borrow = leftLimb < rightLimb ? 1UL : 0UL;
+        }
+
+        if (borrow != 0)
+        {
+            ulong carry = 0;
+            for (int index = 0; index != 8; ++index)
+            {
+                ulong sum = (ulong)result[index] + Order.GetLimb(index) + carry;
+                result[index] = (uint)sum;
+                carry = sum >> 32;
+            }
+        }
+        return FromLimbs(result);
+    }
+
+    internal static ManagedP256ScalarElement Multiply(
+        in ManagedP256ScalarElement left,
+        in ManagedP256ScalarElement right)
+    {
+        Span<uint> product = stackalloc uint[16];
+        MultiplyRaw(left, right, product);
+        return ReduceProduct(product);
+    }
+
+    internal static ManagedP256ScalarElement Square(
+        in ManagedP256ScalarElement value)
+    {
+        return Multiply(value, value);
+    }
+
+    internal static ManagedP256ScalarElement Invert(
+        in ManagedP256ScalarElement value)
+    {
+        if (value.IsZero) return Zero;
+        ManagedP256ScalarElement result = One;
+        /* n is prime; use a fixed 256-step square-and-multiply by n - 2. */
+        for (int bit = 255; bit >= 0; --bit)
+        {
+            result = Square(result);
+            if (OrderMinusTwo.GetBit(bit) != 0)
+            {
+                result = Multiply(result, value);
+            }
+        }
+        return result;
+    }
+
+    internal static bool TryReadCanonical(
+        ReadOnlySpan<byte> source,
+        out ManagedP256ScalarElement value)
+    {
+        value = Zero;
+        if (source.Length != Size) return false;
+        ManagedP256ScalarElement candidate = ReadUnchecked(source);
+        if (Compare(candidate, Order) >= 0) return false;
+        value = candidate;
+        return true;
+    }
+
+    internal static bool TryReadNonZero(
+        ReadOnlySpan<byte> source,
+        out ManagedP256ScalarElement value)
+    {
+        if (!TryReadCanonical(source, out value) || value.IsZero)
+        {
+            value = Zero;
+            return false;
+        }
+        return true;
+    }
+
+    internal static bool TryReduceDigest(
+        ReadOnlySpan<byte> digest,
+        out ManagedP256ScalarElement value)
+    {
+        value = Zero;
+        if (digest.Length != Size) return false;
+        value = ReadUnchecked(digest);
+        /* A SHA-256 digest is below 2^256 and n is just below 2^256, so one
+           conditional subtraction is the complete bits2int reduction for
+           qlen == 256.  Zero is a valid digest integer. */
+        if (Compare(value, Order) >= 0)
+        {
+            value = Subtract(value, Order);
+        }
+        return true;
+    }
+
+    internal static ManagedP256ScalarElement FromFieldX(
+        in ManagedP256FieldElement fieldX)
+    {
+        /* p < 2n, so an affine P-256 X coordinate needs at most one
+           subtraction to become an element of the scalar ring. */
+        ManagedP256ScalarElement result = new(
+            fieldX.L0, fieldX.L1, fieldX.L2, fieldX.L3,
+            fieldX.L4, fieldX.L5, fieldX.L6, fieldX.L7);
+        if (Compare(result, Order) >= 0)
+        {
+            result = Subtract(result, Order);
+        }
+        return result;
+    }
+
+    internal ManagedP256FieldElement ToFieldElement()
+    {
+        return new ManagedP256FieldElement(L0, L1, L2, L3,
+                                           L4, L5, L6, L7);
+    }
+
+    private static ManagedP256ScalarElement ReadUnchecked(
+        ReadOnlySpan<byte> source)
+    {
+        if (source.Length < Size) return Zero;
+        return new ManagedP256ScalarElement(
+            ReadWord(source, 28), ReadWord(source, 24),
+            ReadWord(source, 20), ReadWord(source, 16),
+            ReadWord(source, 12), ReadWord(source, 8),
+            ReadWord(source, 4), ReadWord(source, 0));
+    }
+
+    internal void WriteBigEndian(Span<byte> destination)
+    {
+        if (destination.Length < Size) return;
+        WriteWord(destination, 0, L7);
+        WriteWord(destination, 4, L6);
+        WriteWord(destination, 8, L5);
+        WriteWord(destination, 12, L4);
+        WriteWord(destination, 16, L3);
+        WriteWord(destination, 20, L2);
+        WriteWord(destination, 24, L1);
+        WriteWord(destination, 28, L0);
+    }
+
+    private static int Compare(ReadOnlySpan<uint> left,
+                               in ManagedP256ScalarElement right)
+    {
+        if (left[8] != 0) return 1;
+        for (int index = 7; index >= 0; --index)
+        {
+            uint rightLimb = right.GetLimb(index);
+            if (left[index] != rightLimb)
+                return left[index] < rightLimb ? -1 : 1;
+        }
+        return 0;
+    }
+
+    private static void MultiplyRaw(
+        in ManagedP256ScalarElement left,
+        in ManagedP256ScalarElement right,
+        Span<uint> product)
+    {
+        product.Clear();
+        for (int i = 0; i != 8; ++i)
+        {
+            ulong carry = 0;
+            for (int j = 0; j != 8; ++j)
+            {
+                ulong value = product[i + j] +
+                    (ulong)left.GetLimb(i) * right.GetLimb(j) + carry;
+                product[i + j] = (uint)value;
+                carry = value >> 32;
+            }
+            for (int k = i + 8; k != 16; ++k)
+            {
+                ulong value = product[k] + carry;
+                product[k] = (uint)value;
+                carry = value >> 32;
+            }
+        }
+    }
+
+    private static ManagedP256ScalarElement ReduceProduct(
+        ReadOnlySpan<uint> product)
+    {
+        Span<uint> remainder = stackalloc uint[9];
+
+        /* Fixed-width binary long division.  Before each step remainder < n;
+           shifting and adding one product bit yields a value below 2n, and
+           one conditional subtraction restores the invariant. */
+        for (int bit = 511; bit >= 0; --bit)
+        {
+            uint carry = (product[bit >> 5] >> (bit & 31)) & 1U;
+            for (int index = 0; index != 9; ++index)
+            {
+                uint limb = remainder[index];
+                remainder[index] = (limb << 1) | carry;
+                carry = limb >> 31;
+            }
+            if (remainder[8] != 0 || Compare(remainder, Order) >= 0)
+            {
+                SubtractOrder(remainder);
+            }
+        }
+        return FromLimbs(remainder);
+    }
+
+    private static void SubtractOrder(Span<uint> value)
+    {
+        ulong borrow = 0;
+        for (int index = 0; index != 8; ++index)
+        {
+            ulong left = value[index];
+            ulong right = (ulong)Order.GetLimb(index) + borrow;
+            value[index] = (uint)(left - right);
+            borrow = left < right ? 1UL : 0UL;
+        }
+        value[8] = (uint)((ulong)value[8] - borrow);
+    }
+
+    private static ManagedP256ScalarElement FromLimbs(
+        ReadOnlySpan<uint> limbs)
+    {
+        return new ManagedP256ScalarElement(
+            limbs[0], limbs[1], limbs[2], limbs[3],
+            limbs[4], limbs[5], limbs[6], limbs[7]);
+    }
+
+    private static uint ReadWord(ReadOnlySpan<byte> source, int offset)
+    {
+        return ((uint)source[offset] << 24) |
+               ((uint)source[offset + 1] << 16) |
+               ((uint)source[offset + 2] << 8) |
+               source[offset + 3];
+    }
+
+    private static void WriteWord(Span<byte> destination, int offset,
+                                  uint value)
+    {
+        destination[offset] = (byte)(value >> 24);
+        destination[offset + 1] = (byte)(value >> 16);
+        destination[offset + 2] = (byte)(value >> 8);
+        destination[offset + 3] = (byte)value;
+    }
+}
+
 internal struct ManagedP256JacobianPoint
 {
     internal ManagedP256FieldElement X;
@@ -571,6 +934,17 @@ internal struct ManagedP256JacobianPoint
         return r0;
     }
 
+    internal static ManagedP256JacobianPoint ScalarMultiply(
+        in ManagedP256JacobianPoint point,
+        in ManagedP256ScalarElement scalar)
+    {
+        /* The conversion is explicit at the one reuse boundary: every
+           canonical scalar modulo n is also a valid 256-bit field-sized
+           scalar because n < p.  The EC ladder itself remains single-source. */
+        ManagedP256FieldElement fieldScalar = scalar.ToFieldElement();
+        return ScalarMultiply(point, fieldScalar);
+    }
+
     internal bool TryToAffine(out ManagedP256FieldElement x,
                               out ManagedP256FieldElement y)
     {
@@ -613,7 +987,141 @@ internal static class ManagedP256
     internal const int PrivateScalarSize = 32;
     internal const int PublicKeySize = 65;
     internal const int SharedSecretSize = 32;
+    internal const int DigestSize = 32;
+    internal const int SignatureScalarSize = 32;
+    internal const int MaximumDerSignatureSize = 72;
     private const int KeyGenerationAttempts = 128;
+
+    internal static bool TryVerifyDigest(
+        ReadOnlySpan<byte> digest,
+        ReadOnlySpan<byte> publicKey,
+        ReadOnlySpan<byte> r,
+        ReadOnlySpan<byte> s)
+    {
+        if (digest.Length != DigestSize ||
+            r.Length != SignatureScalarSize ||
+            s.Length != SignatureScalarSize ||
+            !ManagedP256ScalarElement.TryReadNonZero(
+                r, out ManagedP256ScalarElement rValue) ||
+            !ManagedP256ScalarElement.TryReadNonZero(
+                s, out ManagedP256ScalarElement sValue) ||
+            !ManagedP256ScalarElement.TryReduceDigest(
+                digest, out ManagedP256ScalarElement digestValue) ||
+            !TryReadPublicPoint(publicKey,
+                                out ManagedP256JacobianPoint publicPoint))
+        {
+            return false;
+        }
+
+        ManagedP256JacobianPoint generator =
+            ManagedP256JacobianPoint.FromAffine(
+                ManagedP256FieldElement.GeneratorX,
+                ManagedP256FieldElement.GeneratorY);
+        ManagedP256JacobianPoint generatorTerm = default;
+        ManagedP256JacobianPoint publicTerm = default;
+        ManagedP256JacobianPoint result = default;
+        try
+        {
+            ManagedP256ScalarElement inverse =
+                ManagedP256ScalarElement.Invert(sValue);
+            ManagedP256ScalarElement u1 =
+                ManagedP256ScalarElement.Multiply(digestValue, inverse);
+            ManagedP256ScalarElement u2 =
+                ManagedP256ScalarElement.Multiply(rValue, inverse);
+
+            generatorTerm = ManagedP256JacobianPoint.ScalarMultiply(
+                generator, u1);
+            publicTerm = ManagedP256JacobianPoint.ScalarMultiply(
+                publicPoint, u2);
+            result = ManagedP256JacobianPoint.Add(generatorTerm, publicTerm);
+            if (!result.TryToAffine(out ManagedP256FieldElement x,
+                                    out ManagedP256FieldElement y))
+            {
+                return false;
+            }
+
+            /* ECDSA compares the field X coordinate reduced modulo n. */
+            ManagedP256ScalarElement reducedX =
+                ManagedP256ScalarElement.FromFieldX(x);
+            return ManagedP256ScalarElement.Equals(reducedX, rValue);
+        }
+        finally
+        {
+            publicPoint.Clear();
+            generatorTerm.Clear();
+            publicTerm.Clear();
+            result.Clear();
+        }
+    }
+
+    internal static bool TryVerifyDerSignature(
+        ReadOnlySpan<byte> digest,
+        ReadOnlySpan<byte> publicKey,
+        ReadOnlySpan<byte> derSignature)
+    {
+        Span<byte> r = stackalloc byte[SignatureScalarSize];
+        Span<byte> s = stackalloc byte[SignatureScalarSize];
+        try
+        {
+            return TryParseDerSignature(derSignature, r, s) &&
+                   TryVerifyDigest(digest, publicKey, r, s);
+        }
+        finally
+        {
+            r.Clear();
+            s.Clear();
+        }
+    }
+
+    internal static bool TryParseDerSignature(
+        ReadOnlySpan<byte> derSignature,
+        Span<byte> r,
+        Span<byte> s)
+    {
+        if (r.Length != SignatureScalarSize ||
+            s.Length != SignatureScalarSize ||
+            derSignature.Length < 2 ||
+            derSignature.Length > MaximumDerSignatureSize ||
+            derSignature[0] != 0x30)
+        {
+            return false;
+        }
+
+        /* P-256 ECDSA-Sig-Value is at most 72 bytes, so DER's canonical
+           short-form length is the only permitted sequence length here.
+           This rejects indefinite and overlong length encodings before any
+           nested value is inspected. */
+        byte sequenceLengthByte = derSignature[1];
+        if ((sequenceLengthByte & 0x80) != 0 ||
+            sequenceLengthByte != derSignature.Length - 2)
+        {
+            return false;
+        }
+
+        r.Clear();
+        s.Clear();
+        int offset = 2;
+        if (!TryReadDerInteger(derSignature, ref offset, r) ||
+            !TryReadDerInteger(derSignature, ref offset, s))
+        {
+            return false;
+        }
+        return offset == derSignature.Length;
+    }
+
+    internal static bool TryReduceFieldXForTest(
+        ReadOnlySpan<byte> fieldX,
+        Span<byte> scalar)
+    {
+        if (scalar.Length != SignatureScalarSize ||
+            !ManagedP256FieldElement.TryRead(
+                fieldX, out ManagedP256FieldElement value))
+        {
+            return false;
+        }
+        ManagedP256ScalarElement.FromFieldX(value).WriteBigEndian(scalar);
+        return true;
+    }
 
     internal static bool TryGeneratePrivateKey(ManagedSecureRandom random,
                                                Span<byte> privateScalar)
@@ -769,6 +1277,49 @@ internal static class ManagedP256
             return false;
         point = ManagedP256JacobianPoint.FromAffine(x, y);
         return true;
+    }
+
+    private static bool TryReadDerInteger(
+        ReadOnlySpan<byte> signature,
+        ref int offset,
+        Span<byte> destination)
+    {
+        if (offset > signature.Length - 2 ||
+            signature[offset] != 0x02)
+        {
+            return false;
+        }
+
+        int length = signature[offset + 1];
+        if (length == 0 || (length & 0x80) != 0 || length > 33 ||
+            length > signature.Length - offset - 2)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<byte> integer = signature.Slice(offset + 2, length);
+        if (length == 33)
+        {
+            /* A 33-byte P-256 INTEGER is canonical only with one required
+               sign octet followed by exactly 32 value octets. */
+            if (integer[0] != 0 || (integer[1] & 0x80) == 0)
+                return false;
+            integer.Slice(1).CopyTo(destination);
+        }
+        else
+        {
+            /* Positive values must not begin with a high bit, and a leading
+               zero is only valid in the 33-byte sign-octet case above. */
+            if ((integer[0] & 0x80) != 0 ||
+                (length > 1 && integer[0] == 0))
+            {
+                return false;
+            }
+            integer.CopyTo(destination.Slice(SignatureScalarSize - length));
+        }
+
+        offset += 2 + length;
+        return ManagedP256ScalarElement.TryReadNonZero(destination, out _);
     }
 
     private static bool IsOnCurve(in ManagedP256FieldElement x,

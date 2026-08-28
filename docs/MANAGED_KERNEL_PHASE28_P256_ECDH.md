@@ -273,12 +273,12 @@ inherited Phase 27 boundary alone is not.
 
 ## 20. Future ECDSA/X.509/TLS reuse
 
-Future signature verification can reuse the fixed-width field element
-encoding, P-256 reduction, inversion, curve equation, Jacobian point formulas,
-affine conversion, and fixed scalar-multiplication structure internally. It
-must add separately reviewed scalar arithmetic, signature parsing, public-key
-policy, hash integration, and verification-specific side-channel analysis.
-This phase intentionally exposes no general curve framework and does not
-claim RSA, ECDSA, X.509, or TLS capability merely because P-256 ECDH exists.
-
+Phase 29 now adds the separately reviewed managed P-256 ECDSA verification
+substrate described in
+`docs/MANAGED_KERNEL_PHASE29_P256_ECDSA_VERIFY.md`. It reuses this phase's
+field arithmetic, Jacobian formulas, affine conversion, fixed scalar ladder,
+and strict SEC1 public-key path, while keeping scalar-mod-`n` arithmetic and
+the narrow DER parser separate. Phase 28 itself remains an ECDH-only
+milestone; neither phase claims X.509 or TLS capability merely because a
+P-256 primitive exists.
 

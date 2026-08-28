@@ -308,3 +308,40 @@ a mandatory Phase 28 criterion.
 | ECDSA verification | Missing |
 | X.509 | Missing |
 | TLS handshake/state machine | Deferred |
+
+## Phase 29 managed P-256 ECDSA verification — Outcome A
+
+Phase 29 adds a self-contained managed ECDSA P-256/SHA-256 verification
+primitive. It uses a separate fixed-width scalar representation modulo the
+P-256 subgroup order `n`, fixed 512-bit product reduction, fixed exponent
+inversion by `n-2`, the Phase 28 strict SEC1 public-key validator and Jacobian
+point machinery, and a bounded canonical DER parser for exactly two positive
+INTEGERs. It accepts raw 32-byte `r`/`s` values or the bounded DER
+`ECDSA-Sig-Value`; it does not implement signing, X.509, certificate
+authentication, RSA, or TLS handshake processing.
+
+The Phase 29 host suite passes 209/209 cases. The retained regressions pass
+Phase 15–26 691/691, Phase 27 100/100, and Phase 28 188/188. Three fresh
+authoritative NativeAOT boots, payload identity, QEMU/OVMF identity, serial
+logs, and import evidence are recorded under
+`evidence/managed-kernel-phase29-authoritative-final5/`.
+
+### TLS prerequisite matrix after Phase 29
+
+| TLS prerequisite | Status |
+| --- | --- |
+| Secure entropy | Proven |
+| SHA-256 | Proven |
+| HMAC-SHA256 | Proven |
+| AES-128 | Proven |
+| GHASH | Proven |
+| AES-GCM | Proven |
+| TLS PRF building blocks | Available |
+| P-256 ECDH | Proven |
+| P-256 ECDSA verification | Proven |
+| RSA verification | Missing |
+| X.509 certificate validation | Missing |
+| TLS handshake/state machine | Deferred |
+
+ECDSA verification is an input primitive for future certificate processing;
+it is not certificate authentication by itself.
