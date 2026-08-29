@@ -35,6 +35,7 @@ internal static class ManagedE1000Protocol
     internal const uint Phase21RxTestSequence = 0x21000001;
     internal const uint Phase22RxTestSequence = 0x22000001;
     internal const uint Phase23RxTestSequence = 0x23000001;
+    internal const uint Phase32RxTestSequence = 0x32000001;
     internal const uint StatusLinkUp = 1U << 1;
 
     internal const ulong RegCtrl = 0x0000;
@@ -265,7 +266,8 @@ internal static class ManagedE1000Protocol
         if (sequence != RxTestSequence && sequence != Phase17RxTestSequence &&
             sequence != Phase18RxTestSequence && sequence != Phase19RxTestSequence &&
              sequence != Phase20RxTestSequence && sequence != Phase21RxTestSequence &&
-             sequence != Phase22RxTestSequence && sequence != Phase23RxTestSequence)
+            sequence != Phase22RxTestSequence && sequence != Phase23RxTestSequence &&
+            sequence != Phase32RxTestSequence)
             return false;
         for (int index = sequenceOffset + 4; index != frame.Length; ++index)
             if (frame[index] != 0) return false;
@@ -361,6 +363,19 @@ internal static class ManagedE1000Protocol
                         ((uint)frame[sequenceOffset + 2] << 8) |
                         frame[sequenceOffset + 3];
         return sequence == Phase23RxTestSequence;
+    }
+
+    internal static bool IsPhase32RxTestFrame(ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length != RxFrameLength ||
+            !frame.Slice(14, RxPayloadSignature.Length)
+                .SequenceEqual(RxPayloadSignature)) return false;
+        int sequenceOffset = 14 + RxPayloadSignature.Length;
+        uint sequence = ((uint)frame[sequenceOffset] << 24) |
+                        ((uint)frame[sequenceOffset + 1] << 16) |
+                        ((uint)frame[sequenceOffset + 2] << 8) |
+                        frame[sequenceOffset + 3];
+        return sequence == Phase32RxTestSequence;
     }
 
     internal static bool TryValidateFrame(ReadOnlySpan<byte> frame,

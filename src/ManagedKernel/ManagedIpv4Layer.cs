@@ -54,6 +54,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         "missing.phase20.test"u8;
     internal static ReadOnlySpan<byte> Phase22QueryName => "phase22.test"u8;
     internal static ReadOnlySpan<byte> Phase23QueryName => "phase23.test"u8;
+    internal static ReadOnlySpan<byte> Phase32QueryName => "www.example.com"u8;
 
     private readonly ManagedEthernetLayer _ethernet;
     private readonly ManagedArpLayer _arp;
@@ -86,6 +87,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private ManagedPhase21TestConsumer? _phase21Consumer;
     private ManagedPhase22TestConsumer? _phase22Consumer;
     private ManagedPhase23TestConsumer? _phase23Consumer;
+    private ManagedPhase32TestConsumer? _phase32Consumer;
     private readonly ManagedTcpConnection _tcp;
     private uint _localIpv4Value;
     private uint _peerIpv4Value;
@@ -111,6 +113,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase21Passed;
     private bool _phase22Passed;
     private bool _phase23Passed;
+    private bool _phase32Passed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -176,6 +179,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase21Passed => _phase21Passed;
     internal bool Phase22Passed => _phase22Passed;
     internal bool Phase23Passed => _phase23Passed;
+    internal bool Phase32Passed => _phase32Passed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -220,6 +224,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _phase21Consumer = new ManagedPhase21TestConsumer(service);
         _phase22Consumer = new ManagedPhase22TestConsumer(service);
         _phase23Consumer = new ManagedPhase23TestConsumer(service);
+        _phase32Consumer = new ManagedPhase32TestConsumer(service);
     }
 
     internal bool TryRunPhase17()
@@ -430,6 +435,47 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         if (!_phase23Consumer.TryRun()) return false;
         _phase23Passed = true;
         return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE23_PASS\r\n"u8);
+    }
+
+    internal bool TryRunPhase32()
+    {
+        if (_phase32Passed || _active || _networkService == null ||
+            _phase32Consumer == null)
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE32_IPV4_GUARD_FAILED\r\n"u8);
+            return false;
+        }
+        if (!_arp.TryBeginDhcp())
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE32_ARP_DHCP_BEGIN_FAILED\r\n"u8);
+            return false;
+        }
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE32_READY\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort) ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                       ManagedUdpEndpointHandler.DnsResolver) ||
+            !PublishNetworkServiceStatus() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE32_CONFIGURED\r\n"u8))
+            return false;
+
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        if (!_phase32Consumer.TryRun()) return false;
+        _phase32Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE32_PASS\r\n"u8);
     }
 
     private bool PublishNetworkServiceStatus()
@@ -718,6 +764,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _phase21Passed = false;
         _phase22Passed = false;
         _phase23Passed = false;
+        _phase32Passed = false;
         _servicePingIdentifier = 0x2101;
         _servicePingSequence = 1;
         _dns.ResetForTeardown();

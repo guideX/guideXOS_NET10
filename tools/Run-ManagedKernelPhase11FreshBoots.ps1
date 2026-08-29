@@ -22,6 +22,8 @@ param(
     [switch]$EnablePhase21Protocol,
     [switch]$EnablePhase22Protocol,
     [switch]$EnablePhase23Protocol,
+    [switch]$EnablePhase32Protocol,
+    [switch]$EnablePhase32NegativeControl,
     [switch]$Phase15EnableFilterDump,
     [switch]$Phase15EnableQemuReceiveTrace,
     [switch]$EnablePhase26VirtioRng,
@@ -31,6 +33,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($EnablePhase32NegativeControl -and -not $EnablePhase32Protocol) {
+    throw '-EnablePhase32NegativeControl requires -EnablePhase32Protocol.'
+}
 $gate = [IO.Path]::GetFullPath($GateDirectory)
 $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 $efi = Join-Path $gate 'ESP\EFI\BOOT\BOOTX64.EFI'
@@ -171,6 +176,28 @@ function Wait-Phase15Outcome11([datetime]$deadline,
     throw 'Timed out waiting for a Phase 15 pass or bounded deferral.'
 }
 
+function Wait-Phase32NegativeOutcome11([datetime]$deadline,
+                                        [System.Diagnostics.Process]$process,
+                                        [System.IO.Stream]$stream,
+                                        [IO.FileStream]$logStream,
+                                        [Text.StringBuilder]$text,
+                                        [byte[]]$buffer) {
+    while ((Get-Date) -lt $deadline) {
+        Pump-Serial11 $stream $logStream $text $buffer
+        if ($text.ToString().Contains(
+                'GXOS_NET10:MANAGED_KERNEL_PHASE14_BLOCKED=DRIVER_START')) {
+            Write-Timeline11 $script:phase11Timeline 'GUEST_MARKER' `
+                'marker=GXOS_NET10:MANAGED_KERNEL_PHASE14_BLOCKED=DRIVER_START outcome=EXPECTED_FAILURE'
+            return
+        }
+        if ($process.HasExited) {
+            throw 'QEMU exited before the Phase 32 negative control outcome.'
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    throw 'Timed out waiting for the Phase 32 negative control outcome.'
+}
+
 function Send-Serial11([Net.Sockets.TcpClient]$client, [System.IO.Stream]$stream,
                        [System.Diagnostics.Process]$process,
                        [IO.StreamWriter]$injectionLog, [string]$afterMarker,
@@ -221,7 +248,8 @@ function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false,
                              [bool]$phase18 = $false, [bool]$phase19 = $false,
                              [bool]$phase20 = $false, [bool]$phase21 = $false,
                               [bool]$phase22 = $false,
-                              [bool]$phase23 = $false) {
+                              [bool]$phase23 = $false,
+                              [bool]$phase32 = $false) {
     $destination = New-Object byte[] 6
     for ($index = 0; $index -lt 6; $index++) {
         $destination[$index] = [Convert]::ToByte($destinationMac.Substring($index * 2, 2), 16)
@@ -234,7 +262,8 @@ function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false,
     $frame[12] = 0x88
     $frame[13] = 0xB5
     [Array]::Copy($signature, 0, $frame, 14, $signature.Length)
-    $sequence = if ($phase23) { 0x23000001 } `
+    $sequence = if ($phase32) { 0x32000001 } `
+        elseif ($phase23) { 0x23000001 } `
         elseif ($phase22) { 0x22000001 } `
         elseif ($phase21) { 0x21000001 } `
         elseif ($phase20) { 0x20000001 } `
@@ -259,14 +288,16 @@ function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
                                      [bool]$phase20 = $false,
                                      [bool]$phase21 = $false,
                                       [bool]$phase22 = $false,
-                                      [bool]$phase23 = $false) {
-    $frame = New-Phase15Frame11 $destinationMac $phase17 $phase18 $phase19 $phase20 $phase21 $phase22 $phase23
+                                      [bool]$phase23 = $false,
+                                      [bool]$phase32 = $false) {
+    $frame = New-Phase15Frame11 $destinationMac $phase17 $phase18 $phase19 $phase20 $phase21 $phase22 $phase23 $phase32
     $sent = $peerUdp.Send($frame, $frame.Length, $destinationHost, $destinationPort)
     Require11 ($sent -eq $frame.Length) 'Phase 15 UDP injector sent a short Ethernet datagram.'
     $hash = [Security.Cryptography.SHA256]::Create()
     try { $frameHash = ([BitConverter]::ToString($hash.ComputeHash($frame))).Replace('-', '') }
     finally { $hash.Dispose() }
-    $marker = if ($phase23) { 'MANAGED_E1000_PHASE23_INJECTED' } `
+    $marker = if ($phase32) { 'MANAGED_E1000_PHASE32_INJECTED' } `
+        elseif ($phase23) { 'MANAGED_E1000_PHASE23_INJECTED' } `
         elseif ($phase22) { 'MANAGED_E1000_PHASE22_INJECTED' } `
         elseif ($phase21) { 'MANAGED_E1000_PHASE21_INJECTED' } `
         elseif ($phase20) { 'MANAGED_E1000_PHASE20_INJECTED' } `
@@ -274,7 +305,8 @@ function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
         elseif ($phase18) { 'MANAGED_E1000_PHASE18_INJECTED' } `
         elseif ($phase17) { 'MANAGED_E1000_PHASE17_INJECTED' } `
         else { 'MANAGED_E1000_PHASE15_INJECTED' }
-    $sequenceText = if ($phase23) { '0x23000001' } `
+    $sequenceText = if ($phase32) { '0x32000001' } `
+        elseif ($phase23) { '0x23000001' } `
         elseif ($phase22) { '0x22000001' } `
         elseif ($phase21) { '0x21000001' } `
         elseif ($phase20) { '0x20000001' } `
@@ -285,6 +317,349 @@ function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
         $marker, $frame.Length, $destinationMac.ToUpperInvariant(), $sequenceText,
         $frameHash, ([Net.IPEndPoint]$peerUdp.Client.LocalEndPoint).Port,
         $destinationPort)
+}
+
+$script:phase32FixtureCache = @{}
+
+function Get-Phase32FixtureBytes11([string]$name) {
+    if (!$script:phase32FixtureCache.ContainsKey($name)) {
+        $fixturePath = Join-Path $PSScriptRoot '..\src\ManagedKernel\ManagedTls12Phase31Fixtures.cs'
+        $fixtureText = Get-Content -LiteralPath $fixturePath -Raw
+        $pattern = 'internal static readonly byte\[\] ' +
+            [regex]::Escape($name) + '\s*=\s*\{(?<body>.*?)\};'
+        $match = [regex]::Match($fixtureText, $pattern,
+            [Text.RegularExpressions.RegexOptions]::Singleline)
+        Require11 $match.Success "Phase 32 fixture array was not found: $name"
+        $values = [regex]::Matches($match.Groups['body'].Value,
+            '0x([0-9A-Fa-f]+)') | ForEach-Object {
+            [Convert]::ToByte($_.Groups[1].Value, 16)
+        }
+        $script:phase32FixtureCache[$name] = [byte[]]$values
+    }
+    return ,([byte[]]$script:phase32FixtureCache[$name].Clone())
+}
+
+function New-Phase32PlainTlsRecord11([byte]$type, [byte[]]$plaintext) {
+    $record = New-Object byte[] (5 + $plaintext.Length)
+    $record[0] = $type; $record[1] = 3; $record[2] = 3
+    Write-U16-Phase17 $record 3 $plaintext.Length
+    [Array]::Copy($plaintext, 0, $record, 5, $plaintext.Length)
+    return ,$record
+}
+
+function New-Phase32ApplicationRecord11([UInt64]$sequence,
+                                         [byte[]]$plaintext,
+                                         [byte[]]$key, [byte[]]$fixedIv) {
+    $nonce = New-Object byte[] 12
+    [Array]::Copy($fixedIv, 0, $nonce, 0, 4)
+    for ($index = 0; $index -lt 8; ++$index) {
+        $nonce[4 + $index] = [byte](($sequence -shr (56 - 8 * $index)) -band 0xFF)
+    }
+    $aad = New-Object byte[] 13
+    for ($index = 0; $index -lt 8; ++$index) {
+        $aad[$index] = [byte](($sequence -shr (56 - 8 * $index)) -band 0xFF)
+    }
+    $aad[8] = 23; $aad[9] = 3; $aad[10] = 3
+    Write-U16-Phase17 $aad 11 $plaintext.Length
+    $ciphertext = New-Object byte[] $plaintext.Length
+    $tag = New-Object byte[] 16
+    $aes = [Security.Cryptography.AesGcm]::new($key, 16)
+    try { $aes.Encrypt($nonce, $plaintext, $ciphertext, $tag, $aad) }
+    finally { $aes.Dispose() }
+    $record = New-Object byte[] (5 + 8 + $ciphertext.Length + $tag.Length)
+    $record[0] = 23; $record[1] = 3; $record[2] = 3
+    Write-U16-Phase17 $record 3 (8 + $ciphertext.Length + $tag.Length)
+    [Array]::Copy($nonce, 4, $record, 5, 8)
+    [Array]::Copy($ciphertext, 0, $record, 13, $ciphertext.Length)
+    [Array]::Copy($tag, 0, $record, 13 + $ciphertext.Length, $tag.Length)
+    return ,$record
+}
+
+function Get-Phase32TcpPayload11([byte[]]$frame) {
+    if ($frame.Length -lt 54 -or $frame[14] -ne 0x45) { return ,([byte[]]@()) }
+    $ipLength = Read-U16-Phase17 $frame 16
+    $tcpHeaderLength = ($frame[46] -shr 4) * 4
+    $payloadLength = $ipLength - 20 - $tcpHeaderLength
+    if ($payloadLength -le 0 -or 54 + $payloadLength -gt $frame.Length) {
+        return ,([byte[]]@())
+    }
+    return ,([byte[]]$frame[(34 + $tcpHeaderLength)..(33 + $tcpHeaderLength + $payloadLength)])
+}
+
+function Decrypt-Phase32ApplicationRecord11([byte[]]$record,
+                                             [UInt64]$sequence,
+                                             [byte[]]$key, [byte[]]$fixedIv) {
+    if ($record.Length -lt 29 -or $record[0] -ne 23 -or
+        $record[1] -ne 3 -or $record[2] -ne 3) { return $null }
+    $recordLength = Read-U16-Phase17 $record 3
+    if ($recordLength -ne $record.Length - 5 -or $recordLength -lt 24) { return $null }
+    $plainLength = $recordLength - 8 - 16
+    $nonce = New-Object byte[] 12
+    [Array]::Copy($fixedIv, 0, $nonce, 0, 4)
+    [Array]::Copy($record, 5, $nonce, 4, 8)
+    $aad = New-Object byte[] 13
+    for ($index = 0; $index -lt 8; ++$index) {
+        $aad[$index] = [byte](($sequence -shr (56 - 8 * $index)) -band 0xFF)
+    }
+    $aad[8] = 23; $aad[9] = 3; $aad[10] = 3
+    Write-U16-Phase17 $aad 11 $plainLength
+    $ciphertext = [byte[]]$record[13..(12 + $plainLength)]
+    $tag = [byte[]]$record[(13 + $plainLength)..(28 + $plainLength)]
+    $plaintext = New-Object byte[] $plainLength
+    $aes = [Security.Cryptography.AesGcm]::new($key, 16)
+    try { $aes.Decrypt($nonce, $ciphertext, $tag, $plaintext, $aad) }
+    catch { $aes.Dispose(); return $null }
+    $aes.Dispose()
+    return ,$plaintext
+}
+
+function Send-Phase32ServerTcpData11([Net.Sockets.UdpClient]$peerUdp,
+                                      [int]$rxPort, [IO.StreamWriter]$log,
+                                      [byte[]]$peerMac, [byte[]]$guestMac,
+                                      [byte[]]$guestIp, [byte[]]$hostIp,
+                                      [int]$clientPort, [int]$serverPort,
+                                      [uint32]$serverSequence,
+                                      [uint32]$clientSequence,
+                                      [byte[]]$payload, [int]$tag,
+                                      [int]$timeoutSeconds) {
+    Require11 ($payload.Length -le 512) 'Phase 32 server TCP payload exceeded the managed MSS.'
+    $frame = New-Ipv4Tcp22 $guestMac $peerMac $hostIp $guestIp `
+        (New-TcpSegment22 $serverPort $clientPort $serverSequence $clientSequence 0x18 `
+            $hostIp $guestIp $payload $false) $tag
+    Require11 ($peerUdp.Send($frame, $frame.Length, '127.0.0.1', $rxPort) -eq $frame.Length) `
+        'Phase 32 server TCP data send was short.'
+    Write-Phase22Frame $log 'phase32_server_tcp_data' $frame
+    $expectedAck = [uint32]($serverSequence + $payload.Length)
+    $ack = Receive-AnyPhase22TcpFrame $peerUdp $timeoutSeconds 'Phase 32 server data ACK'
+    Require11 (Test-TcpFrame22 $ack $peerMac $guestMac $guestIp $hostIp `
+        $clientPort $serverPort $clientSequence $expectedAck 0x10 ([byte[]]@()) $false) `
+        'Phase 32 server data ACK validation failed.'
+    Write-Phase22Frame $log 'phase32_managed_server_data_ack' $ack
+}
+
+function Send-Phase32PeerAck11([Net.Sockets.UdpClient]$peerUdp,
+                               [int]$rxPort, [IO.StreamWriter]$log,
+                               [byte[]]$peerMac, [byte[]]$guestMac,
+                               [byte[]]$guestIp, [byte[]]$hostIp,
+                               [int]$clientPort, [int]$serverPort,
+                               [uint32]$serverSequence,
+                               [uint32]$clientSequence, [int]$tag) {
+    $frame = New-Ipv4Tcp22 $guestMac $peerMac $hostIp $guestIp `
+        (New-TcpSegment22 $serverPort $clientPort $serverSequence $clientSequence 0x10 `
+            $hostIp $guestIp ([byte[]]@()) $false) $tag
+    Require11 ($peerUdp.Send($frame, $frame.Length, '127.0.0.1', $rxPort) -eq $frame.Length) `
+        'Phase 32 peer ACK send was short.'
+    Write-Phase22Frame $log 'phase32_peer_ack' $frame
+}
+
+function Invoke-Phase32HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
+                                       [int]$rxPort, [int]$timeoutSeconds,
+                                       [System.Diagnostics.Process]$process,
+                                       [System.IO.Stream]$stream,
+                                       [IO.FileStream]$serialLog,
+                                       [Text.StringBuilder]$text,
+                                       [byte[]]$receiveBuffer,
+                                       [IO.StreamWriter]$injectionLog,
+                                       [byte[]]$guestMacBytes,
+                                       [byte[]]$hostMacBytes,
+                                       [byte[]]$guestIpBytes,
+                                       [byte[]]$hostIpBytes,
+                                       [bool]$negativeControl) {
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_DISCOVER_SENT' $deadline $process $stream $serialLog $text $receiveBuffer
+    $discoverFrame = Receive-AnyPhase19Frame $peerUdp $timeoutSeconds 'Phase 32 DHCPDISCOVER'
+    $discoverPayload = Get-DhcpPayload19 $discoverFrame
+    Require11 ($null -ne $discoverPayload) 'Phase 32 DHCPDISCOVER is not IPv4/UDP.'
+    Write-Phase20Frame $injectionLog 'phase32_dhcpdiscover' $discoverFrame
+    $offerPayload = New-DhcpReply19 $discoverPayload 2 $guestIpBytes $hostIpBytes $true $true $true
+    $broadcastMac = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
+    $broadcastIp = [byte[]](255, 255, 255, 255)
+    $offerFrame = New-Ipv4Udp18 $broadcastMac $hostMacBytes $hostIpBytes $broadcastIp `
+        (New-UdpDatagram18 67 68 $hostIpBytes $broadcastIp $offerPayload) 0x3F21
+    Require11 ($peerUdp.Send($offerFrame, $offerFrame.Length, '127.0.0.1', $rxPort) -eq $offerFrame.Length) 'Phase 32 DHCPOFFER send was short.'
+    Write-Phase20Frame $injectionLog 'phase32_dhcpoffer' $offerFrame
+
+    Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_REQUEST_SENT' $deadline $process $stream $serialLog $text $receiveBuffer
+    $requestFrame = Receive-AnyPhase19Frame $peerUdp $timeoutSeconds 'Phase 32 DHCPREQUEST'
+    $requestPayload = Get-DhcpPayload19 $requestFrame
+    Require11 ($null -ne $requestPayload) 'Phase 32 DHCPREQUEST is not IPv4/UDP.'
+    Write-Phase20Frame $injectionLog 'phase32_dhcprequest' $requestFrame
+    $ackPayload = New-DhcpReply19 $requestPayload 5 $guestIpBytes $hostIpBytes $true $true $true
+    $ackFrame = New-Ipv4Udp18 $broadcastMac $hostMacBytes $hostIpBytes $broadcastIp `
+        (New-UdpDatagram18 67 68 $hostIpBytes $broadcastIp $ackPayload) 0x3F22
+    Require11 ($peerUdp.Send($ackFrame, $ackFrame.Length, '127.0.0.1', $rxPort) -eq $ackFrame.Length) 'Phase 32 DHCPACK send was short.'
+    Write-Phase20Frame $injectionLog 'phase32_dhcpack' $ackFrame
+    Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_BOUND' $deadline $process $stream $serialLog $text $receiveBuffer
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_CONFIGURED' $deadline $process $stream $serialLog $text $receiveBuffer
+
+    $zeroMac = [byte[]](0, 0, 0, 0, 0, 0)
+    $arpRequest = New-Phase16ArpFrame11 $broadcastMac $guestMacBytes 1 $guestIpBytes $zeroMac $hostIpBytes
+    $observedArp = Receive-ExpectedPhase16Frame11 $peerUdp $arpRequest 'Phase 32 DNS ARP request' $timeoutSeconds
+    Write-Phase20Frame $injectionLog 'phase32_dns_arp_request' $observedArp
+    $arpReply = New-Phase16ArpFrame11 $guestMacBytes $hostMacBytes 2 $hostIpBytes $guestMacBytes $guestIpBytes
+    Require11 ($peerUdp.Send($arpReply, $arpReply.Length, '127.0.0.1', $rxPort) -eq $arpReply.Length) 'Phase 32 DNS ARP reply send was short.'
+    Write-Phase20Frame $injectionLog 'phase32_dns_arp_reply' $arpReply
+
+    $dnsQueryFrame = Receive-AnyDns20Frame $peerUdp $timeoutSeconds 'www.example.com'
+    $dnsQueryPayload = Get-DnsPayload20 $dnsQueryFrame
+    $expectedQuestion = [byte[]](3,119,119,119,7,101,120,97,109,112,108,101,3,99,111,109,0,0,1,0,1)
+    Require11 ($null -ne $dnsQueryPayload -and $dnsQueryPayload.Length -eq 33 -and
+        (Bytes-Equal16 $dnsQueryPayload 12 $expectedQuestion)) 'Phase 32 DNS query name was invalid.'
+    Write-Phase20Frame $injectionLog 'phase32_dns_query' $dnsQueryFrame
+    $dnsResponse = New-DnsResponse20 $dnsQueryPayload 'valid'
+    $dnsResponseFrame = New-Ipv4Udp18 $guestMacBytes $hostMacBytes $hostIpBytes $guestIpBytes `
+        (New-UdpDatagram18 53 15200 $hostIpBytes $guestIpBytes $dnsResponse) 0x3F23
+    Require11 ($peerUdp.Send($dnsResponseFrame, $dnsResponseFrame.Length, '127.0.0.1', $rxPort) -eq $dnsResponseFrame.Length) 'Phase 32 DNS response send was short.'
+    Write-Phase20Frame $injectionLog 'phase32_dns_response' $dnsResponseFrame
+
+    $clientPort = 15221; $serverPort = 443
+    [uint32]$clientIsn = 0x22000001; [uint32]$serverIsn = 0x32010001
+    [uint32]$clientNext = $clientIsn + 1; [uint32]$serverNext = $serverIsn + 1
+    $peerMac = $hostMacBytes; $guestMac = $guestMacBytes
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_REQUEST_STARTED' $deadline $process $stream $serialLog $text $receiveBuffer
+    $syn = New-TcpSegment22 $clientPort $serverPort $clientIsn 0 2 $guestIpBytes $hostIpBytes ([byte[]]@()) $true
+    $synFrame = New-Ipv4Tcp22 $peerMac $guestMac $guestIpBytes $hostIpBytes $syn 0x2A00
+    $observedSyn = Receive-ExpectedPhase17Frame $peerUdp $synFrame 'Phase 32 managed SYN' $timeoutSeconds
+    Require11 (Test-TcpFrame22 $observedSyn $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $clientIsn 0 2 ([byte[]]@()) $true) 'Phase 32 SYN validation failed.'
+    Write-Phase22Frame $injectionLog 'phase32_managed_syn' $observedSyn
+    $synAck = New-TcpSegment22 $serverPort $clientPort $serverIsn $clientNext 0x12 $hostIpBytes $guestIpBytes ([byte[]]@()) $true
+    $synAckFrame = New-Ipv4Tcp22 $guestMac $peerMac $hostIpBytes $guestIpBytes $synAck 0x3F31
+    Require11 ($peerUdp.Send($synAckFrame, $synAckFrame.Length, '127.0.0.1', $rxPort) -eq $synAckFrame.Length) 'Phase 32 SYNACK send was short.'
+    Write-Phase22Frame $injectionLog 'phase32_peer_synack' $synAckFrame
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_TCP_CONNECTED' $deadline $process $stream $serialLog $text $receiveBuffer
+    $observedHandshakeAck = Receive-AnyPhase22TcpFrame $peerUdp $timeoutSeconds 'Phase 32 managed handshake ACK'
+    Require11 (Test-TcpFrame22 $observedHandshakeAck $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $clientNext $serverNext 0x10 ([byte[]]@()) $false) 'Phase 32 handshake ACK validation failed.'
+    Write-Phase22Frame $injectionLog 'phase32_managed_handshake_ack' $observedHandshakeAck
+    $observedHello = Receive-AnyPhase22TcpFrame $peerUdp $timeoutSeconds 'Phase 32 ClientHello'
+    $helloPayload = Get-Phase32TcpPayload11 $observedHello
+    $expectedHello = New-Phase32PlainTlsRecord11 22 (Get-Phase32FixtureBytes11 'ClientHello')
+    Require11 (Test-TcpFrame22 $observedHello $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $clientNext $serverNext 0x18 $expectedHello $false) 'Phase 32 ClientHello/SNI validation failed.'
+    Require11 (([Text.Encoding]::ASCII.GetString($helloPayload)).Contains('www.example.com', [StringComparison]::Ordinal)) 'Phase 32 SNI hostname was not present.'
+    Write-Phase22Frame $injectionLog 'phase32_clienthello_sni' $observedHello
+    [uint32]$clientNext = $clientNext + $helloPayload.Length
+    Send-Phase32PeerAck11 $peerUdp $rxPort $injectionLog $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $serverNext $clientNext 0x3F32
+
+    $serverRecordNames = @('ServerHelloRecord', 'CertificateRecord0', 'CertificateRecord1', 'CertificateRecord2', 'CertificateRecord3', 'CertificateRecord4', 'CertificateRecord5', 'CertificateRecord6', 'CertificateRecord7', 'CertificateRecord8', 'CertificateRecord9', 'ServerKeyExchangeRecord', 'ServerHelloDoneRecord')
+    $serverSequence = [uint32]$serverNext
+    $recordIndex = 0
+    foreach ($recordName in $serverRecordNames) {
+        $record = Get-Phase32FixtureBytes11 $recordName
+        $chunks = @()
+        $firstEnd = [Math]::Min(1, $record.Length - 1)
+        $chunks += ,([byte[]]$record[0..$firstEnd])
+        if ($record.Length -gt 2) {
+            $secondEnd = [Math]::Min(12, $record.Length - 1)
+            $chunks += ,([byte[]]$record[2..$secondEnd])
+        }
+        if ($record.Length -gt 13) {
+            $chunks += ,([byte[]]$record[13..($record.Length - 1)])
+        }
+        foreach ($chunk in $chunks) {
+            Send-Phase32ServerTcpData11 $peerUdp $rxPort $injectionLog $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $serverSequence $clientNext ([byte[]]$chunk) (0x4000 + $recordIndex) $timeoutSeconds
+            [uint32]$serverSequence = $serverSequence + $chunk.Length
+            ++$recordIndex
+        }
+    }
+
+    $observedFlight = Receive-AnyPhase22TcpFrame $peerUdp $timeoutSeconds 'Phase 32 client TLS flight'
+    $flightPayload = Get-Phase32TcpPayload11 $observedFlight
+    $clientKeyExchange = New-Phase32PlainTlsRecord11 22 (Get-Phase32FixtureBytes11 'ClientKeyExchange')
+    $changeCipherSpec = Get-Phase32FixtureBytes11 'ChangeCipherSpec'
+    $clientFinishedRecord = Get-Phase32FixtureBytes11 'ClientFinishedRecord'
+    $expectedFlight = New-Object byte[] ($clientKeyExchange.Length + $changeCipherSpec.Length + $clientFinishedRecord.Length)
+    [Array]::Copy($clientKeyExchange, 0, $expectedFlight, 0, $clientKeyExchange.Length)
+    [Array]::Copy($changeCipherSpec, 0, $expectedFlight, $clientKeyExchange.Length, $changeCipherSpec.Length)
+    [Array]::Copy($clientFinishedRecord, 0, $expectedFlight, $clientKeyExchange.Length + $changeCipherSpec.Length, $clientFinishedRecord.Length)
+    Require11 (Test-TcpFrame22 $observedFlight $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $clientNext $serverSequence 0x18 $expectedFlight $false) 'Phase 32 client TLS flight validation failed.'
+    Write-Phase22Frame $injectionLog 'phase32_client_tls_flight' $observedFlight
+    [uint32]$clientNext = $clientNext + $flightPayload.Length
+
+    $serverCcs = Get-Phase32FixtureBytes11 'ChangeCipherSpec'
+    Send-Phase32ServerTcpData11 $peerUdp $rxPort $injectionLog $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $serverSequence $clientNext $serverCcs 0x4100 $timeoutSeconds
+    [uint32]$serverSequence = $serverSequence + $serverCcs.Length
+    $serverFinished = Get-Phase32FixtureBytes11 'ServerFinishedRecord'
+    if ($negativeControl) {
+        $serverFinished = [byte[]]$serverFinished.Clone()
+        $serverFinished[$serverFinished.Length - 1] =
+            $serverFinished[$serverFinished.Length - 1] -bxor 1
+    }
+    Send-Phase32ServerTcpData11 $peerUdp $rxPort $injectionLog $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $serverSequence $clientNext $serverFinished 0x4101 $timeoutSeconds
+    [uint32]$serverSequence = $serverSequence + $serverFinished.Length
+
+    if ($negativeControl) {
+        Wait-Phase32NegativeOutcome11 `
+            $deadline $process $stream $serialLog $text $receiveBuffer
+        $negativeTranscript = $text.ToString()
+        Require11 (-not $negativeTranscript.Contains(
+            'GXOS_NET10:MANAGED_HTTPS_PHASE32_HTTP_REQUEST_ENCRYPTED_SENT')) `
+            'Phase 32 negative control emitted an encrypted HTTP request.'
+        Require11 (-not $negativeTranscript.Contains(
+            'GXOS_NET10:MANAGED_HTTPS_PHASE32_PASS')) `
+            'Phase 32 negative control emitted an HTTPS pass marker.'
+        Require11 (-not $negativeTranscript.Contains(
+            'GXOS_NET10:MANAGED_KERNEL_PHASE32_PASS')) `
+            'Phase 32 negative control emitted a kernel pass marker.'
+        return 'NEGATIVE_PASS_PHASE32'
+    }
+
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_HTTP_REQUEST_ENCRYPTED_SENT' $deadline $process $stream $serialLog $text $receiveBuffer
+    $observedRequest = Receive-AnyPhase22TcpFrame $peerUdp $timeoutSeconds 'Phase 32 encrypted HTTP request'
+    $requestPayload = Get-Phase32TcpPayload11 $observedRequest
+    $keyBlock = Get-Phase32FixtureBytes11 'KeyBlock'
+    $clientKey = [byte[]]$keyBlock[0..15]; $clientIv = [byte[]]$keyBlock[32..35]
+    $decryptedRequest = Decrypt-Phase32ApplicationRecord11 $requestPayload 1 $clientKey $clientIv
+    $expectedRequestText = "GET /phase32 HTTP/1.1`r`nHost: www.example.com`r`nConnection: close`r`n`r`n"
+    Require11 ($null -ne $decryptedRequest -and
+        [Text.Encoding]::ASCII.GetString($decryptedRequest) -eq $expectedRequestText) 'Phase 32 encrypted HTTP request validation failed.'
+    Require11 (Test-TcpFrame22 $observedRequest $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $clientNext $serverSequence 0x18 $requestPayload $false) 'Phase 32 request TCP framing validation failed.'
+    Write-Phase22Frame $injectionLog 'phase32_encrypted_http_request' $observedRequest
+    [uint32]$clientNext = $clientNext + $requestPayload.Length
+    Send-Phase32PeerAck11 $peerUdp $rxPort $injectionLog $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $serverSequence $clientNext 0x4102
+
+    $serverKey = [byte[]]$keyBlock[16..31]; $serverIv = [byte[]]$keyBlock[36..39]
+    $responseTexts = @('HTTP/1.1 200', " OK`r`nContent-Length: 17`r`nConnection: close`r`n", "Content-Type: text/plain`r`n`r`nphase32-", 'http-pass')
+    $responseRecords = New-Object byte[][] $responseTexts.Length
+    for ($index = 0; $index -lt $responseTexts.Length; ++$index) {
+        $responseRecords[$index] = New-Phase32ApplicationRecord11 ([UInt64]($index + 1)) ([Text.Encoding]::ASCII.GetBytes($responseTexts[$index])) $serverKey $serverIv
+    }
+    $responseChunks = @(
+        [byte[]]$responseRecords[0][0..1],
+        [byte[]]$responseRecords[0][2..12],
+        [byte[]]$responseRecords[0][13..($responseRecords[0].Length - 1)],
+        [byte[]]($responseRecords[1] + $responseRecords[2]),
+        [byte[]]$responseRecords[3][0..1],
+        [byte[]]$responseRecords[3][2..($responseRecords[3].Length - 1)]
+    )
+    $chunkIndex = 0
+    foreach ($chunk in $responseChunks) {
+        Send-Phase32ServerTcpData11 $peerUdp $rxPort $injectionLog $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $serverSequence $clientNext ([byte[]]$chunk) (0x4200 + $chunkIndex) $timeoutSeconds
+        [uint32]$serverSequence = $serverSequence + $chunk.Length
+        ++$chunkIndex
+    }
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_TLS_APPLICATION_DATA_AUTHENTICATED_DECRYPTED' $deadline $process $stream $serialLog $text $receiveBuffer
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_HTTP_STATUS_PARSED=200' $deadline $process $stream $serialLog $text $receiveBuffer
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_BODY_RECEIVED' $deadline $process $stream $serialLog $text $receiveBuffer
+
+    $peerFin = New-TcpSegment22 $serverPort $clientPort $serverSequence $clientNext 0x11 $hostIpBytes $guestIpBytes ([byte[]]@()) $false
+    $peerFinFrame = New-Ipv4Tcp22 $guestMac $peerMac $hostIpBytes $guestIpBytes $peerFin 0x3F50
+    Require11 ($peerUdp.Send($peerFinFrame, $peerFinFrame.Length, '127.0.0.1', $rxPort) -eq $peerFinFrame.Length) 'Phase 32 peer FIN send was short.'
+    Write-Phase22Frame $injectionLog 'phase32_peer_fin' $peerFinFrame
+    [uint32]$finNext = $clientNext + 1; [uint32]$peerFinNext = $serverSequence + 1
+    $managedFinAck = Receive-AnyPhase22TcpFrame $peerUdp $timeoutSeconds 'Phase 32 managed FIN ACK'
+    Require11 (Test-TcpFrame22 $managedFinAck $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $clientNext $peerFinNext 0x10 ([byte[]]@()) $false) 'Phase 32 managed FIN ACK validation failed.'
+    Write-Phase22Frame $injectionLog 'phase32_managed_fin_ack' $managedFinAck
+    $managedFin = Receive-AnyPhase22TcpFrame $peerUdp $timeoutSeconds 'Phase 32 managed FIN'
+    Require11 (Test-TcpFrame22 $managedFin $peerMac $guestMac $guestIpBytes $hostIpBytes $clientPort $serverPort $clientNext $peerFinNext 0x11 ([byte[]]@()) $false) 'Phase 32 managed FIN validation failed.'
+    Write-Phase22Frame $injectionLog 'phase32_managed_fin' $managedFin
+    $finalAck = New-TcpSegment22 $serverPort $clientPort $peerFinNext $finNext 0x10 $hostIpBytes $guestIpBytes ([byte[]]@()) $false
+    $finalAckFrame = New-Ipv4Tcp22 $guestMac $peerMac $hostIpBytes $guestIpBytes $finalAck 0x3F51
+    Require11 ($peerUdp.Send($finalAckFrame, $finalAckFrame.Length, '127.0.0.1', $rxPort) -eq $finalAckFrame.Length) 'Phase 32 final ACK send was short.'
+    Write-Phase22Frame $injectionLog 'phase32_final_ack' $finalAckFrame
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_BODY_VERIFIED' $deadline $process $stream $serialLog $text $receiveBuffer
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_TEARDOWN_COMPLETE' $deadline $process $stream $serialLog $text $receiveBuffer
+    Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE32_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+    Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE32_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+    return 'PASS_PHASE32'
 }
 
 function New-MacBytes16([string]$text) {
@@ -1225,7 +1600,10 @@ try {
                     'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
                 Require11 $macMatch.Success 'Phase 15 did not publish the runtime e1000 MAC.'
                 $destinationMac = ($macMatch.Groups[1].Value + $macMatch.Groups[2].Value)
-                $injectOutput = if ($EnablePhase23Protocol) {
+                $injectOutput = if ($EnablePhase32Protocol) {
+                    @(Send-Phase15DgramFrame11 $peerUdp $rxPort $destinationMac `
+                        '127.0.0.1' $false $false $false $false $false $false $false $true)
+                } elseif ($EnablePhase23Protocol) {
                     @(Send-Phase15DgramFrame11 $peerUdp $rxPort $destinationMac `
                         '127.0.0.1' $false $false $false $false $false $false $true)
                 } elseif ($EnablePhase22Protocol) {
@@ -1261,7 +1639,7 @@ try {
                 } elseif ($Phase15AcceptEitherOutcome) {
                     $phase15Outcome = Wait-Phase15Outcome11 `
                         $deadline $process $stream $logStream $text $buffer
-                } elseif ($EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol -or $EnablePhase18Protocol -or $EnablePhase17Protocol -or
+                } elseif ($EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol -or $EnablePhase18Protocol -or $EnablePhase17Protocol -or
                           $EnablePhase16Protocol) {
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' `
                         $deadline $process $stream $logStream $text $buffer
@@ -1270,12 +1648,18 @@ try {
                     $guestMacBytes = New-MacBytes16 $destinationMac
                     $broadcastMac = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
                     $hostMacBytes = [byte[]](0x02, 0x15, 0, 0, 0, 2)
-                    $guestIpBytes = if ($EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol) {
+                    $guestIpBytes = if ($EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol) {
                         [byte[]](10, 15, 0, 42)
                     } else { [byte[]](10, 15, 0, 1) }
                     $hostIpBytes = [byte[]](10, 15, 0, 2)
                     $broadcastIpBytes = [byte[]](255, 255, 255, 255)
-                    if ($EnablePhase23Protocol) {
+                    if ($EnablePhase32Protocol) {
+                        $phase15Outcome = Invoke-Phase32HttpsExchange11 `
+                            $peerUdp $rxPort $TimeoutSeconds $process $stream `
+                            $logStream $text $buffer $injectionLog `
+                            $guestMacBytes $hostMacBytes $guestIpBytes $hostIpBytes `
+                            ([bool]$EnablePhase32NegativeControl)
+                    } elseif ($EnablePhase23Protocol) {
                         # Phase 23 uses the same bounded DHCP/DNS fixture as
                         # Phase 22, then validates one HTTP/1.1 GET and a
                         # deliberately segmented response over the same TCP
@@ -2176,7 +2560,7 @@ try {
                         Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_BOUND' `
                             $deadline $process $stream $logStream $text $buffer
                     }
-                    if (-not $EnablePhase23Protocol -and -not $EnablePhase22Protocol -and -not $EnablePhase20Protocol -and -not $EnablePhase21Protocol) {
+                    if (-not $EnablePhase32Protocol -and -not $EnablePhase23Protocol -and -not $EnablePhase22Protocol -and -not $EnablePhase20Protocol -and -not $EnablePhase21Protocol) {
                     $zeroMac = [byte[]](0, 0, 0, 0, 0, 0)
                     $guestRequest = New-Phase16ArpFrame11 `
                         $broadcastMac $guestMacBytes 1 $guestIpBytes $zeroMac $hostIpBytes
@@ -2220,7 +2604,10 @@ try {
                     Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESPONDER_PASS' `
                         $deadline $process $stream $logStream $text $buffer
                     }
-                    if ($EnablePhase23Protocol) {
+                    if ($EnablePhase32Protocol) {
+                        # Phase 32 completed the full managed HTTPS exchange
+                        # and its kernel proof waits in the helper above.
+                    } elseif ($EnablePhase23Protocol) {
                         # Phase 23 completed its HTTP exchange, close, and
                         # kernel-pass waits above.
                     } elseif ($EnablePhase22Protocol) {
@@ -2623,7 +3010,24 @@ try {
                 "QEMU receive tracing did not create the trace for boot $sequence."
         }
         Require11 ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedHash) "Payload hash changed on boot $sequence."
-        Require11 ((!$finalText.Contains('GXOS_NET10:FAIL:') -and !$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:'))) "Boot $sequence reported a fault."
+        if ($EnablePhase32NegativeControl) {
+            Require11 ($finalText.Contains(
+                'GXOS_NET10:MANAGED_KERNEL_PHASE14_BLOCKED=DRIVER_START')) `
+                "Boot $sequence did not reject the Phase 32 negative control."
+            Require11 ($finalText.Contains(
+                'GXOS_NET10:FAIL:managed-kernel-phase14-driver-proof')) `
+                "Boot $sequence did not report the expected negative-control failure."
+            Require11 (!$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
+                       !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
+                       !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
+                "Boot $sequence reported an unexpected machine fault."
+        } else {
+            Require11 ((!$finalText.Contains('GXOS_NET10:FAIL:') -and
+                        !$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
+                        !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
+                        !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:'))) `
+                "Boot $sequence reported a fault."
+        }
         foreach ($marker in $requiredMarkers) { Require11 $finalText.Contains($marker) "Boot $sequence missing marker: $marker" }
         Require11 (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS')).Count -eq 1) 'Phase 11 pass marker count was not one.'
         Require11 ($finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ENQUEUED_COUNT=0x0000000000000009') -and $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DRAINED_COUNT=0x0000000000000009') -and $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DROPPED_COUNT=0x0000000000000000')) "Boot $sequence did not account for nine shared events without drops."

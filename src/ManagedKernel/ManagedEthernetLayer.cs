@@ -44,6 +44,7 @@ internal sealed class ManagedEthernetLayer
     internal bool Phase21Passed => _ipv4.Phase21Passed;
     internal bool Phase22Passed => _ipv4.Phase22Passed;
     internal bool Phase23Passed => _ipv4.Phase23Passed;
+    internal bool Phase32Passed => _ipv4.Phase32Passed;
     internal ReadOnlySpan<byte> LocalMac => _localMac;
     internal bool IsAccepting => _accepting;
     internal bool DriverReady => _transport.State == ManagedE1000DriverState.Running;
@@ -96,6 +97,14 @@ internal sealed class ManagedEthernetLayer
             (ManagedNetworkServiceBackend)_networkService.Backend;
         runtime.Rebind(this, _ipv4);
         return _ipv4.TryRunPhase23();
+    }
+
+    internal bool TryRunPhase32()
+    {
+        ManagedNetworkServiceBackend runtime =
+            (ManagedNetworkServiceBackend)_networkService.Backend;
+        runtime.Rebind(this, _ipv4);
+        return _ipv4.TryRunPhase32();
     }
 
     internal void InitializeMac()

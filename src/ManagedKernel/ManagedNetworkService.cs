@@ -471,6 +471,28 @@ public sealed class ManagedNetworkService : IManagedTcpApplicationSink
         return result ? NetworkOperationResult.Success : NetworkOperationResult.Failed;
     }
 
+    /* Release only the active TCP/DNS operation while retaining the DHCP
+       configuration and service availability.  The original Teardown()
+       remains terminal for callers that are shutting down the whole network
+       service; HTTPS uses this narrower boundary so a client can be reset and
+       reused without a stale PCB or forcing a second DHCP boot. */
+    public NetworkOperationResult ReleaseTcpForReuse()
+    {
+        if (_tornDown || !IsAvailable) return NetworkOperationResult.Unavailable;
+        bool result = _backend.Teardown();
+        _resolutionState = NetworkResolutionState.Idle;
+        _resolvedAddress = default;
+        _tcpReceiveReady = false;
+        _tcpReceiveSource = default;
+        _tcpReceiveDestination = default;
+        _tcpReceiveSourcePort = 0;
+        _tcpReceiveDestinationPort = 0;
+        _tcpReceiveLength = 0;
+        _tcpState = NetworkTcpState.Closed;
+        _tcpReceiveSlot.AsSpan().Clear();
+        return result ? NetworkOperationResult.Success : NetworkOperationResult.Failed;
+    }
+
     internal bool TryCaptureReceivedUdp(Ipv4Address source,
                                         Ipv4Address destination,
                                         ushort sourcePort,

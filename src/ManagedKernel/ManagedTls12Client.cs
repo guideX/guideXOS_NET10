@@ -25,6 +25,12 @@ internal enum ManagedTls12HandshakeStage : byte
     Established
 }
 
+internal enum ManagedTls12FailureKind : byte
+{
+    Protocol = 0,
+    Authentication = 1
+}
+
 /* Transport-independent TLS 1.2 client.  This class intentionally implements
    one profile only: ECDHE-ECDSA with P-256 and AES-128-GCM, with EMS required.
    Input is consumed as arbitrary byte chunks and output is drained by the
@@ -39,6 +45,11 @@ internal sealed class ManagedTls12Client
     internal const int MaximumCertificateMessageBytes = 49152;
     internal const int MaximumPeerCertificates = 4;
     internal const int MaximumOutboundFlightBytes = 512;
+    /* Application data is drained by the HTTPS composition layer after a
+       transport poll.  Keep enough bounded slack for the Phase 23 HTTP
+       header/body limits while rejecting a peer that tries to make the TLS
+       client an unbounded accumulator. */
+    internal const int MaximumPendingApplicationBytes = 2048;
     internal const int CertificateStorageBytes =
         MaximumPeerCertificates * ManagedX509.MaximumCertificateLength;
     internal const int MinimumWorkingStorageBytes = CertificateStorageBytes;
@@ -88,6 +99,8 @@ internal sealed class ManagedTls12Client
     private readonly byte[] _outbound = new byte[MaximumOutboundFlightBytes];
     private readonly byte[] _applicationPlaintext =
         new byte[ManagedTls12RecordProtection.MaximumPlaintextFragment];
+    private readonly byte[] _pendingApplication =
+        new byte[MaximumPendingApplicationBytes];
     private readonly ManagedHmacSha256 _prfHmac = new();
     private readonly ManagedTls12Transcript _transcript = new();
     private readonly ManagedX509Certificate[] _peerCertificates =
@@ -99,6 +112,7 @@ internal sealed class ManagedTls12Client
 
     private InternalStage _stage;
     private ManagedTls12HandshakeStage _lastHandshake;
+    private ManagedTls12FailureKind _failureKind;
     private int _recordHeaderLength;
     private int _recordBodyLength;
     private int _expectedRecordBodyLength = -1;
@@ -108,6 +122,7 @@ internal sealed class ManagedTls12Client
     private int _peerCertificateCount;
     private int _outboundLength;
     private int _applicationPlaintextLength;
+    private int _pendingApplicationLength;
     private bool _serverEms;
     private bool _clientWriteActive;
     private bool _serverReadActive;
@@ -153,6 +168,7 @@ internal sealed class ManagedTls12Client
 
     internal ManagedTls12ClientState State => GetState();
     internal ManagedTls12HandshakeStage LastHandshake => _lastHandshake;
+    internal ManagedTls12FailureKind FailureKind => _failureKind;
     internal bool EmsNegotiated => _serverEms;
     internal int PeerCertificateCount => _peerCertificateCount;
     internal int TranscriptLength => _transcript.Length;
@@ -182,6 +198,43 @@ internal sealed class ManagedTls12Client
     internal int ApplicationPlaintextLength => _applicationPlaintextLength;
     internal ReadOnlySpan<byte> ApplicationPlaintext =>
         _applicationPlaintext.AsSpan(0, _applicationPlaintextLength);
+
+    internal int PendingApplicationDataLength => _pendingApplicationLength;
+
+    internal bool TryTakeApplicationData(Span<byte> destination, out int written)
+    {
+        written = 0;
+        if (_stage != InternalStage.Established && _stage != InternalStage.Closed)
+            return false;
+        if (_pendingApplicationLength == 0)
+            return true;
+        if (destination.Length < _pendingApplicationLength)
+            return false;
+        _pendingApplication.AsSpan(0, _pendingApplicationLength).CopyTo(destination);
+        written = _pendingApplicationLength;
+        _pendingApplication.AsSpan(0, _pendingApplicationLength).Clear();
+        _pendingApplicationLength = 0;
+        return true;
+    }
+
+    /* A transport EOF is valid after the handshake only when no TLS record or
+       handshake fragment is truncated.  HTTPS decides separately whether
+       HTTP framing permits that EOF; close_notify is therefore optional for
+       the Connection: close profile. */
+    internal bool TryNotifyTransportClosed()
+    {
+        if (_stage == InternalStage.Closed)
+            return true;
+        if (_stage != InternalStage.Established ||
+            _recordHeaderLength != 0 || _recordBodyLength != 0 ||
+            _handshakeLength != 0)
+        {
+            Fail();
+            return false;
+        }
+        _stage = InternalStage.Closed;
+        return true;
+    }
 
     internal bool TryStart(Span<byte> destination, out int written)
     {
@@ -324,6 +377,7 @@ internal sealed class ManagedTls12Client
             record.Length > _recordWire.Length)
             return false;
         _applicationPlaintext.AsSpan().Clear();
+        _pendingApplication.AsSpan().Clear();
         if (!TryDecryptApplicationData(record, _applicationPlaintext,
                                         out _applicationPlaintextLength))
         {
@@ -372,6 +426,7 @@ internal sealed class ManagedTls12Client
         _peerCertificateCount = 0;
         _outboundLength = 0;
         _applicationPlaintextLength = 0;
+        _pendingApplicationLength = 0;
         _serverEms = false;
         _clientWriteActive = false;
         _serverReadActive = false;
@@ -445,10 +500,10 @@ internal sealed class ManagedTls12Client
             if (type == ManagedTls12RecordProtection.ApplicationData)
             {
                 if (_stage != InternalStage.Established ||
-                    !TryReadApplicationData(_recordWire.AsSpan(0,
+                    !TryQueueApplicationData(_recordWire.AsSpan(0,
                         ManagedTls12RecordProtection.HeaderSize +
                         _recordBodyLength)))
-                    Fail();
+                    Fail(ManagedTls12FailureKind.Authentication);
                 return;
             }
             if (type == ManagedTls12RecordProtection.Alert)
@@ -461,7 +516,7 @@ internal sealed class ManagedTls12Client
                             _recordBodyLength), _recordPlaintext,
                         out int alertLength))
                 {
-                    Fail();
+                    Fail(ManagedTls12FailureKind.Authentication);
                     return;
                 }
                 _serverSequence++;
@@ -477,7 +532,7 @@ internal sealed class ManagedTls12Client
                         _recordBodyLength), _recordPlaintext,
                     out int plaintextLength))
             {
-                Fail();
+                Fail(ManagedTls12FailureKind.Authentication);
                 return;
             }
             _serverSequence++;
@@ -589,11 +644,14 @@ internal sealed class ManagedTls12Client
 
         if (type == 20)
         {
-            if (_stage != InternalStage.ExpectServerFinished ||
-                bodyLength != 12 ||
-                !_transcript.TryHash(_serverFinishedHash) ||
-                !VerifyFinished("server finished"u8, body))
+            if (_stage != InternalStage.ExpectServerFinished || bodyLength != 12)
                 return false;
+            if (!_transcript.TryHash(_serverFinishedHash) ||
+                !VerifyFinished("server finished"u8, body))
+            {
+                _failureKind = ManagedTls12FailureKind.Authentication;
+                return false;
+            }
             if (!_transcript.Append(message)) return false;
             _stage = InternalStage.Established;
             _lastHandshake = ManagedTls12HandshakeStage.ServerFinished;
@@ -730,10 +788,13 @@ internal sealed class ManagedTls12Client
         if (intermediateCount > 2) return false;
 
         if (!ManagedX509.TryValidateServerChain(
-                GetPeerCertificate(0), intermediate1, intermediate2,
-                candidateRoot, _trustedRoot, in _currentTime, _hostname,
-                out _))
+            GetPeerCertificate(0), intermediate1, intermediate2,
+            candidateRoot, _trustedRoot, in _currentTime, _hostname,
+            out _))
+        {
+            _failureKind = ManagedTls12FailureKind.Authentication;
             return false;
+        }
         return true;
     }
 
@@ -769,8 +830,10 @@ internal sealed class ManagedTls12Client
             ReadOnlySpan<byte> leafKey = _workingStorage.AsSpan(
                 _peerCertificateOffsets[0] + leaf.PublicKeyOffset,
                 leaf.PublicKeyLength);
-            return ManagedP256.TryVerifyDerSignature(
+            bool verified = ManagedP256.TryVerifyDerSignature(
                 digest, leafKey, body.Slice(offset, signatureLength));
+            if (!verified) _failureKind = ManagedTls12FailureKind.Authentication;
+            return verified;
         }
         finally
         {
@@ -1004,6 +1067,12 @@ internal sealed class ManagedTls12Client
             Fail();
     }
 
+    private void Fail(ManagedTls12FailureKind failureKind)
+    {
+        _failureKind = failureKind;
+        Fail();
+    }
+
     private void Fail()
     {
         _stage = InternalStage.Failed;
@@ -1043,6 +1112,31 @@ internal sealed class ManagedTls12Client
         _peerCertificateCount = 0;
         _applicationPlaintext.AsSpan().Clear();
         _applicationPlaintextLength = 0;
+        _pendingApplication.AsSpan().Clear();
+        _pendingApplicationLength = 0;
+    }
+
+    private bool TryQueueApplicationData(ReadOnlySpan<byte> record)
+    {
+        if (!ManagedTls12RecordProtection.TryDecrypt(
+                _serverSequence, _serverWriteKey, _serverWriteIv,
+                ManagedTls12RecordProtection.ApplicationData, record,
+                _recordPlaintext, out int plaintextLength))
+        {
+            return false;
+        }
+        if (plaintextLength > MaximumPendingApplicationBytes -
+                            _pendingApplicationLength)
+        {
+            _recordPlaintext.AsSpan(0, plaintextLength).Clear();
+            return false;
+        }
+        _recordPlaintext.AsSpan(0, plaintextLength).CopyTo(
+            _pendingApplication.AsSpan(_pendingApplicationLength));
+        _pendingApplicationLength += plaintextLength;
+        _recordPlaintext.AsSpan(0, plaintextLength).Clear();
+        _serverSequence++;
+        return true;
     }
 
     private static bool IsContentType(byte value)
