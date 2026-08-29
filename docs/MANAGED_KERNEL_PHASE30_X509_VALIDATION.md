@@ -164,3 +164,18 @@ Production source contains no framework X509Certificate2, ASN.1, OpenSSL, libcry
 ## 32. Future TLS integration
 
 Future TLS work can reuse exact-TBS SHA-256, managed ECDSA verification, P-256 SPKI validation, bounded chain validation, and hostname policy. It still needs the TLS handshake/state machine, transcript and CertificateVerify integration, record protection, alert/error policy, broader certificate profiles, and any additional algorithms required by the protocol. Phase 30 certificate validation is not itself a TLS implementation.
+
+## 33. Phase 31 reuse and status
+
+Phase 31 now consumes this validator directly. Its TLS Certificate path copies
+the bounded peer chain into caller-owned storage, treats the first peer
+certificate as the leaf, and supplies the explicitly configured Phase 30 root
+when the server omits that root. A peer root is accepted only on exact
+byte-for-byte equality with the configured trust anchor. The Phase 31 client
+then reuses Phase 30's exact-TBS signature, SPKI, validity, CA/path-length,
+key-usage, EKU, SAN/CN, hostname, and critical-extension policy; no hosted
+certificate APIs or OS trust store were added.
+
+Phase 30 remains independently green at 91/91 host cases and is retained in
+each Phase 31 authoritative boot. Phase 31's TLS handshake status and evidence
+are recorded in [MANAGED_KERNEL_PHASE31_TLS12_HANDSHAKE.md](MANAGED_KERNEL_PHASE31_TLS12_HANDSHAKE.md).

@@ -1,6 +1,11 @@
 # Next-stage blockers
 
-Gate 4 still proves the first no-allocation managed handoff. The allocation follow-on now builds and traces the generated allocation helper, and the verified FILETIME, monotonic performance, minimal CRT on-exit initialization, x64 SLIST-head initialization, error-returning initializer-table contract, void initializer-table contract, narrow `strcmp`, `strlen`, `GetEnvironmentVariableW`, `_stricmp`, `GetSystemInfo`, `GetNumaHighestNodeNumber`, and `GetProcessGroupAffinity` contracts advance authentic NativeAOT startup beyond QPC. The next boundary is `KERNEL32.dll!GetProcessAffinityMask`; the loader's 32 functional imports remain bounded platform contracts rather than broad implementation of the following runtime services.
+This document retains the NativeAOT startup and platform boundary ledger. The
+managed TLS track now has a separate completed Phase 31 milestone; the
+startup/platform blockers below remain independent and are not prerequisites
+for the transport-independent TLS proof.
+
+Gate 4 still proves the first no-allocation managed handoff. The allocation follow-on now builds and traces the generated allocation helper, and the verified FILETIME, monotonic performance, minimal CRT on-exit initialization, x64 SLIST-head initialization, error-returning initializer-table contract, void initializer-table contract, narrow `strcmp`, `strlen`, `GetEnvironmentVariableW`, `_stricmp`, `GetSystemInfo`, `GetNumaHighestNodeNumber`, and `GetProcessGroupAffinity` contracts advance authentic NativeAOT startup beyond QPC. The next platform boundary is `KERNEL32.dll!GetProcessAffinityMask`; the loader's 32 functional imports remain bounded platform contracts rather than broad implementation of the following runtime services.
 
 | Feature | Gate 4 boundary | Next blocker / smallest next experiment |
 | --- | --- | --- |
@@ -122,7 +127,14 @@ The narrow Microsoft x64 `strcmp` contract is closed by [CRT_STRCMP_BOOTSTRAP.md
 
 ## Recommended next milestone
 
-Investigate the exact `KERNEL32.dll!GetProcessAffinityMask` dependency reached after the bounded `GetSystemInfo`, NUMA, and process-group routes only if that API is explicitly brought into scope. Capture imports, undefined symbols, TLS, module initializer behavior, and transition-helper changes before writing any additional UEFI platform code.
+For the managed networking roadmap, Phase 32 is now the next milestone:
+integrate the proven transport-independent Phase 31 engine behind the existing
+TCP contract, then add DNS and HTTP only as separately audited layers. Preserve
+the exact `0x0303`/`0xC02B`/P-256/EMS profile, caller-buffer boundaries,
+certificate policy, GCM AAD/sequence rules, and no-hosted-TLS import boundary.
+The independent platform roadmap may continue with the exact
+`KERNEL32.dll!GetProcessAffinityMask` dependency; that work is not a TLS
+requirement and must not be conflated with Phase 32.
 
 ## SLIST evidence-closure result (2026-07-29)
 

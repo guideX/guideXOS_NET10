@@ -1344,3 +1344,36 @@ and `artifacts/managed-kernel-phase30-gate/`. The design record is
 | General PKI/path building | Unsupported |
 | Revocation/OCSP/CRL | Unsupported |
 | TLS handshake/state machine | Deferred |
+
+## Phase 31: narrow TLS 1.2 ECDHE-ECDSA handshake — Outcome A
+
+Phase 31 closes the first transport-independent managed TLS state machine for
+TLS 1.2 / `0x0303`, suite `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`
+(`0xC02B`), P-256, SHA-256/ECDSA, AES-128-GCM, and mandatory RFC 7627 EMS.
+It consumes arbitrary caller-buffer fragments, validates the ServerHello,
+Certificate, and signed ServerKeyExchange through the Phase 30/29/28 paths,
+derives the EMS master and traffic keys, authenticates both Finished messages,
+reaches Established, and proves small protected PING/PONG data.
+
+The Phase 31 host suite passes 33 cases. Retained Phase 15–29 regressions pass
+1,188/1,188, Phase 30 passes 91/91, and three fresh authoritative NativeAOT
+boots pass `MANAGED_KERNEL_PHASE31_PASS`. The final payload and boot evidence
+are recorded under `artifacts/managed-kernel-phase31-final/`,
+`artifacts/gate4-phase31-final/`, and
+`artifacts/managed-kernel-phase31-boots-authoritative4/`. Full design and
+limitations are in [MANAGED_KERNEL_PHASE31_TLS12_HANDSHAKE.md](MANAGED_KERNEL_PHASE31_TLS12_HANDSHAKE.md).
+
+### TLS capability matrix after Phase 31
+
+| Capability | Status |
+| --- | --- |
+| Secure entropy / SHA-256 / HMAC-SHA256 | Proven |
+| AES-128 / GHASH / AES-GCM | Proven |
+| P-256 ECDH / P-256 ECDSA verification | Proven |
+| Bounded DER / narrow X.509 / chain / hostname | Proven; Phase 30 reused |
+| TLS 1.2 PRF / mandatory EMS | Proven |
+| TLS 1.2 AES-GCM records / encrypted Finished | Proven |
+| ECDHE-ECDSA handshake state machine | Proven for `0xC02B`/P-256 |
+| Established transport-independent TLS session | Proven |
+| TCP/TLS, DNS, remote HTTPS, HTTP | Deferred to Phase 32 |
+| TLS 1.3, RSA, general PKI/revocation | Unsupported |

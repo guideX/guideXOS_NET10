@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\ManagedKernel\ManagedAes128.cs" Link="ManagedAes128.cs" />
+    <Compile Include="..\ManagedKernel\ManagedAesGcm.cs" Link="ManagedAesGcm.cs" />
+    <Compile Include="..\ManagedKernel\ManagedGhash.cs" Link="ManagedGhash.cs" />
+    <Compile Include="..\ManagedKernel\ManagedHmacSha256.cs" Link="ManagedHmacSha256.cs" />
+    <Compile Include="..\ManagedKernel\ManagedP256.cs" Link="ManagedP256.cs" />
+    <Compile Include="..\ManagedKernel\ManagedSecureRandom.cs" Link="ManagedSecureRandom.cs" />
+    <Compile Include="..\ManagedKernel\ManagedVirtioRngProtocol.cs" Link="ManagedVirtioRngProtocol.cs" />
+    <Compile Include="..\ManagedKernel\ManagedSha256.cs" Link="ManagedSha256.cs" />
+    <Compile Include="..\ManagedKernel\ManagedTls12Client.cs" Link="ManagedTls12Client.cs" />
+    <Compile Include="..\ManagedKernel\ManagedTls12Prf.cs" Link="ManagedTls12Prf.cs" />
+    <Compile Include="..\ManagedKernel\ManagedTls12RecordProtection.cs" Link="ManagedTls12RecordProtection.cs" />
+    <Compile Include="..\ManagedKernel\ManagedTls12Phase31Fixtures.cs" Link="ManagedTls12Phase31Fixtures.cs" />
+    <Compile Include="..\ManagedKernel\ManagedX509.cs" Link="ManagedX509.cs" />
+    <Compile Include="..\ManagedKernelPhase26HostTests\ManagedVirtioRngDriverStub.cs" Link="ManagedVirtioRngDriver.cs" />
+  </ItemGroup>
+</Project>

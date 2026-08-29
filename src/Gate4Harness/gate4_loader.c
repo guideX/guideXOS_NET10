@@ -421,6 +421,7 @@ typedef uint32_t (EFIAPI *ManagedKernelRunPhase27Entry)(void);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase28Entry)(void);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase29Entry)(void);
 typedef uint32_t (EFIAPI *ManagedKernelRunPhase30Entry)(void);
+typedef uint32_t (EFIAPI *ManagedKernelRunPhase31Entry)(void);
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE27
 static ManagedKernelRunPhase27Entry g_managed_kernel_run_phase27;
 #endif
@@ -432,6 +433,9 @@ static ManagedKernelRunPhase29Entry g_managed_kernel_run_phase29;
 #endif
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE30
 static ManagedKernelRunPhase30Entry g_managed_kernel_run_phase30;
+#endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE31
+static ManagedKernelRunPhase31Entry g_managed_kernel_run_phase31;
 #endif
 #endif
 
@@ -4723,6 +4727,7 @@ typedef struct {
     uint32_t managed_kernel_run_phase28_rva;
     uint32_t managed_kernel_run_phase29_rva;
     uint32_t managed_kernel_run_phase30_rva;
+    uint32_t managed_kernel_run_phase31_rva;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     uint32_t managed_gc_probe_rva;
@@ -13736,6 +13741,12 @@ static void managed_kernel_phase14_driver(
     status = g_managed_kernel_run_phase30();
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase30");
 #endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE31
+    if (g_managed_kernel_run_phase31 == 0) fail("managed-kernel-phase31-export");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE31_BEGIN\r\n");
+    status = g_managed_kernel_run_phase31();
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase31");
+#endif
     status = run_phase14(1U);
     if (status != GX_MANAGED_OK || run_phase14(1U) != GX_MANAGED_INVALID_STATE ||
         run_phase14(2U) != GX_MANAGED_OK ||
@@ -17713,6 +17724,7 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase28_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase29_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase30_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION run_phase31_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_STATUS initialize_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInitialize",
@@ -17857,6 +17869,11 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_STATUS run_phase30_status =
         gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase30",
                                    &run_phase30_resolution);
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE31
+    GXOS_NATIVEAOT_EXPORT_STATUS run_phase31_status =
+        gxos_nativeaot_find_export(&export_image, "GxManagedKernelRunPhase31",
+                                   &run_phase31_resolution);
+#endif
     if (initialize_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInitialize-export-missing");
     }
@@ -17982,6 +17999,11 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     if (run_phase30_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelRunPhase30-export-missing");
     }
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE31
+    if (run_phase31_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelRunPhase31-export-missing");
+    }
+#endif
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
     image->managed_kernel_install_boot_resources_rva = install_resolution.rva;
@@ -18042,6 +18064,7 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     image->managed_kernel_run_phase28_rva = run_phase28_resolution.rva;
     image->managed_kernel_run_phase29_rva = run_phase29_resolution.rva;
     image->managed_kernel_run_phase30_rva = run_phase30_resolution.rva;
+    image->managed_kernel_run_phase31_rva = run_phase31_resolution.rva;
 }
 #endif
 
@@ -19536,6 +19559,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase28_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase29_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase30_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_run_phase31_resolution = {0};
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
     ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
@@ -19579,6 +19603,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     ManagedKernelRunPhase28Entry managed_kernel_run_phase28;
     ManagedKernelRunPhase29Entry managed_kernel_run_phase29;
     ManagedKernelRunPhase30Entry managed_kernel_run_phase30;
+    ManagedKernelRunPhase31Entry managed_kernel_run_phase31;
     GX_MANAGED_KERNEL_BOOT_RESOURCE_PUBLICATION_V1 managed_kernel_boot_resource_publication = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_system_info = {0};
     GX_MANAGED_KERNEL_SYSTEM_INFO_V1 managed_kernel_repeat_info = {0};
@@ -19950,6 +19975,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     managed_kernel_run_phase30_resolution.rva = image.managed_kernel_run_phase30_rva;
     managed_kernel_run_phase30_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_run_phase30_rva);
+    managed_kernel_run_phase31_resolution.rva = image.managed_kernel_run_phase31_rva;
+    managed_kernel_run_phase31_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_phase31_rva);
     managed_kernel_initialize = (ManagedKernelInitializeEntry)
         managed_kernel_initialize_resolution.address;
     managed_kernel_query_system_info = (ManagedKernelQuerySystemInfoEntry)
@@ -20047,6 +20075,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_run_phase29_resolution.address;
     managed_kernel_run_phase30 = (ManagedKernelRunPhase30Entry)
         managed_kernel_run_phase30_resolution.address;
+    managed_kernel_run_phase31 = (ManagedKernelRunPhase31Entry)
+        managed_kernel_run_phase31_resolution.address;
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE27
     g_managed_kernel_run_phase27 = managed_kernel_run_phase27;
 #else
@@ -20066,6 +20096,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     g_managed_kernel_run_phase30 = managed_kernel_run_phase30;
 #else
     (void)managed_kernel_run_phase30;
+#endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE31
+    g_managed_kernel_run_phase31 = managed_kernel_run_phase31;
+#else
+    (void)managed_kernel_run_phase31;
 #endif
     serial_text("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT=GxManagedKernelInitialize\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INITIALIZE_EXPORT_RVA=0x",

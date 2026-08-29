@@ -1,12 +1,12 @@
 # Managed TLS Phase 24 cryptographic capability audit
 
-Status: Phase 24 remains Outcome C for TLS. Phase 25 has since completed the
-owned SHA-256, HMAC-SHA256, and constant-time comparison substrate, but the
-authoritative QEMU CPU still provides no usable RDSEED/RDRAND entropy source,
-so TLS protocol implementation remains blocked.
-No TLS cipher suite, TLS record parser, `ManagedTlsClient`, or deterministic
-TLS peer was added. This is intentional: a TLS-shaped protocol without these
-primitives would not be genuine authenticated TLS.
+Status: This is the historical Phase 24 audit. Its original Outcome C
+decision remains accurate for that phase, but Phase 31 supersedes its TLS
+protocol blocker for one narrow TLS 1.2 profile. Phase 25–30 subsequently
+completed the managed cryptographic/X.509 substrate, and Phase 31 added the
+authenticated state machine described at the end of this document. The
+original Phase 24 section below is retained as historical evidence; it must
+not be read as a claim that the current repository lacks TLS protocol code.
 
 The executable Phase 24 audit is
 `tools/Invoke-ManagedTlsPhase24CryptoAudit.ps1`. It inspects the current
@@ -308,6 +308,35 @@ a mandatory Phase 28 criterion.
 | ECDSA verification | Missing |
 | X.509 | Missing |
 | TLS handshake/state machine | Deferred |
+
+## Phase 31 TLS 1.2 handshake update
+
+Phase 31 supersedes the historical protocol blocker recorded above for one
+narrow profile. The repository now contains a transport-independent managed
+TLS 1.2 client for `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (`0xC02B`),
+P-256, SHA-256/ECDSA, AES-128-GCM, and mandatory RFC 7627 EMS. It composes
+the proven Phase 26, 27, 28, 29, and 30 implementations; it does not use
+hosted TLS, hosted X.509, or hosted cryptography in the NativeAOT payload.
+
+| Capability | Phase 31 status |
+| --- | --- |
+| Secure entropy and production ephemeral P-256 initialization | Proven |
+| SHA-256 / HMAC-SHA256 / AES-128 / GHASH / AES-GCM | Proven |
+| P-256 ECDH / P-256 ECDSA verification | Proven |
+| Bounded DER, narrow X.509 chain, configured-root trust, hostname | Proven; Phase 30 reused |
+| TLS 1.2 PRF | Proven |
+| Extended Master Secret | Proven and mandatory |
+| TLS 1.2 AES-GCM record layer | Proven |
+| TLS 1.2 ECDHE-ECDSA handshake state machine | Proven for `0xC02B`/P-256 |
+| Encrypted Finished and established transport-independent session | Proven |
+| TCP/TLS, DNS, HTTP, remote HTTPS | Deferred to Phase 32 |
+| TLS 1.3, RSA, general PKI/revocation | Unsupported |
+
+The Phase 31 host suite passes 33 cases; Phase 30 remains 91/91 and the
+retained Phase 15–29 aggregate remains 1,188/1,188. Three fresh authoritative
+NativeAOT boots pass `MANAGED_KERNEL_PHASE31_PASS`. Full protocol design,
+fixture provenance, bounds, import audit, and evidence are in
+[MANAGED_KERNEL_PHASE31_TLS12_HANDSHAKE.md](MANAGED_KERNEL_PHASE31_TLS12_HANDSHAKE.md).
 
 ## Phase 29 managed P-256 ECDSA verification — Outcome A
 

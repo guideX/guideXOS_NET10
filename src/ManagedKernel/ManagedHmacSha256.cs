@@ -17,7 +17,7 @@ internal sealed class ManagedHmacSha256
     private bool _initialized;
     private bool _finalized;
 
-    private ManagedHmacSha256()
+    internal ManagedHmacSha256()
     {
     }
 
@@ -82,6 +82,15 @@ internal sealed class ManagedHmacSha256
         return success;
     }
 
+    internal bool TryComputeInto(ReadOnlySpan<byte> key,
+                                 ReadOnlySpan<byte> data,
+                                 Span<byte> destination)
+    {
+        return destination.Length >= DigestSize &&
+               Initialize(key) && Append(data) &&
+               TryFinalize(destination);
+    }
+
     internal void Reset()
     {
         if (!_initialized)
@@ -122,12 +131,12 @@ internal sealed class ManagedHmacSha256
                                     ReadOnlySpan<byte> data,
                                     Span<byte> destination)
     {
-        if (destination.Length < DigestSize ||
-            !TryCreate(key, out ManagedHmacSha256? hmac) || hmac == null)
+        if (destination.Length < DigestSize)
         {
             return false;
         }
-        bool success = hmac.Append(data) && hmac.TryFinalize(destination);
+        ManagedHmacSha256 hmac = new();
+        bool success = hmac.TryComputeInto(key, data, destination);
         hmac.Clear();
         return success;
     }
