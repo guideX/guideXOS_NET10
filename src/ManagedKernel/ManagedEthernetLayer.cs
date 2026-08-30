@@ -5,6 +5,8 @@ namespace GuideXOS.Net10.ManagedKernel;
 internal sealed class ManagedEthernetLayer
 {
     internal const uint ReceivePollLimit = 1000000000;
+    internal const uint Phase34ReceivePollLimit = 4096;
+    internal const uint Phase34ClosingReceivePollLimit = 256;
     private readonly ManagedE1000Driver _transport;
     private readonly ManagedArpLayer _arp;
     private readonly ManagedIpv4Layer _ipv4;
@@ -16,6 +18,8 @@ internal sealed class ManagedEthernetLayer
     private uint _unknownEtherTypeCount;
     private uint _malformedFrameCount;
     private bool _accepting = true;
+    private bool _phase34Polling;
+    private uint _phase34PollLimit = Phase34ReceivePollLimit;
 
     internal ManagedEthernetLayer(ManagedE1000Driver transport)
     {
@@ -45,6 +49,26 @@ internal sealed class ManagedEthernetLayer
     internal bool Phase22Passed => _ipv4.Phase22Passed;
     internal bool Phase23Passed => _ipv4.Phase23Passed;
     internal bool Phase32Passed => _ipv4.Phase32Passed;
+    internal bool Phase33Passed => _ipv4.Phase33Passed;
+    internal bool Phase34Passed => _ipv4.Phase34Passed;
+
+    internal void EnablePhase34Polling()
+    {
+        _phase34Polling = true;
+        _phase34PollLimit = Phase34ReceivePollLimit;
+    }
+
+    internal void EnablePhase34ClosingPolling()
+    {
+        _phase34Polling = true;
+        _phase34PollLimit = Phase34ClosingReceivePollLimit;
+    }
+
+    internal void EnablePhase34HandshakePolling()
+    {
+        _phase34Polling = true;
+        _phase34PollLimit = Phase34ReceivePollLimit;
+    }
     internal ReadOnlySpan<byte> LocalMac => _localMac;
     internal bool IsAccepting => _accepting;
     internal bool DriverReady => _transport.State == ManagedE1000DriverState.Running;
@@ -107,6 +131,22 @@ internal sealed class ManagedEthernetLayer
         return _ipv4.TryRunPhase32();
     }
 
+    internal bool TryRunPhase33()
+    {
+        ManagedNetworkServiceBackend runtime =
+            (ManagedNetworkServiceBackend)_networkService.Backend;
+        runtime.Rebind(this, _ipv4);
+        return _ipv4.TryRunPhase33();
+    }
+
+    internal bool TryRunPhase34()
+    {
+        ManagedNetworkServiceBackend runtime =
+            (ManagedNetworkServiceBackend)_networkService.Backend;
+        runtime.Rebind(this, _ipv4);
+        return _ipv4.TryRunPhase34();
+    }
+
     internal void InitializeMac()
     {
         uint macHigh = ManagedE1000Driver.Phase16MacHigh;
@@ -160,7 +200,8 @@ internal sealed class ManagedEthernetLayer
         if (!_accepting || arp == null) return false;
 
         if (!_transport.TryReceiveProtocolFrame(
-                _rxFrame, _rxFrame.Length, ReceivePollLimit,
+                _rxFrame, _rxFrame.Length,
+                _phase34Polling ? _phase34PollLimit : ReceivePollLimit,
                 out ushort frameLength))
             return false;
         if (frameLength == 0)
@@ -196,7 +237,8 @@ internal sealed class ManagedEthernetLayer
         result = ManagedNetworkDispatchResult.Invalid;
         if (!_accepting) return false;
         if (!_transport.TryReceiveProtocolFrame(
-                _rxFrame, _rxFrame.Length, ReceivePollLimit,
+                _rxFrame, _rxFrame.Length,
+                _phase34Polling ? _phase34PollLimit : ReceivePollLimit,
                 out ushort frameLength))
             return false;
         if (frameLength == 0)

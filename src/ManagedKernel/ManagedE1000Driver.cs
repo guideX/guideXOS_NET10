@@ -26,7 +26,7 @@ internal sealed class ManagedE1000Driver
        adding a wall-clock sleep to the guest. */
     private const uint RxPhase15PollLimit = 1000000000;
     private const uint RxReadyPollLimit = 5000000;
-    private const uint RxRearmInterval = 1;
+    private const uint RxRearmInterval = 64;
     internal static uint Phase16MacHigh;
     internal static uint Phase16MacLow;
 
@@ -52,6 +52,8 @@ internal sealed class ManagedE1000Driver
     private bool _phase22Passed;
     private bool _phase23Passed;
     private bool _phase32Passed;
+    private bool _phase33Passed;
+    private bool _phase34Passed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -67,6 +69,8 @@ internal sealed class ManagedE1000Driver
     private bool _phase22Requested;
     private bool _phase23Requested;
     private bool _phase32Requested;
+    private bool _phase33Requested;
+    private bool _phase34Requested;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -94,6 +98,8 @@ internal sealed class ManagedE1000Driver
     internal bool Phase22Passed => _phase22Passed;
     internal bool Phase23Passed => _phase23Passed;
     internal bool Phase32Passed => _phase32Passed;
+    internal bool Phase33Passed => _phase33Passed;
+    internal bool Phase34Passed => _phase34Passed;
 
     internal static ManagedE1000Driver? TryCreate()
     {
@@ -214,7 +220,29 @@ internal sealed class ManagedE1000Driver
             Phase16MacLow = ((uint)mac2 << 24) | ((uint)mac3 << 16) |
                             ((uint)mac4 << 8) | mac5;
             _ethernet!.InitializeMac();
-            if (_phase32Requested)
+            if (_phase34Requested)
+            {
+                if (!KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_PHASE34_STARTING\r\n"u8) ||
+                    !_ethernet.TryRunPhase34())
+                {
+                    KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_PHASE34_START_FAILED\r\n"u8);
+                    return AbortStart();
+                }
+            }
+            else if (_phase33Requested)
+            {
+                if (!KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_PHASE33_STARTING\r\n"u8) ||
+                    !_ethernet.TryRunPhase33())
+                {
+                    KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_PHASE33_START_FAILED\r\n"u8);
+                    return AbortStart();
+                }
+            }
+            else if (_phase32Requested)
             {
                 if (!KernelLog.Write(
                         "GXOS_NET10:MANAGED_KERNEL_PHASE32_STARTING\r\n"u8) ||
@@ -309,7 +337,7 @@ internal sealed class ManagedE1000Driver
     {
         if (_state != ManagedE1000DriverState.Running) return false;
         _state = ManagedE1000DriverState.Stopping;
-        ManagedEthernetLayer? ethernet = (_phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
+        ManagedEthernetLayer? ethernet = (_phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
             ? ManagedNetworkServiceBackend.LiveEthernet ?? _ethernet
             : _ethernet;
         if (ethernet != null)
@@ -323,6 +351,8 @@ internal sealed class ManagedE1000Driver
             _phase22Passed = ethernet.Phase22Passed;
             _phase23Passed = ethernet.Phase23Passed;
             _phase32Passed = ethernet.Phase32Passed;
+            _phase33Passed = ethernet.Phase33Passed;
+            _phase34Passed = ethernet.Phase34Passed;
         }
         bool result = (ethernet == null || ethernet.TryStop()) &&
                       DisableEngines() && ReleaseDmaAndRestorePci();
@@ -778,6 +808,16 @@ internal sealed class ManagedE1000Driver
                 frame.Slice(0, length));
             _phase32Requested = ManagedE1000Protocol.IsPhase32RxTestFrame(
                 frame.Slice(0, length));
+            _phase33Requested = ManagedE1000Protocol.IsPhase33RxTestFrame(
+                frame.Slice(0, length));
+            _phase34Requested = ManagedE1000Protocol.IsPhase34RxTestFrame(
+                frame.Slice(0, length));
+            if (_phase34Requested && !KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_PHASE34_REQUESTED\r\n"u8))
+                return false;
+            if (_phase33Requested && !KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_PHASE33_REQUESTED\r\n"u8))
+                return false;
             if (_phase32Requested && !KernelLog.Write(
                     "GXOS_NET10:MANAGED_KERNEL_PHASE32_REQUESTED\r\n"u8))
                 return false;

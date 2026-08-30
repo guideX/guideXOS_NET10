@@ -21,7 +21,8 @@ if (Test-Path -LiteralPath $evidence) {
 & $runner -GateDirectory $gate -EvidenceDirectory $evidence `
     -PayloadSha256 $PayloadSha256 -PayloadSize $PayloadSize `
     -RunCount $RunCount -TimeoutSeconds $TimeoutSeconds `
-    -EnablePhase15Rx -EnablePhase32Protocol -Phase15EnableFilterDump
+    -EnablePhase15Rx -EnablePhase32Protocol -Phase15EnableFilterDump `
+    -EnablePhase26VirtioRng
 if ($LASTEXITCODE -ne 0) {
     throw "Phase 32 fresh boots failed: $LASTEXITCODE"
 }

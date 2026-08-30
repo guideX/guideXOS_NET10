@@ -9,7 +9,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
-    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase32HostTests</PathMap>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase34HostTests</PathMap>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\ManagedKernel\ManagedAes128.cs" Link="ManagedAes128.cs" />
@@ -33,6 +33,7 @@
     <Compile Include="..\ManagedKernel\ManagedNetworkService.cs" Link="ManagedNetworkService.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpsClient.cs" Link="ManagedHttpsClient.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpsUrl.cs" Link="ManagedHttpsUrl.cs" />
+    <Compile Include="..\ManagedKernelPhase33HostTests\ManagedKernelContractStub.cs" Link="ManagedKernelContractStub.cs" />
     <Compile Include="..\ManagedKernelPhase26HostTests\ManagedVirtioRngDriverStub.cs" Link="ManagedVirtioRngDriver.cs" />
   </ItemGroup>
 </Project>

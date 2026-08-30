@@ -9,7 +9,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
-    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase32HostTests</PathMap>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase33HostTests</PathMap>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\ManagedKernel\ManagedAes128.cs" Link="ManagedAes128.cs" />

@@ -88,6 +88,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private ManagedPhase22TestConsumer? _phase22Consumer;
     private ManagedPhase23TestConsumer? _phase23Consumer;
     private ManagedPhase32TestConsumer? _phase32Consumer;
+    private ManagedPhase33TestConsumer? _phase33Consumer;
+    private ManagedPhase34TestConsumer? _phase34Consumer;
     private readonly ManagedTcpConnection _tcp;
     private uint _localIpv4Value;
     private uint _peerIpv4Value;
@@ -114,6 +116,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase22Passed;
     private bool _phase23Passed;
     private bool _phase32Passed;
+    private bool _phase33Passed;
+    private bool _phase34Passed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -180,6 +184,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase22Passed => _phase22Passed;
     internal bool Phase23Passed => _phase23Passed;
     internal bool Phase32Passed => _phase32Passed;
+    internal bool Phase33Passed => _phase33Passed;
+    internal bool Phase34Passed => _phase34Passed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -221,10 +227,6 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal void AttachNetworkService(ManagedNetworkService service)
     {
         _networkService = service;
-        _phase21Consumer = new ManagedPhase21TestConsumer(service);
-        _phase22Consumer = new ManagedPhase22TestConsumer(service);
-        _phase23Consumer = new ManagedPhase23TestConsumer(service);
-        _phase32Consumer = new ManagedPhase32TestConsumer(service);
     }
 
     internal bool TryRunPhase17()
@@ -350,6 +352,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     {
         if (_phase21Passed || _active || !_arp.TryBeginDhcp() ||
             _networkService == null) return false;
+        _phase21Consumer ??= new ManagedPhase21TestConsumer(_networkService);
         _active = true;
         _networkService.BeginBoot();
         _dns.ResetForDhcp();
@@ -378,8 +381,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool TryRunPhase22()
     {
         if (_phase22Passed || _active || !_arp.TryBeginDhcp() ||
-            _networkService == null || _phase22Consumer == null)
+            _networkService == null)
             return false;
+        _phase22Consumer ??= new ManagedPhase22TestConsumer(_networkService);
         _active = true;
         _networkService.BeginBoot();
         _dns.ResetForDhcp();
@@ -409,8 +413,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool TryRunPhase23()
     {
         if (_phase23Passed || _active || !_arp.TryBeginDhcp() ||
-            _networkService == null || _phase23Consumer == null)
+            _networkService == null)
             return false;
+        _phase23Consumer ??= new ManagedPhase23TestConsumer(_networkService);
         _active = true;
         _networkService.BeginBoot();
         _dns.ResetForDhcp();
@@ -439,13 +444,13 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
 
     internal bool TryRunPhase32()
     {
-        if (_phase32Passed || _active || _networkService == null ||
-            _phase32Consumer == null)
+        if (_phase32Passed || _active || _networkService == null)
         {
             KernelLog.Write(
                 "GXOS_NET10:MANAGED_KERNEL_PHASE32_IPV4_GUARD_FAILED\r\n"u8);
             return false;
         }
+        _phase32Consumer ??= new ManagedPhase32TestConsumer(_networkService);
         if (!_arp.TryBeginDhcp())
         {
             KernelLog.Write(
@@ -476,6 +481,98 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         if (!_phase32Consumer.TryRun()) return false;
         _phase32Passed = true;
         return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE32_PASS\r\n"u8);
+    }
+
+    internal bool TryRunPhase33()
+    {
+        if (_phase33Passed || _active || _networkService == null)
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE33_IPV4_GUARD_FAILED\r\n"u8);
+            return false;
+        }
+        _phase33Consumer ??= new ManagedPhase33TestConsumer(_networkService);
+        if (!_arp.TryBeginDhcp())
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE33_ARP_DHCP_BEGIN_FAILED\r\n"u8);
+            return false;
+        }
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE33_READY\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort) ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                       ManagedUdpEndpointHandler.DnsResolver) ||
+            !PublishNetworkServiceStatus() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE33_CONFIGURED\r\n"u8))
+            return false;
+
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        return TryRunPhase33Consumer();
+    }
+
+    private bool TryRunPhase33Consumer()
+    {
+        if (_phase33Consumer == null || !_phase33Consumer.TryRun()) return false;
+        _phase33Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE33_PASS\r\n"u8);
+    }
+
+    internal bool TryRunPhase34()
+    {
+        if (_phase34Passed || _active || _networkService == null)
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE34_IPV4_GUARD_FAILED\r\n"u8);
+            return false;
+        }
+        _phase34Consumer ??= new ManagedPhase34TestConsumer(_networkService);
+        if (!_arp.TryBeginDhcp())
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE34_ARP_DHCP_BEGIN_FAILED\r\n"u8);
+            return false;
+        }
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE34_READY\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort) ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                       ManagedUdpEndpointHandler.DnsResolver) ||
+            !PublishNetworkServiceStatus() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE34_CONFIGURED\r\n"u8))
+            return false;
+
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        return TryRunPhase34Consumer();
+    }
+
+    private bool TryRunPhase34Consumer()
+    {
+        if (_phase34Consumer == null || !_phase34Consumer.TryRun()) return false;
+        _phase34Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE34_PASS\r\n"u8);
     }
 
     private bool PublishNetworkServiceStatus()
@@ -765,6 +862,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _phase22Passed = false;
         _phase23Passed = false;
         _phase32Passed = false;
+        _phase33Passed = false;
+        _phase34Passed = false;
         _servicePingIdentifier = 0x2101;
         _servicePingSequence = 1;
         _dns.ResetForTeardown();
@@ -938,6 +1037,13 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _tcpRxValidCount++;
         ManagedTcpHandleResult result = _tcp.TryHandle(
             segment, _networkService as IManagedTcpApplicationSink);
+        if (_phase34Consumer != null &&
+            (result == ManagedTcpHandleResult.FinReceived ||
+             result == ManagedTcpHandleResult.OutOfOrder ||
+             result == ManagedTcpHandleResult.Failed))
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE34_TCP_DISPATCH_RESULT=0x"u8,
+                (ulong)result);
         return result switch
         {
             ManagedTcpHandleResult.Established =>

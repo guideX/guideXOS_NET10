@@ -52,7 +52,12 @@ internal sealed class ManagedTls12Client
     internal const int MaximumPendingApplicationBytes = 2048;
     internal const int CertificateStorageBytes =
         MaximumPeerCertificates * ManagedX509.MaximumCertificateLength;
-    internal const int MinimumWorkingStorageBytes = CertificateStorageBytes;
+    internal const int MinimumWorkingStorageBytes = 2 * 1024;
+    internal const int CompactWorkingStorageBytes = 2 * 1024;
+    internal const int CompactRecordBytes = MaximumOutboundFlightBytes;
+    private const int CompactHandshakeBytes = 2 * 1024;
+    private const int DefaultRecordBytes =
+        ManagedTls12RecordProtection.MaximumRecordSize;
 
     private enum InternalStage : byte
     {
@@ -69,7 +74,7 @@ internal sealed class ManagedTls12Client
     }
 
     private ManagedSecureRandom _random;
-    private readonly byte[] _hostname;
+    private byte[] _hostname;
     private readonly byte[] _trustedRoot;
     private readonly ManagedX509UtcTime _currentTime;
     private readonly byte[] _workingStorage;
@@ -89,20 +94,14 @@ internal sealed class ManagedTls12Client
     private readonly byte[] _clientWriteIv = new byte[4];
     private readonly byte[] _serverWriteIv = new byte[4];
     private readonly byte[] _recordHeader = new byte[5];
-    private readonly byte[] _recordBody =
-        new byte[ManagedTls12RecordProtection.MaximumCiphertextFragment];
-    private readonly byte[] _recordWire =
-        new byte[ManagedTls12RecordProtection.MaximumRecordSize];
-    private readonly byte[] _recordPlaintext =
-        new byte[ManagedTls12RecordProtection.MaximumPlaintextFragment];
-    private byte[] _handshake = new byte[MaximumHandshakeMessageBytes + 4];
+    private readonly byte[] _recordWire;
+    private readonly byte[] _recordPlaintext;
+    private byte[] _handshake;
     private readonly byte[] _outbound = new byte[MaximumOutboundFlightBytes];
-    private readonly byte[] _applicationPlaintext =
-        new byte[ManagedTls12RecordProtection.MaximumPlaintextFragment];
     private readonly byte[] _pendingApplication =
         new byte[MaximumPendingApplicationBytes];
     private readonly ManagedHmacSha256 _prfHmac = new();
-    private readonly ManagedTls12Transcript _transcript = new();
+    private readonly ManagedTls12Transcript _transcript;
     private readonly ManagedX509Certificate[] _peerCertificates =
         new ManagedX509Certificate[MaximumPeerCertificates];
     private readonly int[] _peerCertificateOffsets =
@@ -133,13 +132,21 @@ internal sealed class ManagedTls12Client
                                ReadOnlySpan<byte> trustedRoot,
                                in ManagedX509UtcTime currentTime,
                                ManagedSecureRandom random,
-                               byte[] workingStorage)
+                               byte[] workingStorage,
+                               int maximumRecordBytes)
     {
         _hostname = hostname.ToArray();
         _trustedRoot = trustedRoot.ToArray();
         _currentTime = currentTime;
         _random = random;
         _workingStorage = workingStorage;
+        _recordWire = new byte[maximumRecordBytes];
+        _recordPlaintext = new byte[maximumRecordBytes -
+                                    ManagedTls12RecordProtection.HeaderSize];
+        _handshake = new byte[maximumRecordBytes == CompactRecordBytes
+            ? CompactHandshakeBytes : MaximumHandshakeMessageBytes + 4];
+        _transcript = new ManagedTls12Transcript(
+            maximumRecordBytes == CompactRecordBytes ? 2 * 1024 : 4 * 1024);
         _stage = InternalStage.Created;
         _lastHandshake = ManagedTls12HandshakeStage.ClientHello;
     }
@@ -149,11 +156,16 @@ internal sealed class ManagedTls12Client
                                    in ManagedX509UtcTime currentTime,
                                    ManagedSecureRandom? random,
                                    byte[]? workingStorage,
-                                   out ManagedTls12Client? client)
+                                   out ManagedTls12Client? client,
+                                   int maximumRecordBytes = DefaultRecordBytes)
     {
         client = null;
         if (random == null || workingStorage == null ||
             workingStorage.Length < MinimumWorkingStorageBytes ||
+            maximumRecordBytes < ManagedTls12RecordProtection.HeaderSize +
+                                 ManagedTls12RecordProtection.ExplicitNonceSize +
+                                 ManagedAesGcm.TagSize ||
+            maximumRecordBytes > DefaultRecordBytes ||
             trustedRoot.Length == 0 ||
             trustedRoot.Length > ManagedX509.MaximumCertificateLength ||
             !currentTime.IsValid ||
@@ -162,7 +174,7 @@ internal sealed class ManagedTls12Client
             return false;
         client = new ManagedTls12Client(hostname, trustedRoot,
                                         in currentTime, random,
-                                        workingStorage);
+                                        workingStorage, maximumRecordBytes);
         return true;
     }
 
@@ -197,7 +209,7 @@ internal sealed class ManagedTls12Client
     }
     internal int ApplicationPlaintextLength => _applicationPlaintextLength;
     internal ReadOnlySpan<byte> ApplicationPlaintext =>
-        _applicationPlaintext.AsSpan(0, _applicationPlaintextLength);
+        _recordPlaintext.AsSpan(0, _applicationPlaintextLength);
 
     internal int PendingApplicationDataLength => _pendingApplicationLength;
 
@@ -303,15 +315,15 @@ internal sealed class ManagedTls12Client
 
             int bodyCount = Math.Min(
                 input.Length, _expectedRecordBodyLength - _recordBodyLength);
-            input[..bodyCount].CopyTo(_recordBody.AsSpan(_recordBodyLength));
+            input[..bodyCount].CopyTo(_recordWire.AsSpan(
+                ManagedTls12RecordProtection.HeaderSize + _recordBodyLength));
             _recordBodyLength += bodyCount;
             input = input[bodyCount..];
             if (_recordBodyLength != _expectedRecordBodyLength)
                 break;
 
             _recordHeader.CopyTo(_recordWire, 0);
-            _recordBody.AsSpan(0, _recordBodyLength).CopyTo(
-                _recordWire.AsSpan(ManagedTls12RecordProtection.HeaderSize));
+            _recordHeader.CopyTo(_recordWire, 0);
             ProcessRecord();
             _recordHeaderLength = 0;
             _recordBodyLength = 0;
@@ -376,9 +388,9 @@ internal sealed class ManagedTls12Client
         if (_stage != InternalStage.Established ||
             record.Length > _recordWire.Length)
             return false;
-        _applicationPlaintext.AsSpan().Clear();
+        _recordPlaintext.AsSpan().Clear();
         _pendingApplication.AsSpan().Clear();
-        if (!TryDecryptApplicationData(record, _applicationPlaintext,
+        if (!TryDecryptApplicationData(record, _recordPlaintext,
                                         out _applicationPlaintextLength))
         {
             _applicationPlaintextLength = 0;
@@ -405,12 +417,10 @@ internal sealed class ManagedTls12Client
         _clientWriteIv.AsSpan().Clear();
         _serverWriteIv.AsSpan().Clear();
         _recordHeader.AsSpan().Clear();
-        _recordBody.AsSpan().Clear();
         _recordWire.AsSpan().Clear();
         _recordPlaintext.AsSpan().Clear();
         _handshake.AsSpan().Clear();
         _outbound.AsSpan().Clear();
-        _applicationPlaintext.AsSpan().Clear();
         _workingStorage.AsSpan().Clear();
         _prfHmac.Clear();
         _transcript.Clear();
@@ -440,9 +450,24 @@ internal sealed class ManagedTls12Client
        that wants a fresh connection without another large object graph. */
     internal bool TryReset(ManagedSecureRandom? random)
     {
-        if (_stage != InternalStage.Closed || random == null)
+        return TryReset(_hostname, random);
+    }
+
+    /* Reopen the bounded TLS workspace for a new HTTPS hop.  The handshake
+       state, sequence numbers, transcript, keys, and certificate buffers are
+       cleared by Teardown(); replacing the hostname makes SNI and the
+       certificate-name check fresh for the new authority without allocating
+       another certificate-sized object graph. */
+    internal bool TryReset(ReadOnlySpan<byte> hostname,
+                           ManagedSecureRandom? random)
+    {
+        if (_stage != InternalStage.Closed || random == null ||
+            !ManagedX509.IsValidDnsNameForTest(hostname, false) ||
+            hostname.Length > ManagedX509.MaximumDnsNameLength)
             return false;
+        _hostname = hostname.ToArray();
         _random = random;
+        _failureKind = ManagedTls12FailureKind.Protocol;
         _lastHandshake = ManagedTls12HandshakeStage.ClientHello;
         _stage = InternalStage.Created;
         return true;
@@ -465,9 +490,11 @@ internal sealed class ManagedTls12Client
             return false;
         int length = (_recordHeader[3] << 8) | _recordHeader[4];
         bool protectedRecord = _serverReadActive;
-        int maximum = protectedRecord
-            ? ManagedTls12RecordProtection.MaximumCiphertextFragment
-            : ManagedTls12RecordProtection.MaximumPlaintextFragment;
+        int maximum = Math.Min(
+            protectedRecord
+                ? ManagedTls12RecordProtection.MaximumCiphertextFragment
+                : ManagedTls12RecordProtection.MaximumPlaintextFragment,
+            _recordWire.Length - ManagedTls12RecordProtection.HeaderSize);
         if (length > maximum || length == 0)
             return false;
         if (protectedRecord && length <
@@ -545,8 +572,8 @@ internal sealed class ManagedTls12Client
 
         if (type == ManagedTls12RecordProtection.Handshake)
         {
-            if (!AppendHandshakeBytes(_recordBody.AsSpan(0,
-                                                          _recordBodyLength)))
+            if (!AppendHandshakeBytes(_recordWire.AsSpan(
+                    ManagedTls12RecordProtection.HeaderSize, _recordBodyLength)))
                 Fail();
             return;
         }
@@ -554,7 +581,7 @@ internal sealed class ManagedTls12Client
         {
             if (_stage != InternalStage.ExpectServerCcs ||
                 _handshakeLength != 0 || _recordBodyLength != 1 ||
-                _recordBody[0] != 1)
+                _recordWire[ManagedTls12RecordProtection.HeaderSize] != 1)
             {
                 Fail();
                 return;
@@ -1039,7 +1066,8 @@ internal sealed class ManagedTls12Client
 
     private void ProcessAlert()
     {
-        ProcessAlert(_recordBody.AsSpan(0, _recordBodyLength));
+        ProcessAlert(_recordWire.AsSpan(ManagedTls12RecordProtection.HeaderSize,
+                                         _recordBodyLength));
     }
 
     private void ProcessAlert(ReadOnlySpan<byte> body)
@@ -1092,7 +1120,6 @@ internal sealed class ManagedTls12Client
         _clientWriteIv.AsSpan().Clear();
         _serverWriteIv.AsSpan().Clear();
         _recordPlaintext.AsSpan().Clear();
-        _recordBody.AsSpan().Clear();
         _recordWire.AsSpan().Clear();
         _handshake.AsSpan().Clear();
         _workingStorage.AsSpan().Clear();
@@ -1110,7 +1137,7 @@ internal sealed class ManagedTls12Client
         _expectedHandshakeLength = 0;
         _certificateStorageLength = 0;
         _peerCertificateCount = 0;
-        _applicationPlaintext.AsSpan().Clear();
+        _recordPlaintext.AsSpan().Clear();
         _applicationPlaintextLength = 0;
         _pendingApplication.AsSpan().Clear();
         _pendingApplicationLength = 0;

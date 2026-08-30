@@ -88,8 +88,13 @@ internal sealed class ManagedTls12Transcript
     internal const int MaximumBytes = 64 * 1024;
     private const int InitialBytes = 4096;
 
-    private byte[] _encoded = new byte[InitialBytes];
+    private byte[] _encoded;
     private int _length;
+
+    internal ManagedTls12Transcript(int initialCapacity = InitialBytes)
+    {
+        _encoded = new byte[initialCapacity];
+    }
 
     internal int Length => _length;
 

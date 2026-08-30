@@ -72,7 +72,12 @@ public enum ManagedHttpsFailureReason : byte
     HttpParseFailure = 10,
     PrematureConnectionClose = 11,
     TeardownFailure = 12,
-    Cancelled = 13
+    Cancelled = 13,
+    RedirectMissingLocation = 14,
+    RedirectInvalidLocation = 15,
+    RedirectLimitExceeded = 16,
+    RedirectDowngradeRejected = 17,
+    RedirectUnsupportedScheme = 18
 }
 
 /* The HTTPS layer speaks to this narrow stream boundary only.  TLS has no
@@ -122,6 +127,7 @@ internal sealed class ManagedNetworkServiceTlsTransport : IManagedTlsTransport
 public sealed class ManagedHttpsClient
 {
     public const ushort HttpsPort = 443;
+    public const int MaximumRedirects = 5;
     public const int MaximumTlsTransportPayload =
         ManagedTls12Client.MaximumPendingApplicationBytes;
 
@@ -129,6 +135,10 @@ public sealed class ManagedHttpsClient
     private readonly IManagedTlsTransport _transport;
     private readonly byte[] _trustedRoot;
     private readonly ManagedX509UtcTime _validationTime;
+    private readonly bool _closeOnHttpCompletion;
+    private readonly bool _compactTlsProfile;
+    private ManagedHttpsUrl _currentUrl;
+    private ManagedHttpsUrl _nextUrl;
     private ManagedSecureRandom? _random;
     private ManagedTls12Client? _tls;
     private readonly byte[] _request =
@@ -136,30 +146,44 @@ public sealed class ManagedHttpsClient
     private readonly byte[] _receive =
         new byte[ManagedNetworkService.MaximumTcpPayloadLength];
     private readonly byte[] _tlsOutput =
-        new byte[ManagedTls12RecordProtection.MaximumRecordSize];
+        new byte[ManagedNetworkService.MaximumTcpPayloadLength];
     private readonly byte[] _plaintext =
+        new byte[ManagedTls12Client.MaximumPendingApplicationBytes];
+    private readonly byte[] _pendingPlaintext =
         new byte[ManagedTls12Client.MaximumPendingApplicationBytes];
     private readonly byte[] _responseBody =
         new byte[ManagedHttpLimits.MaximumBodyCapacity];
-    private readonly ManagedHttpResponseParser _parser = new();
+    private readonly ManagedHttpResponseParser _parser;
     private ManagedHttpsClientState _state;
     private ManagedHttpsFailureReason _failureReason;
     private int _requestLength;
     private int _tlsOutputLength;
+    private int _pendingPlaintextLength;
     private bool _requestSent;
     private bool _requestOutputReady;
     private bool _tlsAuthenticated;
     private bool _applicationDataReceived;
     private bool _closingStarted;
+    private bool _redirectPending;
+    private int _redirectCount;
+    private ManagedHttpsUrlParseFailureReason _urlParseFailure;
 
     public ManagedHttpsClient(ManagedNetworkService service,
                               ReadOnlySpan<byte> trustedRoot,
-                              ManagedHttpsValidationTime validationTime)
+                              ManagedHttpsValidationTime validationTime,
+                              int maximumResponseBodyLength =
+                                  ManagedHttpLimits.MaximumBodyCapacity)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _transport = new ManagedNetworkServiceTlsTransport(service);
         _trustedRoot = trustedRoot.ToArray();
         _validationTime = validationTime.ToX509Time();
+        _closeOnHttpCompletion = maximumResponseBodyLength >
+                                 ManagedHttpLimits.MaximumBodyCapacity;
+        _compactTlsProfile = false;
+        _parser = new ManagedHttpResponseParser(maximumResponseBodyLength,
+                                                requireConnectionClose: false,
+                                                allowChunked: true);
         _state = ManagedHttpsClientState.Idle;
     }
 
@@ -169,18 +193,33 @@ public sealed class ManagedHttpsClient
     internal ManagedHttpsClient(ManagedNetworkService service,
                                 ReadOnlySpan<byte> trustedRoot,
                                 in ManagedX509UtcTime validationTime,
-                                ManagedSecureRandom random)
+                                ManagedSecureRandom random,
+                                int maximumResponseBodyLength =
+                                    ManagedHttpLimits.MaximumBodyCapacity,
+                                bool compactTlsProfile = false)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _transport = new ManagedNetworkServiceTlsTransport(service);
         _trustedRoot = trustedRoot.ToArray();
         _validationTime = validationTime;
+        _closeOnHttpCompletion = maximumResponseBodyLength >
+                                 ManagedHttpLimits.MaximumBodyCapacity;
+        _compactTlsProfile = compactTlsProfile;
         _random = random;
+        _parser = new ManagedHttpResponseParser(maximumResponseBodyLength,
+                                                requireConnectionClose: false,
+                                                allowChunked: true);
         _state = ManagedHttpsClientState.Idle;
     }
 
     public ManagedHttpsClientState State => _state;
     public ManagedHttpsFailureReason FailureReason => _failureReason;
+    public ManagedHttpsUrlParseFailureReason UrlParseFailureReason =>
+        _urlParseFailure;
+    public ManagedHttpsUrl CurrentUrl => _currentUrl;
+    public ManagedHttpsUrl FinalUrl => _currentUrl;
+    public int RedirectCount => _redirectCount;
+    public ushort Port => _currentUrl.Port;
     public Ipv4Address ResolvedAddress { get; private set; }
     public bool RequestSent => _requestSent;
     public bool TlsAuthenticated => _tlsAuthenticated;
@@ -188,21 +227,70 @@ public sealed class ManagedHttpsClient
     public bool StatusParsed => _parser.IsStatusParsed;
     public int StatusCode => _parser.StatusCode;
     public int ResponseBodyLength => _parser.BodyLength;
+    public int ResponseBodyBytesDelivered => _parser.BodyBytesDelivered;
+    public int BufferedResponseBodyLength => _parser.BufferedBodyLength;
     public int ContentLength => _parser.ContentLength;
+    public ManagedHttpFramingMode FramingMode => _parser.FramingMode;
     public bool ResponseBodyComplete => _parser.IsBodyComplete;
     public ManagedHttpParseFailureReason ParseFailureReason => _parser.FailureReason;
 
     public NetworkOperationResult BeginGet(ReadOnlySpan<byte> hostname,
                                            ReadOnlySpan<byte> path)
     {
+        return BeginGet(hostname, HttpsPort, path);
+    }
+
+    public NetworkOperationResult BeginGet(ReadOnlySpan<byte> hostname,
+                                           ushort port,
+                                           ReadOnlySpan<byte> path)
+    {
+        if (!CanBegin()) return NetworkOperationResult.Busy;
+        ClearOperationBuffers();
+        if (!ManagedHttpsUrl.TryCreate(hostname, port, path,
+                                       out ManagedHttpsUrl url))
+            return Fail(ManagedHttpsFailureReason.InvalidRequest);
+        _currentUrl = url;
+        return BeginCurrentHop();
+    }
+
+    public NetworkOperationResult BeginGetUrl(ReadOnlySpan<byte> url)
+    {
+        if (!CanBegin()) return NetworkOperationResult.Busy;
+        ClearOperationBuffers();
+        if (!ManagedHttpsUrl.TryParse(url, out _currentUrl,
+                                      out _urlParseFailure))
+            return Fail(ManagedHttpsFailureReason.InvalidRequest);
+        return BeginCurrentHop();
+    }
+
+    public NetworkOperationResult BeginGetUrl(string url)
+    {
+        if (url == null) throw new ArgumentNullException(nameof(url));
+        if (!CanBegin()) return NetworkOperationResult.Busy;
+        ClearOperationBuffers();
+        if (!ManagedHttpsUrl.TryParse(url.AsSpan(), out _currentUrl,
+                                      out _urlParseFailure))
+            return Fail(ManagedHttpsFailureReason.InvalidRequest);
+        return BeginCurrentHop();
+    }
+
+    private bool CanBegin()
+    {
         if (_state != ManagedHttpsClientState.Idle &&
             _state != ManagedHttpsClientState.Succeeded &&
             _state != ManagedHttpsClientState.Failed &&
             _state != ManagedHttpsClientState.Cancelled)
-            return NetworkOperationResult.Busy;
+            return false;
+        return true;
+    }
 
-        ClearOperationBuffers();
-        if (!ManagedHttpRequestBuilder.TryBuildGet(hostname, path, _request,
+    private NetworkOperationResult BeginCurrentHop()
+    {
+        ClearPerHopBuffers();
+        if (!ManagedHttpRequestBuilder.TryBuildGet(_currentUrl.Hostname,
+                                                   _currentUrl.Port,
+                                                   _currentUrl.RequestTarget,
+                                                   _request,
                                                    out _requestLength))
             return Fail(ManagedHttpsFailureReason.InvalidRequest);
         if (_requestLength + ManagedTls12RecordProtection.HeaderSize +
@@ -220,13 +308,8 @@ public sealed class ManagedHttpsClient
                 return Fail(ManagedHttpsFailureReason.EntropyUnavailable);
             _random = ManagedKernelContract.SecureRandom;
         }
-        if (!ManagedTls12Client.TryCreate(hostname, _trustedRoot,
-                in _validationTime, _random, new byte[
-                    ManagedTls12Client.CertificateStorageBytes],
-                out _tls) || _tls == null)
-            return Fail(ManagedHttpsFailureReason.TlsAuthenticationFailure);
-
-        NetworkOperationResult result = _service.BeginResolveIpv4(hostname);
+        NetworkOperationResult result = _service.BeginResolveIpv4(
+            _currentUrl.Hostname);
         if (result != NetworkOperationResult.Started)
             return Fail(result == NetworkOperationResult.Unavailable
                 ? ManagedHttpsFailureReason.TransportFailure
@@ -244,6 +327,16 @@ public sealed class ManagedHttpsClient
             return _state == ManagedHttpsClientState.Cancelled
                 ? NetworkOperationResult.Success : NetworkOperationResult.Failed;
 
+        // A full HTTP delivery window applies backpressure above TLS.  Drain
+        // the authenticated plaintext remainder before polling TCP again.
+        if (_pendingPlaintextLength != 0)
+        {
+            if (!DrainApplicationData())
+                return Fail(ManagedHttpsFailureReason.HttpParseFailure);
+            if (_pendingPlaintextLength != 0)
+                return NetworkOperationResult.Success;
+        }
+
         NetworkOperationResult poll = _transport.Poll();
         if (poll == NetworkOperationResult.Unavailable ||
             poll == NetworkOperationResult.Failed)
@@ -256,7 +349,7 @@ public sealed class ManagedHttpsClient
             {
                 ResolvedAddress = resolved;
                 NetworkOperationResult connect = _transport.BeginConnect(
-                    resolved, HttpsPort);
+                    resolved, _currentUrl.Port);
                 if (connect != NetworkOperationResult.Started)
                     return Fail(ManagedHttpsFailureReason.TcpConnectFailure);
                 _state = ManagedHttpsClientState.Connecting;
@@ -275,6 +368,8 @@ public sealed class ManagedHttpsClient
         if (_state == ManagedHttpsClientState.Connecting &&
             _transport.State == NetworkTcpState.Established)
         {
+            if (_tls == null && !TryCreateTls())
+                return Fail(ManagedHttpsFailureReason.TlsAuthenticationFailure);
             if (_tls == null || !_tls.TryStart(_tlsOutput, out _tlsOutputLength))
                 return Fail(ManagedHttpsFailureReason.TlsProtocolFailure);
             NetworkOperationResult output = FlushTlsOutput();
@@ -355,6 +450,9 @@ public sealed class ManagedHttpsClient
                         ManagedHttpParseFailureReason.PrematureConnectionClose
                         ? ManagedHttpsFailureReason.PrematureConnectionClose
                         : ManagedHttpsFailureReason.TlsProtocolFailure);
+                if (IsRedirectStatus(_parser.StatusCode) && !_redirectPending &&
+                    !TryPrepareRedirect(out ManagedHttpsFailureReason redirectFailure))
+                    return Fail(redirectFailure);
                 if (!_closingStarted)
                 {
                     NetworkOperationResult close = _transport.Close();
@@ -364,6 +462,59 @@ public sealed class ManagedHttpsClient
                         return Fail(ManagedHttpsFailureReason.TransportFailure);
                     _closingStarted = true;
                 }
+                else
+                {
+                    // A peer FIN can race the local framing-driven close and
+                    // leave the TCP adapter in CloseWait.  Complete the
+                    // already-started local close so the adapter can advance
+                    // through LastAck/TimeWait.
+                    NetworkOperationResult close = _transport.Close();
+                    if (close == NetworkOperationResult.Busy)
+                        return NetworkOperationResult.Success;
+                    if (close != NetworkOperationResult.Started)
+                        return Fail(ManagedHttpsFailureReason.TransportFailure);
+                }
+                _state = ManagedHttpsClientState.Closing;
+            }
+
+            if (_state == ManagedHttpsClientState.ReceivingResponse &&
+                _parser.IsBodyComplete && IsRedirectStatus(_parser.StatusCode))
+            {
+                if (!_redirectPending &&
+                    !TryPrepareRedirect(out ManagedHttpsFailureReason redirectFailure))
+                    return Fail(redirectFailure);
+                // A server that explicitly asks to close owns the first half
+                // of this TCP teardown.  Waiting for its FIN avoids a
+                // simultaneous-close race with a pending application ACK;
+                // the CloseWait branch above then sends the managed ACK+FIN.
+                if (!_parser.ConnectionClose)
+                {
+                    NetworkOperationResult close = _transport.Close();
+                    if (close == NetworkOperationResult.Busy)
+                        return NetworkOperationResult.Success;
+                    if (close != NetworkOperationResult.Started)
+                        return Fail(ManagedHttpsFailureReason.TransportFailure);
+                    _closingStarted = true;
+                    _state = ManagedHttpsClientState.Closing;
+                }
+            }
+
+            // Content-Length, chunked, and bodyless responses complete from
+            // authenticated HTTP bytes.  Do not wait for peer EOF once the
+            // framing boundary is known; close-delimited bodies reach this
+            // branch only after the transport reports EOF above.
+            if (_closeOnHttpCompletion &&
+                _state == ManagedHttpsClientState.ReceivingResponse &&
+                _parser.IsBodyComplete &&
+                _pendingPlaintextLength == 0 &&
+                _transport.State == NetworkTcpState.Established)
+            {
+                NetworkOperationResult close = _transport.Close();
+                if (close == NetworkOperationResult.Busy)
+                    return NetworkOperationResult.Success;
+                if (close != NetworkOperationResult.Started)
+                    return Fail(ManagedHttpsFailureReason.TransportFailure);
+                _closingStarted = true;
                 _state = ManagedHttpsClientState.Closing;
             }
         }
@@ -375,6 +526,19 @@ public sealed class ManagedHttpsClient
             if (_transport.ReleaseForReuse() != NetworkOperationResult.Success)
                 return Fail(ManagedHttpsFailureReason.TeardownFailure);
             _tls?.Teardown();
+            if (_redirectPending)
+            {
+                if (_tls == null || !_tls.TryReset(_nextUrl.Hostname, _random))
+                    return Fail(ManagedHttpsFailureReason.TlsProtocolFailure);
+                _redirectCount++;
+                _currentUrl.Clear();
+                _currentUrl = _nextUrl;
+                _nextUrl = default;
+                _redirectPending = false;
+                if (BeginCurrentHop() == NetworkOperationResult.Failed)
+                    return NetworkOperationResult.Failed;
+                return NetworkOperationResult.Success;
+            }
             _tls = null;
             _state = ManagedHttpsClientState.Succeeded;
             return NetworkOperationResult.Success;
@@ -393,6 +557,11 @@ public sealed class ManagedHttpsClient
         _responseBody.AsSpan(0, parserLength).CopyTo(destination);
         length = parserLength;
         return true;
+    }
+
+    public bool TryReadResponseBodyChunk(Span<byte> destination, out int length)
+    {
+        return _parser.TryReadBodyChunk(destination, out length);
     }
 
     public NetworkOperationResult Cancel()
@@ -469,13 +638,47 @@ public sealed class ManagedHttpsClient
 
     private bool DrainApplicationData()
     {
-        if (_tls == null ||
-            !_tls.TryTakeApplicationData(_plaintext, out int length))
+        if (_pendingPlaintextLength == 0)
+        {
+            if (_tls == null ||
+                !_tls.TryTakeApplicationData(_plaintext, out int length))
+                return false;
+            if (length == 0) return true;
+            _plaintext.AsSpan(0, length).CopyTo(_pendingPlaintext);
+            _plaintext.AsSpan(0, length).Clear();
+            _pendingPlaintextLength = length;
+        }
+
+        if (!_parser.TryFeed(_pendingPlaintext.AsSpan(0, _pendingPlaintextLength),
+                             out int consumed))
             return false;
-        if (length == 0) return true;
-        if (!_parser.Feed(_plaintext.AsSpan(0, length))) return false;
-        _applicationDataReceived = true;
+        _applicationDataReceived = _applicationDataReceived || consumed != 0;
+        if (consumed == _pendingPlaintextLength)
+        {
+            _pendingPlaintext.AsSpan().Clear();
+            _pendingPlaintextLength = 0;
+            return true;
+        }
+        int remaining = _pendingPlaintextLength - consumed;
+        _pendingPlaintext.AsSpan(consumed, remaining).CopyTo(_pendingPlaintext);
+        _pendingPlaintext.AsSpan(remaining, consumed).Clear();
+        _pendingPlaintextLength = remaining;
         return true;
+    }
+
+    private bool TryCreateTls()
+    {
+        if (_random == null || !_currentUrl.IsValid) return false;
+        int workingStorageBytes = _compactTlsProfile
+            ? ManagedTls12Client.CompactWorkingStorageBytes
+            : ManagedTls12Client.CertificateStorageBytes;
+        return ManagedTls12Client.TryCreate(_currentUrl.Hostname, _trustedRoot,
+                in _validationTime, _random, new byte[workingStorageBytes],
+                out _tls,
+                _compactTlsProfile
+                    ? ManagedTls12Client.CompactRecordBytes
+                    : ManagedTls12RecordProtection.MaximumRecordSize) &&
+               _tls != null;
     }
 
     private NetworkOperationResult Fail(ManagedHttpsFailureReason reason)
@@ -496,20 +699,75 @@ public sealed class ManagedHttpsClient
 
     private void ClearOperationBuffers()
     {
+        _currentUrl.Clear();
+        _nextUrl.Clear();
+        _currentUrl = default;
+        _nextUrl = default;
+        _redirectPending = false;
+        _redirectCount = 0;
+        _urlParseFailure = ManagedHttpsUrlParseFailureReason.None;
+        _failureReason = ManagedHttpsFailureReason.None;
+        ClearPerHopBuffers();
+    }
+
+    private void ClearPerHopBuffers()
+    {
         _parser.Reset();
         _request.AsSpan().Clear();
         _receive.AsSpan().Clear();
         _tlsOutput.AsSpan().Clear();
         _plaintext.AsSpan().Clear();
+        _pendingPlaintext.AsSpan().Clear();
         _responseBody.AsSpan().Clear();
         _requestLength = 0;
         _tlsOutputLength = 0;
+        _pendingPlaintextLength = 0;
         _requestSent = false;
         _requestOutputReady = false;
         _tlsAuthenticated = false;
         _applicationDataReceived = false;
         _closingStarted = false;
-        _failureReason = ManagedHttpsFailureReason.None;
         ResolvedAddress = default;
+    }
+
+    private bool TryPrepareRedirect(out ManagedHttpsFailureReason failure)
+    {
+        failure = ManagedHttpsFailureReason.None;
+        if (_redirectCount >= MaximumRedirects)
+        {
+            failure = ManagedHttpsFailureReason.RedirectLimitExceeded;
+            return false;
+        }
+        if (!_parser.HasLocation)
+        {
+            failure = ManagedHttpsFailureReason.RedirectMissingLocation;
+            return false;
+        }
+        Span<byte> location = stackalloc byte[ManagedHttpLimits.MaximumLocationLength];
+        if (!_parser.TryCopyLocation(location, out int length) || length == 0)
+        {
+            failure = ManagedHttpsFailureReason.RedirectInvalidLocation;
+            return false;
+        }
+        if (!ManagedHttpsUrl.TryResolve(_currentUrl, location[..length],
+                                        out ManagedHttpsUrl next,
+                                        out ManagedHttpsUrlParseFailureReason reason))
+        {
+            failure = reason == ManagedHttpsUrlParseFailureReason.HttpsDowngrade
+                ? ManagedHttpsFailureReason.RedirectDowngradeRejected
+                : reason == ManagedHttpsUrlParseFailureReason.UnsupportedScheme
+                    ? ManagedHttpsFailureReason.RedirectUnsupportedScheme
+                    : ManagedHttpsFailureReason.RedirectInvalidLocation;
+            return false;
+        }
+        _nextUrl = next;
+        _redirectPending = true;
+        return true;
+    }
+
+    private static bool IsRedirectStatus(int statusCode)
+    {
+        return statusCode == 301 || statusCode == 302 || statusCode == 303 ||
+               statusCode == 307 || statusCode == 308;
     }
 }

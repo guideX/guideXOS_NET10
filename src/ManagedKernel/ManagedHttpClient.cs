@@ -33,10 +33,28 @@ public enum ManagedHttpParseState : byte
     Idle = 0,
     StatusLine = 1,
     Headers = 2,
-    Body = 3,
-    BodyComplete = 4,
-    Closed = 5,
-    Failed = 6
+    BodyContentLength = 3,
+    ChunkSize = 4,
+    ChunkData = 5,
+    ChunkDataCrlf = 6,
+    ChunkTrailers = 7,
+    BodyUntilClose = 8,
+    Complete = 9,
+    Closed = 10,
+    Failed = 11,
+
+    // Compatibility aliases for the Phase 23 parser contract.
+    Body = BodyContentLength,
+    BodyComplete = Complete
+}
+
+public enum ManagedHttpFramingMode : byte
+{
+    None = 0,
+    NoBody = 1,
+    ContentLength = 2,
+    Chunked = 3,
+    ConnectionClose = 4
 }
 
 public enum ManagedHttpParseFailureReason : byte
@@ -57,11 +75,28 @@ public enum ManagedHttpParseFailureReason : byte
     MissingConnectionClose = 13,
     BodyTooLarge = 14,
     BodyExceedsContentLength = 15,
-    PrematureConnectionClose = 16
+    PrematureConnectionClose = 16,
+    ContentLengthOverflow = 17,
+    AmbiguousFraming = 18,
+    InvalidTransferEncoding = 19,
+    ChunkSizeLineOverflow = 20,
+    ChunkSizeSyntax = 21,
+    ChunkSizeOverflow = 22,
+    ChunkTooLarge = 23,
+    ChunkDataCrlf = 24,
+    TrailerLineOverflow = 25,
+    TrailerBytes = 26,
+    TrailerCount = 27,
+    TrailerFramingField = 28,
+    InformationalResponseLimit = 29,
+    BodyDeliveryBufferFull = 30,
+    TrailingData = 31,
+    InvalidLocation = 32
 }
 
 public static class ManagedHttpLimits
 {
+    public const ushort DefaultHttpsPort = 443;
     public const int MaximumHostnameLength = 253;
     public const int MaximumPathLength = 128;
     public const int MaximumSerializedRequestSize = ManagedNetworkService.MaximumTcpPayloadLength;
@@ -70,9 +105,20 @@ public static class ManagedHttpLimits
     public const int MaximumHeaderCount = 16;
     public const int MaximumResponseHeaderBytes = 512;
     public const int MaximumHeaderNameLength = 32;
+    // This is the compatibility-sized body retained for TryCopyBody().
     public const int MaximumBodyCapacity = 256;
+    public const int MaximumAcceptedBodyLength = 16 * 1024;
+    public const int MaximumBodyDeliveryWindow = 1024;
+    public const int MaximumChunkSizeLineLength = 128;
+    public const int MaximumChunkExtensionLength = 64;
+    public const int MaximumIndividualChunkSize = 4096;
+    public const int MaximumTrailerLineLength = 96;
+    public const int MaximumTrailerBytes = 256;
+    public const int MaximumTrailerCount = 16;
+    public const int MaximumInformationalResponses = 4;
     public const int MaximumReceiveStagingBuffer = ManagedNetworkService.MaximumTcpPayloadLength;
     public const int MaximumContentTypeLength = 64;
+    public const int MaximumLocationLength = ManagedHttpsUrl.MaximumLocationLength;
 }
 
 public static class ManagedHttpRequestBuilder
@@ -82,8 +128,18 @@ public static class ManagedHttpRequestBuilder
                                    Span<byte> destination,
                                    out int length)
     {
+        return TryBuildGet(hostname, ManagedHttpLimits.DefaultHttpsPort, path,
+                           destination, out length);
+    }
+
+    public static bool TryBuildGet(ReadOnlySpan<byte> hostname,
+                                   ushort port,
+                                   ReadOnlySpan<byte> path,
+                                   Span<byte> destination,
+                                   out int length)
+    {
         length = 0;
-        if (!TryValidateHostname(hostname) || !TryValidatePath(path) ||
+        if (!IsValidHostname(hostname) || port == 0 || !TryValidatePath(path) ||
             destination.Length < ManagedHttpLimits.MaximumSerializedRequestSize)
             return false;
 
@@ -92,10 +148,22 @@ public static class ManagedHttpRequestBuilder
             !Append(destination, ref offset, path) ||
             !Append(destination, ref offset, " HTTP/1.1\r\nHost: "u8) ||
             !Append(destination, ref offset, hostname) ||
+            (port != ManagedHttpLimits.DefaultHttpsPort &&
+             (!Append(destination, ref offset, ":"u8) ||
+              !AppendPort(destination, ref offset, port))) ||
             !Append(destination, ref offset, "\r\nConnection: close\r\n\r\n"u8))
             return false;
         length = offset;
         return length <= ManagedHttpLimits.MaximumSerializedRequestSize;
+    }
+
+    public static bool TryBuildGet(ReadOnlySpan<byte> hostname,
+                                   ReadOnlySpan<byte> path,
+                                   ushort port,
+                                   Span<byte> destination,
+                                   out int length)
+    {
+        return TryBuildGet(hostname, port, path, destination, out length);
     }
 
     private static bool Append(Span<byte> destination, ref int offset,
@@ -107,7 +175,7 @@ public static class ManagedHttpRequestBuilder
         return true;
     }
 
-    private static bool TryValidateHostname(ReadOnlySpan<byte> hostname)
+    public static bool IsValidHostname(ReadOnlySpan<byte> hostname)
     {
         if (hostname.Length == 0 || hostname.Length > ManagedHttpLimits.MaximumHostnameLength)
             return false;
@@ -132,6 +200,23 @@ public static class ManagedHttpRequestBuilder
         return true;
     }
 
+    private static bool AppendPort(Span<byte> destination, ref int offset,
+                                   ushort port)
+    {
+        Span<byte> digits = stackalloc byte[5];
+        int count = 0;
+        do
+        {
+            digits[count++] = (byte)('0' + port % 10);
+            port /= 10;
+        } while (port != 0);
+        if (count > destination.Length - offset) return false;
+        for (int index = 0; index != count; ++index)
+            destination[offset + index] = digits[count - index - 1];
+        offset += count;
+        return true;
+    }
+
     private static bool TryValidatePath(ReadOnlySpan<byte> path)
     {
         if (path.Length == 0 || path.Length > ManagedHttpLimits.MaximumPathLength ||
@@ -148,9 +233,15 @@ public static class ManagedHttpRequestBuilder
 
 public sealed class ManagedHttpResponseParser
 {
-    private readonly byte[] _line = new byte[ManagedHttpLimits.MaximumHeaderLineLength];
-    private readonly byte[] _body = new byte[ManagedHttpLimits.MaximumBodyCapacity];
+    private readonly byte[] _line = new byte[ManagedHttpLimits.MaximumChunkSizeLineLength];
+    private readonly byte[] _body = new byte[ManagedHttpLimits.MaximumBodyDeliveryWindow];
+    private readonly byte[] _compatibilityBody =
+        new byte[ManagedHttpLimits.MaximumBodyCapacity];
     private readonly byte[] _contentType = new byte[ManagedHttpLimits.MaximumContentTypeLength];
+    private readonly byte[] _location = new byte[ManagedHttpLimits.MaximumLocationLength];
+    private readonly int _maximumAcceptedBodyLength;
+    private readonly bool _requireConnectionClose;
+    private readonly bool _allowChunked;
     private ManagedHttpParseState _state;
     private ManagedHttpParseFailureReason _failureReason;
     private int _lineLength;
@@ -159,12 +250,48 @@ public sealed class ManagedHttpResponseParser
     private int _statusCode;
     private int _contentLength;
     private int _bodyLength;
+    private int _bodyDelivered;
+    private int _bufferedBodyLength;
     private int _contentTypeLength;
+    private int _chunkRemaining;
+    private int _trailerBytes;
+    private int _trailerCount;
+    private int _informationalCount;
+    private int _chunkCrlfProgress;
     private bool _sawCarriageReturn;
     private bool _hasContentLength;
+    private bool _hasTransferEncoding;
+    private bool _chunked;
     private bool _connectionClose;
+    private bool _connectionKeepAlive;
+    private bool _hasLocation;
+    private int _locationLength;
+    private bool _compatibilityBodyOverflow;
+    private ManagedHttpFramingMode _framingMode;
 
-    public ManagedHttpResponseParser() => Reset();
+    public ManagedHttpResponseParser()
+        : this(ManagedHttpLimits.MaximumBodyCapacity, true, false)
+    {
+    }
+
+    public ManagedHttpResponseParser(int maximumAcceptedBodyLength,
+                                     bool requireConnectionClose = false)
+        : this(maximumAcceptedBodyLength, requireConnectionClose, true)
+    {
+    }
+
+    public ManagedHttpResponseParser(int maximumAcceptedBodyLength,
+                                     bool requireConnectionClose,
+                                     bool allowChunked)
+    {
+        if (maximumAcceptedBodyLength < 0 ||
+            maximumAcceptedBodyLength > ManagedHttpLimits.MaximumAcceptedBodyLength)
+            throw new ArgumentOutOfRangeException(nameof(maximumAcceptedBodyLength));
+        _maximumAcceptedBodyLength = maximumAcceptedBodyLength;
+        _requireConnectionClose = requireConnectionClose;
+        _allowChunked = allowChunked;
+        Reset();
+    }
 
     public ManagedHttpParseState State => _state;
     public ManagedHttpParseFailureReason FailureReason => _failureReason;
@@ -174,11 +301,19 @@ public sealed class ManagedHttpResponseParser
     public bool HasContentLength => _hasContentLength;
     public int ContentLength => _contentLength;
     public int BodyLength => _bodyLength;
+    public int BodyBytesDelivered => _bodyDelivered;
+    public int BufferedBodyLength => _bufferedBodyLength;
     public int ContentTypeLength => _contentTypeLength;
+    public bool HasTransferEncoding => _hasTransferEncoding;
+    public bool HasLocation => _hasLocation;
+    public bool ConnectionClose => _connectionClose;
+    public bool IsChunked => _chunked;
+    public ManagedHttpFramingMode FramingMode => _framingMode;
     public bool IsStatusParsed => _state >= ManagedHttpParseState.Headers &&
                                   _failureReason == ManagedHttpParseFailureReason.None;
-    public bool IsBodyComplete => _state == ManagedHttpParseState.BodyComplete ||
+    public bool IsBodyComplete => _state == ManagedHttpParseState.Complete ||
                                   _state == ManagedHttpParseState.Closed;
+    public bool HasPendingBody => _bufferedBodyLength != 0;
 
     public void Reset()
     {
@@ -190,81 +325,201 @@ public sealed class ManagedHttpResponseParser
         _statusCode = 0;
         _contentLength = 0;
         _bodyLength = 0;
+        _bodyDelivered = 0;
+        _bufferedBodyLength = 0;
         _contentTypeLength = 0;
+        _chunkRemaining = 0;
+        _trailerBytes = 0;
+        _trailerCount = 0;
+        _informationalCount = 0;
+        _chunkCrlfProgress = 0;
         _sawCarriageReturn = false;
         _hasContentLength = false;
+        _hasTransferEncoding = false;
+        _chunked = false;
         _connectionClose = false;
+        _connectionKeepAlive = false;
+        _hasLocation = false;
+        _locationLength = 0;
+        _compatibilityBodyOverflow = false;
+        _framingMode = ManagedHttpFramingMode.None;
         _line.AsSpan().Clear();
         _body.AsSpan().Clear();
+        _compatibilityBody.AsSpan().Clear();
         _contentType.AsSpan().Clear();
+        _location.AsSpan().Clear();
     }
 
     public bool Feed(ReadOnlySpan<byte> bytes)
     {
+        if (!TryFeed(bytes, out int consumed)) return false;
+        return consumed == bytes.Length ||
+               Fail(ManagedHttpParseFailureReason.BodyDeliveryBufferFull);
+    }
+
+    /* Feed returns the number of source bytes actually consumed.  A successful
+       call may stop before the end only when the bounded body delivery window
+       is full; the caller must drain it and resume with the remainder. */
+    public bool TryFeed(ReadOnlySpan<byte> bytes, out int consumed)
+    {
+        consumed = 0;
         if (_state == ManagedHttpParseState.Failed ||
             _state == ManagedHttpParseState.Closed)
             return bytes.Length == 0;
-        for (int index = 0; index != bytes.Length; ++index)
+
+        while (consumed != bytes.Length)
         {
-            byte value = bytes[index];
-            if (_state == ManagedHttpParseState.Body ||
-                _state == ManagedHttpParseState.BodyComplete)
+            if (_state == ManagedHttpParseState.BodyContentLength ||
+                _state == ManagedHttpParseState.BodyUntilClose)
             {
-                if (_state == ManagedHttpParseState.BodyComplete)
-                    return Fail(ManagedHttpParseFailureReason.BodyExceedsContentLength);
-                if (_bodyLength >= _contentLength ||
-                    _bodyLength >= ManagedHttpLimits.MaximumBodyCapacity)
-                    return Fail(ManagedHttpParseFailureReason.BodyTooLarge);
-                _body[_bodyLength++] = value;
-                if (_bodyLength == _contentLength)
-                    _state = ManagedHttpParseState.BodyComplete;
+                if (!TryAcceptBodyByte(bytes[consumed], out bool accepted))
+                    return false;
+                if (!accepted) return true;
+                consumed++;
                 continue;
             }
 
-            if (_headerBytes == ManagedHttpLimits.MaximumResponseHeaderBytes)
-                return Fail(ManagedHttpParseFailureReason.HeaderBytes);
-            _headerBytes++;
-            if (_sawCarriageReturn)
+            if (_state == ManagedHttpParseState.ChunkData)
             {
-                if (value != (byte)'\n')
+                if (_chunkRemaining == 0)
+                {
+                    _state = ManagedHttpParseState.ChunkDataCrlf;
+                    _chunkCrlfProgress = 0;
+                    continue;
+                }
+                if (!TryAcceptBodyByte(bytes[consumed], out bool accepted))
+                    return false;
+                if (!accepted) return true;
+                consumed++;
+                _chunkRemaining--;
+                continue;
+            }
+
+            if (_state == ManagedHttpParseState.ChunkDataCrlf)
+            {
+                byte value = bytes[consumed++];
+                if ((_chunkCrlfProgress == 0 && value != (byte)'\r') ||
+                    (_chunkCrlfProgress == 1 && value != (byte)'\n'))
+                    return Fail(ManagedHttpParseFailureReason.ChunkDataCrlf);
+                _chunkCrlfProgress++;
+                if (_chunkCrlfProgress == 2)
+                {
+                    _chunkCrlfProgress = 0;
+                    _state = ManagedHttpParseState.ChunkSize;
+                }
+                continue;
+            }
+
+            if (_state == ManagedHttpParseState.Complete)
+                return Fail(_framingMode == ManagedHttpFramingMode.ContentLength
+                    ? ManagedHttpParseFailureReason.BodyExceedsContentLength
+                    : ManagedHttpParseFailureReason.TrailingData);
+
+            if (_state == ManagedHttpParseState.StatusLine ||
+                _state == ManagedHttpParseState.Headers ||
+                _state == ManagedHttpParseState.ChunkSize ||
+                _state == ManagedHttpParseState.ChunkTrailers)
+            {
+                byte value = bytes[consumed++];
+                if (_state == ManagedHttpParseState.ChunkTrailers)
+                {
+                    if (_trailerBytes == ManagedHttpLimits.MaximumTrailerBytes)
+                        return Fail(ManagedHttpParseFailureReason.TrailerBytes);
+                    _trailerBytes++;
+                }
+                else if (_state != ManagedHttpParseState.ChunkSize)
+                {
+                    if (_headerBytes == ManagedHttpLimits.MaximumResponseHeaderBytes)
+                        return Fail(ManagedHttpParseFailureReason.HeaderBytes);
+                    _headerBytes++;
+                }
+                if (_sawCarriageReturn)
+                {
+                    if (value != (byte)'\n')
+                        return Fail(ManagedHttpParseFailureReason.LineFraming);
+                    _sawCarriageReturn = false;
+                    if (!FinishLine()) return false;
+                    continue;
+                }
+                if (value == (byte)'\r')
+                {
+                    _sawCarriageReturn = true;
+                    continue;
+                }
+                if (value == (byte)'\n' || value == 0x7F ||
+                    (value < 0x20 && value != 0x09) || value > 0x7E)
                     return Fail(ManagedHttpParseFailureReason.LineFraming);
-                _sawCarriageReturn = false;
-                if (!FinishLine()) return false;
+                int lineLimit = _state == ManagedHttpParseState.StatusLine
+                    ? ManagedHttpLimits.MaximumStatusLineLength
+                    : _state == ManagedHttpParseState.ChunkSize
+                        ? ManagedHttpLimits.MaximumChunkSizeLineLength
+                        : _state == ManagedHttpParseState.ChunkTrailers
+                            ? ManagedHttpLimits.MaximumTrailerLineLength
+                            : ManagedHttpLimits.MaximumHeaderLineLength;
+                if (_lineLength == lineLimit)
+                {
+                    return Fail(_state == ManagedHttpParseState.StatusLine
+                        ? ManagedHttpParseFailureReason.StatusLineOverflow
+                        : _state == ManagedHttpParseState.ChunkSize
+                            ? ManagedHttpParseFailureReason.ChunkSizeLineOverflow
+                            : _state == ManagedHttpParseState.ChunkTrailers
+                                ? ManagedHttpParseFailureReason.TrailerLineOverflow
+                                : ManagedHttpParseFailureReason.HeaderLineOverflow);
+                }
+                _line[_lineLength++] = value;
                 continue;
             }
-            if (value == (byte)'\r')
-            {
-                _sawCarriageReturn = true;
-                continue;
-            }
-            if (value == (byte)'\n' || value == 0x7F || value < 0x20 && value != 0x09 ||
-                value > 0x7E)
-                return Fail(ManagedHttpParseFailureReason.LineFraming);
-            int lineLimit = _state == ManagedHttpParseState.StatusLine
-                ? ManagedHttpLimits.MaximumStatusLineLength
-                : ManagedHttpLimits.MaximumHeaderLineLength;
-            if (_lineLength == lineLimit)
-                return Fail(_state == ManagedHttpParseState.StatusLine
-                    ? ManagedHttpParseFailureReason.StatusLineOverflow
-                    : ManagedHttpParseFailureReason.HeaderLineOverflow);
-            _line[_lineLength++] = value;
+
+            return Fail(ManagedHttpParseFailureReason.StatusLine);
         }
         return true;
     }
 
     public bool NotifyConnectionClosed()
     {
-        if (_state != ManagedHttpParseState.BodyComplete)
+        if (_state == ManagedHttpParseState.Closed)
+            return true;
+        if (_state == ManagedHttpParseState.BodyUntilClose)
+        {
+            _framingMode = ManagedHttpFramingMode.ConnectionClose;
+            _state = ManagedHttpParseState.Complete;
+        }
+        if (_state != ManagedHttpParseState.Complete)
             return Fail(ManagedHttpParseFailureReason.PrematureConnectionClose);
         _state = ManagedHttpParseState.Closed;
+        return true;
+    }
+
+    public bool TryReadBodyChunk(Span<byte> destination, out int length)
+    {
+        length = 0;
+        if (destination.Length == 0 || _bufferedBodyLength == 0) return false;
+        length = Math.Min(destination.Length, _bufferedBodyLength);
+        _body.AsSpan(0, length).CopyTo(destination);
+        int remaining = _bufferedBodyLength - length;
+        if (remaining != 0)
+            _body.AsSpan(length, remaining).CopyTo(_body);
+        _body.AsSpan(remaining, length).Clear();
+        _bufferedBodyLength = remaining;
+        _bodyDelivered += length;
         return true;
     }
 
     public bool TryCopyBody(Span<byte> destination, out int length)
     {
         length = _bodyLength;
-        if (!IsBodyComplete || destination.Length < _bodyLength) return false;
-        _body.AsSpan(0, _bodyLength).CopyTo(destination);
+        if (!IsBodyComplete || _compatibilityBodyOverflow ||
+            destination.Length < _bodyLength || _bodyLength > _compatibilityBody.Length)
+            return false;
+        _compatibilityBody.AsSpan(0, _bodyLength).CopyTo(destination);
+        return true;
+    }
+
+    public bool TryCopyLocation(Span<byte> destination, out int length)
+    {
+        length = _locationLength;
+        if (!_hasLocation || destination.Length < length) return false;
+        _location.AsSpan(0, length).CopyTo(destination);
         return true;
     }
 
@@ -277,14 +532,67 @@ public sealed class ManagedHttpResponseParser
             _lineLength = 0;
             return true;
         }
+        if (_state == ManagedHttpParseState.ChunkSize)
+        {
+            if (!ParseChunkSize()) return false;
+            _lineLength = 0;
+            return true;
+        }
+        if (_state == ManagedHttpParseState.ChunkTrailers)
+        {
+            if (_lineLength == 0)
+            {
+                _framingMode = ManagedHttpFramingMode.Chunked;
+                _state = ManagedHttpParseState.Complete;
+                _lineLength = 0;
+                return true;
+            }
+            if (++_trailerCount > ManagedHttpLimits.MaximumTrailerCount)
+                return Fail(ManagedHttpParseFailureReason.TrailerCount);
+            if (!ParseHeader(isTrailer: true)) return false;
+            _lineLength = 0;
+            return true;
+        }
         if (_lineLength == 0)
         {
-            if (!_hasContentLength)
-                return Fail(ManagedHttpParseFailureReason.MissingContentLength);
-            if (!_connectionClose)
+            if (_statusCode >= 100 && _statusCode <= 199)
+            {
+                if (++_informationalCount > ManagedHttpLimits.MaximumInformationalResponses)
+                    return Fail(ManagedHttpParseFailureReason.InformationalResponseLimit);
+                PrepareForNextResponse();
+                return true;
+            }
+            if (IsBodyProhibitedStatus(_statusCode))
+            {
+                _framingMode = ManagedHttpFramingMode.NoBody;
+                _state = ManagedHttpParseState.Complete;
+                _lineLength = 0;
+                return true;
+            }
+            if (_hasTransferEncoding)
+            {
+                if (_hasContentLength)
+                    return Fail(ManagedHttpParseFailureReason.AmbiguousFraming);
+                _framingMode = ManagedHttpFramingMode.Chunked;
+                _state = ManagedHttpParseState.ChunkSize;
+                _lineLength = 0;
+                return true;
+            }
+            if (_hasContentLength)
+            {
+                if (_requireConnectionClose && !_connectionClose)
+                    return Fail(ManagedHttpParseFailureReason.MissingConnectionClose);
+                _framingMode = ManagedHttpFramingMode.ContentLength;
+                _state = _contentLength == 0
+                    ? ManagedHttpParseState.Complete
+                    : ManagedHttpParseState.BodyContentLength;
+                _lineLength = 0;
+                return true;
+            }
+            if (_connectionKeepAlive)
                 return Fail(ManagedHttpParseFailureReason.MissingConnectionClose);
-            _state = _contentLength == 0
-                ? ManagedHttpParseState.BodyComplete : ManagedHttpParseState.Body;
+            _framingMode = ManagedHttpFramingMode.ConnectionClose;
+            _state = ManagedHttpParseState.BodyUntilClose;
             _lineLength = 0;
             return true;
         }
@@ -312,7 +620,7 @@ public sealed class ManagedHttpResponseParser
         return true;
     }
 
-    private bool ParseHeader()
+    private bool ParseHeader(bool isTrailer = false)
     {
         int colon = -1;
         for (int index = 0; index != _lineLength; ++index)
@@ -333,17 +641,21 @@ public sealed class ManagedHttpResponseParser
             valueEnd--;
         ReadOnlySpan<byte> name = _line.AsSpan(0, colon);
         ReadOnlySpan<byte> value = _line.AsSpan(valueStart, valueEnd - valueStart);
+        if (isTrailer)
+        {
+            if (EqualsAsciiIgnoreCase(name, "Content-Length"u8) ||
+                EqualsAsciiIgnoreCase(name, "Transfer-Encoding"u8))
+                return Fail(ManagedHttpParseFailureReason.TrailerFramingField);
+            return true;
+        }
         if (EqualsAsciiIgnoreCase(name, "Content-Length"u8))
             return ParseContentLength(value);
         if (EqualsAsciiIgnoreCase(name, "Connection"u8))
         {
-            if (!EqualsAsciiIgnoreCase(value, "close"u8))
-                return Fail(ManagedHttpParseFailureReason.MissingConnectionClose);
-            _connectionClose = true;
-            return true;
+            return ParseConnection(value);
         }
         if (EqualsAsciiIgnoreCase(name, "Transfer-Encoding"u8))
-            return Fail(ManagedHttpParseFailureReason.UnsupportedTransferEncoding);
+            return ParseTransferEncoding(value);
         if (EqualsAsciiIgnoreCase(name, "Content-Type"u8))
         {
             if (value.Length > ManagedHttpLimits.MaximumContentTypeLength)
@@ -351,29 +663,185 @@ public sealed class ManagedHttpResponseParser
             value.CopyTo(_contentType);
             _contentTypeLength = value.Length;
         }
+        if (EqualsAsciiIgnoreCase(name, "Location"u8))
+        {
+            if (_hasLocation || value.Length > ManagedHttpLimits.MaximumLocationLength)
+                return Fail(ManagedHttpParseFailureReason.InvalidLocation);
+            for (int index = 0; index != value.Length; ++index)
+                if (value[index] < 0x21 || value[index] > 0x7E)
+                    return Fail(ManagedHttpParseFailureReason.InvalidLocation);
+            value.CopyTo(_location);
+            _locationLength = value.Length;
+            _hasLocation = true;
+        }
         return true;
     }
 
     private bool ParseContentLength(ReadOnlySpan<byte> value)
     {
-        if (value.Length == 0) return Fail(ManagedHttpParseFailureReason.ContentLength);
-        int parsed = 0;
-        for (int index = 0; index != value.Length; ++index)
+        int offset = 0;
+        bool sawValue = false;
+        while (offset < value.Length)
         {
-            byte digit = value[index];
-            if (digit < (byte)'0' || digit > (byte)'9')
-                return Fail(ManagedHttpParseFailureReason.ContentLength);
-            int next = parsed * 10 + digit - (byte)'0';
-            if (next < parsed || next > ManagedHttpLimits.MaximumBodyCapacity)
+            while (offset < value.Length && IsWhitespace(value[offset])) offset++;
+            int start = offset;
+            while (offset < value.Length && value[offset] != (byte)',') offset++;
+            int end = offset;
+            while (end > start && IsWhitespace(value[end - 1])) end--;
+            if (start == end) return Fail(ManagedHttpParseFailureReason.ContentLength);
+            ulong parsed = 0;
+            for (int index = start; index != end; ++index)
+            {
+                byte digit = value[index];
+                if (digit < (byte)'0' || digit > (byte)'9')
+                    return Fail(ManagedHttpParseFailureReason.ContentLength);
+                uint number = (uint)(digit - (byte)'0');
+                if (parsed > ((ulong)int.MaxValue - number) / 10)
+                    return Fail(ManagedHttpParseFailureReason.ContentLengthOverflow);
+                parsed = parsed * 10 + number;
+            }
+            if (parsed > (ulong)_maximumAcceptedBodyLength)
                 return Fail(ManagedHttpParseFailureReason.BodyTooLarge);
-            parsed = next;
+            int candidate = (int)parsed;
+            if (_hasContentLength && _contentLength != candidate)
+                return Fail(ManagedHttpParseFailureReason.ConflictingContentLength);
+            _contentLength = candidate;
+            sawValue = true;
+            if (offset == value.Length) break;
+            offset++;
+            if (offset == value.Length)
+                return Fail(ManagedHttpParseFailureReason.ContentLength);
         }
-        if (_hasContentLength && _contentLength != parsed)
-            return Fail(ManagedHttpParseFailureReason.ConflictingContentLength);
+        if (!sawValue) return Fail(ManagedHttpParseFailureReason.ContentLength);
         _hasContentLength = true;
-        _contentLength = parsed;
+        if (_hasTransferEncoding)
+            return Fail(ManagedHttpParseFailureReason.AmbiguousFraming);
         return true;
     }
+
+    private bool ParseTransferEncoding(ReadOnlySpan<byte> value)
+    {
+        if (!_allowChunked)
+            return Fail(ManagedHttpParseFailureReason.UnsupportedTransferEncoding);
+        if (_hasTransferEncoding || value.Length == 0)
+            return Fail(ManagedHttpParseFailureReason.InvalidTransferEncoding);
+        int start = 0;
+        while (start < value.Length && IsWhitespace(value[start])) start++;
+        int end = value.Length;
+        while (end > start && IsWhitespace(value[end - 1])) end--;
+        if (start == end || !EqualsAsciiIgnoreCase(
+                value.Slice(start, end - start), "chunked"u8))
+            return Fail(ManagedHttpParseFailureReason.UnsupportedTransferEncoding);
+        if (_hasContentLength)
+            return Fail(ManagedHttpParseFailureReason.AmbiguousFraming);
+        _hasTransferEncoding = true;
+        _chunked = true;
+        return true;
+    }
+
+    private bool ParseConnection(ReadOnlySpan<byte> value)
+    {
+        int offset = 0;
+        bool sawToken = false;
+        while (offset < value.Length)
+        {
+            while (offset < value.Length && (IsWhitespace(value[offset]) ||
+                                              value[offset] == (byte)',')) offset++;
+            int start = offset;
+            while (offset < value.Length && value[offset] != (byte)',') offset++;
+            int end = offset;
+            while (end > start && IsWhitespace(value[end - 1])) end--;
+            if (start == end) return Fail(ManagedHttpParseFailureReason.HeaderSyntax);
+            ReadOnlySpan<byte> token = value.Slice(start, end - start);
+            if (!IsTokenSpan(token))
+                return Fail(ManagedHttpParseFailureReason.HeaderSyntax);
+            if (EqualsAsciiIgnoreCase(token, "close"u8)) _connectionClose = true;
+            if (EqualsAsciiIgnoreCase(token, "keep-alive"u8)) _connectionKeepAlive = true;
+            sawToken = true;
+            if (offset != value.Length) offset++;
+        }
+        return sawToken ? true : Fail(ManagedHttpParseFailureReason.HeaderSyntax);
+    }
+
+    private bool ParseChunkSize()
+    {
+        int sizeEnd = 0;
+        ulong size = 0;
+        while (sizeEnd < _lineLength && IsHex(_line[sizeEnd]))
+        {
+            uint digit = HexValue(_line[sizeEnd++]);
+            if (size > ((ulong)int.MaxValue - digit) / 16)
+                return Fail(ManagedHttpParseFailureReason.ChunkSizeOverflow);
+            size = size * 16 + digit;
+        }
+        if (sizeEnd == 0 || (sizeEnd < _lineLength && _line[sizeEnd] != (byte)';'))
+            return Fail(ManagedHttpParseFailureReason.ChunkSizeSyntax);
+        if (sizeEnd < _lineLength)
+        {
+            int extensionLength = _lineLength - sizeEnd;
+            if (extensionLength > ManagedHttpLimits.MaximumChunkExtensionLength)
+                return Fail(ManagedHttpParseFailureReason.ChunkSizeSyntax);
+            for (int index = sizeEnd; index != _lineLength; ++index)
+                if (_line[index] < 0x21 || _line[index] > 0x7E)
+                    return Fail(ManagedHttpParseFailureReason.ChunkSizeSyntax);
+        }
+        if (size > (ulong)ManagedHttpLimits.MaximumIndividualChunkSize)
+            return Fail(ManagedHttpParseFailureReason.ChunkTooLarge);
+        _chunkRemaining = (int)size;
+        _state = size == 0 ? ManagedHttpParseState.ChunkTrailers :
+                            ManagedHttpParseState.ChunkData;
+        return true;
+    }
+
+    private bool TryAcceptBodyByte(byte value, out bool accepted)
+    {
+        accepted = false;
+        if (_bufferedBodyLength == _body.Length) return true;
+        if (_bodyLength == _maximumAcceptedBodyLength)
+        {
+            Fail(ManagedHttpParseFailureReason.BodyTooLarge);
+            return false;
+        }
+        if (_state == ManagedHttpParseState.BodyContentLength &&
+            _bodyLength == _contentLength)
+        {
+            Fail(ManagedHttpParseFailureReason.BodyExceedsContentLength);
+            return false;
+        }
+        _body[_bufferedBodyLength++] = value;
+        if (_bodyLength < _compatibilityBody.Length)
+            _compatibilityBody[_bodyLength] = value;
+        else
+            _compatibilityBodyOverflow = true;
+        _bodyLength++;
+        accepted = true;
+        if (_state == ManagedHttpParseState.BodyContentLength &&
+            _bodyLength == _contentLength)
+            _state = ManagedHttpParseState.Complete;
+        return true;
+    }
+
+    private void PrepareForNextResponse()
+    {
+        _state = ManagedHttpParseState.StatusLine;
+        _lineLength = 0;
+        _headerCount = 0;
+        _statusCode = 0;
+        _contentLength = 0;
+        _contentTypeLength = 0;
+        _hasContentLength = false;
+        _hasTransferEncoding = false;
+        _chunked = false;
+        _connectionClose = false;
+        _connectionKeepAlive = false;
+        _hasLocation = false;
+        _locationLength = 0;
+        _location.AsSpan().Clear();
+        _framingMode = ManagedHttpFramingMode.None;
+    }
+
+    private static bool IsBodyProhibitedStatus(int statusCode) =>
+        (statusCode >= 100 && statusCode <= 199) || statusCode == 204 || statusCode == 304;
 
     private bool Fail(ManagedHttpParseFailureReason reason)
     {
@@ -404,11 +872,35 @@ public sealed class ManagedHttpResponseParser
 
     private static bool IsWhitespace(byte value) => value == (byte)' ' || value == 9;
 
+    private static bool IsHex(byte value) =>
+        (value >= (byte)'0' && value <= (byte)'9') ||
+        (value >= (byte)'A' && value <= (byte)'F') ||
+        (value >= (byte)'a' && value <= (byte)'f');
+
+    private static uint HexValue(byte value) => value <= (byte)'9'
+        ? (uint)(value - (byte)'0')
+        : value <= (byte)'F'
+            ? (uint)(value - (byte)'A' + 10)
+            : (uint)(value - (byte)'a' + 10);
+
+    private static bool IsTokenSpan(ReadOnlySpan<byte> value)
+    {
+        if (value.Length == 0) return false;
+        for (int index = 0; index != value.Length; ++index)
+            if (!IsToken(value[index])) return false;
+        return true;
+    }
+
     private static bool IsToken(byte value)
     {
         return (value >= (byte)'A' && value <= (byte)'Z') ||
                (value >= (byte)'a' && value <= (byte)'z') ||
-               (value >= (byte)'0' && value <= (byte)'9') || value == (byte)'-';
+               (value >= (byte)'0' && value <= (byte)'9') ||
+               value == (byte)'-' || value == (byte)'!' || value == (byte)'#' ||
+               value == (byte)'$' || value == (byte)'%' || value == (byte)'&' ||
+               value == (byte)'\'' || value == (byte)'*' || value == (byte)'+' ||
+               value == (byte)'.' || value == (byte)'^' || value == (byte)'_' ||
+               value == (byte)'`' || value == (byte)'|' || value == (byte)'~';
     }
 }
 
@@ -419,17 +911,29 @@ public sealed class ManagedHttpClient
         new byte[ManagedHttpLimits.MaximumSerializedRequestSize];
     private readonly byte[] _receive =
         new byte[ManagedHttpLimits.MaximumReceiveStagingBuffer];
+    private readonly byte[] _pendingReceive =
+        new byte[ManagedHttpLimits.MaximumReceiveStagingBuffer];
     private readonly byte[] _responseBody =
         new byte[ManagedHttpLimits.MaximumBodyCapacity];
-    private readonly ManagedHttpResponseParser _parser = new();
+    private readonly ManagedHttpResponseParser _parser;
     private ManagedHttpClientState _state;
     private ManagedHttpFailureReason _failureReason;
     private int _requestLength;
+    private int _pendingReceiveLength;
     private bool _requestSent;
 
     public ManagedHttpClient(ManagedNetworkService service)
+        : this(service, ManagedHttpLimits.MaximumBodyCapacity, true)
+    {
+    }
+
+    public ManagedHttpClient(ManagedNetworkService service,
+                             int maximumResponseBodyLength,
+                             bool requireConnectionClose = false)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
+        _parser = new ManagedHttpResponseParser(maximumResponseBodyLength,
+                                                requireConnectionClose);
         _state = ManagedHttpClientState.Idle;
     }
 
@@ -441,7 +945,10 @@ public sealed class ManagedHttpClient
     public bool StatusParsed => _parser.IsStatusParsed;
     public int StatusCode => _parser.StatusCode;
     public int ResponseBodyLength => _parser.BodyLength;
+    public int ResponseBodyBytesDelivered => _parser.BodyBytesDelivered;
+    public int BufferedResponseBodyLength => _parser.BufferedBodyLength;
     public int ContentLength => _parser.ContentLength;
+    public ManagedHttpFramingMode FramingMode => _parser.FramingMode;
     public bool ResponseBodyComplete => _parser.IsBodyComplete;
     public ManagedHttpParseFailureReason ParseFailureReason => _parser.FailureReason;
 
@@ -455,7 +962,9 @@ public sealed class ManagedHttpClient
             return NetworkOperationResult.Busy;
         _parser.Reset();
         _request.AsSpan().Clear();
+        _pendingReceive.AsSpan().Clear();
         _responseBody.AsSpan().Clear();
+        _pendingReceiveLength = 0;
         _requestSent = false;
         _failureReason = ManagedHttpFailureReason.None;
         if (!ManagedHttpRequestBuilder.TryBuildGet(hostname, path, _request,
@@ -475,6 +984,14 @@ public sealed class ManagedHttpClient
             return NetworkOperationResult.Success;
         if (_state == ManagedHttpClientState.Failed)
             return NetworkOperationResult.Failed;
+        if (_pendingReceiveLength != 0)
+        {
+            if (!FeedPendingReceive())
+                return Fail(ManagedHttpFailureReason.HttpParseFailure);
+            if (_pendingReceiveLength != 0)
+                return NetworkOperationResult.Success;
+        }
+
         NetworkOperationResult poll = _service.Poll();
         if (poll == NetworkOperationResult.Unavailable)
             return Fail(ManagedHttpFailureReason.TransportFailure);
@@ -525,7 +1042,7 @@ public sealed class ManagedHttpClient
                         out int length) ||
                     sourcePort != ManagedTcpConnection.ServerPort ||
                     destinationPort != ManagedTcpConnection.ClientPort ||
-                    length <= 0 || !_parser.Feed(_receive.AsSpan(0, length)))
+                    length <= 0 || !FeedReceived(_receive.AsSpan(0, length)))
                     return Fail(ManagedHttpFailureReason.HttpParseFailure);
             }
             if (_state == ManagedHttpClientState.Receiving &&
@@ -564,6 +1081,11 @@ public sealed class ManagedHttpClient
         return true;
     }
 
+    public bool TryReadResponseBodyChunk(Span<byte> destination, out int length)
+    {
+        return _parser.TryReadBodyChunk(destination, out length);
+    }
+
     public NetworkOperationResult Cancel()
     {
         if (_state == ManagedHttpClientState.Succeeded ||
@@ -589,11 +1111,13 @@ public sealed class ManagedHttpClient
         _state = ManagedHttpClientState.Idle;
         _failureReason = ManagedHttpFailureReason.None;
         _requestLength = 0;
+        _pendingReceiveLength = 0;
         _requestSent = false;
         ResolvedAddress = default;
         _parser.Reset();
         _request.AsSpan().Clear();
         _receive.AsSpan().Clear();
+        _pendingReceive.AsSpan().Clear();
         _responseBody.AsSpan().Clear();
         return NetworkOperationResult.Success;
     }
@@ -606,6 +1130,33 @@ public sealed class ManagedHttpClient
         _failureReason = reason;
         _state = ManagedHttpClientState.Failed;
         return NetworkOperationResult.Failed;
+    }
+
+    private bool FeedReceived(ReadOnlySpan<byte> value)
+    {
+        if (!_parser.TryFeed(value, out int consumed)) return false;
+        if (consumed == value.Length) return true;
+        value[consumed..].CopyTo(_pendingReceive);
+        _pendingReceiveLength = value.Length - consumed;
+        return true;
+    }
+
+    private bool FeedPendingReceive()
+    {
+        if (!_parser.TryFeed(_pendingReceive.AsSpan(0, _pendingReceiveLength),
+                             out int consumed))
+            return false;
+        if (consumed == _pendingReceiveLength)
+        {
+            _pendingReceive.AsSpan().Clear();
+            _pendingReceiveLength = 0;
+            return true;
+        }
+        int remaining = _pendingReceiveLength - consumed;
+        _pendingReceive.AsSpan(consumed, remaining).CopyTo(_pendingReceive);
+        _pendingReceive.AsSpan(remaining, consumed).Clear();
+        _pendingReceiveLength = remaining;
+        return true;
     }
 
     private static ManagedHttpFailureReason MapFailure(
