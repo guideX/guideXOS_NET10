@@ -8,7 +8,8 @@ internal enum ManagedPhase35Outcome : byte
     FullSuccess = 1,
     TlsProfileIncompatible = 2,
     TcpIncomplete = 3,
-    NetworkIncomplete = 4
+    NetworkIncomplete = 4,
+    HttpBodyLimitExceeded = 5
 }
 
 /* The Phase 35 consumer deliberately uses the production ManagedHttpsClient
@@ -17,7 +18,7 @@ internal enum ManagedPhase35Outcome : byte
 internal sealed class ManagedPhase35PublicHttpsConsumer
 {
     private const int MaximumPolls = 8_000_000;
-    private const int MaximumBodyBytes = 4096;
+    private const int MaximumBodyBytes = ManagedHttpLimits.MaximumStreamedBodyLength;
     private static ReadOnlySpan<byte> TargetHost => "www.cloudflare.com"u8;
     private static ReadOnlySpan<byte> TargetPath => "/llms.txt"u8;
 
@@ -48,7 +49,7 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
     private readonly ManagedNetworkService _service;
     private readonly ManagedHttpsClient _client;
     private readonly ManagedSha256 _bodyHash = new();
-    private readonly byte[] _bodyChunk = new byte[512];
+    private readonly BodyHashSink _bodySink;
     private readonly byte[] _digest = new byte[ManagedSha256.DigestSize];
     private bool _dnsLogged;
     private bool _tcpLogged;
@@ -61,6 +62,8 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
     private bool _statusLogged;
     private bool _gcLogged;
     private int _bodyBytes;
+    private int _bodySegments;
+    private int _peakBodyBuffer;
 
     internal ManagedPhase35Outcome Outcome { get; private set; }
     internal bool ControlledTlsIncompatibility =>
@@ -73,6 +76,7 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
             2026, 8, 30, 12, 0, 0);
         _client = new ManagedHttpsClient(service, TrustedRoot,
             validationTime, MaximumBodyBytes);
+        _bodySink = new BodyHashSink(this);
     }
 
     internal bool TryRun()
@@ -103,7 +107,7 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
         {
             NetworkOperationResult result = _client.Poll();
             if (!ObserveProgress()) return false;
-            DrainBody();
+            if (!DrainBody()) return HandleBodyConsumerFailure();
 
             if (result == NetworkOperationResult.Failed ||
                 _client.State == ManagedHttpsClientState.Failed)
@@ -216,16 +220,12 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
         return true;
     }
 
-    private void DrainBody()
+    private bool DrainBody()
     {
-        while (_client.TryReadResponseBodyChunk(_bodyChunk,
-                                                out int length))
-        {
-            if (length <= 0 || _bodyBytes > MaximumBodyBytes - length ||
-                !_bodyHash.Append(_bodyChunk.AsSpan(0, length)))
-                return;
-            _bodyBytes += length;
-        }
+        RecordBodyBufferPeak();
+        if (!_client.TryConsumeResponseBody(_bodySink)) return false;
+        RecordBodyBufferPeak();
+        return true;
     }
 
     private bool HandleFailure()
@@ -248,10 +248,25 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
                                (ulong)_client.ResponseBodyLength);
         KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_DELIVERED=0x"u8,
                                (ulong)_client.ResponseBodyBytesDelivered);
+        KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_SEGMENTS=0x"u8,
+                               (ulong)_bodySegments);
+        KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_PEAK_BUFFER=0x"u8,
+                               (ulong)_peakBodyBuffer);
         if (_client.FailureReason == ManagedHttpsFailureReason.HttpParseFailure &&
             _client.ParseFailureReason == ManagedHttpParseFailureReason.BodyTooLarge)
+        {
+            Outcome = ManagedPhase35Outcome.HttpBodyLimitExceeded;
             KernelLog.Write(
                 "GXOS_NET10:PUBLIC_HTTPS_NEXT_BLOCKER=HTTP_BODY_LIMIT_EXCEEDED\r\n"u8);
+            KernelLog.Write("GXOS_NET10:PUBLIC_HTTPS_OUTCOME=B\r\n"u8);
+            return true;
+        }
+        if (_client.FailureReason == ManagedHttpsFailureReason.HttpParseFailure)
+        {
+            Outcome = ManagedPhase35Outcome.NetworkIncomplete;
+            KernelLog.Write("GXOS_NET10:PUBLIC_HTTPS_OUTCOME=C\r\n"u8);
+            return false;
+        }
         if (_tcpLogged && _client.TlsLastHandshake >=
                 ManagedTls12HandshakeStage.ServerHello)
         {
@@ -270,20 +285,40 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
         return false;
     }
 
+    private bool HandleBodyConsumerFailure()
+    {
+        Outcome = ManagedPhase35Outcome.NetworkIncomplete;
+        KernelLog.Write("GXOS_NET10:PUBLIC_HTTPS_BODY_CONSUMER_FAILED\r\n"u8);
+        KernelLog.Write("GXOS_NET10:PUBLIC_HTTPS_OUTCOME=C\r\n"u8);
+        return false;
+    }
+
     private bool FinishSuccess()
     {
-        DrainBody();
-        if (!_client.StatusParsed || _client.StatusCode != 200 ||
+        if (!DrainBody() || !_client.StatusParsed || _client.StatusCode != 200 ||
+            (_client.FramingMode != ManagedHttpFramingMode.Chunked &&
+             _client.FramingMode != ManagedHttpFramingMode.ContentLength) ||
             !_client.ResponseBodyComplete || _bodyBytes <= 0 ||
             _bodyBytes > MaximumBodyBytes ||
             _client.ResponseBodyLength != _bodyBytes ||
             _client.ResponseBodyBytesDelivered != _bodyBytes ||
+            _client.BufferedResponseBodyLength != 0 ||
+            _client.ParseFailureReason != ManagedHttpParseFailureReason.None ||
             !_bodyHash.TryFinalize(_digest))
         {
             Outcome = ManagedPhase35Outcome.NetworkIncomplete;
             KernelLog.Write("GXOS_NET10:PUBLIC_HTTPS_BODY_VERIFY_FAILED\r\n"u8);
             return false;
         }
+        if (!KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_TRANSFER_MODE=0x"u8,
+                                    (ulong)_client.FramingMode) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_SEGMENTS=0x"u8,
+                                    (ulong)_bodySegments) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_PEAK_BUFFER=0x"u8,
+                                    (ulong)_peakBodyBuffer) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_DELIVERED=0x"u8,
+                                    (ulong)_client.ResponseBodyBytesDelivered))
+            return false;
         if (!KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_LENGTH=0x"u8,
                                    (ulong)_bodyBytes)) return false;
         for (int index = 0; index != _digest.Length; index += 4)
@@ -296,9 +331,37 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
                 return false;
         }
         Outcome = ManagedPhase35Outcome.FullSuccess;
-        return KernelLog.Write(
-            "GXOS_NET10:PUBLIC_HTTPS_BODY_VERIFIED\r\n"u8) &&
+        return KernelLog.Write("GXOS_NET10:PUBLIC_HTTPS_OUTCOME=A\r\n"u8) &&
+            KernelLog.Write(
+                "GXOS_NET10:PUBLIC_HTTPS_BODY_VERIFIED\r\n"u8) &&
             KernelLog.Write("GXOS_NET10:PUBLIC_HTTPS_COMPLETE\r\n"u8);
+    }
+
+    private void RecordBodyBufferPeak()
+    {
+        if (_client.BufferedResponseBodyLength > _peakBodyBuffer)
+            _peakBodyBuffer = _client.BufferedResponseBodyLength;
+    }
+
+    private sealed class BodyHashSink : IManagedHttpBodySink
+    {
+        private readonly ManagedPhase35PublicHttpsConsumer _owner;
+
+        internal BodyHashSink(ManagedPhase35PublicHttpsConsumer owner)
+        {
+            _owner = owner;
+        }
+
+        public bool TryConsume(ReadOnlySpan<byte> segment)
+        {
+            if (segment.Length == 0 ||
+                _owner._bodyBytes > MaximumBodyBytes - segment.Length ||
+                !_owner._bodyHash.Append(segment))
+                return false;
+            _owner._bodyBytes += segment.Length;
+            _owner._bodySegments++;
+            return true;
+        }
     }
 
     private static byte[] DecodeBase64(string encoded)

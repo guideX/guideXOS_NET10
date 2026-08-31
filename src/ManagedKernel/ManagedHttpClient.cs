@@ -101,13 +101,21 @@ public static class ManagedHttpLimits
     public const int MaximumPathLength = 128;
     public const int MaximumSerializedRequestSize = ManagedNetworkService.MaximumTcpPayloadLength;
     public const int MaximumStatusLineLength = 64;
-    public const int MaximumHeaderLineLength = 96;
-    public const int MaximumHeaderCount = 16;
-    public const int MaximumResponseHeaderBytes = 512;
+    // The live public endpoint currently sends a 1,990-byte CSP line and 25
+    // headers.  These remain bounded independently from the body stream.
+    public const int MaximumHeaderLineLength = 2048;
+    public const int MaximumHeaderCount = 32;
+    public const int MaximumResponseHeaderBytes = 4096;
     public const int MaximumHeaderNameLength = 32;
     // This is the compatibility-sized body retained for TryCopyBody().
     public const int MaximumBodyCapacity = 256;
+    // This remains the historical explicit total-body bound used by the
+    // small-response parser callers.  It is not parser working storage.
     public const int MaximumAcceptedBodyLength = 16 * 1024;
+    // Streaming callers may accept a larger bounded entity without allocating
+    // storage proportional to that entity.  The delivery window remains the
+    // parser's only body queue.
+    public const int MaximumStreamedBodyLength = 1024 * 1024;
     public const int MaximumBodyDeliveryWindow = 1024;
     public const int MaximumChunkSizeLineLength = 128;
     public const int MaximumChunkExtensionLength = 64;
@@ -119,6 +127,13 @@ public static class ManagedHttpLimits
     public const int MaximumReceiveStagingBuffer = ManagedNetworkService.MaximumTcpPayloadLength;
     public const int MaximumContentTypeLength = 64;
     public const int MaximumLocationLength = ManagedHttpsUrl.MaximumLocationLength;
+}
+
+/* A body sink receives one bounded parser segment at a time.  The segment is
+   valid only for the duration of TryConsume; a sink must not retain it. */
+public interface IManagedHttpBodySink
+{
+    bool TryConsume(ReadOnlySpan<byte> segment);
 }
 
 public static class ManagedHttpRequestBuilder
@@ -233,7 +248,7 @@ public static class ManagedHttpRequestBuilder
 
 public sealed class ManagedHttpResponseParser
 {
-    private readonly byte[] _line = new byte[ManagedHttpLimits.MaximumChunkSizeLineLength];
+    private readonly byte[] _line = new byte[ManagedHttpLimits.MaximumHeaderLineLength];
     private readonly byte[] _body = new byte[ManagedHttpLimits.MaximumBodyDeliveryWindow];
     private readonly byte[] _compatibilityBody =
         new byte[ManagedHttpLimits.MaximumBodyCapacity];
@@ -285,7 +300,7 @@ public sealed class ManagedHttpResponseParser
                                      bool allowChunked)
     {
         if (maximumAcceptedBodyLength < 0 ||
-            maximumAcceptedBodyLength > ManagedHttpLimits.MaximumAcceptedBodyLength)
+            maximumAcceptedBodyLength > ManagedHttpLimits.MaximumStreamedBodyLength)
             throw new ArgumentOutOfRangeException(nameof(maximumAcceptedBodyLength));
         _maximumAcceptedBodyLength = maximumAcceptedBodyLength;
         _requireConnectionClose = requireConnectionClose;
@@ -502,6 +517,24 @@ public sealed class ManagedHttpResponseParser
         _body.AsSpan(remaining, length).Clear();
         _bufferedBodyLength = remaining;
         _bodyDelivered += length;
+        return true;
+    }
+
+    /* Delivers all currently buffered body bytes without allocating a second
+       response-sized buffer.  A sink failure is returned before that segment
+       is removed, so the parser remains resumable and its accounting is not
+       corrupted. */
+    public bool TryConsumeBody(IManagedHttpBodySink sink)
+    {
+        if (sink == null) throw new ArgumentNullException(nameof(sink));
+        while (_bufferedBodyLength != 0)
+        {
+            int length = _bufferedBodyLength;
+            if (!sink.TryConsume(_body.AsSpan(0, length))) return false;
+            _body.AsSpan(0, length).Clear();
+            _bufferedBodyLength = 0;
+            _bodyDelivered += length;
+        }
         return true;
     }
 
@@ -1084,6 +1117,11 @@ public sealed class ManagedHttpClient
     public bool TryReadResponseBodyChunk(Span<byte> destination, out int length)
     {
         return _parser.TryReadBodyChunk(destination, out length);
+    }
+
+    public bool TryConsumeResponseBody(IManagedHttpBodySink sink)
+    {
+        return _parser.TryConsumeBody(sink);
     }
 
     public NetworkOperationResult Cancel()

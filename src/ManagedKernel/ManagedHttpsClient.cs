@@ -619,6 +619,11 @@ public sealed class ManagedHttpsClient
         return _parser.TryReadBodyChunk(destination, out length);
     }
 
+    public bool TryConsumeResponseBody(IManagedHttpBodySink sink)
+    {
+        return _parser.TryConsumeBody(sink);
+    }
+
     public NetworkOperationResult Cancel()
     {
         if (_state == ManagedHttpsClientState.Succeeded ||
