@@ -27,7 +27,31 @@ internal enum ManagedX509ValidationStatus : byte
     InvalidExtendedKeyUsage,
     PathLengthExceeded,
     HostnameMismatch,
-    UntrustedRoot
+    UntrustedRoot,
+    CertificateAlgorithmMismatch
+}
+
+internal enum ManagedX509SignatureAlgorithm : byte
+{
+    Unsupported = 0,
+    EcdsaSha256 = 1,
+    EcdsaSha384 = 2,
+    RsaSha256 = 3
+}
+
+internal enum ManagedX509PublicKeyAlgorithm : byte
+{
+    Unsupported = 0,
+    EcdsaP256 = 1,
+    EcdsaP384 = 2,
+    Rsa = 3
+}
+
+internal enum ManagedX509TrustAnchorMatch : byte
+{
+    None = 0,
+    Match = 1,
+    SubjectKeyMismatch = 2
 }
 
 internal readonly struct ManagedX509UtcTime
@@ -110,6 +134,8 @@ internal readonly struct ManagedX509Certificate
     internal readonly int SubjectLength;
     internal readonly int PublicKeyOffset;
     internal readonly int PublicKeyLength;
+    internal readonly ManagedX509PublicKeyAlgorithm PublicKeyAlgorithm;
+    internal readonly ManagedX509SignatureAlgorithm SignatureAlgorithm;
     internal readonly int SignatureOffset;
     internal readonly int SignatureLength;
     internal readonly int SubjectAltNameOffset;
@@ -134,7 +160,9 @@ internal readonly struct ManagedX509Certificate
         int rawLength, int tbsOffset, int tbsLength, int serialOffset,
         int serialLength, int issuerOffset, int issuerLength,
         int subjectOffset, int subjectLength, int publicKeyOffset,
-        int publicKeyLength, int signatureOffset, int signatureLength,
+        int publicKeyLength, ManagedX509PublicKeyAlgorithm publicKeyAlgorithm,
+        ManagedX509SignatureAlgorithm signatureAlgorithm, int signatureOffset,
+        int signatureLength,
         int subjectAltNameOffset, int subjectAltNameLength,
         int commonNameOffset, int commonNameLength, int dnsNameCount,
         ManagedX509UtcTime notBefore, ManagedX509UtcTime notAfter,
@@ -155,6 +183,8 @@ internal readonly struct ManagedX509Certificate
         SubjectLength = subjectLength;
         PublicKeyOffset = publicKeyOffset;
         PublicKeyLength = publicKeyLength;
+        PublicKeyAlgorithm = publicKeyAlgorithm;
+        SignatureAlgorithm = signatureAlgorithm;
         SignatureOffset = signatureOffset;
         SignatureLength = signatureLength;
         SubjectAltNameOffset = subjectAltNameOffset;
@@ -324,6 +354,7 @@ internal static class ManagedX509
     private const byte Integer = 0x02;
     private const byte ObjectIdentifier = 0x06;
     private const byte Boolean = 0x01;
+    private const byte Null = 0x05;
     private const byte OctetString = 0x04;
     private const byte BitString = 0x03;
     private const byte Utf8String = 0x0C;
@@ -334,10 +365,18 @@ internal static class ManagedX509
 
     private static readonly byte[] EcdsaWithSha256Oid =
         { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02 };
+    private static readonly byte[] EcdsaWithSha384Oid =
+        { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03 };
+    private static readonly byte[] Sha256WithRsaOid =
+        { 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B };
     private static readonly byte[] EcPublicKeyOid =
         { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
     private static readonly byte[] Prime256v1Oid =
         { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
+    private static readonly byte[] Prime384r1Oid =
+        { 0x2B, 0x81, 0x04, 0x00, 0x22 };
+    private static readonly byte[] RsaEncryptionOid =
+        { 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01 };
     private static readonly byte[] CommonNameOid = { 0x55, 0x04, 0x03 };
     private static readonly byte[] SubjectAltNameOid = { 0x55, 0x1D, 0x11 };
     private static readonly byte[] BasicConstraintsOid = { 0x55, 0x1D, 0x13 };
@@ -373,11 +412,15 @@ internal static class ManagedX509
                                         out int tbsOffset,
                                         out int tbsLength))
             return parseStatus;
-        if (ParseTbs(der, ref tbs, out int serialOffset,
+        if (ParseTbs(der, ref tbs,
+                     out ManagedX509SignatureAlgorithm tbsSignatureAlgorithm,
+                     out int serialOffset,
                      out int serialLength, out int issuerOffset,
                      out int issuerLength, out int subjectOffset,
                      out int subjectLength, out int publicKeyOffset,
-                     out int publicKeyLength, out int sanOffset,
+                     out int publicKeyLength,
+                     out ManagedX509PublicKeyAlgorithm publicKeyAlgorithm,
+                     out int sanOffset,
                      out int sanLength, out int commonNameOffset,
                      out int commonNameLength, out int dnsNameCount,
                      out ManagedX509UtcTime notBefore,
@@ -401,10 +444,16 @@ internal static class ManagedX509
             return parseStatus;
         }
         ManagedX509ValidationStatus algorithmStatus =
-            ParseSignatureAlgorithm(der, ref outerAlgorithm);
+            ParseSignatureAlgorithm(der, ref outerAlgorithm,
+                                    out ManagedX509SignatureAlgorithm signatureAlgorithm);
         if (algorithmStatus != ManagedX509ValidationStatus.Success)
         {
             parseStatus = algorithmStatus;
+            return parseStatus;
+        }
+        if (signatureAlgorithm != tbsSignatureAlgorithm)
+        {
+            parseStatus = ManagedX509ValidationStatus.CertificateAlgorithmMismatch;
             return parseStatus;
         }
         if (!outerAlgorithm.AtEnd ||
@@ -424,7 +473,8 @@ internal static class ManagedX509
         certificate = new ManagedX509Certificate(
             der.Length, tbsOffset, tbsLength, serialOffset, serialLength,
             issuerOffset, issuerLength, subjectOffset, subjectLength,
-            publicKeyOffset, publicKeyLength, signatureOffset,
+            publicKeyOffset, publicKeyLength, publicKeyAlgorithm,
+            signatureAlgorithm, signatureOffset,
             signatureLength, sanOffset, sanLength, commonNameOffset,
             commonNameLength, dnsNameCount, notBefore, notAfter,
             hasBasicConstraints, isCertificateAuthority,
@@ -440,13 +490,35 @@ internal static class ManagedX509
         ReadOnlySpan<byte> issuerPublicKey,
         out ManagedX509ValidationStatus status)
     {
+        ManagedX509PublicKeyAlgorithm issuerAlgorithm =
+            issuerPublicKey.Length == ManagedP384.PublicKeySize
+                ? ManagedX509PublicKeyAlgorithm.EcdsaP384
+                : issuerPublicKey.Length == ManagedP256.PublicKeySize
+                    ? ManagedX509PublicKeyAlgorithm.EcdsaP256
+                    : ManagedX509PublicKeyAlgorithm.Unsupported;
+        return TryValidateCertificateSignature(
+            certificate, in parsed, issuerPublicKey, issuerAlgorithm,
+            out status);
+    }
+
+    private static bool TryValidateCertificateSignature(
+        ReadOnlySpan<byte> certificate, in ManagedX509Certificate parsed,
+        ReadOnlySpan<byte> issuerPublicKey,
+        ManagedX509PublicKeyAlgorithm issuerAlgorithm,
+        out ManagedX509ValidationStatus status)
+    {
         status = ManagedX509ValidationStatus.MalformedDer;
         if (!HasRange(certificate, parsed.TbsOffset, parsed.TbsLength) ||
             !HasRange(certificate, parsed.SignatureOffset,
                       parsed.SignatureLength) ||
             parsed.RawLength != certificate.Length ||
-            parsed.PublicKeyLength != ManagedP256.PublicKeySize ||
-            issuerPublicKey.Length != ManagedP256.PublicKeySize)
+            (parsed.PublicKeyAlgorithm ==
+                 ManagedX509PublicKeyAlgorithm.EcdsaP256 &&
+             parsed.PublicKeyLength != ManagedP256.PublicKeySize) ||
+            (parsed.PublicKeyAlgorithm ==
+                 ManagedX509PublicKeyAlgorithm.EcdsaP384 &&
+             parsed.PublicKeyLength != ManagedP384.PublicKeySize) ||
+            parsed.PublicKeyAlgorithm == ManagedX509PublicKeyAlgorithm.Unsupported)
             return false;
         if (parsed.HasUnknownCriticalExtension)
         {
@@ -454,28 +526,75 @@ internal static class ManagedX509
             return false;
         }
 
-        Span<byte> digest = stackalloc byte[ManagedP256.DigestSize];
-        try
+        if (parsed.SignatureAlgorithm == ManagedX509SignatureAlgorithm.RsaSha256)
         {
-            if (!ManagedSha256.TryHash(
-                    certificate.Slice(parsed.TbsOffset, parsed.TbsLength),
-                    digest))
+            status = ManagedX509ValidationStatus.UnsupportedAlgorithm;
+            return false;
+        }
+
+        ReadOnlySpan<byte> signature = certificate.Slice(
+            parsed.SignatureOffset, parsed.SignatureLength);
+        if (parsed.SignatureAlgorithm ==
+            ManagedX509SignatureAlgorithm.EcdsaSha256)
+        {
+            if (issuerAlgorithm != ManagedX509PublicKeyAlgorithm.EcdsaP256 ||
+                issuerPublicKey.Length != ManagedP256.PublicKeySize)
             {
-                status = ManagedX509ValidationStatus.MalformedDer;
+                status = ManagedX509ValidationStatus.UnsupportedAlgorithm;
                 return false;
             }
-            bool valid = ManagedP256.TryVerifyDerSignature(
-                digest, issuerPublicKey,
-                certificate.Slice(parsed.SignatureOffset,
-                                  parsed.SignatureLength));
-            status = valid ? ManagedX509ValidationStatus.Success :
-                ManagedX509ValidationStatus.BadSignature;
-            return valid;
+            Span<byte> digest = stackalloc byte[ManagedSha256.DigestSize];
+            try
+            {
+                if (!ManagedSha256.TryHash(
+                        certificate.Slice(parsed.TbsOffset, parsed.TbsLength),
+                        digest))
+                {
+                    status = ManagedX509ValidationStatus.MalformedDer;
+                    return false;
+                }
+                bool valid = ManagedP256.TryVerifyDerSignature(
+                    digest, issuerPublicKey, signature);
+                status = valid ? ManagedX509ValidationStatus.Success :
+                    ManagedX509ValidationStatus.BadSignature;
+                return valid;
+            }
+            finally { digest.Clear(); }
         }
-        finally
+        if (parsed.SignatureAlgorithm ==
+            ManagedX509SignatureAlgorithm.EcdsaSha384)
         {
-            digest.Clear();
+            if (issuerAlgorithm != ManagedX509PublicKeyAlgorithm.EcdsaP256 &&
+                issuerAlgorithm != ManagedX509PublicKeyAlgorithm.EcdsaP384)
+            {
+                status = ManagedX509ValidationStatus.UnsupportedAlgorithm;
+                return false;
+            }
+            Span<byte> digest = stackalloc byte[ManagedSha384.DigestSize];
+            try
+            {
+                if (!ManagedSha384.TryHash(
+                        certificate.Slice(parsed.TbsOffset, parsed.TbsLength),
+                        digest))
+                {
+                    status = ManagedX509ValidationStatus.MalformedDer;
+                    return false;
+                }
+                bool valid = issuerAlgorithm ==
+                    ManagedX509PublicKeyAlgorithm.EcdsaP384
+                    ? ManagedP384.TryVerifyDerSignature(
+                        digest, issuerPublicKey, signature)
+                    : ManagedP256.TryVerifyDerSignature(
+                        digest[..ManagedP256.DigestSize], issuerPublicKey,
+                        signature);
+                status = valid ? ManagedX509ValidationStatus.Success :
+                    ManagedX509ValidationStatus.BadSignature;
+                return valid;
+            }
+            finally { digest.Clear(); }
         }
+        status = ManagedX509ValidationStatus.UnsupportedAlgorithm;
+        return false;
     }
 
     internal static bool TryMatchHostname(
@@ -539,15 +658,6 @@ internal static class ManagedX509
             status = ManagedX509ValidationStatus.TimeUnavailable;
             return false;
         }
-        if (candidateRoot.IsEmpty || trustedRoot.IsEmpty ||
-            candidateRoot.Length != trustedRoot.Length ||
-            !ManagedCryptoComparison.FixedTimeEquals(candidateRoot,
-                                                     trustedRoot))
-        {
-            status = ManagedX509ValidationStatus.UntrustedRoot;
-            return false;
-        }
-
         ManagedX509ValidationStatus parseStatus = TryParseCertificate(
             leaf, out ManagedX509Certificate leafCertificate, out status);
         if (parseStatus != ManagedX509ValidationStatus.Success) return false;
@@ -564,6 +674,15 @@ internal static class ManagedX509
         parseStatus = TryParseCertificate(candidateRoot,
             out ManagedX509Certificate rootCertificate, out status);
         if (parseStatus != ManagedX509ValidationStatus.Success) return false;
+        parseStatus = TryParseCertificate(trustedRoot,
+            out ManagedX509Certificate trustedCertificate, out status);
+        if (parseStatus != ManagedX509ValidationStatus.Success) return false;
+        if (!IsTrustAnchorIdentity(candidateRoot, in rootCertificate,
+                                   trustedRoot, in trustedCertificate))
+        {
+            status = ManagedX509ValidationStatus.UntrustedRoot;
+            return false;
+        }
 
         if (leafCertificate.HasUnknownCriticalExtension ||
             (hasIntermediate1 && firstIntermediate.HasUnknownCriticalExtension) ||
@@ -650,11 +769,53 @@ internal static class ManagedX509
         return IsValidDnsName(name, wildcard);
     }
 
+    internal static bool TryMatchTrustAnchorIdentity(
+        ReadOnlySpan<byte> candidateDer, in ManagedX509Certificate candidate,
+        ReadOnlySpan<byte> trustedDer, out ManagedX509TrustAnchorMatch match)
+    {
+        match = ManagedX509TrustAnchorMatch.None;
+        if (TryParseCertificate(trustedDer,
+                                out ManagedX509Certificate trusted,
+                                out _) != ManagedX509ValidationStatus.Success)
+            return false;
+        if (!RangesEqual(candidateDer, candidate.SubjectOffset,
+                         candidate.SubjectLength, trustedDer,
+                         trusted.SubjectOffset, trusted.SubjectLength))
+            return true;
+        if (candidate.PublicKeyAlgorithm != trusted.PublicKeyAlgorithm ||
+            !RangesEqual(candidateDer, candidate.PublicKeyOffset,
+                         candidate.PublicKeyLength, trustedDer,
+                         trusted.PublicKeyOffset, trusted.PublicKeyLength))
+        {
+            match = ManagedX509TrustAnchorMatch.SubjectKeyMismatch;
+            return true;
+        }
+        match = ManagedX509TrustAnchorMatch.Match;
+        return true;
+    }
+
+    private static bool IsTrustAnchorIdentity(
+        ReadOnlySpan<byte> candidateDer, in ManagedX509Certificate candidate,
+        ReadOnlySpan<byte> trustedDer, in ManagedX509Certificate trusted)
+    {
+        return candidate.PublicKeyAlgorithm == trusted.PublicKeyAlgorithm &&
+               RangesEqual(candidateDer, candidate.SubjectOffset,
+                           candidate.SubjectLength, trustedDer,
+                           trusted.SubjectOffset, trusted.SubjectLength) &&
+               RangesEqual(candidateDer, candidate.PublicKeyOffset,
+                           candidate.PublicKeyLength, trustedDer,
+                           trusted.PublicKeyOffset,
+                           trusted.PublicKeyLength);
+    }
+
     private static ManagedX509ValidationStatus ParseTbs(
         ReadOnlySpan<byte> der, ref ManagedDerReader tbs,
+        out ManagedX509SignatureAlgorithm signatureAlgorithm,
         out int serialOffset, out int serialLength, out int issuerOffset,
         out int issuerLength, out int subjectOffset, out int subjectLength,
-        out int publicKeyOffset, out int publicKeyLength, out int sanOffset,
+        out int publicKeyOffset, out int publicKeyLength,
+        out ManagedX509PublicKeyAlgorithm publicKeyAlgorithm,
+        out int sanOffset,
         out int sanLength, out int commonNameOffset, out int commonNameLength,
         out int dnsNameCount, out ManagedX509UtcTime notBefore,
         out ManagedX509UtcTime notAfter, out bool hasBasicConstraints,
@@ -665,8 +826,10 @@ internal static class ManagedX509
         out bool hasUnknownCriticalExtension,
         out ManagedX509ValidationStatus status)
     {
+        signatureAlgorithm = ManagedX509SignatureAlgorithm.Unsupported;
         serialOffset = serialLength = issuerOffset = issuerLength = 0;
         subjectOffset = subjectLength = publicKeyOffset = publicKeyLength = 0;
+        publicKeyAlgorithm = ManagedX509PublicKeyAlgorithm.Unsupported;
         sanOffset = sanLength = commonNameOffset = commonNameLength = 0;
         dnsNameCount = 0;
         notBefore = notAfter = default;
@@ -705,7 +868,8 @@ internal static class ManagedX509
         {
             return status;
         }
-        status = ParseSignatureAlgorithm(der, ref signature);
+        status = ParseSignatureAlgorithm(der, ref signature,
+                                         out signatureAlgorithm);
         if (status != ManagedX509ValidationStatus.Success)
             return status;
 
@@ -742,7 +906,8 @@ internal static class ManagedX509
         }
         ManagedX509ValidationStatus publicKeyStatus =
             ParseSubjectPublicKeyInfo(der, ref spki, out publicKeyOffset,
-                                      out publicKeyLength);
+                                      out publicKeyLength,
+                                      out publicKeyAlgorithm);
         if (publicKeyStatus != ManagedX509ValidationStatus.Success)
         {
             status = publicKeyStatus;
@@ -814,46 +979,115 @@ internal static class ManagedX509
     }
 
     private static ManagedX509ValidationStatus ParseSignatureAlgorithm(
-        ReadOnlySpan<byte> der, ref ManagedDerReader reader)
+        ReadOnlySpan<byte> der, ref ManagedDerReader reader,
+        out ManagedX509SignatureAlgorithm algorithm)
     {
+        algorithm = ManagedX509SignatureAlgorithm.Unsupported;
         if (!reader.TryRead(ObjectIdentifier, out _, out _,
                             out int oidOffset, out int oidLength) ||
             !TryValidateOid(der, oidOffset, oidLength))
             return ManagedX509ValidationStatus.MalformedDer;
-        if (!IsOid(der, oidOffset, oidLength, EcdsaWithSha256Oid) ||
-            !reader.AtEnd)
-            return ManagedX509ValidationStatus.UnsupportedAlgorithm;
-        return ManagedX509ValidationStatus.Success;
+        if (IsOid(der, oidOffset, oidLength, EcdsaWithSha256Oid))
+        {
+            if (!reader.AtEnd) return ManagedX509ValidationStatus.MalformedDer;
+            algorithm = ManagedX509SignatureAlgorithm.EcdsaSha256;
+            return ManagedX509ValidationStatus.Success;
+        }
+        if (IsOid(der, oidOffset, oidLength, EcdsaWithSha384Oid))
+        {
+            if (!reader.AtEnd) return ManagedX509ValidationStatus.MalformedDer;
+            algorithm = ManagedX509SignatureAlgorithm.EcdsaSha384;
+            return ManagedX509ValidationStatus.Success;
+        }
+        if (IsOid(der, oidOffset, oidLength, Sha256WithRsaOid) &&
+            reader.TryRead(Null, out _, out _, out _, out int nullLength) &&
+            nullLength == 0 && reader.AtEnd)
+        {
+            algorithm = ManagedX509SignatureAlgorithm.RsaSha256;
+            return ManagedX509ValidationStatus.Success;
+        }
+        if (!reader.AtEnd)
+            return ManagedX509ValidationStatus.MalformedDer;
+        return ManagedX509ValidationStatus.UnsupportedAlgorithm;
     }
 
     private static ManagedX509ValidationStatus ParseSubjectPublicKeyInfo(
         ReadOnlySpan<byte> der, ref ManagedDerReader reader,
-        out int keyOffset, out int keyLength)
+        out int keyOffset, out int keyLength,
+        out ManagedX509PublicKeyAlgorithm algorithm)
     {
         keyOffset = keyLength = 0;
-        if (!reader.TryEnter(Sequence, out ManagedDerReader algorithm,
+        algorithm = ManagedX509PublicKeyAlgorithm.Unsupported;
+        if (!reader.TryEnter(Sequence, out ManagedDerReader keyAlgorithm,
                              out _, out _))
             return ManagedX509ValidationStatus.MalformedDer;
-        if (!algorithm.TryRead(ObjectIdentifier, out _, out _,
-                               out int algorithmOidOffset,
-                               out int algorithmOidLength) ||
-            !IsOid(der, algorithmOidOffset, algorithmOidLength, EcPublicKeyOid) ||
-            !algorithm.TryRead(ObjectIdentifier, out _, out _,
-                               out int curveOidOffset, out int curveOidLength) ||
-            !IsOid(der, curveOidOffset, curveOidLength, Prime256v1Oid) ||
-            !algorithm.AtEnd)
+        if (!keyAlgorithm.TryRead(ObjectIdentifier, out _, out _,
+                                   out int algorithmOidOffset,
+                                   out int algorithmOidLength))
+            return ManagedX509ValidationStatus.MalformedDer;
+
+        bool ec = IsOid(der, algorithmOidOffset, algorithmOidLength,
+                        EcPublicKeyOid);
+        if (ec)
+        {
+            if (!keyAlgorithm.TryRead(ObjectIdentifier, out _, out _,
+                                      out int curveOidOffset,
+                                      out int curveOidLength) ||
+                !keyAlgorithm.AtEnd)
+                return ManagedX509ValidationStatus.MalformedDer;
+            if (IsOid(der, curveOidOffset, curveOidLength, Prime256v1Oid))
+                algorithm = ManagedX509PublicKeyAlgorithm.EcdsaP256;
+            else if (IsOid(der, curveOidOffset, curveOidLength,
+                           Prime384r1Oid))
+                algorithm = ManagedX509PublicKeyAlgorithm.EcdsaP384;
+            else
+                return ManagedX509ValidationStatus.UnsupportedAlgorithm;
+        }
+        else if (IsOid(der, algorithmOidOffset, algorithmOidLength,
+                       RsaEncryptionOid))
+        {
+            /* RSA SPKI is deliberately recognized only to reject it as an
+               unsupported certificate key.  No RSA key material is accepted
+               into the managed validator in Phase 36. */
+            if (!keyAlgorithm.TryRead(Null, out _, out _, out _,
+                                     out int nullLength) || nullLength != 0 ||
+                !keyAlgorithm.AtEnd)
+                return ManagedX509ValidationStatus.MalformedDer;
+            return ManagedX509ValidationStatus.UnsupportedAlgorithm;
+        }
+        else
         {
             return ManagedX509ValidationStatus.UnsupportedAlgorithm;
         }
+
         if (!reader.TryRead(BitString, out _, out _, out int bitOffset,
-                            out int bitLength) ||
-            !TryGetBitStringPayload(der, bitOffset, bitLength, true,
-                                    out keyOffset, out keyLength) ||
-            keyLength != ManagedP256.PublicKeySize ||
-            !ManagedP256.TryValidatePublicKey(
-                der.Slice(keyOffset, keyLength)) || !reader.AtEnd)
-        {
+                            out int bitLength) || !reader.AtEnd)
+            return ManagedX509ValidationStatus.MalformedDer;
+        if (!HasRange(der, bitOffset, bitLength) || bitLength < 1 ||
+            der[bitOffset] > 7)
+            return ManagedX509ValidationStatus.MalformedDer;
+        if (der[bitOffset] != 0)
             return ManagedX509ValidationStatus.InvalidPublicKey;
+        if (!TryGetBitStringPayload(der, bitOffset, bitLength, true,
+                                    out keyOffset, out keyLength))
+            return ManagedX509ValidationStatus.MalformedDer;
+        if (algorithm == ManagedX509PublicKeyAlgorithm.EcdsaP256)
+        {
+            if (keyLength != ManagedP256.PublicKeySize ||
+                !ManagedP256.TryValidatePublicKey(
+                    der.Slice(keyOffset, keyLength)))
+                return ManagedX509ValidationStatus.InvalidPublicKey;
+        }
+        else if (algorithm == ManagedX509PublicKeyAlgorithm.EcdsaP384)
+        {
+            if (keyLength != ManagedP384.PublicKeySize ||
+                !ManagedP384.TryValidatePublicKey(
+                    der.Slice(keyOffset, keyLength)))
+                return ManagedX509ValidationStatus.InvalidPublicKey;
+        }
+        else
+        {
+            return ManagedX509ValidationStatus.UnsupportedAlgorithm;
         }
         return ManagedX509ValidationStatus.Success;
     }
@@ -1223,6 +1457,7 @@ internal static class ManagedX509
                                                issuerDer.Slice(
                                                    issuer.PublicKeyOffset,
                                                    issuer.PublicKeyLength),
+                                               issuer.PublicKeyAlgorithm,
                                                out status);
     }
 

@@ -127,7 +127,9 @@ internal static class ManagedUdpProtocol
 {
     internal const byte Protocol = 17;
     internal const int HeaderLength = 8;
-    internal const int MaximumPayloadLength = 512;
+    /* DHCP replies from real QEMU user-mode networking commonly carry the
+       fixed BOOTP header plus options beyond the old 512-byte fixture cap. */
+    internal const int MaximumPayloadLength = 1024;
     internal const int MaximumDatagramLength = HeaderLength + MaximumPayloadLength;
 
     internal static bool TryParse(ReadOnlySpan<byte> payload,

@@ -5,7 +5,6 @@ namespace GuideXOS.Net10.ManagedKernel;
 internal sealed class ManagedArpLayer
 {
     private const int MaximumProtocolFrames = 16;
-    private const uint HostIpv4Value = 0x0A0F0002;
     private readonly ManagedEthernetLayer _ethernet;
     private readonly ManagedArpCache _cache = new();
     private ulong _localMacValue;
@@ -133,8 +132,7 @@ internal sealed class ManagedArpLayer
         {
             if (!_pending || !ManagedArpProtocol.IsPendingReplyMatch(
                     packet, ethernetSource, ethernetDestination,
-                    localMac, localIpv4, _pendingIpv4) ||
-                ReadIpv4(packet.SenderIpv4) != HostIpv4Value)
+                    localMac, localIpv4, _pendingIpv4))
                 return ManagedArpHandleResult.Ignored;
 
             if (!KernelLog.Write("GXOS_NET10:MANAGED_ARP_REPLY_VALID\r\n"u8))
@@ -255,20 +253,14 @@ internal sealed class ManagedArpLayer
                mac[4] == 0 && mac[5] == 2;
     }
 
+    private void WriteHostIpv4(Span<byte> address)
+    {
+        _hostIpv4.AsSpan().CopyTo(address);
+    }
+
     private static uint ReadIpv4(ReadOnlySpan<byte> address)
     {
         return ManagedEthernetProtocol.ReadUInt32Network(address, 0);
-    }
-
-    private static uint ReadIpv4(byte[] address)
-    {
-        return ((uint)address[0] << 24) | ((uint)address[1] << 16) |
-               ((uint)address[2] << 8) | address[3];
-    }
-
-    private static void WriteHostIpv4(Span<byte> address)
-    {
-        ManagedEthernetProtocol.WriteUInt32Network(address, 0, HostIpv4Value);
     }
 
     private bool TryBuildRuntimeRequest(ReadOnlySpan<byte> targetIpv4)

@@ -639,11 +639,20 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_config_read_service(
         offset, width, result_address, result_capacity);
 }
 
-static uint32_t g_managed_kernel_pci_command_live;
-static uint64_t g_managed_kernel_pci_command_resource_id;
-static uint64_t g_managed_kernel_pci_command_claim_handle;
-static uint32_t g_managed_kernel_pci_command_driver_id;
-static uint32_t g_managed_kernel_pci_command_original;
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE35
+#define GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS 2U
+#else
+#define GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS 1U
+#endif
+typedef struct {
+    uint32_t live;
+    uint64_t resource_id;
+    uint64_t claim_handle;
+    uint32_t driver_id;
+    uint32_t original;
+} GX_MANAGED_KERNEL_PCI_COMMAND_SLOT;
+static GX_MANAGED_KERNEL_PCI_COMMAND_SLOT
+    g_managed_kernel_pci_command_slots[GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS];
 
 static const GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 *
 managed_kernel_find_target_pci_resource(uint64_t resource_id)
@@ -678,6 +687,8 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
     uint32_t resulting;
     uint32_t requested;
     uint32_t address;
+    GX_MANAGED_KERNEL_PCI_COMMAND_SLOT *command = 0;
+    uint32_t slot_index;
     if (result_address == 0 || result_capacity <
             GX_MANAGED_KERNEL_PCI_COMMAND_RESULT_V1_SIZE ||
         result_address > UINTPTR_MAX - result_capacity ||
@@ -694,21 +705,51 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
     result = (GX_MANAGED_KERNEL_PCI_COMMAND_RESULT_V1 *)(uintptr_t)result_address;
     if (operation == GX_MANAGED_PCI_COMMAND_ENABLE) {
         requested = value;
-        if (g_managed_kernel_pci_command_live != 0 ||
-            requested == 0 || (requested & ~0x6U) != 0U) {
+        for (slot_index = 0; slot_index != GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS;
+             ++slot_index) {
+            if (g_managed_kernel_pci_command_slots[slot_index].live != 0) {
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE35
+                if (g_managed_kernel_pci_command_slots[slot_index].resource_id ==
+                    resource_id) return GX_MANAGED_INVALID_STATE;
+#else
+                return GX_MANAGED_INVALID_STATE;
+#endif
+                continue;
+            }
+            if (command == 0) command = &g_managed_kernel_pci_command_slots[slot_index];
+        }
+        if (command == 0 || requested == 0 || (requested & ~0x6U) != 0U) {
             return GX_MANAGED_INVALID_STATE;
         }
     } else if (operation == GX_MANAGED_PCI_COMMAND_RESTORE) {
-        if (g_managed_kernel_pci_command_live == 0 ||
-            g_managed_kernel_pci_command_resource_id != resource_id ||
-            g_managed_kernel_pci_command_claim_handle != claim_handle ||
-            g_managed_kernel_pci_command_driver_id != driver_id ||
-            value != g_managed_kernel_pci_command_original) {
+        for (slot_index = 0; slot_index != GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS;
+             ++slot_index) {
+            GX_MANAGED_KERNEL_PCI_COMMAND_SLOT *candidate =
+                &g_managed_kernel_pci_command_slots[slot_index];
+            if (candidate->live != 0 && candidate->resource_id == resource_id &&
+                candidate->claim_handle == claim_handle &&
+                candidate->driver_id == driver_id) {
+                command = candidate;
+                break;
+            }
+        }
+        if (command == 0 || value != command->original) {
             return GX_MANAGED_INVALID_STATE;
         }
         requested = value;
     } else if (operation == GX_MANAGED_PCI_COMMAND_DISABLE_BUS_MASTER) {
-        if (g_managed_kernel_pci_command_live != 0 && value == 0x4U) {
+        for (slot_index = 0; slot_index != GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS;
+             ++slot_index) {
+            GX_MANAGED_KERNEL_PCI_COMMAND_SLOT *candidate =
+                &g_managed_kernel_pci_command_slots[slot_index];
+            if (candidate->live != 0 && candidate->resource_id == resource_id &&
+                candidate->claim_handle == claim_handle &&
+                candidate->driver_id == driver_id) {
+                command = candidate;
+                break;
+            }
+        }
+        if (command != 0 && value == 0x4U) {
             requested = 0x4U;
         } else {
             return GX_MANAGED_INVALID_STATE;
@@ -721,7 +762,7 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
         resource->OwnerDevice, resource->OwnerFunction, 4);
     if (current == UINT32_MAX) return GX_MANAGED_INVALID_STATE;
     if (operation == GX_MANAGED_PCI_COMMAND_ENABLE) {
-        g_managed_kernel_pci_command_original = current & 0xFFFFU;
+        command->original = current & 0xFFFFU;
         resulting = (current & 0xFFFF0000U) |
                     ((current & 0xFFFFU) | requested);
     } else if (operation == GX_MANAGED_PCI_COMMAND_DISABLE_BUS_MASTER) {
@@ -745,21 +786,21 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
     result->Size = GX_MANAGED_KERNEL_PCI_COMMAND_RESULT_V1_SIZE;
     result->AbiVersion = GX_MANAGED_KERNEL_PCI_SERVICES_ABI_V1;
     result->OriginalCommand = operation == GX_MANAGED_PCI_COMMAND_ENABLE
-        ? g_managed_kernel_pci_command_original : resulting & 0xFFFFU;
+        ? command->original : resulting & 0xFFFFU;
     result->RequestedBits = requested;
     result->ResultingCommand = resulting & 0xFFFFU;
     result->Reserved = 0;
     if (operation == GX_MANAGED_PCI_COMMAND_ENABLE) {
-        g_managed_kernel_pci_command_live = 1;
-        g_managed_kernel_pci_command_resource_id = resource_id;
-        g_managed_kernel_pci_command_claim_handle = claim_handle;
-        g_managed_kernel_pci_command_driver_id = driver_id;
+        command->live = 1;
+        command->resource_id = resource_id;
+        command->claim_handle = claim_handle;
+        command->driver_id = driver_id;
     } else if (operation == GX_MANAGED_PCI_COMMAND_RESTORE) {
-        g_managed_kernel_pci_command_live = 0;
-        g_managed_kernel_pci_command_resource_id = 0;
-        g_managed_kernel_pci_command_claim_handle = 0;
-        g_managed_kernel_pci_command_driver_id = 0;
-        g_managed_kernel_pci_command_original = 0;
+        command->live = 0;
+        command->resource_id = 0;
+        command->claim_handle = 0;
+        command->driver_id = 0;
+        command->original = 0;
     }
     return GX_MANAGED_OK;
 }
@@ -13746,6 +13787,11 @@ static void managed_kernel_phase14_driver(
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE31_BEGIN\r\n");
     status = g_managed_kernel_run_phase31();
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase31");
+#endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE35
+    status = run_phase14(3U);
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase35-mode");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE35_MODE_SELECTED\r\n");
 #endif
     status = run_phase14(1U);
     if (status != GX_MANAGED_OK || run_phase14(1U) != GX_MANAGED_INVALID_STATE ||

@@ -29,6 +29,7 @@ internal sealed class ManagedE1000Driver
     private const uint RxRearmInterval = 64;
     internal static uint Phase16MacHigh;
     internal static uint Phase16MacLow;
+    private static bool s_phase35ModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -54,6 +55,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase32Passed;
     private bool _phase33Passed;
     private bool _phase34Passed;
+    private bool _phase35Passed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -71,6 +73,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase32Requested;
     private bool _phase33Requested;
     private bool _phase34Requested;
+    private bool _phase35Requested;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -100,6 +103,12 @@ internal sealed class ManagedE1000Driver
     internal bool Phase32Passed => _phase32Passed;
     internal bool Phase33Passed => _phase33Passed;
     internal bool Phase34Passed => _phase34Passed;
+    internal bool Phase35Passed => _phase35Passed;
+
+    internal static void EnablePhase35Mode()
+    {
+        s_phase35ModeEnabled = true;
+    }
 
     internal static ManagedE1000Driver? TryCreate()
     {
@@ -122,6 +131,7 @@ internal sealed class ManagedE1000Driver
 
     internal bool TryStart()
     {
+        _phase35Requested = s_phase35ModeEnabled;
         return TryStartCore();
     }
 
@@ -203,7 +213,23 @@ internal sealed class ManagedE1000Driver
                 "GXOS_NET10:MANAGED_E1000_RX_STATE=BEFORE_INJECTION\r\n"u8) ||
             !KernelLog.Write("GXOS_NET10:MANAGED_E1000_RX_READY\r\n"u8))
             return AbortStart();
-        if (!PollPhase15RxProof()) return AbortStart();
+        if (s_phase35ModeEnabled)
+        {
+            s_phase35ModeEnabled = false;
+            Phase16MacHigh = (uint)(_macValue >> 32);
+            Phase16MacLow = (uint)_macValue;
+            _phase35Requested = true;
+            _ethernet!.InitializeMac();
+            if (!KernelLog.Write(
+                    "GXOS_NET10:MANAGED_PUBLIC_HTTPS_STARTING\r\n"u8) ||
+                !_ethernet.TryRunPhase35())
+            {
+                KernelLog.Write(
+                    "GXOS_NET10:MANAGED_PUBLIC_HTTPS_START_FAILED\r\n"u8);
+                return AbortStart();
+            }
+        }
+        else if (!PollPhase15RxProof()) return AbortStart();
         if (_rxPhase15Received != 0)
         {
             if (_mmio == null ||
@@ -288,6 +314,7 @@ internal sealed class ManagedE1000Driver
 
     private bool AbortStart()
     {
+        s_phase35ModeEnabled = false;
         bool safe = true;
         if (_ethernet != null)
         {
@@ -337,7 +364,7 @@ internal sealed class ManagedE1000Driver
     {
         if (_state != ManagedE1000DriverState.Running) return false;
         _state = ManagedE1000DriverState.Stopping;
-        ManagedEthernetLayer? ethernet = (_phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
+        ManagedEthernetLayer? ethernet = (_phase35Requested || _phase34Requested || _phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
             ? ManagedNetworkServiceBackend.LiveEthernet ?? _ethernet
             : _ethernet;
         if (ethernet != null)
@@ -353,6 +380,7 @@ internal sealed class ManagedE1000Driver
             _phase32Passed = ethernet.Phase32Passed;
             _phase33Passed = ethernet.Phase33Passed;
             _phase34Passed = ethernet.Phase34Passed;
+            _phase35Passed = ethernet.Phase35Passed;
         }
         bool result = (ethernet == null || ethernet.TryStop()) &&
                       DisableEngines() && ReleaseDmaAndRestorePci();
@@ -399,8 +427,21 @@ internal sealed class ManagedE1000Driver
 
     private bool ReadMac()
     {
-        if (_mmio == null || !_mmio.TryRead32(ManagedE1000Protocol.RegRal, out uint ral) ||
-            !_mmio.TryRead32(ManagedE1000Protocol.RegRah, out uint rah)) return false;
+        if (_mmio == null)
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC_READ_FAILED=NO_MMIO\r\n"u8);
+            return false;
+        }
+        if (!_mmio.TryRead32(ManagedE1000Protocol.RegRal, out uint ral))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC_READ_FAILED=RAL\r\n"u8);
+            return false;
+        }
+        if (!_mmio.TryRead32(ManagedE1000Protocol.RegRah, out uint rah))
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC_READ_FAILED=RAH\r\n"u8);
+            return false;
+        }
         _mac[0] = (byte)ral;
         _mac[1] = (byte)(ral >> 8);
         _mac[2] = (byte)(ral >> 16);
@@ -411,8 +452,14 @@ internal sealed class ManagedE1000Driver
                          ((ulong)_mac[2] << 24) | ((ulong)_mac[3] << 16) |
                          ((ulong)_mac[4] << 8) | _mac[5];
         _macValue = macValue;
-        return !ManagedE1000Protocol.IsInvalidMac(_mac) &&
-               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x"u8,
+        if (ManagedE1000Protocol.IsInvalidMac(_mac))
+        {
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC_READ_FAILED=INVALID_0x"u8,
+                macValue);
+            return false;
+        }
+        return KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x"u8,
                                       macValue);
     }
 
@@ -431,7 +478,17 @@ internal sealed class ManagedE1000Driver
             _claimHandle, DriverId,
             ManagedE1000Protocol.PacketBufferSize * ManagedE1000Protocol.RingCount, 4096);
         if (_txRing == null || _rxRing == null || _txBuffers == null || _rxBuffers == null)
+        {
+            KernelLog.Write(
+                _txRing == null
+                    ? "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_ALLOC_FAILED=TX_RING\r\n"u8
+                    : _rxRing == null
+                        ? "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_ALLOC_FAILED=RX_RING\r\n"u8
+                        : _txBuffers == null
+                            ? "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_ALLOC_FAILED=TX_BUFFERS\r\n"u8
+                            : "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_ALLOC_FAILED=RX_BUFFERS\r\n"u8);
             return false;
+        }
         if (ManagedKernelContract.TryDmaAllocate(
                 _claimHandle, DriverId, 0, 4096, out _) ||
             ManagedKernelContract.TryDmaAllocate(
@@ -448,9 +505,12 @@ internal sealed class ManagedE1000Driver
         if (temporary == null || !temporary.TryReleaseReference() ||
             !temporary.TryRelease() ||
             ManagedKernelContract.TryDmaRelease(temporary.Handle, DriverId) ||
-            temporary.TryRead8(0, out _) ||
-            !RunDmaCapacityNegativeTest() ||
-            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_OK\r\n"u8))
+            temporary.TryRead8(0, out _))
+            return false;
+        if (!_phase35Requested && !RunDmaCapacityNegativeTest()) return false;
+        if (!KernelLog.Write(_phase35Requested
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_PHASE35_CONCURRENT_RNG\r\n"u8
+                : "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_OK\r\n"u8))
             return false;
         return KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_PHASE14_TX_RING_BUS=0x"u8,
                                       _txRing.BusAddress) &&

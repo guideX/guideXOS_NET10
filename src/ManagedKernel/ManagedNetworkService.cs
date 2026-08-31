@@ -112,7 +112,8 @@ public readonly struct NetworkStatus
     public NetworkStatus(bool linkReady, bool driverReady, bool configured,
                          bool dhcpBound, ulong macAddress,
                          Ipv4Address ipv4Address, Ipv4Address subnetMask,
-                         Ipv4Address dnsServer)
+                         Ipv4Address dnsServer,
+                         Ipv4Address gateway = default)
     {
         LinkReady = linkReady;
         DriverReady = driverReady;
@@ -122,6 +123,7 @@ public readonly struct NetworkStatus
         Ipv4Address = ipv4Address;
         SubnetMask = subnetMask;
         DnsServer = dnsServer;
+        Gateway = gateway;
     }
 
     public bool LinkReady { get; }
@@ -132,6 +134,7 @@ public readonly struct NetworkStatus
     public Ipv4Address Ipv4Address { get; }
     public Ipv4Address SubnetMask { get; }
     public Ipv4Address DnsServer { get; }
+    public Ipv4Address Gateway { get; }
 }
 
 internal enum ManagedNetworkServiceBackendResult : byte
@@ -189,7 +192,9 @@ internal interface IManagedNetworkServiceBackend
 public sealed class ManagedNetworkService : IManagedTcpApplicationSink
 {
     public const int MaximumHostnameLength = 253;
-    public const int MaximumUdpPayloadLength = 512;
+    /* Keep this public contract dependency-free so the service host suite can
+       compile without linking the UDP protocol implementation. */
+    public const int MaximumUdpPayloadLength = 1024;
     public const int MaximumTcpPayloadLength = ManagedTcpProtocol.MaximumPayloadLength;
     /* Must remain equal to ManagedUdpEndpointTable.Capacity (Phase 18 = 4).
        Keeping the public contract independent lets the service host suite test

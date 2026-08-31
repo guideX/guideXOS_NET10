@@ -59,7 +59,8 @@ internal sealed class ManagedNetworkServiceBackend : IManagedNetworkServiceBacke
                                status.Configured || status.DhcpBound ||
                                status.MacAddress != 0 ||
                                status.Ipv4Address.Value != 0 ||
-                               status.DnsServer.Value != 0;
+                               status.DnsServer.Value != 0 ||
+                               status.Gateway.Value != 0;
     }
 
     public NetworkStatus GetStatus()
@@ -77,7 +78,8 @@ internal sealed class ManagedNetworkServiceBackend : IManagedNetworkServiceBacke
             mac,
             new Ipv4Address(Ipv4.LocalIpv4Value),
             new Ipv4Address(Ipv4.SubnetMaskValue),
-            new Ipv4Address(Ipv4.DnsServerValue));
+            new Ipv4Address(Ipv4.DnsServerValue),
+            new Ipv4Address(Ipv4.GatewayIpv4Value));
     }
 
     public ManagedNetworkServiceBackendResult BeginResolve(ReadOnlySpan<byte> name)

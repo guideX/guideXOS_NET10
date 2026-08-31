@@ -178,7 +178,10 @@ internal static class Program
         FakeBackend backend = new(FakeScenario.Normal);
         ManagedNetworkService service = CreateService(backend);
         byte[] root = (byte[])ManagedTls12Phase31Fixtures.Root.Clone();
-        root[240] ^= 1;
+        // The configured anchor is now matched by subject+SPKI identity. Make
+        // this negative control alter the key itself, not an unrelated anchor
+        // encoding byte that is intentionally ignored by the new rule.
+        root[237] = 0x05;
         ManagedHttpsClient client = CreateHttpsClient(service, backend, root);
         if (client.BeginGet("www.example.com"u8, "/phase32"u8) !=
             NetworkOperationResult.Started)

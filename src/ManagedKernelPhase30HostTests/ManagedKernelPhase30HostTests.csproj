@@ -13,7 +13,9 @@
     <Compile Include="..\ManagedKernel\ManagedSecureRandom.cs" Link="ManagedSecureRandom.cs" />
     <Compile Include="..\ManagedKernel\ManagedVirtioRngProtocol.cs" Link="ManagedVirtioRngProtocol.cs" />
     <Compile Include="..\ManagedKernel\ManagedSha256.cs" Link="ManagedSha256.cs" />
+    <Compile Include="..\ManagedKernel\ManagedSha384.cs" Link="ManagedSha384.cs" />
     <Compile Include="..\ManagedKernel\ManagedX509.cs" Link="ManagedX509.cs" />
+    <Compile Include="..\ManagedKernel\ManagedP384.cs" Link="ManagedP384.cs" />
     <Compile Include="..\ManagedKernel\ManagedX509Phase30Fixtures.cs" Link="ManagedX509Phase30Fixtures.cs" />
     <Compile Include="..\ManagedKernelPhase26HostTests\ManagedVirtioRngDriverStub.cs" Link="ManagedVirtioRngDriver.cs" />
   </ItemGroup>

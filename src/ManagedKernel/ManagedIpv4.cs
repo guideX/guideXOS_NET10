@@ -157,6 +157,31 @@ internal static class ManagedIpv4Protocol
         return (localAddress & subnetMask) ==
                (destinationAddress & subnetMask);
     }
+
+    /* Select the IPv4 next hop without touching ARP or the Ethernet layer.
+       This pure decision is deliberately kept beside the existing subnet
+       predicate so the public egress path and its host regression can prove
+       that an off-subnet IP destination is sent to the configured gateway. */
+    internal static bool TrySelectNextHop(uint localAddress, uint subnetMask,
+                                          uint gatewayAddress,
+                                          uint destinationAddress,
+                                          out uint nextHopAddress)
+    {
+        nextHopAddress = 0;
+        if (localAddress == 0 || subnetMask == 0 ||
+            destinationAddress == 0 || destinationAddress == 0xFFFFFFFFU)
+            return false;
+        if (IsDirectlyReachable(localAddress, subnetMask, destinationAddress))
+        {
+            nextHopAddress = destinationAddress;
+            return true;
+        }
+        if (gatewayAddress == 0 || gatewayAddress == 0xFFFFFFFFU ||
+            !IsDirectlyReachable(localAddress, subnetMask, gatewayAddress))
+            return false;
+        nextHopAddress = gatewayAddress;
+        return true;
+    }
 }
 
 internal sealed class ManagedIpv4PendingTransmission

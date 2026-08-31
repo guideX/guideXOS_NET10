@@ -7,6 +7,52 @@ namespace GuideXOS.Net10.ManagedKernel;
 internal static unsafe class ManagedVirtioRngKernelProof
 {
     private static int s_run;
+    private static ManagedVirtioRngDriver? s_phase35Driver;
+    private static ManagedEntropyService? s_phase35Entropy;
+
+    /* Phase 26 proves that a device-backed provider can be attached and
+       completely torn down.  The isolated public arm needs that same
+       provider to remain live while the E1000 performs DHCP and TLS, so it
+       starts a second, explicitly owned lifetime after the proof. */
+    internal static bool TryStartPhase35Provider()
+    {
+        if (s_phase35Driver.HasValue || s_phase35Entropy != null ||
+            !ManagedKernelContract.TryEnsureEntropyService())
+            return false;
+        ManagedEntropyService? entropy = ManagedKernelContract.EntropyService;
+        ManagedSecureRandom? random = ManagedKernelContract.SecureRandom;
+        ManagedVirtioRngDriver? candidate = ManagedVirtioRngDriver.TryCreate();
+        if (entropy == null || random == null || !candidate.HasValue)
+            return false;
+        ManagedVirtioRngDriver driver = candidate.Value;
+        if (!driver.TryStart()) return false;
+        entropy.AttachVirtioRng(driver);
+        if (!random.IsAvailable)
+        {
+            entropy.DetachVirtioRng(driver);
+            driver.TryStop();
+            return false;
+        }
+        s_phase35Entropy = entropy;
+        s_phase35Driver = driver;
+        return KernelLog.Write(
+            "GXOS_NET10:MANAGED_PHASE35_ENTROPY_PROVIDER_LIVE\r\n"u8);
+    }
+
+    internal static bool StopPhase35Provider()
+    {
+        if (!s_phase35Driver.HasValue)
+            return s_phase35Entropy == null;
+        ManagedVirtioRngDriver driver = s_phase35Driver.Value;
+        ManagedEntropyService? entropy = s_phase35Entropy;
+        if (entropy != null) entropy.DetachVirtioRng(driver);
+        bool stopped = driver.TryStop() &&
+            ManagedDeviceResourceRuntimeCatalog.ActiveClaimCountForDriver(
+                ManagedVirtioRngProtocol.DriverId) == 0;
+        s_phase35Driver = null;
+        s_phase35Entropy = null;
+        return stopped;
+    }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void CollectWithRoots(ManagedEntropyService entropy,

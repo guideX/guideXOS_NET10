@@ -27,6 +27,7 @@ param(
     [switch]$EnablePhase33Protocol,
     [switch]$EnablePhase34NegativeControl,
     [switch]$EnablePhase34Protocol,
+    [switch]$EnableManagedKernelPhase35,
     [switch]$EnablePhase32NegativeControl,
     [switch]$Phase15EnableFilterDump,
     [switch]$Phase15EnableQemuReceiveTrace,
@@ -45,6 +46,10 @@ if ($EnablePhase33NegativeControl -and -not $EnablePhase33Protocol) {
 }
 if ($EnablePhase34NegativeControl -and -not $EnablePhase34Protocol) {
     throw '-EnablePhase34NegativeControl requires -EnablePhase34Protocol.'
+}
+if ($EnableManagedKernelPhase35 -and
+    (!$EnablePhase15Rx -or $Phase15NetworkBackend -ne 'user')) {
+    throw '-EnableManagedKernelPhase35 requires -EnablePhase15Rx -Phase15NetworkBackend user.'
 }
 $gate = [IO.Path]::GetFullPath($GateDirectory)
 $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
@@ -184,6 +189,42 @@ function Wait-Phase15Outcome11([datetime]$deadline,
         Start-Sleep -Milliseconds 25
     }
     throw 'Timed out waiting for a Phase 15 pass or bounded deferral.'
+}
+
+function Wait-Phase35Outcome11([datetime]$deadline,
+                                [System.Diagnostics.Process]$process,
+                                [System.IO.Stream]$stream, [IO.FileStream]$logStream,
+                                [Text.StringBuilder]$text, [byte[]]$buffer) {
+    while ((Get-Date) -lt $deadline) {
+        Pump-Serial11 $stream $logStream $text $buffer
+        $transcript = $text.ToString()
+        if ($transcript.Contains('GXOS_NET10:PUBLIC_HTTPS_COMPLETE')) {
+            Write-Timeline11 $script:phase11Timeline 'GUEST_MARKER' `
+                'marker=GXOS_NET10:PUBLIC_HTTPS_COMPLETE outcome=A'
+            return 'A'
+        }
+        if ($transcript.Contains('GXOS_NET10:PUBLIC_HTTPS_OUTCOME=B')) {
+            Write-Timeline11 $script:phase11Timeline 'GUEST_MARKER' `
+                'marker=GXOS_NET10:PUBLIC_HTTPS_OUTCOME=B outcome=B'
+            return 'B'
+        }
+        if ($transcript.Contains('GXOS_NET10:PUBLIC_HTTPS_OUTCOME=C')) {
+            return 'C'
+        }
+        if ($transcript.Contains('GXOS_NET10:PUBLIC_HTTPS_OUTCOME=D')) {
+            return 'D'
+        }
+        if ($transcript.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
+            $transcript.Contains('GXOS_NET10:PAGE_FAULT_') -or
+            $transcript.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) {
+            throw 'QEMU reported a machine fault while waiting for the Phase 35 outcome.'
+        }
+        if ($process.HasExited) {
+            throw 'QEMU exited while waiting for the Phase 35 outcome.'
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    throw 'Timed out waiting for the Phase 35 public HTTPS outcome.'
 }
 
 function Wait-Phase32NegativeOutcome11([datetime]$deadline,
@@ -2231,8 +2272,9 @@ if ($Phase15EnableFilterDump) {
         'Phase 15 filter-dump requires the dgram RX backend.'
 }
 if ($Phase15EnableQemuReceiveTrace) {
-    Require11 ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') `
-        'Phase 15 QEMU receive tracing requires the dgram RX backend.'
+    Require11 ($EnablePhase15Rx -and
+        ($Phase15NetworkBackend -eq 'dgram' -or $EnableManagedKernelPhase35)) `
+        'Phase 15 QEMU receive tracing requires an active RX backend.'
 }
 Require11 (@(Get-OwnedQemu11).Count -eq 0) 'An owned QEMU process is already running.'
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
@@ -2329,7 +2371,10 @@ try {
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
             '-display', 'none', '-no-reboot', '-no-shutdown')
         if ($EnablePhase15Rx) {
-            if (-not $Phase15KeepDefaultNic) { $arguments += @('-nic', 'none') }
+            if (-not $Phase15KeepDefaultNic -and
+                $Phase15NetworkBackend -eq 'dgram') {
+                $arguments += @('-nic', 'none')
+            }
             if ($Phase15NetworkBackend -eq 'dgram') {
                 $arguments += @(
                     '-netdev', "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$rxPort,remote.type=inet,remote.host=127.0.0.1,remote.port=$peerPort")
@@ -2422,7 +2467,14 @@ try {
             if (-not [string]::IsNullOrEmpty($PostPhase11Marker)) {
                 Wait-Marker11 $PostPhase11Marker $deadline $process $stream $logStream $text $buffer
             }
-            if ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') {
+            if ($EnableManagedKernelPhase35) {
+                $phase15Outcome = Wait-Phase35Outcome11 `
+                    $deadline $process $stream $logStream $text $buffer
+                if ($phase15Outcome -in @('A', 'B')) {
+                    Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' `
+                        $deadline $process $stream $logStream $text $buffer
+                }
+            } elseif ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') {
                 Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_READY' $deadline $process $stream $logStream $text $buffer
                 $macMatch = [regex]::Match($text.ToString(),
                     'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
@@ -3887,6 +3939,13 @@ try {
             Require11 ($finalText.Contains(
                 'GXOS_NET10:MANAGED_KERNEL_PHASE33_START_FAILED')) `
                 "Boot $sequence did not reject the Phase 33 negative control."
+            Require11 (!$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
+                       !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
+                       !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
+                "Boot $sequence reported an unexpected machine fault."
+        } elseif ($EnableManagedKernelPhase35) {
+            Require11 ($phase15Outcome -in @('A', 'B')) `
+                "Boot $sequence reported unsupported Phase 35 outcome: $phase15Outcome."
             Require11 (!$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
                        !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
                        !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `

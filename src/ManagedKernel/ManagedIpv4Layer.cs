@@ -60,6 +60,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private readonly ManagedArpLayer _arp;
     private readonly byte[] _localIpv4 = new byte[4];
     private readonly byte[] _peerIpv4 = new byte[4];
+    private readonly byte[] _gatewayIpv4 = new byte[4];
     private readonly byte[] _subnetMask = { 255, 255, 255, 0 };
     private readonly byte[] _destinationMac = new byte[6];
     private readonly byte[] _pendingIpv4 = new byte[4];
@@ -90,9 +91,11 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private ManagedPhase32TestConsumer? _phase32Consumer;
     private ManagedPhase33TestConsumer? _phase33Consumer;
     private ManagedPhase34TestConsumer? _phase34Consumer;
+    private ManagedPhase35PublicHttpsConsumer? _phase35Consumer;
     private readonly ManagedTcpConnection _tcp;
     private uint _localIpv4Value;
     private uint _peerIpv4Value;
+    private uint _gatewayIpv4Value;
     private uint _subnetMaskValue;
     private byte _pingPayloadLength;
     private byte _managedUdpPayloadLength;
@@ -118,6 +121,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase32Passed;
     private bool _phase33Passed;
     private bool _phase34Passed;
+    private bool _phase35Passed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -186,6 +190,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase32Passed => _phase32Passed;
     internal bool Phase33Passed => _phase33Passed;
     internal bool Phase34Passed => _phase34Passed;
+    internal bool Phase35Passed => _phase35Passed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -217,6 +222,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal ReadOnlySpan<byte> DnsResolvedIpv4 => _dns.ResolvedIpv4;
     internal uint LocalIpv4Value => _localIpv4Value;
     internal uint SubnetMaskValue => _subnetMaskValue;
+    internal uint GatewayIpv4Value => _gatewayIpv4Value;
     internal uint DnsServerValue => _dns.HasServer
         ? ManagedEthernetProtocol.ReadUInt32Network(_dns.ServerIpv4, 0) : 0;
     internal uint DnsResolvedIpv4Value => _dns.HasResolvedAddress
@@ -285,8 +291,10 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _active = true;
         _localIpv4.AsSpan().Clear();
         _subnetMask.AsSpan().Clear();
+        _gatewayIpv4.AsSpan().Clear();
         _localIpv4Value = 0;
         _subnetMaskValue = 0;
+        _gatewayIpv4Value = 0;
         _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
         if (!_udpEndpoints.TryRegister(DhcpClientPort,
                                         ManagedUdpEndpointHandler.Dhcpv4Client) ||
@@ -312,8 +320,10 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _dns.ResetForDhcp();
         _localIpv4.AsSpan().Clear();
         _subnetMask.AsSpan().Clear();
+        _gatewayIpv4.AsSpan().Clear();
         _localIpv4Value = 0;
         _subnetMaskValue = 0;
+        _gatewayIpv4Value = 0;
         _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
         if (!_udpEndpoints.TryRegister(DhcpClientPort,
                                         ManagedUdpEndpointHandler.Dhcpv4Client) ||
@@ -575,6 +585,69 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         return KernelLog.Write("GXOS_NET10:MANAGED_DNS_PHASE34_PASS\r\n"u8);
     }
 
+    /* Phase 35 is an intentionally separate boot mode.  It performs the same
+       managed DHCP/DNS/TCP/TLS composition as the production service, but is
+       entered only after the loader has selected QEMU's user-mode backend.
+       The fixture phases never call this method. */
+    internal bool TryRunPhase35()
+    {
+        if (_phase35Passed || _active || _networkService == null)
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE35_IPV4_GUARD_FAILED\r\n"u8);
+            return false;
+        }
+        _phase35Consumer ??= new ManagedPhase35PublicHttpsConsumer(_networkService);
+        if (!_arp.TryBeginDhcp())
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE35_ARP_DHCP_BEGIN_FAILED\r\n"u8);
+            return false;
+        }
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _gatewayIpv4.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _gatewayIpv4Value = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_PUBLIC_HTTPS_BEGIN\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true, requireGateway: true) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort) ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                       ManagedUdpEndpointHandler.DnsResolver) ||
+            !PublishNetworkServiceStatus() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_PUBLIC_HTTPS_CONFIGURED\r\n"u8))
+            return false;
+
+        if (!KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_PUBLIC_HTTPS_IPV4=0x"u8,
+                _localIpv4Value) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_PUBLIC_HTTPS_SUBNET=0x"u8,
+                _subnetMaskValue) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_PUBLIC_HTTPS_GATEWAY=0x"u8,
+                _gatewayIpv4Value) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_PUBLIC_HTTPS_DNS=0x"u8,
+                DnsServerValue))
+            return false;
+
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        if (!_phase35Consumer.TryRun()) return false;
+        if (_phase35Consumer.ControlledTlsIncompatibility)
+            return true;
+        _phase35Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_PUBLIC_HTTPS_PASS\r\n"u8);
+    }
+
     private bool PublishNetworkServiceStatus()
     {
         if (_networkService == null) return false;
@@ -586,7 +659,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
             true, true, true, true, mac,
             new Ipv4Address(_localIpv4Value),
             new Ipv4Address(_subnetMaskValue),
-            new Ipv4Address(DnsServerValue)));
+            new Ipv4Address(DnsServerValue),
+            new Ipv4Address(_gatewayIpv4Value)));
         return true;
     }
 
@@ -685,7 +759,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         return true;
     }
 
-    private bool TryRunDhcpDora(bool requireDnsServer = false)
+    private bool TryRunDhcpDora(bool requireDnsServer = false,
+                                bool requireGateway = false)
     {
         for (int attempt = 0; attempt != ManagedDhcpv4Client.MaximumDiscoverAttempts;
              ++attempt)
@@ -709,13 +784,17 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
             }
             if (completed)
             {
-                if (!ApplyDhcpLease(requireDnsServer) ||
+                if (!ApplyDhcpLease(requireDnsServer, requireGateway) ||
                     !KernelLog.Write("GXOS_NET10:MANAGED_DHCP_ACK_ACCEPTED\r\n"u8) ||
                     !KernelLog.Write("GXOS_NET10:MANAGED_DHCP_BOUND\r\n"u8) ||
                     !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_LEASED_IPV4=0x"u8,
                                             _localIpv4Value) ||
-                    !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_SUBNET_MASK=0x"u8,
-                                            _subnetMaskValue) ||
+                     !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_SUBNET_MASK=0x"u8,
+                                             _subnetMaskValue) ||
+                     !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_GATEWAY=0x"u8,
+                                             _gatewayIpv4Value) ||
+                     !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_DNS_SERVER=0x"u8,
+                                             DnsServerValue) ||
                     !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_DHCP_LEASE_TIME=0x"u8,
                                             _dhcp.LeasedLeaseTime))
                     return false;
@@ -729,21 +808,28 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         return KernelLog.Write("GXOS_NET10:MANAGED_DHCP_FAILED\r\n"u8);
     }
 
-    private bool ApplyDhcpLease(bool requireDnsServer = false)
+    private bool ApplyDhcpLease(bool requireDnsServer = false,
+                                bool requireGateway = false)
     {
         if (!_dhcp.HasLease ||
-            (requireDnsServer && !_dhcp.LeasedHasDnsServer1))
+            (requireDnsServer && !_dhcp.LeasedHasDnsServer1) ||
+            (requireGateway && !_dhcp.LeasedHasRouter))
             return false;
         _dhcp.LeasedIpv4.CopyTo(_localIpv4);
         _dhcp.LeasedMask.CopyTo(_subnetMask);
         _dhcp.LeasedServerIdentifier.CopyTo(_peerIpv4);
+        _gatewayIpv4.AsSpan().Clear();
+        if (_dhcp.LeasedHasRouter) _dhcp.LeasedRouter.CopyTo(_gatewayIpv4);
         _localIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_localIpv4, 0);
         _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        _gatewayIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_gatewayIpv4, 0);
         _subnetMaskValue = ManagedEthernetProtocol.ReadUInt32Network(_subnetMask, 0);
         if (requireDnsServer && !_dns.TryInstallServer(_dhcp.LeasedDnsServer1))
             return false;
         if (!ManagedIpv4Protocol.IsDirectlyReachable(
-                _localIpv4Value, _subnetMaskValue, _peerIpv4Value))
+                _localIpv4Value, _subnetMaskValue, _peerIpv4Value) ||
+            (requireGateway && !ManagedIpv4Protocol.IsDirectlyReachable(
+                _localIpv4Value, _subnetMaskValue, _gatewayIpv4Value)))
             return false;
         return _arp.TryInstallLocalIpv4(_localIpv4);
     }
@@ -854,8 +940,10 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _dhcp.ResetForTeardown();
         _localIpv4.AsSpan().Clear();
         _subnetMask.AsSpan().Clear();
+        _gatewayIpv4.AsSpan().Clear();
         _localIpv4Value = 0;
         _subnetMaskValue = 0;
+        _gatewayIpv4Value = 0;
         _phase19Passed = false;
         _phase20Passed = false;
         _phase21Passed = false;
@@ -864,6 +952,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _phase32Passed = false;
         _phase33Passed = false;
         _phase34Passed = false;
+        _phase35Passed = false;
         _servicePingIdentifier = 0x2101;
         _servicePingSequence = 1;
         _dns.ResetForTeardown();
@@ -1316,11 +1405,16 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool TrySendPacket(ReadOnlySpan<byte> destinationIpv4,
                                ReadOnlySpan<byte> packet)
     {
-        if (!ManagedIpv4Protocol.IsDirectlyReachable(
-                _localIpv4Value, _subnetMaskValue,
-                ManagedEthernetProtocol.ReadUInt32Network(destinationIpv4, 0)))
+        uint destinationIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(
+            destinationIpv4, 0);
+        if (!ManagedIpv4Protocol.TrySelectNextHop(
+                _localIpv4Value, _subnetMaskValue, _gatewayIpv4Value,
+                destinationIpv4Value, out uint nextHopIpv4Value))
             return false;
-        if (_arp.Cache.TryLookup(destinationIpv4, _destinationMac))
+        Span<byte> nextHopIpv4 = stackalloc byte[4];
+        ManagedEthernetProtocol.WriteUInt32Network(nextHopIpv4, 0,
+                                                    nextHopIpv4Value);
+        if (_arp.Cache.TryLookup(nextHopIpv4, _destinationMac))
             return _ethernet.TryTransmit(ManagedIpv4Protocol.EtherType,
                                          _destinationMac, _txPacket,
                                          packet.Length);
@@ -1331,8 +1425,15 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 "GXOS_NET10:MANAGED_IPV4_PENDING_OVERFLOW\r\n"u8);
             return false;
         }
-        destinationIpv4.CopyTo(_pendingIpv4);
-        if (!_arp.TryResolve(destinationIpv4))
+        nextHopIpv4.CopyTo(_pendingIpv4);
+        if (!ManagedIpv4Protocol.IsDirectlyReachable(
+                _localIpv4Value, _subnetMaskValue, nextHopIpv4Value) ||
+            !KernelLog.WriteHexLine(
+                destinationIpv4Value == nextHopIpv4Value
+                    ? "GXOS_NET10:MANAGED_IPV4_ARP_NEXT_HOP_DIRECT=0x"u8
+                    : "GXOS_NET10:MANAGED_IPV4_ARP_NEXT_HOP_GATEWAY=0x"u8,
+                nextHopIpv4Value) ||
+            !_arp.TryResolve(nextHopIpv4))
         {
             _pending.Clear();
             return false;

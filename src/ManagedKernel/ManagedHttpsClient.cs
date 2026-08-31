@@ -167,6 +167,14 @@ public sealed class ManagedHttpsClient
     private bool _redirectPending;
     private int _redirectCount;
     private ManagedHttpsUrlParseFailureReason _urlParseFailure;
+    private ManagedTls12HandshakeStage _lastTlsHandshake =
+        ManagedTls12HandshakeStage.ClientHello;
+    private ManagedTls12FailureKind _lastTlsFailureKind =
+        ManagedTls12FailureKind.Protocol;
+    private bool _lastTlsEmsNegotiated;
+    private int _lastTlsPeerCertificateCount;
+    private byte _lastTlsPeerCertificateAlgorithmMask;
+    private bool _lastTlsTrustAnchorMatched;
 
     public ManagedHttpsClient(ManagedNetworkService service,
                               ReadOnlySpan<byte> trustedRoot,
@@ -233,6 +241,19 @@ public sealed class ManagedHttpsClient
     public ManagedHttpFramingMode FramingMode => _parser.FramingMode;
     public bool ResponseBodyComplete => _parser.IsBodyComplete;
     public ManagedHttpParseFailureReason ParseFailureReason => _parser.FailureReason;
+    internal ManagedTls12HandshakeStage TlsLastHandshake => _tls == null
+        ? _lastTlsHandshake : _tls.LastHandshake;
+    internal ManagedTls12FailureKind TlsFailureKind => _tls == null
+        ? _lastTlsFailureKind : _tls.FailureKind;
+    internal bool TlsEmsNegotiated => _tls == null
+        ? _lastTlsEmsNegotiated : _tls.EmsNegotiated;
+    internal int TlsPeerCertificateCount => _tls == null
+        ? _lastTlsPeerCertificateCount : _tls.PeerCertificateCount;
+    internal byte TlsPeerCertificateAlgorithmMask => _tls == null
+        ? _lastTlsPeerCertificateAlgorithmMask :
+          _tls.PeerCertificateAlgorithmMask;
+    internal bool TlsTrustAnchorMatched => _tls == null
+        ? _lastTlsTrustAnchorMatched : _tls.TrustAnchorMatched;
 
     public NetworkOperationResult BeginGet(ReadOnlySpan<byte> hostname,
                                            ReadOnlySpan<byte> path)
@@ -401,13 +422,46 @@ public sealed class ManagedHttpsClient
             {
                 if (!_transport.TryReceive(_receive, out int received) ||
                     received <= 0 || _tls == null)
+                {
+                    KernelLog.WriteHexLine(
+                        "GXOS_NET10:PUBLIC_TLS_RECEIVE_FAILED_LENGTH=0x"u8,
+                        (ulong)Math.Max(received, 0));
                     return Fail(ManagedHttpsFailureReason.TlsProtocolFailure);
+                }
+                if (received >= ManagedTls12RecordProtection.HeaderSize)
+                {
+                    KernelLog.WriteHexLine(
+                        "GXOS_NET10:PUBLIC_TLS_RECORD_TYPE=0x"u8,
+                        _receive[0]);
+                    KernelLog.WriteHexLine(
+                        "GXOS_NET10:PUBLIC_TLS_RECORD_LENGTH=0x"u8,
+                        (ulong)((_receive[3] << 8) | _receive[4]));
+                    if (_receive[0] == ManagedTls12RecordProtection.Handshake &&
+                        received >= ManagedTls12RecordProtection.HeaderSize + 6)
+                    {
+                        KernelLog.WriteHexLine(
+                            "GXOS_NET10:PUBLIC_TLS_HANDSHAKE_TYPE=0x"u8,
+                            _receive[5]);
+                        KernelLog.WriteHexLine(
+                            "GXOS_NET10:PUBLIC_TLS_HANDSHAKE_LENGTH=0x"u8,
+                            (ulong)((_receive[6] << 16) |
+                                    (_receive[7] << 8) | _receive[8]));
+                    }
+                }
                 if (!_tls.TryConsume(_receive.AsSpan(0, received)))
+                {
+                    KernelLog.WriteHexLine(
+                        "GXOS_NET10:PUBLIC_TLS_CONSUME_FAILED_BYTES=0x"u8,
+                        (ulong)received);
+                    KernelLog.WriteHexLine(
+                        "GXOS_NET10:PUBLIC_TLS_CONSUME_FAILED_STAGE=0x"u8,
+                        (ulong)_tls.LastHandshake);
                     return Fail(_tls.State == ManagedTls12ClientState.Failed &&
                                 _tls.FailureKind ==
                                 ManagedTls12FailureKind.Authentication
                         ? ManagedHttpsFailureReason.TlsAuthenticationFailure
                         : ManagedHttpsFailureReason.TlsProtocolFailure);
+                }
 
                 if (_tls.State == ManagedTls12ClientState.Failed)
                     return Fail(_tls.FailureKind ==
@@ -525,6 +579,7 @@ public sealed class ManagedHttpsClient
         {
             if (_transport.ReleaseForReuse() != NetworkOperationResult.Success)
                 return Fail(ManagedHttpsFailureReason.TeardownFailure);
+            SnapshotTlsDiagnostics();
             _tls?.Teardown();
             if (_redirectPending)
             {
@@ -683,6 +738,7 @@ public sealed class ManagedHttpsClient
 
     private NetworkOperationResult Fail(ManagedHttpsFailureReason reason)
     {
+        SnapshotTlsDiagnostics();
         if (_state != ManagedHttpsClientState.Failed &&
             _state != ManagedHttpsClientState.Succeeded)
         {
@@ -707,7 +763,25 @@ public sealed class ManagedHttpsClient
         _redirectCount = 0;
         _urlParseFailure = ManagedHttpsUrlParseFailureReason.None;
         _failureReason = ManagedHttpsFailureReason.None;
+        _lastTlsHandshake = ManagedTls12HandshakeStage.ClientHello;
+        _lastTlsFailureKind = ManagedTls12FailureKind.Protocol;
+        _lastTlsEmsNegotiated = false;
+        _lastTlsPeerCertificateCount = 0;
+        _lastTlsPeerCertificateAlgorithmMask = 0;
+        _lastTlsTrustAnchorMatched = false;
         ClearPerHopBuffers();
+    }
+
+    private void SnapshotTlsDiagnostics()
+    {
+        if (_tls == null) return;
+        _lastTlsHandshake = _tls.LastHandshake;
+        _lastTlsFailureKind = _tls.FailureKind;
+        _lastTlsEmsNegotiated = _tls.EmsNegotiated;
+        _lastTlsPeerCertificateCount = _tls.PeerCertificateCount;
+        _lastTlsPeerCertificateAlgorithmMask =
+            _tls.PeerCertificateAlgorithmMask;
+        _lastTlsTrustAnchorMatched = _tls.TrustAnchorMatched;
     }
 
     private void ClearPerHopBuffers()

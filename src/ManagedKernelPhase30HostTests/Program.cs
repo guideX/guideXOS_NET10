@@ -321,13 +321,13 @@ internal static class Program
         byte[] unsupportedSignature = MutateOid(
             ManagedX509Phase30Fixtures.Root,
             new byte[] { 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04,
-                         0x03, 0x02 }, false);
+                          0x03, 0x02 }, false, 0x02);
         ExpectParseStatus("unsupported-signature-algorithm", unsupportedSignature,
                           ManagedX509ValidationStatus.UnsupportedAlgorithm);
         byte[] unsupportedOuter = MutateOid(
             ManagedX509Phase30Fixtures.Root,
             new byte[] { 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04,
-                         0x03, 0x02 }, true);
+                          0x03, 0x02 }, true, 0x02);
         ExpectParseStatus("outer-tbs-signature-algorithm-mismatch",
                           unsupportedOuter,
                           ManagedX509ValidationStatus.UnsupportedAlgorithm);
@@ -591,13 +591,13 @@ internal static class Program
     }
 
     private static byte[] MutateOid(byte[] source, byte[] encodedOid,
-                                    bool lastOccurrence)
+                                    bool lastOccurrence, byte xor = 1)
     {
         byte[] result = Clone(source);
         int offset = lastOccurrence ? FindLast(result, encodedOid) :
                                       Find(result, encodedOid);
         Require(offset >= 0, "OID fixture");
-        result[offset + encodedOid.Length - 1] ^= 1;
+        result[offset + encodedOid.Length - 1] ^= xor;
         return result;
     }
 

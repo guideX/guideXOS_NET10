@@ -119,6 +119,7 @@ internal sealed class ManagedTls12Client
     private int _expectedHandshakeLength;
     private int _certificateStorageLength;
     private int _peerCertificateCount;
+    private byte _peerCertificateAlgorithmMask;
     private int _outboundLength;
     private int _applicationPlaintextLength;
     private int _pendingApplicationLength;
@@ -127,6 +128,7 @@ internal sealed class ManagedTls12Client
     private bool _serverReadActive;
     private ulong _clientSequence;
     private ulong _serverSequence;
+    private bool _trustAnchorMatched;
 
     private ManagedTls12Client(ReadOnlySpan<byte> hostname,
                                ReadOnlySpan<byte> trustedRoot,
@@ -183,6 +185,8 @@ internal sealed class ManagedTls12Client
     internal ManagedTls12FailureKind FailureKind => _failureKind;
     internal bool EmsNegotiated => _serverEms;
     internal int PeerCertificateCount => _peerCertificateCount;
+    internal byte PeerCertificateAlgorithmMask => _peerCertificateAlgorithmMask;
+    internal bool TrustAnchorMatched => _trustAnchorMatched;
     internal int TranscriptLength => _transcript.Length;
     internal int HandshakeBytesPending => _handshakeLength;
     internal int ExpectedHandshakeLength => _expectedHandshakeLength;
@@ -254,12 +258,29 @@ internal sealed class ManagedTls12Client
         int expectedHandshakeLength = 4 + 78 + _hostname.Length;
         if (_stage != InternalStage.Created ||
             destination.Length < 5 + expectedHandshakeLength)
+        {
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_TLS_CLIENT_START_STAGE=0x"u8,
+                (ulong)_stage);
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_TLS_CLIENT_START_BUFFER=0x"u8,
+                (ulong)destination.Length);
             return false;
+        }
 
         Span<byte> handshake = stackalloc byte[512];
-        if (!_random.TryFill(_clientRandom) ||
-            !BuildClientHello(handshake, out int handshakeLength))
+        if (!_random.TryFill(_clientRandom))
         {
+            KernelLog.Write(
+                "GXOS_NET10:PUBLIC_TLS_CLIENT_RANDOM_ENTROPY_FAILED\r\n"u8);
+            Fail();
+            handshake.Clear();
+            return false;
+        }
+        if (!BuildClientHello(handshake, out int handshakeLength))
+        {
+            KernelLog.Write(
+                "GXOS_NET10:PUBLIC_TLS_CLIENT_HELLO_BUILD_FAILED\r\n"u8);
             Fail();
             handshake.Clear();
             return false;
@@ -608,6 +629,12 @@ internal sealed class ManagedTls12Client
                 {
                     int bodyLength = (_handshake[1] << 16) |
                                      (_handshake[2] << 8) | _handshake[3];
+                    KernelLog.WriteHexLine(
+                        "GXOS_NET10:PUBLIC_TLS_HANDSHAKE_HEADER_TYPE=0x"u8,
+                        _handshake[0]);
+                    KernelLog.WriteHexLine(
+                        "GXOS_NET10:PUBLIC_TLS_HANDSHAKE_HEADER_LENGTH=0x"u8,
+                        (ulong)bodyLength);
                     int maximum = _handshake[0] == 11
                         ? MaximumCertificateMessageBytes
                         : MaximumHandshakeMessageBytes;
@@ -727,6 +754,9 @@ internal sealed class ManagedTls12Client
         body.Slice(2, 32).CopyTo(_serverRandom);
         int offset = 34;
         int sessionIdLength = body[offset++];
+        KernelLog.WriteHexLine(
+            "GXOS_NET10:PUBLIC_TLS_SERVER_SESSION_ID_LENGTH=0x"u8,
+            (ulong)sessionIdLength);
         if (sessionIdLength > 32 || sessionIdLength > body.Length - offset)
             return false;
         offset += sessionIdLength;
@@ -734,9 +764,15 @@ internal sealed class ManagedTls12Client
             ((body[offset] << 8) | body[offset + 1]) != CipherSuite ||
             body[offset + 2] != 0)
             return false;
+        KernelLog.WriteHexLine(
+            "GXOS_NET10:PUBLIC_TLS_SERVER_CIPHER=0x"u8,
+            (ulong)((body[offset] << 8) | body[offset + 1]));
         offset += 3;
         int extensionLength = (body[offset] << 8) | body[offset + 1];
         offset += 2;
+        KernelLog.WriteHexLine(
+            "GXOS_NET10:PUBLIC_TLS_SERVER_EXTENSION_LENGTH=0x"u8,
+            (ulong)extensionLength);
         if (extensionLength != body.Length - offset) return false;
 
         bool ems = false;
@@ -746,10 +782,23 @@ internal sealed class ManagedTls12Client
             ushort type = (ushort)((body[offset] << 8) | body[offset + 1]);
             int length = (body[offset + 2] << 8) | body[offset + 3];
             offset += 4;
-            if (length > body.Length - offset ||
-                type != ExtendedMasterSecretExtension || length != 0 || ems)
-                return false;
-            ems = true;
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_TLS_SERVER_EXTENSION_TYPE=0x"u8,
+                type);
+            if (length > body.Length - offset) return false;
+            ReadOnlySpan<byte> extension = body.Slice(offset, length);
+            bool valid = type switch
+            {
+                0 => length == 0, // server_name acknowledgement
+                11 => length == 2 && extension[0] == 1 && extension[1] == 0,
+                35 => length == 0, // session_ticket acknowledgement
+                0xFF01 => length == 1 && extension[0] == 0,
+                ExtendedMasterSecretExtension => length == 0 && !ems,
+                _ => false
+            };
+            if (!valid) return false;
+            if (type == ExtendedMasterSecretExtension) ems = true;
+            offset += length;
         }
         _serverEms = ems;
         return ems;
@@ -757,59 +806,133 @@ internal sealed class ManagedTls12Client
 
     private bool ParseCertificate(ReadOnlySpan<byte> body)
     {
+        KernelLog.WriteHexLine(
+            "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_BODY_LENGTH=0x"u8,
+            (ulong)body.Length);
         if (body.Length < 3 || body.Length - 3 > MaximumCertificateMessageBytes)
+        {
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_FAILURE=0x"u8, 1UL);
             return false;
+        }
         int listLength = (body[0] << 16) | (body[1] << 8) | body[2];
+        KernelLog.WriteHexLine(
+            "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_LIST_LENGTH=0x"u8,
+            (ulong)listLength);
         if (listLength != body.Length - 3 || listLength == 0)
+        {
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_FAILURE=0x"u8, 2UL);
             return false;
+        }
         int offset = 3;
         int end = body.Length;
         _peerCertificateCount = 0;
+        _peerCertificateAlgorithmMask = 0;
+        _trustAnchorMatched = false;
         _certificateStorageLength = 0;
         while (offset < end)
         {
             if (_peerCertificateCount == MaximumPeerCertificates ||
-                end - offset < 3) return false;
+                end - offset < 3)
+            {
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_FAILURE=0x"u8,
+                    3UL);
+                return false;
+            }
             int length = (body[offset] << 16) | (body[offset + 1] << 8) |
                          body[offset + 2];
             offset += 3;
             if (length == 0 || length > ManagedX509.MaximumCertificateLength ||
                 length > end - offset ||
                 length > _workingStorage.Length - _certificateStorageLength)
+            {
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_FAILURE=0x"u8,
+                    4UL);
                 return false;
+            }
+            ReadOnlySpan<byte> wireCertificate = body.Slice(offset, length);
             int storageOffset = _certificateStorageLength;
-            body.Slice(offset, length).CopyTo(
+            wireCertificate.CopyTo(
                 _workingStorage.AsSpan(storageOffset));
             ReadOnlySpan<byte> certificate = _workingStorage.AsSpan(
                 storageOffset, length);
-            if (ManagedX509.TryParseCertificate(certificate,
-                                                out ManagedX509Certificate parsed,
-                                                out _) !=
-                ManagedX509ValidationStatus.Success)
+            ManagedX509ValidationStatus parseStatus =
+                ManagedX509.TryParseCertificate(
+                    certificate, out ManagedX509Certificate parsed,
+                    out ManagedX509ValidationStatus certificateStatus);
+            if (parseStatus != ManagedX509ValidationStatus.Success)
+            {
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_INDEX=0x"u8,
+                    (ulong)_peerCertificateCount);
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_STATUS=0x"u8,
+                    (ulong)certificateStatus);
                 return false;
+            }
             _peerCertificateOffsets[_peerCertificateCount] = storageOffset;
             _peerCertificateLengths[_peerCertificateCount] = length;
             _peerCertificates[_peerCertificateCount] = parsed;
+            _peerCertificateAlgorithmMask |=
+                CertificateAlgorithmBit(in parsed);
             _peerCertificateCount++;
             _certificateStorageLength += length;
             offset += length;
         }
         if (offset != end || _peerCertificateCount == 0)
+        {
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_FAILURE=0x"u8, 5UL);
             return false;
+        }
 
-        ReadOnlySpan<byte> finalPeer = GetPeerCertificate(
-            _peerCertificateCount - 1);
-        bool peerIncludesRoot = finalPeer.Length == _trustedRoot.Length &&
-            ManagedCryptoComparison.FixedTimeEquals(finalPeer, _trustedRoot);
-        if (!peerIncludesRoot && _peerCertificateCount > 3)
+        ReadOnlySpan<byte> candidateRoot = _trustedRoot;
+        int certificateCount = _peerCertificateCount;
+        if (certificateCount > 1)
+        {
+            int lastIndex = certificateCount - 1;
+            ManagedX509TrustAnchorMatch anchorMatch =
+                ManagedX509TrustAnchorMatch.None;
+            if (!ManagedX509.TryMatchTrustAnchorIdentity(
+                    GetPeerCertificate(lastIndex),
+                    in _peerCertificates[lastIndex], _trustedRoot,
+                    out anchorMatch))
+            {
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_FAILURE=0x"u8,
+                    6UL);
+                _failureKind = ManagedTls12FailureKind.Authentication;
+                return false;
+            }
+            if (anchorMatch == ManagedX509TrustAnchorMatch.SubjectKeyMismatch)
+            {
+                KernelLog.Write(
+                    "GXOS_NET10:PUBLIC_TLS_TRUST_ANCHOR_KEY_MISMATCH\r\n"u8);
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_FAILURE=0x"u8,
+                    7UL);
+                _failureKind = ManagedTls12FailureKind.Authentication;
+                return false;
+            }
+            if (anchorMatch == ManagedX509TrustAnchorMatch.Match)
+            {
+                candidateRoot = GetPeerCertificate(lastIndex);
+                _trustAnchorMatched = true;
+                certificateCount--;
+            }
+        }
+        if (certificateCount > 3)
+        {
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_PARSE_FAILURE=0x"u8, 8UL);
             return false;
-        int rootIndex = peerIncludesRoot ? _peerCertificateCount - 1 : -1;
-        ReadOnlySpan<byte> candidateRoot = peerIncludesRoot
-            ? finalPeer : _trustedRoot;
+        }
         ReadOnlySpan<byte> intermediate1 = ReadOnlySpan<byte>.Empty;
         ReadOnlySpan<byte> intermediate2 = ReadOnlySpan<byte>.Empty;
-        int intermediateCount = peerIncludesRoot ? rootIndex - 1 :
-                                _peerCertificateCount - 1;
+        int intermediateCount = certificateCount - 1;
         if (intermediateCount > 0) intermediate1 = GetPeerCertificate(1);
         if (intermediateCount > 1) intermediate2 = GetPeerCertificate(2);
         if (intermediateCount > 2) return false;
@@ -817,8 +940,11 @@ internal sealed class ManagedTls12Client
         if (!ManagedX509.TryValidateServerChain(
             GetPeerCertificate(0), intermediate1, intermediate2,
             candidateRoot, _trustedRoot, in _currentTime, _hostname,
-            out _))
+            out ManagedX509ValidationStatus validationStatus))
         {
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_TLS_CERTIFICATE_VALIDATION_STATUS=0x"u8,
+                (ulong)validationStatus);
             _failureKind = ManagedTls12FailureKind.Authentication;
             return false;
         }
@@ -998,6 +1124,27 @@ internal sealed class ManagedTls12Client
                                       _peerCertificateLengths[index]);
     }
 
+    private static byte CertificateAlgorithmBit(
+        in ManagedX509Certificate certificate)
+    {
+        if (certificate.PublicKeyAlgorithm ==
+                ManagedX509PublicKeyAlgorithm.EcdsaP256 &&
+            certificate.SignatureAlgorithm ==
+                ManagedX509SignatureAlgorithm.EcdsaSha256)
+            return 0x01;
+        if (certificate.PublicKeyAlgorithm ==
+                ManagedX509PublicKeyAlgorithm.EcdsaP256 &&
+            certificate.SignatureAlgorithm ==
+                ManagedX509SignatureAlgorithm.EcdsaSha384)
+            return 0x02;
+        if (certificate.PublicKeyAlgorithm ==
+                ManagedX509PublicKeyAlgorithm.EcdsaP384 &&
+            certificate.SignatureAlgorithm ==
+                ManagedX509SignatureAlgorithm.RsaSha256)
+            return 0x04;
+        return 0x80;
+    }
+
     private bool BuildClientHello(Span<byte> destination, out int length)
     {
         length = 0;
@@ -1074,11 +1221,18 @@ internal sealed class ManagedTls12Client
     {
         if (body.Length != 2)
         {
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_TLS_ALERT_LENGTH=0x"u8,
+                (ulong)body.Length);
             Fail();
             return;
         }
         byte level = body[0];
         byte description = body[1];
+        KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_TLS_ALERT_LEVEL=0x"u8,
+                               level);
+        KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_TLS_ALERT_DESCRIPTION=0x"u8,
+                               description);
         if (level == 2)
         {
             Fail();
@@ -1137,6 +1291,8 @@ internal sealed class ManagedTls12Client
         _expectedHandshakeLength = 0;
         _certificateStorageLength = 0;
         _peerCertificateCount = 0;
+        _peerCertificateAlgorithmMask = 0;
+        _trustAnchorMatched = false;
         _recordPlaintext.AsSpan().Clear();
         _applicationPlaintextLength = 0;
         _pendingApplication.AsSpan().Clear();
