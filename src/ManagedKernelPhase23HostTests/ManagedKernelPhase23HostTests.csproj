@@ -12,6 +12,7 @@
   <ItemGroup>
     <Compile Include="..\ManagedKernel\ManagedNetworkService.cs" Link="ManagedNetworkService.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpClient.cs" Link="ManagedHttpClient.cs" />
+    <Compile Include="..\ManagedKernel\ManagedContentEncoding.cs" Link="ManagedContentEncoding.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpsUrl.cs" Link="ManagedHttpsUrl.cs" />
     <Compile Include="..\ManagedKernel\ManagedEthernet.cs" Link="ManagedEthernet.cs" />
     <Compile Include="..\ManagedKernel\ManagedE1000Protocol.cs" Link="ManagedE1000Protocol.cs" />

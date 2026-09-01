@@ -834,6 +834,7 @@ internal static unsafe class ManagedKernelContract
     private static int s_phase35Mode;
     private static int s_phase39Mode;
     private static int s_phase40Mode;
+    private static int s_phase41Mode;
     private static ManagedE1000Driver? s_phase14Driver;
     private static int s_dmaServicesInstalled;
     private static ulong s_dmaCapabilities;
@@ -2370,13 +2371,26 @@ internal static unsafe class ManagedKernelContract
             ManagedE1000Driver.EnablePhase40Mode();
             return ManagedOk;
         }
+        if (stage == 6)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_dmaServicesInstalled == 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            if (!ManagedVirtioRngKernelProof.TryStartPhase35Provider())
+                return InvalidState;
+            s_phase41Mode = 1;
+            ManagedE1000Driver.EnablePhase41Mode();
+            return ManagedOk;
+        }
         if (stage == 1)
         {
             if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
                 s_dmaServicesInstalled == 0 ||
                 !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
                 (s_phase35Mode == 0 && s_phase39Mode == 0 &&
-                 s_phase40Mode == 0 &&
+                 s_phase40Mode == 0 && s_phase41Mode == 0 &&
                  ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0))
                 return InvalidState;
             ManagedE1000Driver? candidate = ManagedE1000Driver.TryCreate();
@@ -2404,6 +2418,7 @@ internal static unsafe class ManagedKernelContract
             s_phase35Mode = 0;
             s_phase39Mode = 0;
             s_phase40Mode = 0;
+            s_phase41Mode = 0;
             bool rxProof = s_phase14Driver.RxProofReceived;
             bool phase15RxProof = s_phase14Driver.RxPhase15Received;
             bool phase16Proof = s_phase14Driver.Phase16Passed;
@@ -2420,6 +2435,7 @@ internal static unsafe class ManagedKernelContract
             bool phase35Proof = s_phase14Driver.Phase35Passed;
             bool phase39Proof = s_phase14Driver.Phase39Passed;
             bool phase40Proof = s_phase14Driver.Phase40Passed;
+            bool phase41Proof = s_phase14Driver.Phase41Passed;
             s_phase14TeardownRun = 1;
             if (!KernelLog.Write(rxProof
                     ? "PHASE 14 FIRST MANAGED PCI DRIVER COMPLETE — DMA TX/RX PROVEN\r\n"u8
@@ -2458,7 +2474,9 @@ internal static unsafe class ManagedKernelContract
                 (phase39Proof &&
                  !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE39_PASS\r\n"u8)) ||
                 (phase40Proof &&
-                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE40_PASS\r\n"u8)))
+                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE40_PASS\r\n"u8)) ||
+                (phase41Proof &&
+                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE41_PASS\r\n"u8)))
                 return InvalidState;
             s_phase14Driver = null;
             return ManagedOk;
