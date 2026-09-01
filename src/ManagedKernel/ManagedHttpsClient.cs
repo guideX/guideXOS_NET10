@@ -241,6 +241,8 @@ public sealed class ManagedHttpsClient
     public int DeliveredResponseBodySegmentCount =>
         _parser.DeliveredSegmentCount;
     public int ContentLength => _parser.ContentLength;
+    public ManagedHttpContentTypeState ContentTypeState => _parser.ContentTypeState;
+    public int ContentTypeLength => _parser.ContentTypeLength;
     public ManagedHttpFramingMode FramingMode => _parser.FramingMode;
     public bool ResponseBodyComplete => _parser.IsBodyComplete;
     public ManagedHttpParseFailureReason ParseFailureReason => _parser.FailureReason;
@@ -248,6 +250,7 @@ public sealed class ManagedHttpsClient
         _parser.CreateProgressSnapshot(GetTransferState(), GetTerminalFailure());
     internal ManagedTls12HandshakeStage TlsLastHandshake => _tls == null
         ? _lastTlsHandshake : _tls.LastHandshake;
+    internal NetworkTcpState TcpState => _service.TcpState;
     internal ManagedTls12FailureKind TlsFailureKind => _tls == null
         ? _lastTlsFailureKind : _tls.FailureKind;
     internal bool TlsEmsNegotiated => _tls == null
@@ -636,6 +639,11 @@ public sealed class ManagedHttpsClient
             return false;
         }
         return _parser.TryReadBodyChunk(destination, out length);
+    }
+
+    public bool TryCopyResponseContentType(Span<byte> destination, out int length)
+    {
+        return _parser.TryCopyContentType(destination, out length);
     }
 
     public ManagedHttpBodyDeliveryResult ConsumeResponseBody(

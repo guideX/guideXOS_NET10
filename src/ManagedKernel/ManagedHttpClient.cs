@@ -55,6 +55,13 @@ public enum ManagedHttpTransferState : byte
     Failed = 5
 }
 
+public enum ManagedHttpContentTypeState : byte
+{
+    Missing = 0,
+    Available = 1,
+    TooLong = 2
+}
+
 public enum ManagedHttpTerminalFailureReason : byte
 {
     None = 0,
@@ -369,6 +376,8 @@ public sealed class ManagedHttpResponseParser
     private bool _connectionKeepAlive;
     private bool _hasLocation;
     private int _locationLength;
+    private bool _hasContentType;
+    private bool _contentTypeTooLong;
     private bool _compatibilityBodyOverflow;
     private bool _bodyDeliveryPaused;
     private ManagedHttpFramingMode _framingMode;
@@ -414,6 +423,11 @@ public sealed class ManagedHttpResponseParser
     public bool IsBodyDeliveryWindowFull =>
         _bufferedBodyLength == ManagedHttpLimits.MaximumBodyDeliveryWindow;
     public int ContentTypeLength => _contentTypeLength;
+    public bool HasContentType => _hasContentType;
+    public ManagedHttpContentTypeState ContentTypeState =>
+        !_hasContentType ? ManagedHttpContentTypeState.Missing :
+        _contentTypeTooLong ? ManagedHttpContentTypeState.TooLong :
+        ManagedHttpContentTypeState.Available;
     public bool HasTransferEncoding => _hasTransferEncoding;
     public bool HasLocation => _hasLocation;
     public bool ConnectionClose => _connectionClose;
@@ -467,6 +481,8 @@ public sealed class ManagedHttpResponseParser
         _connectionKeepAlive = false;
         _hasLocation = false;
         _locationLength = 0;
+        _hasContentType = false;
+        _contentTypeTooLong = false;
         _compatibilityBodyOverflow = false;
         _bodyDeliveryPaused = false;
         _framingMode = ManagedHttpFramingMode.None;
@@ -714,6 +730,16 @@ public sealed class ManagedHttpResponseParser
         return true;
     }
 
+    public bool TryCopyContentType(Span<byte> destination, out int length)
+    {
+        length = _contentTypeLength;
+        if (ContentTypeState != ManagedHttpContentTypeState.Available ||
+            destination.Length < length)
+            return false;
+        _contentType.AsSpan(0, length).CopyTo(destination);
+        return true;
+    }
+
     private bool FinishLine()
     {
         if (_state == ManagedHttpParseState.StatusLine)
@@ -849,10 +875,19 @@ public sealed class ManagedHttpResponseParser
             return ParseTransferEncoding(value);
         if (EqualsAsciiIgnoreCase(name, "Content-Type"u8))
         {
+            _hasContentType = true;
             if (value.Length > ManagedHttpLimits.MaximumContentTypeLength)
-                return Fail(ManagedHttpParseFailureReason.HeaderLineOverflow);
-            value.CopyTo(_contentType);
-            _contentTypeLength = value.Length;
+            {
+                _contentTypeTooLong = true;
+                _contentTypeLength = 0;
+                _contentType.AsSpan().Clear();
+            }
+            else
+            {
+                _contentTypeTooLong = false;
+                value.CopyTo(_contentType);
+                _contentTypeLength = value.Length;
+            }
         }
         if (EqualsAsciiIgnoreCase(name, "Location"u8))
         {
@@ -1020,6 +1055,9 @@ public sealed class ManagedHttpResponseParser
         _statusCode = 0;
         _contentLength = 0;
         _contentTypeLength = 0;
+        _hasContentType = false;
+        _contentTypeTooLong = false;
+        _contentType.AsSpan().Clear();
         _hasContentLength = false;
         _hasTransferEncoding = false;
         _chunked = false;
@@ -1141,6 +1179,8 @@ public sealed class ManagedHttpClient
     public int DeliveredResponseBodySegmentCount =>
         _parser.DeliveredSegmentCount;
     public int ContentLength => _parser.ContentLength;
+    public ManagedHttpContentTypeState ContentTypeState => _parser.ContentTypeState;
+    public int ContentTypeLength => _parser.ContentTypeLength;
     public ManagedHttpFramingMode FramingMode => _parser.FramingMode;
     public bool ResponseBodyComplete => _parser.IsBodyComplete;
     public ManagedHttpParseFailureReason ParseFailureReason => _parser.FailureReason;
@@ -1292,6 +1332,11 @@ public sealed class ManagedHttpClient
         return _parser.TryReadBodyChunk(destination, out length);
     }
 
+    public bool TryCopyResponseContentType(Span<byte> destination, out int length)
+    {
+        return _parser.TryCopyContentType(destination, out length);
+    }
+
     public ManagedHttpBodyDeliveryResult ConsumeResponseBody(
         IManagedHttpBodySink sink)
     {
@@ -1322,7 +1367,10 @@ public sealed class ManagedHttpClient
             return NetworkOperationResult.Success;
         if (_state == ManagedHttpClientState.Failed)
             return NetworkOperationResult.Success;
-        NetworkOperationResult result = _service.Teardown();
+        // Cancellation is a reusable-operation boundary.  Retain DHCP and
+        // service configuration just as HTTPS does; Reset() must be able to
+        // start a second request on the same service.
+        NetworkOperationResult result = _service.ReleaseTcpForReuse();
         _request.AsSpan().Clear();
         _receive.AsSpan().Clear();
         _pendingReceive.AsSpan().Clear();

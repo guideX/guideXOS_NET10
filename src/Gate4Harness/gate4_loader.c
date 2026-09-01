@@ -639,7 +639,7 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_config_read_service(
         offset, width, result_address, result_capacity);
 }
 
-#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE35
+#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39)
 #define GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS 2U
 #else
 #define GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS 1U
@@ -708,7 +708,7 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
         for (slot_index = 0; slot_index != GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS;
              ++slot_index) {
             if (g_managed_kernel_pci_command_slots[slot_index].live != 0) {
-#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE35
+#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39)
                 if (g_managed_kernel_pci_command_slots[slot_index].resource_id ==
                     resource_id) return GX_MANAGED_INVALID_STATE;
 #else
@@ -13792,6 +13792,11 @@ static void managed_kernel_phase14_driver(
     status = run_phase14(3U);
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase35-mode");
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE35_MODE_SELECTED\r\n");
+#endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE39
+    status = run_phase14(4U);
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase39-mode");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE39_MODE_SELECTED\r\n");
 #endif
     status = run_phase14(1U);
     if (status != GX_MANAGED_OK || run_phase14(1U) != GX_MANAGED_INVALID_STATE ||
