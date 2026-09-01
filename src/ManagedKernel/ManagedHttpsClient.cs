@@ -243,6 +243,9 @@ public sealed class ManagedHttpsClient
     public int ContentLength => _parser.ContentLength;
     public ManagedHttpContentTypeState ContentTypeState => _parser.ContentTypeState;
     public int ContentTypeLength => _parser.ContentTypeLength;
+    public ManagedHttpContentEncodingState ContentEncodingState =>
+        _parser.ContentEncodingState;
+    public int ContentEncodingLength => _parser.ContentEncodingLength;
     public ManagedHttpFramingMode FramingMode => _parser.FramingMode;
     public bool ResponseBodyComplete => _parser.IsBodyComplete;
     public ManagedHttpParseFailureReason ParseFailureReason => _parser.FailureReason;
@@ -644,6 +647,12 @@ public sealed class ManagedHttpsClient
     public bool TryCopyResponseContentType(Span<byte> destination, out int length)
     {
         return _parser.TryCopyContentType(destination, out length);
+    }
+
+    public bool TryCopyResponseContentEncoding(Span<byte> destination,
+                                               out int length)
+    {
+        return _parser.TryCopyContentEncoding(destination, out length);
     }
 
     public ManagedHttpBodyDeliveryResult ConsumeResponseBody(

@@ -31,6 +31,7 @@ internal sealed class ManagedE1000Driver
     internal static uint Phase16MacLow;
     private static bool s_phase35ModeEnabled;
     private static bool s_phase39ModeEnabled;
+    private static bool s_phase40ModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -58,6 +59,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase34Passed;
     private bool _phase35Passed;
     private bool _phase39Passed;
+    private bool _phase40Passed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -77,6 +79,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase34Requested;
     private bool _phase35Requested;
     private bool _phase39Requested;
+    private bool _phase40Requested;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -108,6 +111,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase34Passed => _phase34Passed;
     internal bool Phase35Passed => _phase35Passed;
     internal bool Phase39Passed => _phase39Passed;
+    internal bool Phase40Passed => _phase40Passed;
 
     internal static void EnablePhase35Mode()
     {
@@ -117,6 +121,11 @@ internal sealed class ManagedE1000Driver
     internal static void EnablePhase39Mode()
     {
         s_phase39ModeEnabled = true;
+    }
+
+    internal static void EnablePhase40Mode()
+    {
+        s_phase40ModeEnabled = true;
     }
 
     internal static ManagedE1000Driver? TryCreate()
@@ -142,6 +151,7 @@ internal sealed class ManagedE1000Driver
     {
         _phase35Requested = s_phase35ModeEnabled;
         _phase39Requested = s_phase39ModeEnabled;
+        _phase40Requested = s_phase40ModeEnabled;
         return TryStartCore();
     }
 
@@ -256,7 +266,18 @@ internal sealed class ManagedE1000Driver
             Phase16MacLow = ((uint)mac2 << 24) | ((uint)mac3 << 16) |
                             ((uint)mac4 << 8) | mac5;
             _ethernet!.InitializeMac();
-            if (_phase39Requested)
+            if (_phase40Requested)
+            {
+                if (!KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_PHASE40_STARTING\r\n"u8) ||
+                    !_ethernet.TryRunPhase40())
+                {
+                    KernelLog.Write(
+                        "GXOS_NET10:MANAGED_KERNEL_PHASE40_START_FAILED\r\n"u8);
+                    return AbortStart();
+                }
+            }
+            else if (_phase39Requested)
             {
                 if (!KernelLog.Write(
                         "GXOS_NET10:MANAGED_KERNEL_PHASE39_STARTING\r\n"u8) ||
@@ -337,6 +358,7 @@ internal sealed class ManagedE1000Driver
     {
         s_phase35ModeEnabled = false;
         s_phase39ModeEnabled = false;
+        s_phase40ModeEnabled = false;
         bool safe = true;
         if (_ethernet != null)
         {
@@ -386,7 +408,7 @@ internal sealed class ManagedE1000Driver
     {
         if (_state != ManagedE1000DriverState.Running) return false;
         _state = ManagedE1000DriverState.Stopping;
-        ManagedEthernetLayer? ethernet = (_phase35Requested || _phase39Requested || _phase34Requested || _phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
+        ManagedEthernetLayer? ethernet = (_phase35Requested || _phase39Requested || _phase40Requested || _phase34Requested || _phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
             ? ManagedNetworkServiceBackend.LiveEthernet ?? _ethernet
             : _ethernet;
         if (ethernet != null)
@@ -404,6 +426,7 @@ internal sealed class ManagedE1000Driver
             _phase34Passed = ethernet.Phase34Passed;
             _phase35Passed = ethernet.Phase35Passed;
             _phase39Passed = ethernet.Phase39Passed;
+            _phase40Passed = ethernet.Phase40Passed;
         }
         bool result = (ethernet == null || ethernet.TryStop()) &&
                       DisableEngines() && ReleaseDmaAndRestorePci();
@@ -530,10 +553,10 @@ internal sealed class ManagedE1000Driver
             ManagedKernelContract.TryDmaRelease(temporary.Handle, DriverId) ||
             temporary.TryRead8(0, out _))
             return false;
-        if (!_phase35Requested && !_phase39Requested &&
+        if (!_phase35Requested && !_phase39Requested && !_phase40Requested &&
             !RunDmaCapacityNegativeTest()) return false;
-        if (!KernelLog.Write(_phase35Requested
-                ? "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_PHASE35_CONCURRENT_RNG\r\n"u8
+        if (!KernelLog.Write(_phase35Requested || _phase40Requested
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_CONCURRENT_RNG\r\n"u8
                 : "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_OK\r\n"u8))
             return false;
         return KernelLog.WriteHexLine("GXOS_NET10:MANAGED_KERNEL_PHASE14_TX_RING_BUS=0x"u8,

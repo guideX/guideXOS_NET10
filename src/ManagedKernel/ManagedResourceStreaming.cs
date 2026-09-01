@@ -49,7 +49,19 @@ public enum ManagedResourceFailureReason : byte
     TransportFailure = 7,
     TlsFailure = 8,
     RequestFailure = 9,
-    TeardownFailure = 10
+    TeardownFailure = 10,
+    UnsupportedContentEncoding = 11,
+    MalformedContentEncoding = 12,
+    ContentEncodingHeaderTooLong = 13,
+    MalformedGzipHeader = 14,
+    MalformedZlibHeader = 15,
+    MalformedDeflateStream = 16,
+    GzipCrcMismatch = 17,
+    GzipIsizeMismatch = 18,
+    ZlibAdlerMismatch = 19,
+    TruncatedCompressedStream = 20,
+    DecodedResourceTooLarge = 21,
+    TrailingCompressedData = 22
 }
 
 public interface IManagedResourceConsumer : IManagedHttpBodySink
@@ -86,7 +98,22 @@ public readonly struct ManagedResourceProgressSnapshot
         int pauseCount,
         int resumeCount,
         ManagedHttpContentTypeState contentTypeState,
-        int contentTypeLength)
+        int contentTypeLength,
+        ManagedHttpContentEncodingState contentEncodingState,
+        int contentEncodingLength,
+        int encodedBytesReceived,
+        int encodedBytesConsumed,
+        int decodedBytesProduced,
+        int bufferedDecodedBytes,
+        int peakDecodedOutputBytes,
+        ManagedContentDecoderState decoderState,
+        ManagedContentDecoderFailureReason decoderFailureReason,
+        int decoderPauseCount,
+        int decoderResumeCount,
+        int decoderHistoryWindowSize,
+        bool crcValidated,
+        bool isizeValidated,
+        bool adlerValidated)
     {
         State = state;
         Protocol = protocol;
@@ -110,6 +137,21 @@ public readonly struct ManagedResourceProgressSnapshot
         ResumeCount = resumeCount;
         ContentTypeState = contentTypeState;
         ContentTypeLength = contentTypeLength;
+        ContentEncodingState = contentEncodingState;
+        ContentEncodingLength = contentEncodingLength;
+        EncodedBytesReceived = encodedBytesReceived;
+        EncodedBytesConsumed = encodedBytesConsumed;
+        DecodedBytesProduced = decodedBytesProduced;
+        BufferedDecodedBytes = bufferedDecodedBytes;
+        PeakDecodedOutputBytes = peakDecodedOutputBytes;
+        DecoderState = decoderState;
+        DecoderFailureReason = decoderFailureReason;
+        DecoderPauseCount = decoderPauseCount;
+        DecoderResumeCount = decoderResumeCount;
+        DecoderHistoryWindowSize = decoderHistoryWindowSize;
+        CrcValidated = crcValidated;
+        IsizeValidated = isizeValidated;
+        AdlerValidated = adlerValidated;
     }
 
     public ManagedResourceState State { get; }
@@ -134,6 +176,22 @@ public readonly struct ManagedResourceProgressSnapshot
     public int ResumeCount { get; }
     public ManagedHttpContentTypeState ContentTypeState { get; }
     public int ContentTypeLength { get; }
+    public ManagedHttpContentEncodingState ContentEncodingState { get; }
+    public int ContentEncodingLength { get; }
+    public int EncodedBytesReceived { get; }
+    public int EncodedBytesConsumed { get; }
+    public int DecodedBytesProduced { get; }
+    public int DecodedBytesConsumed => ResourceBytesProcessed;
+    public int BufferedDecodedBytes { get; }
+    public int PeakDecodedOutputBytes { get; }
+    public ManagedContentDecoderState DecoderState { get; }
+    public ManagedContentDecoderFailureReason DecoderFailureReason { get; }
+    public int DecoderPauseCount { get; }
+    public int DecoderResumeCount { get; }
+    public int DecoderHistoryWindowSize { get; }
+    public bool CrcValidated { get; }
+    public bool IsizeValidated { get; }
+    public bool AdlerValidated { get; }
     public bool IsComplete => State == ManagedResourceState.Completed;
     public bool IsCancelled => State == ManagedResourceState.Cancelled;
     public bool IsTerminal => State == ManagedResourceState.Completed ||
@@ -565,7 +623,11 @@ public sealed class ManagedResourceRequest
     private readonly ManagedHttpClient? _http;
     private readonly ManagedHttpsClient? _https;
     private readonly int _maximumEntityLength;
+    private readonly int _maximumDecodedResourceLength;
     private IManagedResourceConsumer? _consumer;
+    private ManagedContentEncodingDecoder? _decoder;
+    private byte[]? _encodedDecoderStaging;
+    private ManagedContentDecoderFailureReason _decoderFailureReason;
     private ManagedResourceState _state;
     private ManagedResourceFailureReason _failureReason;
     private ManagedResourceConsumerFailureReason _consumerFailureReason;
@@ -573,16 +635,27 @@ public sealed class ManagedResourceRequest
     private int _pauseCount;
     private int _resumeCount;
     private int _peakBufferedBytes;
+    private int _peakDecodedOutputBytes;
 
     public ManagedResourceRequest(ManagedNetworkService service,
                                   int maximumEntityLength =
                                       ManagedHttpLimits.MaximumStreamedBodyLength)
+        : this(service, maximumEntityLength,
+               ManagedContentEncodingLimits.MaximumDecodedResourceLength)
+    {
+    }
+
+    public ManagedResourceRequest(ManagedNetworkService service,
+                                  int maximumEntityLength,
+                                  int maximumDecodedResourceLength)
     {
         if (maximumEntityLength < 0 ||
             maximumEntityLength > ManagedHttpLimits.MaximumStreamedBodyLength)
             throw new ArgumentOutOfRangeException(nameof(maximumEntityLength));
+        ValidateDecodedLimit(maximumDecodedResourceLength);
         _protocol = ManagedResourceProtocol.Http;
         _maximumEntityLength = maximumEntityLength;
+        _maximumDecodedResourceLength = maximumDecodedResourceLength;
         _http = new ManagedHttpClient(service, maximumEntityLength, false);
         _state = ManagedResourceState.Idle;
     }
@@ -592,12 +665,24 @@ public sealed class ManagedResourceRequest
                                   ManagedHttpsValidationTime validationTime,
                                   int maximumEntityLength =
                                       ManagedHttpLimits.MaximumStreamedBodyLength)
+        : this(service, trustedRoot, validationTime, maximumEntityLength,
+               ManagedContentEncodingLimits.MaximumDecodedResourceLength)
+    {
+    }
+
+    public ManagedResourceRequest(ManagedNetworkService service,
+                                  ReadOnlySpan<byte> trustedRoot,
+                                  ManagedHttpsValidationTime validationTime,
+                                  int maximumEntityLength,
+                                  int maximumDecodedResourceLength)
     {
         if (maximumEntityLength < 0 ||
             maximumEntityLength > ManagedHttpLimits.MaximumStreamedBodyLength)
             throw new ArgumentOutOfRangeException(nameof(maximumEntityLength));
+        ValidateDecodedLimit(maximumDecodedResourceLength);
         _protocol = ManagedResourceProtocol.Https;
         _maximumEntityLength = maximumEntityLength;
+        _maximumDecodedResourceLength = maximumDecodedResourceLength;
         _https = new ManagedHttpsClient(service, trustedRoot, validationTime,
                                         maximumEntityLength);
         _state = ManagedResourceState.Idle;
@@ -609,13 +694,17 @@ public sealed class ManagedResourceRequest
                                     ManagedSecureRandom random,
                                     int maximumEntityLength =
                                         ManagedHttpLimits.MaximumStreamedBodyLength,
-                                    bool compactTlsProfile = false)
+                                    bool compactTlsProfile = false,
+                                    int maximumDecodedResourceLength =
+                                        ManagedContentEncodingLimits.MaximumDecodedResourceLength)
     {
         if (maximumEntityLength < 0 ||
             maximumEntityLength > ManagedHttpLimits.MaximumStreamedBodyLength)
             throw new ArgumentOutOfRangeException(nameof(maximumEntityLength));
+        ValidateDecodedLimit(maximumDecodedResourceLength);
         _protocol = ManagedResourceProtocol.Https;
         _maximumEntityLength = maximumEntityLength;
+        _maximumDecodedResourceLength = maximumDecodedResourceLength;
         _https = new ManagedHttpsClient(service, trustedRoot, in validationTime,
                                         random, maximumEntityLength,
                                         compactTlsProfile);
@@ -628,7 +717,12 @@ public sealed class ManagedResourceRequest
     public ManagedResourceConsumerFailureReason ConsumerFailureReason =>
         _consumerFailureReason;
     public int MaximumEntityLength => _maximumEntityLength;
+    public int MaximumDecodedResourceLength => _maximumDecodedResourceLength;
     public ManagedResourceProgressSnapshot Progress => CreateProgress();
+
+    public ManagedHttpContentEncodingState ContentEncodingState =>
+        _protocol == ManagedResourceProtocol.Http
+            ? _http!.ContentEncodingState : _https!.ContentEncodingState;
 
     /* These narrow observations are intentionally internal.  They let the
        kernel proof expose transport milestones without making resource
@@ -650,6 +744,7 @@ public sealed class ManagedResourceRequest
         if (consumer == null) throw new ArgumentNullException(nameof(consumer));
         consumer.Reset();
         ClearRequestState(consumer);
+        ClearDecoderState();
         NetworkOperationResult result = _protocol == ManagedResourceProtocol.Http
             ? _http!.BeginGet(hostname, path)
             : _https!.BeginGet(hostname, path);
@@ -673,6 +768,7 @@ public sealed class ManagedResourceRequest
         if (consumer == null) throw new ArgumentNullException(nameof(consumer));
         consumer.Reset();
         ClearRequestState(consumer);
+        ClearDecoderState();
         NetworkOperationResult result = _https!.BeginGetUrl(url);
         if (result != NetworkOperationResult.Started)
         {
@@ -719,7 +815,16 @@ public sealed class ManagedResourceRequest
             return NetworkOperationResult.Failed;
         if (_pauseRequested) return NetworkOperationResult.Success;
 
-        if (HasPendingBody())
+        if (_decoder != null)
+        {
+            if (!DriveDecoded()) return NetworkOperationResult.Failed;
+            if (_state == ManagedResourceState.Paused ||
+                _state == ManagedResourceState.Failed)
+                return _state == ManagedResourceState.Paused
+                    ? NetworkOperationResult.Success
+                    : NetworkOperationResult.Failed;
+        }
+        else if (HasPendingBody())
         {
             RecordBufferedBodyPeak();
             if (!DeliverPendingBody()) return NetworkOperationResult.Failed;
@@ -739,7 +844,17 @@ public sealed class ManagedResourceRequest
             return NetworkOperationResult.Failed;
         }
 
-        if (HasPendingBody())
+        if (!EnsureDecoder()) return NetworkOperationResult.Failed;
+        if (_decoder != null)
+        {
+            if (!DriveDecoded()) return NetworkOperationResult.Failed;
+            if (_state == ManagedResourceState.Paused ||
+                _state == ManagedResourceState.Failed)
+                return _state == ManagedResourceState.Paused
+                    ? NetworkOperationResult.Success
+                    : NetworkOperationResult.Failed;
+        }
+        else if (HasPendingBody())
         {
             RecordBufferedBodyPeak();
             if (!DeliverPendingBody()) return NetworkOperationResult.Failed;
@@ -750,7 +865,8 @@ public sealed class ManagedResourceRequest
                     : NetworkOperationResult.Failed;
         }
 
-        if (UnderlyingSucceeded() && !HasPendingBody())
+        if (UnderlyingSucceeded() &&
+            (_decoder == null || _decoder.IsComplete) && !HasPendingBody())
         {
             if (_consumer == null || !_consumer.Complete())
             {
@@ -776,6 +892,7 @@ public sealed class ManagedResourceRequest
             return NetworkOperationResult.Success;
         NetworkOperationResult result = _protocol == ManagedResourceProtocol.Http
             ? _http!.Cancel() : _https!.Cancel();
+        _decoder?.Cancel();
         _consumer?.Cancel();
         _pauseRequested = false;
         _state = ManagedResourceState.Cancelled;
@@ -793,13 +910,16 @@ public sealed class ManagedResourceRequest
             ? _http!.Reset() : _https!.Reset();
         if (result != NetworkOperationResult.Success) return result;
         _consumer?.Reset();
+        ClearDecoderState();
         _consumer = null;
         _pauseRequested = false;
         _pauseCount = 0;
         _resumeCount = 0;
         _peakBufferedBytes = 0;
+        _peakDecodedOutputBytes = 0;
         _failureReason = ManagedResourceFailureReason.None;
         _consumerFailureReason = ManagedResourceConsumerFailureReason.None;
+        _decoderFailureReason = ManagedContentDecoderFailureReason.None;
         _state = ManagedResourceState.Idle;
         return NetworkOperationResult.Success;
     }
@@ -809,6 +929,13 @@ public sealed class ManagedResourceRequest
         return _protocol == ManagedResourceProtocol.Http
             ? _http!.TryCopyResponseContentType(destination, out length)
             : _https!.TryCopyResponseContentType(destination, out length);
+    }
+
+    public bool TryCopyContentEncoding(Span<byte> destination, out int length)
+    {
+        return _protocol == ManagedResourceProtocol.Http
+            ? _http!.TryCopyResponseContentEncoding(destination, out length)
+            : _https!.TryCopyResponseContentEncoding(destination, out length);
     }
 
     private bool CanBegin() => _state == ManagedResourceState.Idle ||
@@ -826,11 +953,26 @@ public sealed class ManagedResourceRequest
         _pauseCount = 0;
         _resumeCount = 0;
         _peakBufferedBytes = 0;
+        _peakDecodedOutputBytes = 0;
     }
 
     private bool HasPendingBody() => _protocol == ManagedResourceProtocol.Http
-        ? _http!.BufferedResponseBodyLength != 0
-        : _https!.BufferedResponseBodyLength != 0;
+            ? _http!.BufferedResponseBodyLength != 0
+            : _https!.BufferedResponseBodyLength != 0;
+
+    private static void ValidateDecodedLimit(int value)
+    {
+        if (value < 0 || value > ManagedContentEncodingLimits.MaximumDecodedResourceLength)
+            throw new ArgumentOutOfRangeException(nameof(value));
+    }
+
+    private void ClearDecoderState()
+    {
+        _decoder?.Reset();
+        _decoder = null;
+        _encodedDecoderStaging = null;
+        _decoderFailureReason = ManagedContentDecoderFailureReason.None;
+    }
 
     private void RecordBufferedBodyPeak()
     {
@@ -848,6 +990,159 @@ public sealed class ManagedResourceRequest
         int status = _https.StatusCode;
         return status == 301 || status == 302 || status == 303 ||
                status == 307 || status == 308;
+    }
+
+    private bool EnsureDecoder()
+    {
+        if (_decoder != null || _consumer == null) return true;
+        bool statusParsed = _protocol == ManagedResourceProtocol.Http
+            ? _http!.StatusParsed : _https!.StatusParsed;
+        if (!statusParsed || IsRedirectBody()) return true;
+        ManagedHttpContentEncodingState encoding = _protocol == ManagedResourceProtocol.Http
+            ? _http!.ContentEncodingState : _https!.ContentEncodingState;
+        switch (encoding)
+        {
+            case ManagedHttpContentEncodingState.Missing:
+            case ManagedHttpContentEncodingState.Identity:
+                return true;
+            case ManagedHttpContentEncodingState.Gzip:
+            case ManagedHttpContentEncodingState.Deflate:
+                _decoder = new ManagedContentEncodingDecoder(
+                    encoding, _maximumDecodedResourceLength);
+                _encodedDecoderStaging = new byte[ManagedContentEncodingLimits.InputStagingSize];
+                return true;
+            case ManagedHttpContentEncodingState.Unsupported:
+                return FailDecoder(ManagedResourceFailureReason.UnsupportedContentEncoding,
+                    ManagedContentDecoderFailureReason.UnsupportedEncoding);
+            case ManagedHttpContentEncodingState.TooLong:
+                return FailDecoder(ManagedResourceFailureReason.ContentEncodingHeaderTooLong,
+                    ManagedContentDecoderFailureReason.UnsupportedEncoding);
+            default:
+                return FailDecoder(ManagedResourceFailureReason.MalformedContentEncoding,
+                    ManagedContentDecoderFailureReason.MalformedDeflateStream);
+        }
+    }
+
+    private bool DriveDecoded()
+    {
+        if (_decoder == null || _consumer == null) return true;
+        while (true)
+        {
+            if (_decoder.OutputLength != 0)
+            {
+                ManagedHttpBodyDeliveryResult delivered =
+                    _decoder.ConsumeOutput(_consumer);
+                if (delivered == ManagedHttpBodyDeliveryResult.Paused)
+                {
+                    _pauseRequested = true;
+                    _state = ManagedResourceState.Paused;
+                    _pauseCount++;
+                    return true;
+                }
+                if (delivered == ManagedHttpBodyDeliveryResult.Failed)
+                {
+                    _consumerFailureReason = _consumer.FailureReason ==
+                        ManagedResourceConsumerFailureReason.None
+                        ? ManagedResourceConsumerFailureReason.ConsumerFailure
+                        : _consumer.FailureReason;
+                    _failureReason = _consumerFailureReason ==
+                        ManagedResourceConsumerFailureReason.DestinationFull
+                        ? ManagedResourceFailureReason.DestinationFull
+                        : ManagedResourceFailureReason.ConsumerFailure;
+                    _state = ManagedResourceState.Failed;
+                    return false;
+                }
+                if (delivered == ManagedHttpBodyDeliveryResult.Cancelled)
+                {
+                    _failureReason = ManagedResourceFailureReason.Cancelled;
+                    _state = ManagedResourceState.Cancelled;
+                    return false;
+                }
+                _state = ManagedResourceState.Receiving;
+                continue;
+            }
+
+            bool bodyComplete = TransportBodyComplete() && !HasPendingBody();
+            ManagedContentDecoderProcessResult result = _decoder.Pump(bodyComplete);
+            if (result == ManagedContentDecoderProcessResult.Failed)
+                return FailDecoder(_decoder.FailureReason);
+            if (result == ManagedContentDecoderProcessResult.Cancelled)
+            {
+                _failureReason = ManagedResourceFailureReason.Cancelled;
+                _state = ManagedResourceState.Cancelled;
+                return false;
+            }
+            if (result == ManagedContentDecoderProcessResult.OutputAvailable)
+            {
+                if (_decoder.OutputLength > _peakDecodedOutputBytes)
+                    _peakDecodedOutputBytes = _decoder.OutputLength;
+                continue;
+            }
+            if (result == ManagedContentDecoderProcessResult.Complete)
+                return true;
+            if (result != ManagedContentDecoderProcessResult.NeedInput)
+                return true;
+
+            if (!HasPendingBody()) return true;
+            if (_encodedDecoderStaging == null || _decoder.InputFreeCapacity == 0)
+                return true;
+            int readCapacity = Math.Min(_encodedDecoderStaging.Length,
+                                        _decoder.InputFreeCapacity);
+            bool read = _protocol == ManagedResourceProtocol.Http
+                ? _http!.TryReadResponseBodyChunk(
+                    _encodedDecoderStaging.AsSpan(0, readCapacity), out int length)
+                : _https!.TryReadResponseBodyChunk(
+                    _encodedDecoderStaging.AsSpan(0, readCapacity), out length);
+            if (!read || length == 0) return true;
+            if (!_decoder.AppendInput(_encodedDecoderStaging.AsSpan(0, length)))
+                return FailDecoder(_decoder.FailureReason);
+        }
+    }
+
+    private bool TransportBodyComplete() => _protocol == ManagedResourceProtocol.Http
+        ? _http!.ResponseBodyComplete : _https!.ResponseBodyComplete;
+
+    private bool FailDecoder(ManagedContentDecoderFailureReason reason)
+    {
+        _decoderFailureReason = reason;
+        ManagedResourceFailureReason resourceReason = reason switch
+        {
+            ManagedContentDecoderFailureReason.MalformedGzipHeader =>
+                ManagedResourceFailureReason.MalformedGzipHeader,
+            ManagedContentDecoderFailureReason.MalformedZlibHeader =>
+                ManagedResourceFailureReason.MalformedZlibHeader,
+            ManagedContentDecoderFailureReason.MalformedDeflateStream =>
+                ManagedResourceFailureReason.MalformedDeflateStream,
+            ManagedContentDecoderFailureReason.GzipCrcMismatch =>
+                ManagedResourceFailureReason.GzipCrcMismatch,
+            ManagedContentDecoderFailureReason.GzipIsizeMismatch =>
+                ManagedResourceFailureReason.GzipIsizeMismatch,
+            ManagedContentDecoderFailureReason.ZlibAdlerMismatch =>
+                ManagedResourceFailureReason.ZlibAdlerMismatch,
+            ManagedContentDecoderFailureReason.TruncatedCompressedStream =>
+                ManagedResourceFailureReason.TruncatedCompressedStream,
+            ManagedContentDecoderFailureReason.DecodedResourceLimitExceeded =>
+                ManagedResourceFailureReason.DecodedResourceTooLarge,
+            ManagedContentDecoderFailureReason.TrailingCompressedData =>
+                ManagedResourceFailureReason.TrailingCompressedData,
+            ManagedContentDecoderFailureReason.GzipOptionalFieldTooLong =>
+                ManagedResourceFailureReason.MalformedGzipHeader,
+            ManagedContentDecoderFailureReason.GzipHeaderCrcMismatch =>
+                ManagedResourceFailureReason.MalformedGzipHeader,
+            ManagedContentDecoderFailureReason.DownstreamConsumerFailure =>
+                ManagedResourceFailureReason.ConsumerFailure,
+            _ => ManagedResourceFailureReason.MalformedDeflateStream
+        };
+        return FailDecoder(resourceReason, reason);
+    }
+
+    private bool FailDecoder(ManagedResourceFailureReason reason,
+                             ManagedContentDecoderFailureReason decoderReason)
+    {
+        _failureReason = reason;
+        _decoderFailureReason = decoderReason;
+        _state = ManagedResourceState.Failed;
+        return false;
     }
 
     private bool DeliverPendingBody()
@@ -976,6 +1271,20 @@ public sealed class ManagedResourceRequest
             consumerState = ManagedResourceConsumerState.Cancelled;
         if (_state == ManagedResourceState.Failed)
             consumerState = ManagedResourceConsumerState.Failed;
+        ManagedHttpContentEncodingState contentEncodingState =
+            _protocol == ManagedResourceProtocol.Http
+                ? _http!.ContentEncodingState : _https!.ContentEncodingState;
+        int contentEncodingLength = _protocol == ManagedResourceProtocol.Http
+            ? _http!.ContentEncodingLength : _https!.ContentEncodingLength;
+        int encodedBytesReceived = transport.DecodedBodyBytesReceived;
+        int encodedBytesConsumed = transport.DecodedBodyBytesDelivered;
+        int decodedBytesProduced = _decoder?.DecodedBytesProduced ??
+            (_consumer?.BytesProcessed ?? 0);
+        int bufferedDecodedBytes = _decoder?.BufferedOutputLength ?? 0;
+        ManagedContentDecoderState decoderState = _decoder?.State ??
+            ManagedContentDecoderState.Idle;
+        ManagedContentDecoderFailureReason decoderFailureReason =
+            _decoder?.FailureReason ?? _decoderFailureReason;
         return new ManagedResourceProgressSnapshot(
             _state, _protocol, consumerState, _failureReason,
             _consumerFailureReason, httpFailure, httpsFailure,
@@ -989,7 +1298,17 @@ public sealed class ManagedResourceRequest
             _protocol == ManagedResourceProtocol.Http
                 ? _http!.ContentTypeState : _https!.ContentTypeState,
             _protocol == ManagedResourceProtocol.Http
-                ? _http!.ContentTypeLength : _https!.ContentTypeLength);
+                ? _http!.ContentTypeLength : _https!.ContentTypeLength,
+            contentEncodingState, contentEncodingLength,
+            encodedBytesReceived, encodedBytesConsumed,
+            decodedBytesProduced, bufferedDecodedBytes,
+            _peakDecodedOutputBytes,
+            decoderState, decoderFailureReason,
+            _decoder?.PauseCount ?? 0, _decoder?.ResumeCount ?? 0,
+            _decoder?.HistoryWindowSize ?? 0,
+            _decoder?.CrcValidated ?? false,
+            _decoder?.IsizeValidated ?? false,
+            _decoder?.AdlerValidated ?? false);
     }
 
     private sealed class RedirectDiscardSink : IManagedHttpBodySink

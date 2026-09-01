@@ -9,7 +9,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
-    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase39HostTests</PathMap>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase40HostTests</PathMap>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\ManagedKernel\ManagedAes128.cs" Link="ManagedAes128.cs" />
@@ -28,8 +28,8 @@
     <Compile Include="..\ManagedKernel\ManagedSha384.cs" Link="ManagedSha384.cs" />
     <Compile Include="..\ManagedKernel\ManagedP384.cs" Link="ManagedP384.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpClient.cs" Link="ManagedHttpClient.cs" />
-    <Compile Include="..\ManagedKernel\ManagedResourceStreaming.cs" Link="ManagedResourceStreaming.cs" />
     <Compile Include="..\ManagedKernel\ManagedContentEncoding.cs" Link="ManagedContentEncoding.cs" />
+    <Compile Include="..\ManagedKernel\ManagedResourceStreaming.cs" Link="ManagedResourceStreaming.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpsClient.cs" Link="ManagedHttpsClient.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpsUrl.cs" Link="ManagedHttpsUrl.cs" />
     <Compile Include="..\ManagedKernel\ManagedTcp.cs" Link="ManagedTcp.cs" />

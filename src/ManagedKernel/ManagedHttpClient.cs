@@ -218,6 +218,8 @@ public static class ManagedHttpLimits
     public const int MaximumInformationalResponses = 4;
     public const int MaximumReceiveStagingBuffer = ManagedNetworkService.MaximumTcpPayloadLength;
     public const int MaximumContentTypeLength = 64;
+    public const int MaximumContentEncodingLength =
+        ManagedContentEncodingLimits.MaximumContentEncodingLength;
     public const int MaximumLocationLength = ManagedHttpsUrl.MaximumLocationLength;
 }
 
@@ -345,6 +347,7 @@ public sealed class ManagedHttpResponseParser
     private readonly byte[] _compatibilityBody =
         new byte[ManagedHttpLimits.MaximumBodyCapacity];
     private readonly byte[] _contentType = new byte[ManagedHttpLimits.MaximumContentTypeLength];
+    private readonly byte[] _contentEncoding = new byte[ManagedHttpLimits.MaximumContentEncodingLength];
     private readonly byte[] _location = new byte[ManagedHttpLimits.MaximumLocationLength];
     private readonly int _maximumAcceptedBodyLength;
     private readonly bool _requireConnectionClose;
@@ -378,6 +381,9 @@ public sealed class ManagedHttpResponseParser
     private int _locationLength;
     private bool _hasContentType;
     private bool _contentTypeTooLong;
+    private bool _hasContentEncoding;
+    private int _contentEncodingLength;
+    private ManagedHttpContentEncodingState _contentEncodingState;
     private bool _compatibilityBodyOverflow;
     private bool _bodyDeliveryPaused;
     private ManagedHttpFramingMode _framingMode;
@@ -428,6 +434,10 @@ public sealed class ManagedHttpResponseParser
         !_hasContentType ? ManagedHttpContentTypeState.Missing :
         _contentTypeTooLong ? ManagedHttpContentTypeState.TooLong :
         ManagedHttpContentTypeState.Available;
+    public ManagedHttpContentEncodingState ContentEncodingState =>
+        _contentEncodingState;
+    public int ContentEncodingLength => _contentEncodingLength;
+    public bool HasContentEncoding => _hasContentEncoding;
     public bool HasTransferEncoding => _hasTransferEncoding;
     public bool HasLocation => _hasLocation;
     public bool ConnectionClose => _connectionClose;
@@ -483,6 +493,9 @@ public sealed class ManagedHttpResponseParser
         _locationLength = 0;
         _hasContentType = false;
         _contentTypeTooLong = false;
+        _hasContentEncoding = false;
+        _contentEncodingLength = 0;
+        _contentEncodingState = ManagedHttpContentEncodingState.Missing;
         _compatibilityBodyOverflow = false;
         _bodyDeliveryPaused = false;
         _framingMode = ManagedHttpFramingMode.None;
@@ -490,6 +503,7 @@ public sealed class ManagedHttpResponseParser
         _body.AsSpan().Clear();
         _compatibilityBody.AsSpan().Clear();
         _contentType.AsSpan().Clear();
+        _contentEncoding.AsSpan().Clear();
         _location.AsSpan().Clear();
     }
 
@@ -740,6 +754,18 @@ public sealed class ManagedHttpResponseParser
         return true;
     }
 
+    public bool TryCopyContentEncoding(Span<byte> destination, out int length)
+    {
+        length = _contentEncodingLength;
+        if (_contentEncodingState == ManagedHttpContentEncodingState.Missing ||
+            _contentEncodingState == ManagedHttpContentEncodingState.TooLong ||
+            _contentEncodingState == ManagedHttpContentEncodingState.Malformed ||
+            destination.Length < length)
+            return false;
+        _contentEncoding.AsSpan(0, length).CopyTo(destination);
+        return true;
+    }
+
     private bool FinishLine()
     {
         if (_state == ManagedHttpParseState.StatusLine)
@@ -887,6 +913,41 @@ public sealed class ManagedHttpResponseParser
                 _contentTypeTooLong = false;
                 value.CopyTo(_contentType);
                 _contentTypeLength = value.Length;
+            }
+        }
+        if (EqualsAsciiIgnoreCase(name, "Content-Encoding"u8))
+        {
+            if (_hasContentEncoding)
+            {
+                _contentEncodingState = ManagedHttpContentEncodingState.Malformed;
+                _contentEncodingLength = 0;
+                _contentEncoding.AsSpan().Clear();
+                return true;
+            }
+            _hasContentEncoding = true;
+            if (value.Length > ManagedHttpLimits.MaximumContentEncodingLength)
+            {
+                _contentEncodingState = ManagedHttpContentEncodingState.TooLong;
+                _contentEncodingLength = 0;
+                _contentEncoding.AsSpan().Clear();
+            }
+            else if (!IsTokenSpan(value) || ContainsByte(value, (byte)','))
+            {
+                _contentEncodingState = ManagedHttpContentEncodingState.Malformed;
+                _contentEncodingLength = 0;
+                _contentEncoding.AsSpan().Clear();
+            }
+            else
+            {
+                value.CopyTo(_contentEncoding);
+                _contentEncodingLength = value.Length;
+                _contentEncodingState = EqualsAsciiIgnoreCase(value, "identity"u8)
+                    ? ManagedHttpContentEncodingState.Identity
+                    : EqualsAsciiIgnoreCase(value, "gzip"u8)
+                        ? ManagedHttpContentEncodingState.Gzip
+                        : EqualsAsciiIgnoreCase(value, "deflate"u8)
+                            ? ManagedHttpContentEncodingState.Deflate
+                            : ManagedHttpContentEncodingState.Unsupported;
             }
         }
         if (EqualsAsciiIgnoreCase(name, "Location"u8))
@@ -1057,7 +1118,11 @@ public sealed class ManagedHttpResponseParser
         _contentTypeLength = 0;
         _hasContentType = false;
         _contentTypeTooLong = false;
+        _hasContentEncoding = false;
+        _contentEncodingLength = 0;
+        _contentEncodingState = ManagedHttpContentEncodingState.Missing;
         _contentType.AsSpan().Clear();
+        _contentEncoding.AsSpan().Clear();
         _hasContentLength = false;
         _hasTransferEncoding = false;
         _chunked = false;
@@ -1131,6 +1196,13 @@ public sealed class ManagedHttpResponseParser
                value == (byte)'.' || value == (byte)'^' || value == (byte)'_' ||
                value == (byte)'`' || value == (byte)'|' || value == (byte)'~';
     }
+
+    private static bool ContainsByte(ReadOnlySpan<byte> value, byte sought)
+    {
+        for (int index = 0; index != value.Length; ++index)
+            if (value[index] == sought) return true;
+        return false;
+    }
 }
 
 public sealed class ManagedHttpClient
@@ -1181,6 +1253,9 @@ public sealed class ManagedHttpClient
     public int ContentLength => _parser.ContentLength;
     public ManagedHttpContentTypeState ContentTypeState => _parser.ContentTypeState;
     public int ContentTypeLength => _parser.ContentTypeLength;
+    public ManagedHttpContentEncodingState ContentEncodingState =>
+        _parser.ContentEncodingState;
+    public int ContentEncodingLength => _parser.ContentEncodingLength;
     public ManagedHttpFramingMode FramingMode => _parser.FramingMode;
     public bool ResponseBodyComplete => _parser.IsBodyComplete;
     public ManagedHttpParseFailureReason ParseFailureReason => _parser.FailureReason;
@@ -1335,6 +1410,12 @@ public sealed class ManagedHttpClient
     public bool TryCopyResponseContentType(Span<byte> destination, out int length)
     {
         return _parser.TryCopyContentType(destination, out length);
+    }
+
+    public bool TryCopyResponseContentEncoding(Span<byte> destination,
+                                               out int length)
+    {
+        return _parser.TryCopyContentEncoding(destination, out length);
     }
 
     public ManagedHttpBodyDeliveryResult ConsumeResponseBody(

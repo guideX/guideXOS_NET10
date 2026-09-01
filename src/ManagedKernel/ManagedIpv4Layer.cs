@@ -93,6 +93,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private ManagedPhase34TestConsumer? _phase34Consumer;
     private ManagedPhase35PublicHttpsConsumer? _phase35Consumer;
     private ManagedPhase39ResourceProof? _phase39Consumer;
+    private ManagedPhase40ResourceProof? _phase40Consumer;
     private readonly ManagedTcpConnection _tcp;
     private uint _localIpv4Value;
     private uint _peerIpv4Value;
@@ -124,6 +125,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase34Passed;
     private bool _phase35Passed;
     private bool _phase39Passed;
+    private bool _phase40Passed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -194,6 +196,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase34Passed => _phase34Passed;
     internal bool Phase35Passed => _phase35Passed;
     internal bool Phase39Passed => _phase39Passed;
+    internal bool Phase40Passed => _phase40Passed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -721,6 +724,73 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _phase39Passed = true;
         return KernelLog.Write(
             "GXOS_NET10:MANAGED_HTTPS_PHASE39_PASS\r\n"u8);
+    }
+
+    /* Phase 40 keeps the Phase 39 HTTPS/resource proof topology while making
+       the response body a gzip member.  The resource proof owns the decoder
+       and reports encoded and decoded progress independently. */
+    internal bool TryRunPhase40()
+    {
+        if (_phase40Passed || _active || _networkService == null)
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE40_IPV4_GUARD_FAILED\r\n"u8);
+            return false;
+        }
+        _phase40Consumer ??= new ManagedPhase40ResourceProof(_networkService);
+        if (!_arp.TryBeginDhcp())
+        {
+            KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE40_ARP_DHCP_BEGIN_FAILED\r\n"u8);
+            return false;
+        }
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _gatewayIpv4.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _gatewayIpv4Value = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE40_BEGIN\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true, requireGateway: false))
+            return false;
+        if (!KernelLog.Write(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE40_DHCP_COMPLETE\r\n"u8) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort))
+            return false;
+        if (!KernelLog.Write(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE40_DHCP_UNREGISTERED\r\n"u8) ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                       ManagedUdpEndpointHandler.DnsResolver))
+            return false;
+        if (!PublishNetworkServiceStatus()) return false;
+        if (!KernelLog.Write(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE40_CONFIGURED\r\n"u8) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE40_IPV4=0x"u8,
+                _localIpv4Value) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE40_SUBNET=0x"u8,
+                _subnetMaskValue) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE40_GATEWAY=0x"u8,
+                _gatewayIpv4Value) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE40_DNS=0x"u8,
+                DnsServerValue))
+            return false;
+
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        if (!_phase40Consumer.TryRun()) return false;
+        _phase40Passed = true;
+        return KernelLog.Write(
+            "GXOS_NET10:MANAGED_HTTPS_PHASE40_PASS\r\n"u8);
     }
 
     private bool PublishNetworkServiceStatus()
