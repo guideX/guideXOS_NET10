@@ -330,14 +330,14 @@ internal static class Program
         internal int Bytes => _offset;
         internal bool IsExact => _offset == _expected.Length;
 
-        public bool TryConsume(ReadOnlySpan<byte> segment)
+        public ManagedHttpBodySinkResult Consume(ReadOnlySpan<byte> segment)
         {
             if (segment.Length > _expected.Length - _offset ||
                 !segment.SequenceEqual(_expected.AsSpan(_offset, segment.Length)) ||
                 !_hash.Append(segment))
-                return false;
+                return ManagedHttpBodySinkResult.Fail;
             _offset += segment.Length;
-            return true;
+            return ManagedHttpBodySinkResult.Continue;
         }
 
         internal bool TryFinalize()
@@ -352,6 +352,7 @@ internal static class Program
 
     private sealed class RejectingSink : IManagedHttpBodySink
     {
-        public bool TryConsume(ReadOnlySpan<byte> segment) => false;
+        public ManagedHttpBodySinkResult Consume(ReadOnlySpan<byte> segment) =>
+            ManagedHttpBodySinkResult.Fail;
     }
 }

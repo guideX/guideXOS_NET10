@@ -50,6 +50,7 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
     private readonly ManagedHttpsClient _client;
     private readonly ManagedSha256 _bodyHash = new();
     private readonly BodyHashSink _bodySink;
+    private readonly CancellationProbeSink _cancellationSink = new();
     private readonly byte[] _digest = new byte[ManagedSha256.DigestSize];
     private bool _dnsLogged;
     private bool _tcpLogged;
@@ -64,6 +65,8 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
     private int _bodyBytes;
     private int _bodySegments;
     private int _peakBodyBuffer;
+    private bool _pauseObserved;
+    private int _pausedPolls;
 
     internal ManagedPhase35Outcome Outcome { get; private set; }
     internal bool ControlledTlsIncompatibility =>
@@ -107,6 +110,30 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
         {
             NetworkOperationResult result = _client.Poll();
             if (!ObserveProgress()) return false;
+            if (!_pauseObserved &&
+                _client.Progress.State == ManagedHttpTransferState.Paused)
+            {
+                ManagedHttpProgressSnapshot paused = _client.Progress;
+                int pausedPollCount = 0;
+                for (; pausedPollCount != 4; ++pausedPollCount)
+                {
+                    if (_client.Poll() != NetworkOperationResult.Success ||
+                        _client.Progress.State != ManagedHttpTransferState.Paused ||
+                        _client.Progress.DecodedBodyBytesDelivered !=
+                            paused.DecodedBodyBytesDelivered ||
+                        _client.Progress.BufferedBodyBytes != paused.BufferedBodyBytes)
+                        return false;
+                }
+                _pausedPolls = pausedPollCount;
+                _bodySink.AllowResume();
+                _pauseObserved = true;
+                if (!KernelLog.Write(
+                        "GXOS_NET10:PUBLIC_HTTP_BODY_PAUSE_PROGRESS_STABLE\r\n"u8) ||
+                    !KernelLog.WriteHexLine(
+                        "GXOS_NET10:PUBLIC_HTTP_BODY_PAUSED_POLLS=0x"u8,
+                        (ulong)_pausedPolls))
+                    return false;
+            }
             if (!DrainBody()) return HandleBodyConsumerFailure();
 
             if (result == NetworkOperationResult.Failed ||
@@ -114,7 +141,10 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
                 return HandleFailure();
 
             if (_client.State == ManagedHttpsClientState.Succeeded)
-                return FinishSuccess();
+            {
+                if (!FinishSuccess()) return false;
+                return RunCancellationControl();
+            }
         }
 
         Outcome = _dnsLogged && !_tcpLogged
@@ -295,7 +325,8 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
 
     private bool FinishSuccess()
     {
-        if (!DrainBody() || !_client.StatusParsed || _client.StatusCode != 200 ||
+        if (!_pauseObserved || _pausedPolls < 4 || !DrainBody() ||
+            !_client.StatusParsed || _client.StatusCode != 200 ||
             (_client.FramingMode != ManagedHttpFramingMode.Chunked &&
              _client.FramingMode != ManagedHttpFramingMode.ContentLength) ||
             !_client.ResponseBodyComplete || _bodyBytes <= 0 ||
@@ -321,6 +352,23 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
             return false;
         if (!KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_LENGTH=0x"u8,
                                    (ulong)_bodyBytes)) return false;
+        ManagedHttpProgressSnapshot progress = _client.Progress;
+        if (!KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_PROGRESS_STATE=0x"u8,
+                                     (ulong)progress.State) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_TOTAL_KNOWN=0x"u8,
+                                     progress.HasKnownTotalLength ? 1UL : 0UL) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_TOTAL_LENGTH=0x"u8,
+                                     (ulong)progress.TotalEntityLength) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_RECEIVED=0x"u8,
+                                     (ulong)progress.DecodedBodyBytesReceived) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_BUFFERED=0x"u8,
+                                     (ulong)progress.BufferedBodyBytes) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_PAUSE_COUNT=0x"u8,
+                                     (ulong)progress.PauseCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:PUBLIC_HTTP_BODY_RESUME_COUNT=0x"u8,
+                                     (ulong)progress.ResumeCount) ||
+            !KernelLog.Write("GXOS_NET10:PUBLIC_HTTP_BODY_RESUMED\r\n"u8))
+            return false;
         for (int index = 0; index != _digest.Length; index += 4)
         {
             uint word = ((uint)_digest[index] << 24) |
@@ -337,6 +385,67 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
             KernelLog.Write("GXOS_NET10:PUBLIC_HTTPS_COMPLETE\r\n"u8);
     }
 
+    private bool RunCancellationControl()
+    {
+        if (_client.Reset() != NetworkOperationResult.Success ||
+            _client.BeginGet(TargetHost, TargetPath) != NetworkOperationResult.Started ||
+            !KernelLog.Write(
+                "GXOS_NET10:PUBLIC_PHASE38_CANCEL_REQUEST_STARTED\r\n"u8))
+            return false;
+
+        bool bodyDelivered = false;
+        for (int poll = 0; poll != MaximumPolls; ++poll)
+        {
+            NetworkOperationResult result = _client.Poll();
+            if (result == NetworkOperationResult.Failed ||
+                _client.State == ManagedHttpsClientState.Failed)
+                return false;
+            if (_client.StatusParsed && _client.Progress.BufferedBodyBytes != 0)
+            {
+                if (_client.ConsumeResponseBody(_cancellationSink) !=
+                        ManagedHttpBodyDeliveryResult.Delivered)
+                    return false;
+                bodyDelivered = true;
+                break;
+            }
+        }
+        ManagedHttpProgressSnapshot beforeCancel = _client.Progress;
+        if (!bodyDelivered || _cancellationSink.Calls != 1 ||
+            _client.Cancel() != NetworkOperationResult.Success ||
+            _client.State != ManagedHttpsClientState.Cancelled)
+            return false;
+        ManagedHttpProgressSnapshot cancelled = _client.Progress;
+        if (cancelled.State != ManagedHttpTransferState.Cancelled ||
+            cancelled.TerminalFailureReason !=
+                ManagedHttpTerminalFailureReason.Cancelled ||
+            _client.ConsumeResponseBody(_cancellationSink) !=
+                ManagedHttpBodyDeliveryResult.Cancelled ||
+            _cancellationSink.Calls != 1)
+            return false;
+        if (!KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_PHASE38_CANCEL_RECEIVED=0x"u8,
+                (ulong)beforeCancel.DecodedBodyBytesReceived) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_PHASE38_CANCEL_DELIVERED=0x"u8,
+                (ulong)beforeCancel.DecodedBodyBytesDelivered) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PUBLIC_PHASE38_CANCEL_BUFFERED=0x"u8,
+                (ulong)beforeCancel.BufferedBodyBytes) ||
+            !KernelLog.Write(
+                "GXOS_NET10:PUBLIC_PHASE38_CANCELLED_STATE\r\n"u8) ||
+            !KernelLog.Write(
+                "GXOS_NET10:PUBLIC_PHASE38_CANCEL_NO_LATE_DELIVERY\r\n"u8) ||
+            !KernelLog.Write(
+                "GXOS_NET10:PUBLIC_PHASE38_CANCEL_TEARDOWN_COMPLETE\r\n"u8) ||
+            _client.Cancel() != NetworkOperationResult.Success ||
+            _client.Reset() != NetworkOperationResult.Success ||
+            !KernelLog.Write(
+                "GXOS_NET10:PUBLIC_PHASE38_CANCEL_RESET_REUSE_READY\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:PUBLIC_PHASE38_COMPLETE\r\n"u8))
+            return false;
+        return true;
+    }
+
     private void RecordBodyBufferPeak()
     {
         if (_client.BufferedResponseBodyLength > _peakBodyBuffer)
@@ -346,21 +455,48 @@ internal sealed class ManagedPhase35PublicHttpsConsumer
     private sealed class BodyHashSink : IManagedHttpBodySink
     {
         private readonly ManagedPhase35PublicHttpsConsumer _owner;
+        private bool _pauseIssued;
+        private bool _resumeAllowed;
 
         internal BodyHashSink(ManagedPhase35PublicHttpsConsumer owner)
         {
             _owner = owner;
         }
 
-        public bool TryConsume(ReadOnlySpan<byte> segment)
+        internal void AllowResume() => _resumeAllowed = true;
+
+        public ManagedHttpBodySinkResult Consume(ReadOnlySpan<byte> segment)
         {
+            if (!_pauseIssued)
+            {
+                _pauseIssued = true;
+                _owner.KernelPauseEntered();
+                return ManagedHttpBodySinkResult.Pause;
+            }
+            if (!_resumeAllowed) return ManagedHttpBodySinkResult.Pause;
             if (segment.Length == 0 ||
                 _owner._bodyBytes > MaximumBodyBytes - segment.Length ||
                 !_owner._bodyHash.Append(segment))
-                return false;
+                return ManagedHttpBodySinkResult.Fail;
             _owner._bodyBytes += segment.Length;
             _owner._bodySegments++;
-            return true;
+            return ManagedHttpBodySinkResult.Continue;
+        }
+    }
+
+    private void KernelPauseEntered()
+    {
+        KernelLog.Write("GXOS_NET10:PUBLIC_HTTP_BODY_PAUSED\r\n"u8);
+    }
+
+    private sealed class CancellationProbeSink : IManagedHttpBodySink
+    {
+        internal int Calls { get; private set; }
+
+        public ManagedHttpBodySinkResult Consume(ReadOnlySpan<byte> segment)
+        {
+            Calls++;
+            return ManagedHttpBodySinkResult.Continue;
         }
     }
 

@@ -25,7 +25,92 @@ public enum ManagedHttpFailureReason : byte
     HttpParseFailure = 6,
     PrematureConnectionClose = 7,
     TeardownFailure = 8,
-    Cancelled = 9
+    Cancelled = 9,
+    SinkFailure = 10
+}
+
+public enum ManagedHttpBodySinkResult : byte
+{
+    Continue = 0,
+    Pause = 1,
+    Fail = 2
+}
+
+public enum ManagedHttpBodyDeliveryResult : byte
+{
+    NoData = 0,
+    Delivered = 1,
+    Paused = 2,
+    Failed = 3,
+    Cancelled = 4
+}
+
+public enum ManagedHttpTransferState : byte
+{
+    Idle = 0,
+    Receiving = 1,
+    Paused = 2,
+    Completed = 3,
+    Cancelled = 4,
+    Failed = 5
+}
+
+public enum ManagedHttpTerminalFailureReason : byte
+{
+    None = 0,
+    Cancelled = 1,
+    SinkFailure = 2,
+    BodyTooLarge = 3,
+    MalformedHttp = 4,
+    PrematureConnectionClose = 5,
+    TransportFailure = 6,
+    TlsFailure = 7,
+    TeardownFailure = 8,
+    RequestFailure = 9
+}
+
+public readonly struct ManagedHttpProgressSnapshot
+{
+    internal ManagedHttpProgressSnapshot(
+        ManagedHttpTransferState state, int statusCode,
+        ManagedHttpFramingMode transferMode, int decodedBodyBytesReceived,
+        int decodedBodyBytesDelivered, int bufferedBodyBytes,
+        int deliveredSegmentCount, int pauseCount, int resumeCount,
+        bool hasKnownTotalLength, int totalEntityLength,
+        ManagedHttpTerminalFailureReason terminalFailureReason,
+        ManagedHttpParseFailureReason parseFailureReason)
+    {
+        State = state;
+        StatusCode = statusCode;
+        TransferMode = transferMode;
+        DecodedBodyBytesReceived = decodedBodyBytesReceived;
+        DecodedBodyBytesDelivered = decodedBodyBytesDelivered;
+        BufferedBodyBytes = bufferedBodyBytes;
+        DeliveredSegmentCount = deliveredSegmentCount;
+        PauseCount = pauseCount;
+        ResumeCount = resumeCount;
+        HasKnownTotalLength = hasKnownTotalLength;
+        TotalEntityLength = totalEntityLength;
+        TerminalFailureReason = terminalFailureReason;
+        ParseFailureReason = parseFailureReason;
+    }
+
+    public ManagedHttpTransferState State { get; }
+    public int StatusCode { get; }
+    public ManagedHttpFramingMode TransferMode { get; }
+    public int DecodedBodyBytesReceived { get; }
+    public int DecodedBodyBytesDelivered { get; }
+    public int BufferedBodyBytes { get; }
+    public int DeliveredSegmentCount { get; }
+    public int PauseCount { get; }
+    public int ResumeCount { get; }
+    public bool HasKnownTotalLength { get; }
+    public int TotalEntityLength { get; }
+    public ManagedHttpTerminalFailureReason TerminalFailureReason { get; }
+    public ManagedHttpParseFailureReason ParseFailureReason { get; }
+    public bool IsTerminal => State == ManagedHttpTransferState.Completed ||
+                              State == ManagedHttpTransferState.Cancelled ||
+                              State == ManagedHttpTransferState.Failed;
 }
 
 public enum ManagedHttpParseState : byte
@@ -130,10 +215,10 @@ public static class ManagedHttpLimits
 }
 
 /* A body sink receives one bounded parser segment at a time.  The segment is
-   valid only for the duration of TryConsume; a sink must not retain it. */
+   valid only for the duration of Consume; a sink must not retain it. */
 public interface IManagedHttpBodySink
 {
-    bool TryConsume(ReadOnlySpan<byte> segment);
+    ManagedHttpBodySinkResult Consume(ReadOnlySpan<byte> segment);
 }
 
 public static class ManagedHttpRequestBuilder
@@ -267,6 +352,9 @@ public sealed class ManagedHttpResponseParser
     private int _bodyLength;
     private int _bodyDelivered;
     private int _bufferedBodyLength;
+    private int _deliveredSegmentCount;
+    private int _pauseCount;
+    private int _resumeCount;
     private int _contentTypeLength;
     private int _chunkRemaining;
     private int _trailerBytes;
@@ -282,6 +370,7 @@ public sealed class ManagedHttpResponseParser
     private bool _hasLocation;
     private int _locationLength;
     private bool _compatibilityBodyOverflow;
+    private bool _bodyDeliveryPaused;
     private ManagedHttpFramingMode _framingMode;
 
     public ManagedHttpResponseParser()
@@ -318,6 +407,12 @@ public sealed class ManagedHttpResponseParser
     public int BodyLength => _bodyLength;
     public int BodyBytesDelivered => _bodyDelivered;
     public int BufferedBodyLength => _bufferedBodyLength;
+    public int DeliveredSegmentCount => _deliveredSegmentCount;
+    public int PauseCount => _pauseCount;
+    public int ResumeCount => _resumeCount;
+    public bool IsBodyDeliveryPaused => _bodyDeliveryPaused;
+    public bool IsBodyDeliveryWindowFull =>
+        _bufferedBodyLength == ManagedHttpLimits.MaximumBodyDeliveryWindow;
     public int ContentTypeLength => _contentTypeLength;
     public bool HasTransferEncoding => _hasTransferEncoding;
     public bool HasLocation => _hasLocation;
@@ -329,6 +424,19 @@ public sealed class ManagedHttpResponseParser
     public bool IsBodyComplete => _state == ManagedHttpParseState.Complete ||
                                   _state == ManagedHttpParseState.Closed;
     public bool HasPendingBody => _bufferedBodyLength != 0;
+    public ManagedHttpProgressSnapshot Progress => CreateProgressSnapshot(
+        _failureReason != ManagedHttpParseFailureReason.None
+            ? ManagedHttpTransferState.Failed
+            : _bodyDeliveryPaused
+                ? ManagedHttpTransferState.Paused
+                : IsBodyComplete
+                    ? ManagedHttpTransferState.Completed
+                    : ManagedHttpTransferState.Receiving,
+        _failureReason == ManagedHttpParseFailureReason.None
+            ? ManagedHttpTerminalFailureReason.None
+            : _failureReason == ManagedHttpParseFailureReason.BodyTooLarge
+                ? ManagedHttpTerminalFailureReason.BodyTooLarge
+                : ManagedHttpTerminalFailureReason.MalformedHttp);
 
     public void Reset()
     {
@@ -342,6 +450,9 @@ public sealed class ManagedHttpResponseParser
         _bodyLength = 0;
         _bodyDelivered = 0;
         _bufferedBodyLength = 0;
+        _deliveredSegmentCount = 0;
+        _pauseCount = 0;
+        _resumeCount = 0;
         _contentTypeLength = 0;
         _chunkRemaining = 0;
         _trailerBytes = 0;
@@ -357,6 +468,7 @@ public sealed class ManagedHttpResponseParser
         _hasLocation = false;
         _locationLength = 0;
         _compatibilityBodyOverflow = false;
+        _bodyDeliveryPaused = false;
         _framingMode = ManagedHttpFramingMode.None;
         _line.AsSpan().Clear();
         _body.AsSpan().Clear();
@@ -368,8 +480,9 @@ public sealed class ManagedHttpResponseParser
     public bool Feed(ReadOnlySpan<byte> bytes)
     {
         if (!TryFeed(bytes, out int consumed)) return false;
-        return consumed == bytes.Length ||
-               Fail(ManagedHttpParseFailureReason.BodyDeliveryBufferFull);
+        if (consumed == bytes.Length) return true;
+        if (_bodyDeliveryPaused) return false;
+        return Fail(ManagedHttpParseFailureReason.BodyDeliveryBufferFull);
     }
 
     /* Feed returns the number of source bytes actually consumed.  A successful
@@ -381,6 +494,7 @@ public sealed class ManagedHttpResponseParser
         if (_state == ManagedHttpParseState.Failed ||
             _state == ManagedHttpParseState.Closed)
             return bytes.Length == 0;
+        if (_bodyDeliveryPaused) return true;
 
         while (consumed != bytes.Length)
         {
@@ -517,25 +631,69 @@ public sealed class ManagedHttpResponseParser
         _body.AsSpan(remaining, length).Clear();
         _bufferedBodyLength = remaining;
         _bodyDelivered += length;
+        _deliveredSegmentCount++;
+        if (_bodyDeliveryPaused)
+        {
+            _bodyDeliveryPaused = false;
+            _resumeCount++;
+        }
         return true;
     }
 
-    /* Delivers all currently buffered body bytes without allocating a second
-       response-sized buffer.  A sink failure is returned before that segment
-       is removed, so the parser remains resumable and its accounting is not
-       corrupted. */
-    public bool TryConsumeBody(IManagedHttpBodySink sink)
+    /* Delivers the current bounded segment without allocating a second
+       response-sized buffer.  Pause and Fail both leave the exact segment in
+       parser ownership, so the next call observes the same bytes. */
+    public ManagedHttpBodyDeliveryResult ConsumeBody(IManagedHttpBodySink sink)
     {
         if (sink == null) throw new ArgumentNullException(nameof(sink));
-        while (_bufferedBodyLength != 0)
+        if (_bufferedBodyLength == 0)
         {
-            int length = _bufferedBodyLength;
-            if (!sink.TryConsume(_body.AsSpan(0, length))) return false;
+            return ManagedHttpBodyDeliveryResult.NoData;
+        }
+        int length = _bufferedBodyLength;
+        ManagedHttpBodySinkResult result = sink.Consume(
+            _body.AsSpan(0, length));
+        if (result == ManagedHttpBodySinkResult.Continue)
+        {
             _body.AsSpan(0, length).Clear();
             _bufferedBodyLength = 0;
             _bodyDelivered += length;
+            _deliveredSegmentCount++;
+            if (_bodyDeliveryPaused)
+            {
+                _bodyDeliveryPaused = false;
+                _resumeCount++;
+            }
+            return ManagedHttpBodyDeliveryResult.Delivered;
         }
-        return true;
+        if (result == ManagedHttpBodySinkResult.Pause)
+        {
+            if (!_bodyDeliveryPaused)
+            {
+                _bodyDeliveryPaused = true;
+                _pauseCount++;
+            }
+            return ManagedHttpBodyDeliveryResult.Paused;
+        }
+        return ManagedHttpBodyDeliveryResult.Failed;
+    }
+
+    /* Compatibility wrapper for Phase 37 and earlier callers.  New callers
+       should use ConsumeBody to distinguish Pause from a successful drain. */
+    public bool TryConsumeBody(IManagedHttpBodySink sink)
+    {
+        return ConsumeBody(sink) != ManagedHttpBodyDeliveryResult.Failed;
+    }
+
+    internal ManagedHttpProgressSnapshot CreateProgressSnapshot(
+        ManagedHttpTransferState state,
+        ManagedHttpTerminalFailureReason terminalFailureReason)
+    {
+        return new ManagedHttpProgressSnapshot(
+            state, _statusCode, _framingMode, _bodyLength, _bodyDelivered,
+            _bufferedBodyLength, _deliveredSegmentCount, _pauseCount,
+            _resumeCount, _hasContentLength, _contentLength,
+            terminalFailureReason, _failureReason);
     }
 
     public bool TryCopyBody(Span<byte> destination, out int length)
@@ -980,10 +1138,14 @@ public sealed class ManagedHttpClient
     public int ResponseBodyLength => _parser.BodyLength;
     public int ResponseBodyBytesDelivered => _parser.BodyBytesDelivered;
     public int BufferedResponseBodyLength => _parser.BufferedBodyLength;
+    public int DeliveredResponseBodySegmentCount =>
+        _parser.DeliveredSegmentCount;
     public int ContentLength => _parser.ContentLength;
     public ManagedHttpFramingMode FramingMode => _parser.FramingMode;
     public bool ResponseBodyComplete => _parser.IsBodyComplete;
     public ManagedHttpParseFailureReason ParseFailureReason => _parser.FailureReason;
+    public ManagedHttpProgressSnapshot Progress =>
+        _parser.CreateProgressSnapshot(GetTransferState(), GetTerminalFailure());
 
     public NetworkOperationResult BeginGet(ReadOnlySpan<byte> hostname,
                                            ReadOnlySpan<byte> path)
@@ -1017,11 +1179,17 @@ public sealed class ManagedHttpClient
             return NetworkOperationResult.Success;
         if (_state == ManagedHttpClientState.Failed)
             return NetworkOperationResult.Failed;
+        if (_parser.IsBodyDeliveryPaused ||
+            (!_parser.IsBodyComplete && _parser.IsBodyDeliveryWindowFull))
+            return NetworkOperationResult.Success;
         if (_pendingReceiveLength != 0)
         {
             if (!FeedPendingReceive())
                 return Fail(ManagedHttpFailureReason.HttpParseFailure);
             if (_pendingReceiveLength != 0)
+                return NetworkOperationResult.Success;
+            if (_parser.IsBodyDeliveryPaused ||
+                (!_parser.IsBodyComplete && _parser.IsBodyDeliveryWindowFull))
                 return NetworkOperationResult.Success;
         }
 
@@ -1116,12 +1284,35 @@ public sealed class ManagedHttpClient
 
     public bool TryReadResponseBodyChunk(Span<byte> destination, out int length)
     {
+        if (_state == ManagedHttpClientState.Cancelled)
+        {
+            length = 0;
+            return false;
+        }
         return _parser.TryReadBodyChunk(destination, out length);
     }
 
+    public ManagedHttpBodyDeliveryResult ConsumeResponseBody(
+        IManagedHttpBodySink sink)
+    {
+        if (_state == ManagedHttpClientState.Cancelled)
+            return ManagedHttpBodyDeliveryResult.Cancelled;
+        if (_state == ManagedHttpClientState.Failed)
+            return ManagedHttpBodyDeliveryResult.Failed;
+        ManagedHttpBodyDeliveryResult result = _parser.ConsumeBody(sink);
+        if (result == ManagedHttpBodyDeliveryResult.Failed)
+        {
+            Fail(ManagedHttpFailureReason.SinkFailure);
+        }
+        return result;
+    }
+
+    /* Compatibility wrapper for callers that only need a boolean result. */
     public bool TryConsumeResponseBody(IManagedHttpBodySink sink)
     {
-        return _parser.TryConsumeBody(sink);
+        ManagedHttpBodyDeliveryResult result = ConsumeResponseBody(sink);
+        return result != ManagedHttpBodyDeliveryResult.Failed &&
+               result != ManagedHttpBodyDeliveryResult.Cancelled;
     }
 
     public NetworkOperationResult Cancel()
@@ -1132,9 +1323,15 @@ public sealed class ManagedHttpClient
         if (_state == ManagedHttpClientState.Failed)
             return NetworkOperationResult.Success;
         NetworkOperationResult result = _service.Teardown();
+        _request.AsSpan().Clear();
+        _receive.AsSpan().Clear();
+        _pendingReceive.AsSpan().Clear();
+        _responseBody.AsSpan().Clear();
+        _requestLength = 0;
+        _pendingReceiveLength = 0;
+        _requestSent = false;
         _state = ManagedHttpClientState.Cancelled;
         _failureReason = ManagedHttpFailureReason.Cancelled;
-        _parser.Reset();
         return result == NetworkOperationResult.Success
             ? NetworkOperationResult.Success : NetworkOperationResult.Failed;
     }
@@ -1168,6 +1365,46 @@ public sealed class ManagedHttpClient
         _failureReason = reason;
         _state = ManagedHttpClientState.Failed;
         return NetworkOperationResult.Failed;
+    }
+
+    private ManagedHttpTransferState GetTransferState()
+    {
+        if (_state == ManagedHttpClientState.Cancelled)
+            return ManagedHttpTransferState.Cancelled;
+        if (_state == ManagedHttpClientState.Failed)
+            return ManagedHttpTransferState.Failed;
+        if (_parser.IsBodyDeliveryPaused)
+            return ManagedHttpTransferState.Paused;
+        if (_state == ManagedHttpClientState.Succeeded)
+            return ManagedHttpTransferState.Completed;
+        if (_state == ManagedHttpClientState.Idle)
+            return ManagedHttpTransferState.Idle;
+        return ManagedHttpTransferState.Receiving;
+    }
+
+    private ManagedHttpTerminalFailureReason GetTerminalFailure()
+    {
+        if (_state == ManagedHttpClientState.Cancelled ||
+            _failureReason == ManagedHttpFailureReason.Cancelled)
+            return ManagedHttpTerminalFailureReason.Cancelled;
+        if (_failureReason == ManagedHttpFailureReason.SinkFailure)
+            return ManagedHttpTerminalFailureReason.SinkFailure;
+        if (_parser.FailureReason == ManagedHttpParseFailureReason.BodyTooLarge)
+            return ManagedHttpTerminalFailureReason.BodyTooLarge;
+        if (_failureReason == ManagedHttpFailureReason.HttpParseFailure)
+            return ManagedHttpTerminalFailureReason.MalformedHttp;
+        if (_failureReason == ManagedHttpFailureReason.PrematureConnectionClose)
+            return ManagedHttpTerminalFailureReason.PrematureConnectionClose;
+        if (_failureReason == ManagedHttpFailureReason.TransportFailure ||
+            _failureReason == ManagedHttpFailureReason.TcpReset ||
+            _failureReason == ManagedHttpFailureReason.TcpConnectFailure ||
+            _failureReason == ManagedHttpFailureReason.DnsFailure)
+            return ManagedHttpTerminalFailureReason.TransportFailure;
+        if (_failureReason == ManagedHttpFailureReason.TeardownFailure)
+            return ManagedHttpTerminalFailureReason.TeardownFailure;
+        return _state == ManagedHttpClientState.Failed
+            ? ManagedHttpTerminalFailureReason.RequestFailure
+            : ManagedHttpTerminalFailureReason.None;
     }
 
     private bool FeedReceived(ReadOnlySpan<byte> value)

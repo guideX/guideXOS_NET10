@@ -77,7 +77,8 @@ public enum ManagedHttpsFailureReason : byte
     RedirectInvalidLocation = 15,
     RedirectLimitExceeded = 16,
     RedirectDowngradeRejected = 17,
-    RedirectUnsupportedScheme = 18
+    RedirectUnsupportedScheme = 18,
+    SinkFailure = 19
 }
 
 /* The HTTPS layer speaks to this narrow stream boundary only.  TLS has no
@@ -237,10 +238,14 @@ public sealed class ManagedHttpsClient
     public int ResponseBodyLength => _parser.BodyLength;
     public int ResponseBodyBytesDelivered => _parser.BodyBytesDelivered;
     public int BufferedResponseBodyLength => _parser.BufferedBodyLength;
+    public int DeliveredResponseBodySegmentCount =>
+        _parser.DeliveredSegmentCount;
     public int ContentLength => _parser.ContentLength;
     public ManagedHttpFramingMode FramingMode => _parser.FramingMode;
     public bool ResponseBodyComplete => _parser.IsBodyComplete;
     public ManagedHttpParseFailureReason ParseFailureReason => _parser.FailureReason;
+    public ManagedHttpProgressSnapshot Progress =>
+        _parser.CreateProgressSnapshot(GetTransferState(), GetTerminalFailure());
     internal ManagedTls12HandshakeStage TlsLastHandshake => _tls == null
         ? _lastTlsHandshake : _tls.LastHandshake;
     internal ManagedTls12FailureKind TlsFailureKind => _tls == null
@@ -348,6 +353,12 @@ public sealed class ManagedHttpsClient
             return _state == ManagedHttpsClientState.Cancelled
                 ? NetworkOperationResult.Success : NetworkOperationResult.Failed;
 
+        // A sink pause is a hard ownership boundary.  Do not advance TLS,
+        // plaintext, or TCP state until the consumer acknowledges the segment.
+        if (_parser.IsBodyDeliveryPaused ||
+            (!_parser.IsBodyComplete && _parser.IsBodyDeliveryWindowFull))
+            return NetworkOperationResult.Success;
+
         // A full HTTP delivery window applies backpressure above TLS.  Drain
         // the authenticated plaintext remainder before polling TCP again.
         if (_pendingPlaintextLength != 0)
@@ -355,6 +366,9 @@ public sealed class ManagedHttpsClient
             if (!DrainApplicationData())
                 return Fail(ManagedHttpsFailureReason.HttpParseFailure);
             if (_pendingPlaintextLength != 0)
+                return NetworkOperationResult.Success;
+            if (_parser.IsBodyDeliveryPaused ||
+                (!_parser.IsBodyComplete && _parser.IsBodyDeliveryWindowFull))
                 return NetworkOperationResult.Success;
         }
 
@@ -616,12 +630,33 @@ public sealed class ManagedHttpsClient
 
     public bool TryReadResponseBodyChunk(Span<byte> destination, out int length)
     {
+        if (_state == ManagedHttpsClientState.Cancelled)
+        {
+            length = 0;
+            return false;
+        }
         return _parser.TryReadBodyChunk(destination, out length);
     }
 
+    public ManagedHttpBodyDeliveryResult ConsumeResponseBody(
+        IManagedHttpBodySink sink)
+    {
+        if (_state == ManagedHttpsClientState.Cancelled)
+            return ManagedHttpBodyDeliveryResult.Cancelled;
+        if (_state == ManagedHttpsClientState.Failed)
+            return ManagedHttpBodyDeliveryResult.Failed;
+        ManagedHttpBodyDeliveryResult result = _parser.ConsumeBody(sink);
+        if (result == ManagedHttpBodyDeliveryResult.Failed)
+            Fail(ManagedHttpsFailureReason.SinkFailure);
+        return result;
+    }
+
+    /* Compatibility wrapper for callers that only need a boolean result. */
     public bool TryConsumeResponseBody(IManagedHttpBodySink sink)
     {
-        return _parser.TryConsumeBody(sink);
+        ManagedHttpBodyDeliveryResult result = ConsumeResponseBody(sink);
+        return result != ManagedHttpBodyDeliveryResult.Failed &&
+               result != ManagedHttpBodyDeliveryResult.Cancelled;
     }
 
     public NetworkOperationResult Cancel()
@@ -632,9 +667,10 @@ public sealed class ManagedHttpsClient
         if (_state == ManagedHttpsClientState.Failed)
             return NetworkOperationResult.Success;
         NetworkOperationResult result = _transport.ReleaseForReuse();
+        SnapshotTlsDiagnostics();
         _tls?.Teardown();
         _tls = null;
-        ClearOperationBuffers();
+        ClearCancelledBuffers();
         _state = ManagedHttpsClientState.Cancelled;
         _failureReason = ManagedHttpsFailureReason.Cancelled;
         return result == NetworkOperationResult.Success
@@ -758,6 +794,49 @@ public sealed class ManagedHttpsClient
         return NetworkOperationResult.Failed;
     }
 
+    private ManagedHttpTransferState GetTransferState()
+    {
+        if (_state == ManagedHttpsClientState.Cancelled)
+            return ManagedHttpTransferState.Cancelled;
+        if (_state == ManagedHttpsClientState.Failed)
+            return ManagedHttpTransferState.Failed;
+        if (_parser.IsBodyDeliveryPaused)
+            return ManagedHttpTransferState.Paused;
+        if (_state == ManagedHttpsClientState.Succeeded)
+            return ManagedHttpTransferState.Completed;
+        if (_state == ManagedHttpsClientState.Idle)
+            return ManagedHttpTransferState.Idle;
+        return ManagedHttpTransferState.Receiving;
+    }
+
+    private ManagedHttpTerminalFailureReason GetTerminalFailure()
+    {
+        if (_state == ManagedHttpsClientState.Cancelled ||
+            _failureReason == ManagedHttpsFailureReason.Cancelled)
+            return ManagedHttpTerminalFailureReason.Cancelled;
+        if (_failureReason == ManagedHttpsFailureReason.SinkFailure)
+            return ManagedHttpTerminalFailureReason.SinkFailure;
+        if (_parser.FailureReason == ManagedHttpParseFailureReason.BodyTooLarge)
+            return ManagedHttpTerminalFailureReason.BodyTooLarge;
+        if (_failureReason == ManagedHttpsFailureReason.TlsAuthenticationFailure ||
+            _failureReason == ManagedHttpsFailureReason.TlsProtocolFailure)
+            return ManagedHttpTerminalFailureReason.TlsFailure;
+        if (_failureReason == ManagedHttpsFailureReason.HttpParseFailure)
+            return ManagedHttpTerminalFailureReason.MalformedHttp;
+        if (_failureReason == ManagedHttpsFailureReason.PrematureConnectionClose)
+            return ManagedHttpTerminalFailureReason.PrematureConnectionClose;
+        if (_failureReason == ManagedHttpsFailureReason.TransportFailure ||
+            _failureReason == ManagedHttpsFailureReason.TcpReset ||
+            _failureReason == ManagedHttpsFailureReason.TcpConnectFailure ||
+            _failureReason == ManagedHttpsFailureReason.DnsFailure)
+            return ManagedHttpTerminalFailureReason.TransportFailure;
+        if (_failureReason == ManagedHttpsFailureReason.TeardownFailure)
+            return ManagedHttpTerminalFailureReason.TeardownFailure;
+        return _state == ManagedHttpsClientState.Failed
+            ? ManagedHttpTerminalFailureReason.RequestFailure
+            : ManagedHttpTerminalFailureReason.None;
+    }
+
     private void ClearOperationBuffers()
     {
         _currentUrl.Clear();
@@ -775,6 +854,32 @@ public sealed class ManagedHttpsClient
         _lastTlsPeerCertificateAlgorithmMask = 0;
         _lastTlsTrustAnchorMatched = false;
         ClearPerHopBuffers();
+    }
+
+    private void ClearCancelledBuffers()
+    {
+        _currentUrl.Clear();
+        _nextUrl.Clear();
+        _currentUrl = default;
+        _nextUrl = default;
+        _redirectPending = false;
+        _redirectCount = 0;
+        _urlParseFailure = ManagedHttpsUrlParseFailureReason.None;
+        _request.AsSpan().Clear();
+        _receive.AsSpan().Clear();
+        _tlsOutput.AsSpan().Clear();
+        _plaintext.AsSpan().Clear();
+        _pendingPlaintext.AsSpan().Clear();
+        _responseBody.AsSpan().Clear();
+        _requestLength = 0;
+        _tlsOutputLength = 0;
+        _pendingPlaintextLength = 0;
+        _requestSent = false;
+        _requestOutputReady = false;
+        _tlsAuthenticated = false;
+        _applicationDataReceived = false;
+        _closingStarted = false;
+        ResolvedAddress = default;
     }
 
     private void SnapshotTlsDiagnostics()
