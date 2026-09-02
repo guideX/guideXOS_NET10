@@ -18,7 +18,16 @@ public enum ManagedHtmlFailureReason : byte
     TransportFailure = 11,
     TlsFailure = 12,
     TeardownFailure = 13,
-    RequestFailure = 14
+    RequestFailure = 14,
+    NodeCapacityExceeded = 15,
+    TextCapacityExceeded = 16,
+    AttributeCapacityExceeded = 17,
+    AttributeValueCapacityExceeded = 18,
+    AttributeNameCapacityExceeded = 19,
+    TagNameCapacityExceeded = 20,
+    TreeDepthExceeded = 21,
+    InvalidTreeState = 22,
+    UnsupportedInsertionModeCase = 23
 }
 
 public readonly struct ManagedHtmlProgressSnapshot
@@ -68,6 +77,9 @@ public readonly struct ManagedHtmlProgressSnapshot
         PauseCount = text.PauseCount;
         ResumeCount = text.ResumeCount;
         PeakTokenizerTextScalars = tokenizer.PeakTextScalars;
+        TreeBuilderState = tokenizer.TreeBuilder?.State ?? ManagedHtmlTreeBuilderState.Idle;
+        TreeBuilderFailureReason = tokenizer.TreeBuilder?.FailureReason ??
+            ManagedHtmlTreeBuilderFailureReason.None;
     }
 
     public ManagedResourceState State { get; }
@@ -105,6 +117,8 @@ public readonly struct ManagedHtmlProgressSnapshot
     public int PauseCount { get; }
     public int ResumeCount { get; }
     public int PeakTokenizerTextScalars { get; }
+    public ManagedHtmlTreeBuilderState TreeBuilderState { get; }
+    public ManagedHtmlTreeBuilderFailureReason TreeBuilderFailureReason { get; }
     public int DecodedScalarsProduced => ScalarsProduced;
     public bool IsComplete => State == ManagedResourceState.Completed;
     public bool IsCancelled => State == ManagedResourceState.Cancelled;
@@ -135,6 +149,14 @@ internal readonly struct ManagedHtmlProgressSnapshotData
         PauseCount = source.PauseCount;
         ResumeCount = source.ResumeCount;
         PeakTextScalars = source.PeakTextScalars;
+        TreeBuilder = null;
+    }
+
+    internal ManagedHtmlProgressSnapshotData(ManagedHtmlTokenizerProgressSnapshot source,
+                                             ManagedHtmlTreeBuilder? treeBuilder)
+        : this(source)
+    {
+        TreeBuilder = treeBuilder;
     }
 
     internal readonly ManagedHtmlTokenizerState State;
@@ -155,6 +177,7 @@ internal readonly struct ManagedHtmlProgressSnapshotData
     internal readonly int PauseCount;
     internal readonly int ResumeCount;
     internal readonly int PeakTextScalars;
+    internal readonly ManagedHtmlTreeBuilder? TreeBuilder;
 }
 
 /* HTML is deliberately a wrapper above Phase 41.  The response body first
@@ -216,6 +239,7 @@ public sealed class ManagedHtmlResourceRequest
     public ManagedTextFailureReason TextFailureReason => _text.FailureReason;
     public ManagedHtmlProgressSnapshot Progress => CreateProgress();
     public ManagedHtmlTokenizer Tokenizer => _tokenizer!;
+    public ManagedHtmlTreeBuilder? TreeBuilder => _consumer as ManagedHtmlTreeBuilder;
 
     public NetworkOperationResult BeginGet(ReadOnlySpan<byte> hostname,
                                            ReadOnlySpan<byte> path,
@@ -264,6 +288,15 @@ public sealed class ManagedHtmlResourceRequest
         _state = ManagedResourceState.Receiving;
         return result;
     }
+
+    public NetworkOperationResult BeginGet(ReadOnlySpan<byte> hostname,
+                                           ReadOnlySpan<byte> path,
+                                           ManagedHtmlTreeBuilder builder) =>
+        BeginGet(hostname, path, (IManagedHtmlTokenConsumer)builder);
+
+    public NetworkOperationResult BeginGetUrl(ReadOnlySpan<byte> url,
+                                              ManagedHtmlTreeBuilder builder) =>
+        BeginGetUrl(url, (IManagedHtmlTokenConsumer)builder);
 
     public NetworkOperationResult Pause()
     {
@@ -452,6 +485,26 @@ public sealed class ManagedHtmlResourceRequest
 
     private void MapTokenizerFailure()
     {
+        if (_consumer is ManagedHtmlTreeBuilder builder &&
+            builder.FailureReason != ManagedHtmlTreeBuilderFailureReason.None)
+        {
+            _failureReason = builder.FailureReason switch
+            {
+                ManagedHtmlTreeBuilderFailureReason.NodeCapacityExceeded => ManagedHtmlFailureReason.NodeCapacityExceeded,
+                ManagedHtmlTreeBuilderFailureReason.TextCapacityExceeded => ManagedHtmlFailureReason.TextCapacityExceeded,
+                ManagedHtmlTreeBuilderFailureReason.AttributeCapacityExceeded => ManagedHtmlFailureReason.AttributeCapacityExceeded,
+                ManagedHtmlTreeBuilderFailureReason.AttributeValueCapacityExceeded => ManagedHtmlFailureReason.AttributeValueCapacityExceeded,
+                ManagedHtmlTreeBuilderFailureReason.AttributeNameCapacityExceeded => ManagedHtmlFailureReason.AttributeNameCapacityExceeded,
+                ManagedHtmlTreeBuilderFailureReason.TagNameCapacityExceeded => ManagedHtmlFailureReason.TagNameCapacityExceeded,
+                ManagedHtmlTreeBuilderFailureReason.TreeDepthExceeded => ManagedHtmlFailureReason.TreeDepthExceeded,
+                ManagedHtmlTreeBuilderFailureReason.InvalidTreeState => ManagedHtmlFailureReason.InvalidTreeState,
+                ManagedHtmlTreeBuilderFailureReason.UnsupportedInsertionModeCase => ManagedHtmlFailureReason.UnsupportedInsertionModeCase,
+                ManagedHtmlTreeBuilderFailureReason.Cancelled => ManagedHtmlFailureReason.Cancelled,
+                _ => ManagedHtmlFailureReason.TokenConsumerFailure
+            };
+            _state = ManagedResourceState.Failed;
+            return;
+        }
         _failureReason = _tokenizer?.FailureReason ==
             ManagedHtmlTokenizerFailureReason.TokenConsumerFailure
             ? ManagedHtmlFailureReason.TokenConsumerFailure
@@ -463,7 +516,7 @@ public sealed class ManagedHtmlResourceRequest
     {
         ManagedTextProgressSnapshot text = _text.Progress;
         ManagedHtmlProgressSnapshotData tokenizer = new(
-            _tokenizer?.Progress ?? default);
+            _tokenizer?.Progress ?? default, _consumer as ManagedHtmlTreeBuilder);
         return new(_state, _failureReason, text.FailureReason, text, tokenizer);
     }
 

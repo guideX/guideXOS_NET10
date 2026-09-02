@@ -18,6 +18,7 @@
     <Compile Include="..\ManagedKernel\ManagedTextDecoding.cs" Link="ManagedTextDecoding.cs" />
     <Compile Include="..\ManagedKernel\ManagedHtmlTokenizer.cs" Link="ManagedHtmlTokenizer.cs" />
     <Compile Include="..\ManagedKernel\ManagedHtmlResourceStreaming.cs" Link="ManagedHtmlResourceStreaming.cs" />
+    <Compile Include="..\ManagedKernel\ManagedHtmlDocument.cs" Link="ManagedHtmlDocument.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpsClient.cs" Link="ManagedHttpsClient.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpsUrl.cs" Link="ManagedHttpsUrl.cs" />
     <Compile Include="..\ManagedKernel\ManagedTls12Client.cs" Link="ManagedTls12Client.cs" />
