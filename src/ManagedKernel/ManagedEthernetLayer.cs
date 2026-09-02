@@ -55,6 +55,7 @@ internal sealed class ManagedEthernetLayer
     internal bool Phase39Passed => _ipv4.Phase39Passed;
     internal bool Phase40Passed => _ipv4.Phase40Passed;
     internal bool Phase41Passed => _ipv4.Phase41Passed;
+    internal bool Phase42Passed => _ipv4.Phase42Passed;
 
     internal void EnablePhase34Polling()
     {
@@ -181,6 +182,14 @@ internal sealed class ManagedEthernetLayer
             (ManagedNetworkServiceBackend)_networkService!.Backend;
         runtime.Rebind(this, _ipv4);
         return _ipv4.TryRunPhase41();
+    }
+
+    internal bool TryRunPhase42()
+    {
+        ManagedNetworkServiceBackend runtime =
+            (ManagedNetworkServiceBackend)_networkService!.Backend;
+        runtime.Rebind(this, _ipv4);
+        return _ipv4.TryRunPhase42();
     }
 
     internal void InitializeMac()

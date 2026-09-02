@@ -28,6 +28,7 @@
     <Compile Include="..\ManagedKernel\ManagedSha384.cs" Link="ManagedSha384.cs" />
     <Compile Include="..\ManagedKernel\ManagedP384.cs" Link="ManagedP384.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpClient.cs" Link="ManagedHttpClient.cs" />
+    <Compile Include="..\ManagedKernel\ManagedContentEncoding.cs" Link="ManagedContentEncoding.cs" />
     <Compile Include="..\ManagedKernel\ManagedTcp.cs" Link="ManagedTcp.cs" />
     <Compile Include="..\ManagedKernel\ManagedTcpConnection.cs" Link="ManagedTcpConnection.cs" />
     <Compile Include="..\ManagedKernel\ManagedEthernet.cs" Link="ManagedEthernet.cs" />

@@ -312,12 +312,17 @@ public sealed class ManagedContentEncodingDecoder
                 return ManagedContentDecoderProcessResult.OutputAvailable;
             if (step == StepResult.Complete)
             {
-                _state = ManagedContentDecoderState.Completed;
                 if (_inputLength != 0)
                 {
                     Fail(ManagedContentDecoderFailureReason.TrailingCompressedData);
                     return ManagedContentDecoderProcessResult.Failed;
                 }
+                /* A final deflate block can fill a partial output window.  Do
+                   not publish terminal state until that last bounded window
+                   has been accepted by the downstream consumer. */
+                if (_outputLength != 0)
+                    return ManagedContentDecoderProcessResult.OutputAvailable;
+                _state = ManagedContentDecoderState.Completed;
                 return ManagedContentDecoderProcessResult.Complete;
             }
             if (step == StepResult.Failed)
