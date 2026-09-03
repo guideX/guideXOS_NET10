@@ -186,6 +186,7 @@ internal readonly struct ManagedHtmlProgressSnapshotData
    windows into the tokenizer. */
 public sealed class ManagedHtmlResourceRequest
 {
+    private static ManagedHtmlTokenizer? s_nativeKernelTokenizer;
     private readonly ManagedTextResourceRequest _text;
     private readonly ManagedHtmlScalarAdapter _scalarAdapter;
     private IManagedHtmlTokenConsumer? _consumer;
@@ -231,7 +232,22 @@ public sealed class ManagedHtmlResourceRequest
                                                 compactTlsProfile,
                                                 maximumDecodedResourceLength);
         _scalarAdapter = new(this);
+        _tokenizer = TakeNativeKernelTokenizer();
         _state = ManagedResourceState.Idle;
+    }
+
+    internal static bool PrimeNativeKernelTokenizer()
+    {
+        if (s_nativeKernelTokenizer != null) return true;
+        s_nativeKernelTokenizer = new ManagedHtmlTokenizer();
+        return true;
+    }
+
+    private static ManagedHtmlTokenizer? TakeNativeKernelTokenizer()
+    {
+        ManagedHtmlTokenizer? tokenizer = s_nativeKernelTokenizer;
+        s_nativeKernelTokenizer = null;
+        return tokenizer;
     }
 
     public ManagedResourceState State => _state;
@@ -391,7 +407,6 @@ public sealed class ManagedHtmlResourceRequest
         _tokenizer?.Reset();
         _consumer?.Reset();
         _consumer = null;
-        _tokenizer = null;
         _state = ManagedResourceState.Idle;
         _failureReason = ManagedHtmlFailureReason.None;
         _metadataChecked = false;

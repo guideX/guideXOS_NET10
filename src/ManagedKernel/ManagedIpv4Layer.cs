@@ -132,6 +132,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase41Passed;
     private bool _phase42Passed;
     private bool _phase43Passed;
+    private bool _phase44Passed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -206,6 +207,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase41Passed => _phase41Passed;
     internal bool Phase42Passed => _phase42Passed;
     internal bool Phase43Passed => _phase43Passed;
+    internal bool Phase44Passed => _phase44Passed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -1003,6 +1005,50 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
             "GXOS_NET10:MANAGED_HTTPS_PHASE43_PASS\r\n"u8);
     }
 
+    internal bool TryRunPhase44(bool capacityControl = false)
+    {
+        if (_phase44Passed || _active || _networkService == null)
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE44_IPV4_GUARD_FAILED\r\n"u8);
+            return false;
+        }
+        _phase43Consumer ??= new ManagedPhase43HtmlProof(_networkService, capacityControl, true);
+        if (!_arp.TryBeginDhcp())
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE44_ARP_DHCP_BEGIN_FAILED\r\n"u8);
+            return false;
+        }
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _pending.Clear();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _gatewayIpv4.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _gatewayIpv4Value = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort, ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_BEGIN\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true, requireGateway: false)) return false;
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_COMPLETE\r\n"u8) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_UNREGISTERED\r\n"u8) ||
+            !_udpEndpoints.TryRegister(DnsClientPort, ManagedUdpEndpointHandler.DnsResolver) ||
+            !PublishNetworkServiceStatus() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_CONFIGURED\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_IPV4=0x"u8, _localIpv4Value) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_SUBNET=0x"u8, _subnetMaskValue) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_GATEWAY=0x"u8, _gatewayIpv4Value) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_DNS=0x"u8, DnsServerValue)) return false;
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        if (!_phase43Consumer.TryRun()) return false;
+        _phase44Passed = !capacityControl;
+        return capacityControl || KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_PASS\r\n"u8);
+    }
+
     private bool PublishNetworkServiceStatus()
     {
         if (_networkService == null) return false;
@@ -1312,6 +1358,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _phase41Passed = false;
         _phase42Passed = false;
         _phase43Passed = false;
+        _phase44Passed = false;
         _servicePingIdentifier = 0x2101;
         _servicePingSequence = 1;
         _dns.ResetForTeardown();
@@ -1321,15 +1368,25 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
 
     internal bool TryBeginServiceResolve(ReadOnlySpan<byte> name)
     {
-        if (!_active || _dhcp.State != ManagedDhcpv4State.Bound ||
-            !_dns.HasServer || _dns.IsActive ||
-            !_dns.TryStartQuery(name) ||
-            !_dns.TryBuildQuery(_dnsQuery, out ushort queryLength) ||
+        uint failure = 0;
+        if (!_active) failure |= 1U;
+        if (_dhcp.State != ManagedDhcpv4State.Bound) failure |= 2U;
+        if (!_dns.HasServer) failure |= 4U;
+        if (_dns.IsActive) failure |= 8U;
+        if (failure == 0 && !_dns.TryStartQuery(name)) failure |= 0x10U;
+        ushort queryLength = 0;
+        if (failure == 0 &&
+            !_dns.TryBuildQuery(_dnsQuery, out queryLength)) failure |= 0x20U;
+        if (failure == 0 &&
             !TrySendUdpDatagram(DnsClientPort, DnsServerPort,
                                 _dnsQuery.AsSpan(0, queryLength),
-                                _dns.ServerIpv4, out _))
+                                _dns.ServerIpv4, out _)) failure |= 0x40U;
+        if (failure != 0)
         {
             _dns.CancelActiveQuery();
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_NETWORK_SERVICE_DNS_BEGIN_FAILURE=0x"u8,
+                failure);
             return false;
         }
         return true;

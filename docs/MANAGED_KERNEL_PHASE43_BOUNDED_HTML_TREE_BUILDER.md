@@ -200,7 +200,7 @@ The deterministic gzip fixture is served at `/phase43/gzip` with
 `text/html; charset=utf-8`, gzip encoding, 2,566 decompressed bytes, and raw
 resource SHA-256:
 
-`C51E5224E6919E31A2D8835ED674ED088C5F644AC8DDA394AE5D162C05062440`
+`F5E393FF306737E41C5BD930642786870E733E8F1644BD75E28A138DFB82EB21`
 
 The wrapper requires 3/3 fresh boots, the full metric set above, the canonical
 document hash, and absence of machine-fault markers. It also requires
@@ -213,19 +213,21 @@ The node-capacity negative-control wrapper is
 success marker, and expects clean kernel health failure-boundary markers.
 The same control can be run for three fresh boots.
 
-QEMU was not available in the current environment (`qemu-system-x86_64.exe`
-was not found), so no Phase 43 positive or capacity-control QEMU boots are
-claimed here. The wrappers and Gate 4 mode are in place for the existing QEMU
-environment. Phase 40/41/42 QEMU regressions were likewise not rerun in this
-environment.
+QEMU was available for the Phase 44 continuation at
+`C:\Program Files\qemu\qemu-system-x86_64.exe` (QEMU 11.0.0). The final Phase
+43 continuation evidence is preserved in
+`artifacts\phase43-document-final-20260902` (3/3 positive boots) and
+`artifacts\phase43-node-capacity-final-20260902` (3/3 node-capacity negative
+boots). Phase 40/41/42 QEMU regressions were not rerun in this continuation;
+their existing evidence remains preserved.
 
 ## Compatibility and remaining limitations
 
-The representation is sufficient for future selector traversal, simple
-element-type checks, bounded link/image discovery, and layout tree traversal.
-It does not yet expose CSS matching, computed style, layout boxes, painting,
-resource fetching, navigation, DOM mutation/events, form behavior, image
-decoding, JavaScript, shadow DOM, accessibility, or XML semantics.
+The representation is sufficient for selector traversal, element-type checks,
+bounded link/image discovery, CSS matching, computed style, and layout tree
+traversal. It does not expose layout boxes, painting, resource fetching,
+navigation, DOM mutation/events, form behavior, image decoding, JavaScript,
+shadow DOM, accessibility, or XML semantics.
 
 The measured fixture deliberately has no implied html/head/body elements;
 separate host cases cover the implied structure. Comments are counted and
@@ -234,7 +236,8 @@ arenas. Ordinary child insertion is O(1) through `LastChild`; end-tag and
 attribute matching are bounded linear scans over the fixed depth or element
 attribute slice.
 
-Recommended Phase 44 work is to add a read-only node-walk adapter consumed by
-Navigator, document the exact selector-facing tag/attribute contract, and add
-optional bounded traversal-prefix telemetry. CSS parsing and layout should
-remain separate phases.
+Phase 44 adds the CSS parser/matcher/cascade as a separate bounded layer; see
+`docs\MANAGED_KERNEL_PHASE44_BOUNDED_CSS_CASCADE.md`. CSS remains separate from
+layout and painting. A future phase can add external stylesheet streaming,
+sibling combinators, or a layout adapter without changing the Phase 43 node
+arena contract.
