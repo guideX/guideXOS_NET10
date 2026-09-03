@@ -42,32 +42,37 @@ internal sealed class ManagedPhase43HtmlProof
         0xE2, 0x8A, 0x13, 0x8D, 0xFB, 0x82, 0xEB, 0x21
     };
     private static ReadOnlySpan<byte> Hostname => "www.example.com"u8;
-    private ReadOnlySpan<byte> Path => _cssMode ? "/phase44/gzip"u8 : "/phase43/gzip"u8;
+    private ReadOnlySpan<byte> Path => _layoutMode ? "/phase45/gzip"u8 :
+        (_cssMode ? "/phase44/gzip"u8 : "/phase43/gzip"u8);
     private static ReadOnlySpan<byte> ContentType => "text/html; charset=utf-8"u8;
 
     private readonly ManagedNetworkService _service;
     private readonly ManagedHtmlResourceRequest _resource;
     private readonly ManagedHtmlTreeBuilder _tree;
     private readonly ManagedCssEngine? _cssEngine;
+    private ManagedLayoutEngine? _layoutEngine;
     private readonly bool _capacityControl;
     private readonly bool _cssMode;
+    private readonly bool _layoutMode;
     private bool _bodyReceivedLogged;
     private bool _pauseObserved;
     private int _stablePausedPolls;
 
     internal ManagedPhase43HtmlProof(ManagedNetworkService service,
                                      bool capacityControl = false,
-                                     bool cssMode = false)
+                                     bool cssMode = false,
+                                     bool layoutMode = false)
     {
         _service = service;
         _capacityControl = capacityControl;
         _cssMode = cssMode;
+        _layoutMode = layoutMode;
         _tree = capacityControl && !cssMode
             ? new ManagedHtmlTreeBuilder(new ManagedHtmlDocumentArenaOptions(
                 80, 65_536, 2_048, 16_384, 128))
             : new ManagedHtmlTreeBuilder();
         _cssEngine = cssMode
-            ? ManagedCssEngine.TakeNativeKernelArena(_tree.Document, capacityControl)
+            ? ManagedCssEngine.TakeNativeKernelArena(_tree.Document, capacityControl && !layoutMode)
             : null;
         ManagedSecureRandom random = new(new FixedEntropy(CreateEntropy()));
         _resource = new(service, ManagedTls12Phase31Fixtures.Root,
@@ -129,9 +134,10 @@ internal sealed class ManagedPhase43HtmlProof
 
     private bool WriteResourceMarker(ReadOnlySpan<byte> suffix)
     {
-        return KernelLog.Write(_cssMode
+        return KernelLog.Write(_layoutMode ?
+                "GXOS_NET10:MANAGED_HTTPS_PHASE45_"u8 : (_cssMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE44_"u8
-                : "GXOS_NET10:MANAGED_HTTPS_PHASE43_"u8) &&
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE43_"u8)) &&
                KernelLog.Write(suffix) && KernelLog.Write("\r\n"u8);
     }
 
@@ -267,7 +273,9 @@ internal sealed class ManagedPhase43HtmlProof
     {
         ManagedHtmlProgressSnapshot progress = _resource.Progress;
         ManagedHtmlTreeBuilderProgressSnapshot tree = _tree.Progress;
-        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_BEGIN\r\n"u8))
+        if (!KernelLog.Write(_layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CSS_BEGIN\r\n"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_BEGIN\r\n"u8))
             return false;
         if (progress.StatusCode != 200 ||
             progress.MimeClassification != ManagedMimeClassification.Html ||
@@ -283,16 +291,20 @@ internal sealed class ManagedPhase43HtmlProof
             !_tree.Validate(out ManagedHtmlDocumentValidationFailureReason validation) ||
             validation != ManagedHtmlDocumentValidationFailureReason.None)
             return false;
-        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_TREE_VALIDATED\r\n"u8))
+        if (!KernelLog.Write(_layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CSS_TREE_VALIDATED\r\n"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_TREE_VALIDATED\r\n"u8))
             return false;
 
         ManagedCssEngine? css = _cssEngine;
         if (css == null) return false;
-        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_ENGINE_CREATED\r\n"u8))
+        if (!KernelLog.Write(_layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CSS_ENGINE_CREATED\r\n"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_ENGINE_CREATED\r\n"u8))
             return false;
         if (!css.TryStyle())
         {
-            if (!_capacityControl || css.FailureReason != ManagedCssParseFailureReason.RuleCapacityExceeded)
+            if (!_capacityControl || _layoutMode || css.FailureReason != ManagedCssParseFailureReason.RuleCapacityExceeded)
                 return WriteCssFailure(css);
             KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_FAILURE=0x"u8,
                                    (ulong)css.FailureReason);
@@ -300,7 +312,10 @@ internal sealed class ManagedPhase43HtmlProof
             KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_CAPACITY_NEGATIVE_PASS\r\n"u8);
             return false;
         }
-        if (_capacityControl) return false;
+        if (_capacityControl && !_layoutMode) return false;
+
+        if (_layoutMode)
+            return FinishLayoutSuccess(progress, tree, css);
 
         ManagedHtmlNodeHandle main = FindElementById("main"u8);
         ManagedHtmlNodeHandle note = FindElementByClass("note"u8);
@@ -394,9 +409,126 @@ internal sealed class ManagedPhase43HtmlProof
 
     private bool WriteCssFailure(ManagedCssEngine css)
     {
-        KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_FAILURE=0x"u8,
+        KernelLog.WriteHexLine(_layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CSS_FAILURE=0x"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_FAILURE=0x"u8,
                                (ulong)css.FailureReason);
         return false;
+    }
+
+    private bool FinishLayoutSuccess(ManagedHtmlProgressSnapshot progress,
+                                     ManagedHtmlTreeBuilderProgressSnapshot tree,
+                                     ManagedCssEngine css)
+    {
+        if (_capacityControl)
+        {
+            ManagedLayoutEngine sizing = new(_tree.Document, css,
+                ManagedLayoutArenaOptions.Default, new ManagedDeterministicLayoutTextMetrics());
+            if (!sizing.TryLayout(800, 600) || sizing.LayoutBoxCount <= 1)
+                return false;
+            int exactCapacity = sizing.LayoutBoxCount - 1;
+            ManagedLayoutEngine negative = new(_tree.Document, css,
+                new ManagedLayoutArenaOptions(exactCapacity,
+                    ManagedLayoutLimits.DefaultLineCapacity,
+                    ManagedLayoutLimits.DefaultTextFragmentCapacity,
+                    ManagedLayoutLimits.DefaultTraversalStackCapacity),
+                new ManagedDeterministicLayoutTextMetrics());
+            bool failed = !negative.TryLayout(800, 600) &&
+                          negative.FailureReason == ManagedLayoutFailureReason.LayoutBoxCapacityExceeded;
+            if (!failed || !KernelLog.WriteHexLine(
+                    "GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_CAPACITY=0x"u8,
+                    (ulong)exactCapacity) ||
+                !KernelLog.WriteHexLine(
+                    "GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_FAILURE=0x"u8,
+                    (ulong)negative.FailureReason) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_CAPACITY_CONTROL_VALIDATED\r\n"u8) ||
+                !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_CAPACITY_NEGATIVE_PASS\r\n"u8))
+                return false;
+            return false;
+        }
+
+        _layoutEngine = new ManagedLayoutEngine(_tree.Document, css,
+            ManagedLayoutArenaOptions.Default, new ManagedDeterministicLayoutTextMetrics());
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_ENGINE_CREATED\r\n"u8) ||
+            !_layoutEngine.TryLayout(800, 600) ||
+            !_layoutEngine.Validate(out ManagedLayoutValidationFailureReason validation) ||
+            validation != ManagedLayoutValidationFailureReason.None)
+        {
+            KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_FAILURE=0x"u8,
+                                  (ulong)(_layoutEngine?.FailureReason ?? ManagedLayoutFailureReason.InvalidState));
+            return false;
+        }
+        ManagedLayoutTelemetry telemetry = _layoutEngine.Telemetry;
+        ManagedHtmlNodeHandle body = _tree.Body;
+        ManagedHtmlNodeHandle main = FindElementById("main"u8);
+        ManagedHtmlNodeHandle note = FindElementByClass("note"u8);
+        if (body == ManagedHtmlNodeHandle.Invalid || main == ManagedHtmlNodeHandle.Invalid ||
+            note == ManagedHtmlNodeHandle.Invalid ||
+            !_layoutEngine.TryGetBoxForNode(body, out int bodyIndex) ||
+            !_layoutEngine.TryGetBoxForNode(main, out int mainIndex) ||
+            !_layoutEngine.TryGetBoxForNode(note, out int noteIndex) ||
+            !_layoutEngine.TryGetBox(bodyIndex, out ManagedLayoutBox bodyBox) ||
+            !_layoutEngine.TryGetBox(mainIndex, out ManagedLayoutBox mainBox) ||
+            !_layoutEngine.TryGetBox(noteIndex, out ManagedLayoutBox noteBox)) return false;
+        Span<byte> documentHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> styleHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> layoutHash = stackalloc byte[ManagedSha256.DigestSize];
+        if (!_tree.TryCopyCanonicalHash(documentHash) || !css.TryCopyCanonicalStyleHash(styleHash) ||
+            !_layoutEngine.TryCopyCanonicalLayoutHash(layoutHash)) return false;
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_VERIFIED\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_STATUS=0x"u8, (ulong)progress.StatusCode) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_CONTENT_TYPE=0x"u8, (ulong)ContentType.Length) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_CONTENT_ENCODING=0x"u8, 1) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_ENCODED_BYTES=0x"u8, (ulong)progress.EncodedBytesReceived) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_DECOMPRESSED_BYTES=0x"u8, (ulong)progress.DecompressedBytesProduced) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_SCALARS=0x"u8, (ulong)tree.TextScalarsUsed) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_TOKENS=0x"u8, (ulong)progress.TokensEmitted) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_NODES=0x"u8, (ulong)tree.NodeCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_ELEMENTS=0x"u8, (ulong)tree.ElementCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_CSS_RULES=0x"u8, (ulong)css.RulesParsed) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_SELECTOR_MATCHES=0x"u8, (ulong)css.SelectorMatches) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_ELEMENTS_STYLED=0x"u8, (ulong)css.ElementsStyled) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_VIEWPORT_WIDTH=0x"u8, 800) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_VIEWPORT_HEIGHT=0x"u8, 600) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_BOXES=0x"u8, (ulong)telemetry.LayoutBoxCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BLOCK_BOXES=0x"u8, (ulong)telemetry.BlockBoxCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_INLINE_TEXT_BOXES=0x"u8, (ulong)telemetry.InlineTextBoxCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_LINES=0x"u8, (ulong)telemetry.LineCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_TEXT_FRAGMENTS=0x"u8, (ulong)telemetry.TextFragmentCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_TEXT_SCALARS_MEASURED=0x"u8, (ulong)telemetry.TextScalarsMeasured) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_SOFT_WRAPS=0x"u8, (ulong)telemetry.SoftWrapCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_FORCED_BREAKS=0x"u8, (ulong)telemetry.ForcedBreakCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_DISPLAY_NONE_SKIPS=0x"u8, (ulong)telemetry.DisplayNoneSkips) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_POSITIONED_BOXES=0x"u8, (ulong)telemetry.PositionedBoxCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_HORIZONTAL_OVERFLOW=0x"u8, (ulong)telemetry.HorizontalOverflowCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_VERTICAL_OVERFLOW=0x"u8, (ulong)telemetry.VerticalOverflowCount) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_PEAK_BOX_ARENA=0x"u8, (ulong)telemetry.PeakBoxArena) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_PEAK_LINE_ARENA=0x"u8, (ulong)telemetry.PeakLineArena) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_PEAK_FRAGMENT_ARENA=0x"u8, (ulong)telemetry.PeakFragmentArena) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_PEAK_TRAVERSAL_DEPTH=0x"u8, (ulong)telemetry.PeakTraversalDepth) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_CONTENT_WIDTH=0x"u8, (ulong)telemetry.DocumentContentWidth) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_CONTENT_HEIGHT=0x"u8, (ulong)telemetry.DocumentContentHeight) ||
+            !WriteLayoutRecord("BODY"u8, bodyBox) || !WriteLayoutRecord("MAIN"u8, mainBox) ||
+            !WriteLayoutRecord("NOTE"u8, noteBox)) return false;
+        return WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE45_DOCUMENT_HASH_WORD=0x"u8, documentHash) &&
+               WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE45_STYLE_HASH_WORD=0x"u8, styleHash) &&
+               WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_HASH_WORD=0x"u8, layoutHash) &&
+               KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE45_RESOURCE_COMPLETE\r\n"u8) &&
+               KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE45_RESOURCE_PASS\r\n"u8);
+    }
+
+    private bool WriteLayoutRecord(ReadOnlySpan<byte> name, ManagedLayoutBox box)
+    {
+        return KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_"u8, (ulong)name.Length) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_SOURCE=0x"u8, (ulong)box.SourceNodeIndex) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_X=0x"u8, (ulong)box.BorderBox.X) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_Y=0x"u8, (ulong)box.BorderBox.Y) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_WIDTH=0x"u8, (ulong)box.BorderBox.Width) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_HEIGHT=0x"u8, (ulong)box.BorderBox.Height) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_CONTENT_X=0x"u8, (ulong)box.ContentRect.X) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_CONTENT_Y=0x"u8, (ulong)box.ContentRect.Y) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_CONTENT_WIDTH=0x"u8, (ulong)box.ContentRect.Width) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE45_BOX_CONTENT_HEIGHT=0x"u8, (ulong)box.ContentRect.Height);
     }
 
     private bool WriteCssStyle(ReadOnlySpan<byte> name, ManagedHtmlNodeHandle node,

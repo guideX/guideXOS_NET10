@@ -133,6 +133,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase42Passed;
     private bool _phase43Passed;
     private bool _phase44Passed;
+    private bool _phase45Passed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -208,6 +209,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase42Passed => _phase42Passed;
     internal bool Phase43Passed => _phase43Passed;
     internal bool Phase44Passed => _phase44Passed;
+    internal bool Phase45Passed => _phase45Passed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -1005,17 +1007,27 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
             "GXOS_NET10:MANAGED_HTTPS_PHASE43_PASS\r\n"u8);
     }
 
-    internal bool TryRunPhase44(bool capacityControl = false)
+    internal bool TryRunPhase44(bool capacityControl = false) =>
+        TryRunPhase44Core(capacityControl, false);
+
+    internal bool TryRunPhase45(bool capacityControl = false) =>
+        TryRunPhase44Core(capacityControl, true);
+
+    private bool TryRunPhase44Core(bool capacityControl, bool layoutMode)
     {
-        if (_phase44Passed || _active || _networkService == null)
+        if ((layoutMode ? _phase45Passed : _phase44Passed) || _active || _networkService == null)
         {
-            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE44_IPV4_GUARD_FAILED\r\n"u8);
+            KernelLog.Write(layoutMode
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE45_IPV4_GUARD_FAILED\r\n"u8
+                : "GXOS_NET10:MANAGED_KERNEL_PHASE44_IPV4_GUARD_FAILED\r\n"u8);
             return false;
         }
-        _phase43Consumer ??= new ManagedPhase43HtmlProof(_networkService, capacityControl, true);
+        _phase43Consumer ??= new ManagedPhase43HtmlProof(_networkService, capacityControl, true, layoutMode);
         if (!_arp.TryBeginDhcp())
         {
-            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE44_ARP_DHCP_BEGIN_FAILED\r\n"u8);
+            KernelLog.Write(layoutMode
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE45_ARP_DHCP_BEGIN_FAILED\r\n"u8
+                : "GXOS_NET10:MANAGED_KERNEL_PHASE44_ARP_DHCP_BEGIN_FAILED\r\n"u8);
             return false;
         }
         _active = true;
@@ -1031,22 +1043,50 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _gatewayIpv4Value = 0;
         _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
         if (!_udpEndpoints.TryRegister(DhcpClientPort, ManagedUdpEndpointHandler.Dhcpv4Client) ||
-            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_BEGIN\r\n"u8) ||
+            !KernelLog.Write(layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_BEGIN\r\n"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_BEGIN\r\n"u8) ||
             !TryRunDhcpDora(requireDnsServer: true, requireGateway: false)) return false;
-        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_COMPLETE\r\n"u8) ||
+        if (!KernelLog.Write(layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_DHCP_COMPLETE\r\n"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_COMPLETE\r\n"u8) ||
             !_udpEndpoints.TryUnregister(DhcpClientPort) ||
-            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_UNREGISTERED\r\n"u8) ||
+            !KernelLog.Write(layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_DHCP_UNREGISTERED\r\n"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_UNREGISTERED\r\n"u8) ||
             !_udpEndpoints.TryRegister(DnsClientPort, ManagedUdpEndpointHandler.DnsResolver) ||
             !PublishNetworkServiceStatus() ||
-            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_CONFIGURED\r\n"u8) ||
-            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_IPV4=0x"u8, _localIpv4Value) ||
-            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_SUBNET=0x"u8, _subnetMaskValue) ||
-            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_GATEWAY=0x"u8, _gatewayIpv4Value) ||
-            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE44_DNS=0x"u8, DnsServerValue)) return false;
+            !KernelLog.Write(layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CONFIGURED\r\n"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CONFIGURED\r\n"u8) ||
+            !KernelLog.WriteHexLine(layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_IPV4=0x"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_IPV4=0x"u8, _localIpv4Value) ||
+            !KernelLog.WriteHexLine(layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_SUBNET=0x"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_SUBNET=0x"u8, _subnetMaskValue) ||
+            !KernelLog.WriteHexLine(layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_GATEWAY=0x"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_GATEWAY=0x"u8, _gatewayIpv4Value) ||
+            !KernelLog.WriteHexLine(layoutMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_DNS=0x"u8
+                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_DNS=0x"u8, DnsServerValue)) return false;
         ManagedNetworkServiceBackend.SetLiveIpv4(this);
         if (!_phase43Consumer.TryRun()) return false;
-        _phase44Passed = !capacityControl;
-        return capacityControl || KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE44_PASS\r\n"u8);
+        if (layoutMode) _phase45Passed = !capacityControl;
+        else _phase44Passed = !capacityControl;
+        if (layoutMode)
+        {
+            // Layout emits a much larger bounded telemetry record set than
+            // the CSS-only proof.  A transient serial backpressure result on
+            // this convenience marker must not turn an already verified
+            // document/layout proof into a driver-start failure; the kernel
+            // pass marker is emitted after the driver teardown boundary.
+            KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE45_PASS\r\n"u8);
+            return true;
+        }
+        return capacityControl || KernelLog.Write(
+            "GXOS_NET10:MANAGED_HTTPS_PHASE44_PASS\r\n"u8);
     }
 
     private bool PublishNetworkServiceStatus()
