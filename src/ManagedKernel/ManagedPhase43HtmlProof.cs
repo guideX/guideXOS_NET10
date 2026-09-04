@@ -42,8 +42,14 @@ internal sealed class ManagedPhase43HtmlProof
         0xE2, 0x8A, 0x13, 0x8D, 0xFB, 0x82, 0xEB, 0x21
     };
     private static ReadOnlySpan<byte> Hostname => "www.example.com"u8;
-    private ReadOnlySpan<byte> Path => _layoutMode ? "/phase45/gzip"u8 :
-        (_cssMode ? "/phase44/gzip"u8 : "/phase43/gzip"u8);
+    private ReadOnlySpan<byte> Path => _paintMode ? "/phase46/gzip"u8 :
+        (_layoutMode ? "/phase45/gzip"u8 :
+        (_cssMode ? "/phase44/gzip"u8 : "/phase43/gzip"u8));
+    private ReadOnlySpan<byte> PhasePrefix => _paintMode
+        ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_"u8
+        : (_layoutMode ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_"u8
+        : (_cssMode ? "GXOS_NET10:MANAGED_HTTPS_PHASE44_"u8
+        : "GXOS_NET10:MANAGED_HTTPS_PHASE43_"u8));
     private static ReadOnlySpan<byte> ContentType => "text/html; charset=utf-8"u8;
 
     private readonly ManagedNetworkService _service;
@@ -54,6 +60,8 @@ internal sealed class ManagedPhase43HtmlProof
     private readonly bool _capacityControl;
     private readonly bool _cssMode;
     private readonly bool _layoutMode;
+    private readonly bool _paintMode;
+    private ManagedPaintEngine? _paintEngine;
     private bool _bodyReceivedLogged;
     private bool _pauseObserved;
     private int _stablePausedPolls;
@@ -61,12 +69,14 @@ internal sealed class ManagedPhase43HtmlProof
     internal ManagedPhase43HtmlProof(ManagedNetworkService service,
                                      bool capacityControl = false,
                                      bool cssMode = false,
-                                     bool layoutMode = false)
+                                     bool layoutMode = false,
+                                     bool paintMode = false)
     {
         _service = service;
         _capacityControl = capacityControl;
         _cssMode = cssMode;
         _layoutMode = layoutMode;
+        _paintMode = paintMode;
         _tree = capacityControl && !cssMode
             ? new ManagedHtmlTreeBuilder(new ManagedHtmlDocumentArenaOptions(
                 80, 65_536, 2_048, 16_384, 128))
@@ -91,9 +101,11 @@ internal sealed class ManagedPhase43HtmlProof
         NetworkOperationResult begin = _resource.BeginGet(Hostname, Path, _tree);
         if (begin != NetworkOperationResult.Started)
         {
-            KernelLog.WriteHexLine(_cssMode
+            KernelLog.WriteHexLine(_paintMode
+                    ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_BEGIN_GET_FAILURE=0x"u8
+                    : (_cssMode
                     ? "GXOS_NET10:MANAGED_HTTPS_PHASE44_BEGIN_GET_FAILURE=0x"u8
-                    : "GXOS_NET10:MANAGED_HTTPS_PHASE43_BEGIN_GET_FAILURE=0x"u8,
+                    : "GXOS_NET10:MANAGED_HTTPS_PHASE43_BEGIN_GET_FAILURE=0x"u8),
                 (ulong)begin);
             return false;
         }
@@ -134,10 +146,7 @@ internal sealed class ManagedPhase43HtmlProof
 
     private bool WriteResourceMarker(ReadOnlySpan<byte> suffix)
     {
-        return KernelLog.Write(_layoutMode ?
-                "GXOS_NET10:MANAGED_HTTPS_PHASE45_"u8 : (_cssMode
-                ? "GXOS_NET10:MANAGED_HTTPS_PHASE44_"u8
-                : "GXOS_NET10:MANAGED_HTTPS_PHASE43_"u8)) &&
+        return KernelLog.Write(PhasePrefix) &&
                KernelLog.Write(suffix) && KernelLog.Write("\r\n"u8);
     }
 
@@ -273,9 +282,7 @@ internal sealed class ManagedPhase43HtmlProof
     {
         ManagedHtmlProgressSnapshot progress = _resource.Progress;
         ManagedHtmlTreeBuilderProgressSnapshot tree = _tree.Progress;
-        if (!KernelLog.Write(_layoutMode
-                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CSS_BEGIN\r\n"u8
-                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_BEGIN\r\n"u8))
+        if (!KernelLog.Write(PhasePrefix) || !KernelLog.Write("CSS_BEGIN\r\n"u8))
             return false;
         if (progress.StatusCode != 200 ||
             progress.MimeClassification != ManagedMimeClassification.Html ||
@@ -291,16 +298,12 @@ internal sealed class ManagedPhase43HtmlProof
             !_tree.Validate(out ManagedHtmlDocumentValidationFailureReason validation) ||
             validation != ManagedHtmlDocumentValidationFailureReason.None)
             return false;
-        if (!KernelLog.Write(_layoutMode
-                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CSS_TREE_VALIDATED\r\n"u8
-                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_TREE_VALIDATED\r\n"u8))
+        if (!KernelLog.Write(PhasePrefix) || !KernelLog.Write("CSS_TREE_VALIDATED\r\n"u8))
             return false;
 
         ManagedCssEngine? css = _cssEngine;
         if (css == null) return false;
-        if (!KernelLog.Write(_layoutMode
-                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CSS_ENGINE_CREATED\r\n"u8
-                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_ENGINE_CREATED\r\n"u8))
+        if (!KernelLog.Write(PhasePrefix) || !KernelLog.Write("CSS_ENGINE_CREATED\r\n"u8))
             return false;
         if (!css.TryStyle())
         {
@@ -409,10 +412,8 @@ internal sealed class ManagedPhase43HtmlProof
 
     private bool WriteCssFailure(ManagedCssEngine css)
     {
-        KernelLog.WriteHexLine(_layoutMode
-                ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CSS_FAILURE=0x"u8
-                : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CSS_FAILURE=0x"u8,
-                               (ulong)css.FailureReason);
+        KernelLog.Write(PhasePrefix);
+        KernelLog.WriteHexLine("CSS_FAILURE=0x"u8, (ulong)css.FailureReason);
         return false;
     }
 
@@ -420,6 +421,8 @@ internal sealed class ManagedPhase43HtmlProof
                                      ManagedHtmlTreeBuilderProgressSnapshot tree,
                                      ManagedCssEngine css)
     {
+        if (_paintMode)
+            return FinishPaintSuccess(progress, tree, css);
         if (_capacityControl)
         {
             ManagedLayoutEngine sizing = new(_tree.Document, css,
@@ -515,6 +518,167 @@ internal sealed class ManagedPhase43HtmlProof
                WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE45_LAYOUT_HASH_WORD=0x"u8, layoutHash) &&
                KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE45_RESOURCE_COMPLETE\r\n"u8) &&
                KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE45_RESOURCE_PASS\r\n"u8);
+    }
+
+    private bool FinishPaintSuccess(ManagedHtmlProgressSnapshot progress,
+                                    ManagedHtmlTreeBuilderProgressSnapshot tree,
+                                    ManagedCssEngine css)
+    {
+        _layoutEngine = new ManagedLayoutEngine(_tree.Document, css,
+            ManagedLayoutArenaOptions.Default, new ManagedDeterministicLayoutTextMetrics());
+        if (!KernelLog.Write(PhasePrefix) || !KernelLog.Write("LAYOUT_ENGINE_CREATED\r\n"u8) ||
+            !_layoutEngine.TryLayout(800, 600) ||
+            !_layoutEngine.Validate(out ManagedLayoutValidationFailureReason layoutValidation) ||
+            layoutValidation != ManagedLayoutValidationFailureReason.None)
+        {
+            KernelLog.Write(PhasePrefix);
+            KernelLog.WriteHexLine("LAYOUT_FAILURE=0x"u8,
+                                  (ulong)(_layoutEngine?.FailureReason ?? ManagedLayoutFailureReason.InvalidState));
+            return false;
+        }
+
+        if (_capacityControl)
+        {
+            ManagedPaintEngine sizing = new(_layoutEngine);
+            if (!sizing.TryGenerate(800, 600) || sizing.CommandsEmitted <= 1)
+                return false;
+            int exactCapacity = sizing.CommandsEmitted - 1;
+            ManagedPaintEngine negative = new(_layoutEngine,
+                new ManagedPaintArenaOptions(exactCapacity,
+                    ManagedPaintLimits.DefaultClipDepthCapacity,
+                    ManagedPaintLimits.DefaultOrderingCapacity));
+            bool failed = !negative.TryGenerate(800, 600) &&
+                          negative.FailureReason == ManagedPaintFailureReason.PaintCommandCapacityExceeded &&
+                          negative.CommandsEmitted == 0;
+            if (!failed ||
+                !KernelLog.Write(PhasePrefix) || !KernelLog.Write("PAINT_CAPACITY_CONTROL_VALIDATED\r\n"u8) ||
+                !WritePaintHex("PAINT_COMMAND_CAPACITY"u8, (ulong)exactCapacity) ||
+                !WritePaintHex("PAINT_FAILURE"u8, (ulong)negative.FailureReason) ||
+                !KernelLog.Write(PhasePrefix) || !KernelLog.Write("PAINT_CAPACITY_NEGATIVE_PASS\r\n"u8))
+                return false;
+            return false;
+        }
+
+        _paintEngine = new ManagedPaintEngine(_layoutEngine);
+        if (!KernelLog.Write(PhasePrefix) || !KernelLog.Write("PAINT_ENGINE_CREATED\r\n"u8) ||
+            !_paintEngine.TryGenerate(800, 600) ||
+            !_paintEngine.Validate(out ManagedPaintValidationFailureReason paintValidation) ||
+            paintValidation != ManagedPaintValidationFailureReason.None)
+        {
+            KernelLog.Write(PhasePrefix);
+            KernelLog.WriteHexLine("PAINT_FAILURE=0x"u8,
+                                  (ulong)(_paintEngine?.FailureReason ?? ManagedPaintFailureReason.InvalidState));
+            return false;
+        }
+
+        ManagedLayoutTelemetry layoutTelemetry = _layoutEngine.Telemetry;
+        ManagedPaintTelemetry paintTelemetry = _paintEngine.Telemetry;
+        if (paintTelemetry.FillCommands == 0 || paintTelemetry.BorderCommands == 0 ||
+            paintTelemetry.TextCommands == 0 || paintTelemetry.ImagePlaceholderCommands == 0 ||
+            paintTelemetry.ClipPushes == 0 || paintTelemetry.DisplayNoneBoxesSkipped == 0 ||
+            paintTelemetry.PositionedCommands == 0 || paintTelemetry.PositiveZOrderCount == 0)
+            return false;
+        ManagedHtmlNodeHandle body = _tree.Body;
+        ManagedHtmlNodeHandle main = FindElementById("main"u8);
+        ManagedHtmlNodeHandle note = FindElementByClass("note"u8);
+        if (body == ManagedHtmlNodeHandle.Invalid || main == ManagedHtmlNodeHandle.Invalid ||
+            note == ManagedHtmlNodeHandle.Invalid ||
+            !_layoutEngine.TryGetBoxForNode(body, out int bodyIndex) ||
+            !_layoutEngine.TryGetBoxForNode(main, out int mainIndex) ||
+            !_layoutEngine.TryGetBoxForNode(note, out int noteIndex) ||
+            !_layoutEngine.TryGetBox(bodyIndex, out ManagedLayoutBox bodyBox) ||
+            !_layoutEngine.TryGetBox(mainIndex, out ManagedLayoutBox mainBox) ||
+            !_layoutEngine.TryGetBox(noteIndex, out ManagedLayoutBox noteBox))
+            return false;
+
+        Span<byte> documentHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> styleHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> layoutHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> paintHash = stackalloc byte[ManagedSha256.DigestSize];
+        if (!_tree.TryCopyCanonicalHash(documentHash) || !css.TryCopyCanonicalStyleHash(styleHash) ||
+            !_layoutEngine.TryCopyCanonicalLayoutHash(layoutHash) ||
+            !_paintEngine.TryCopyCanonicalPaintHash(paintHash)) return false;
+
+        return KernelLog.Write(PhasePrefix) && KernelLog.Write("PAINT_VERIFIED\r\n"u8) &&
+               WritePaintHex("STATUS"u8, (ulong)progress.StatusCode) &&
+               WritePaintHex("CONTENT_TYPE"u8, (ulong)ContentType.Length) &&
+               WritePaintHex("CONTENT_ENCODING"u8, 1) &&
+               WritePaintHex("ENCODED_BYTES"u8, (ulong)progress.EncodedBytesReceived) &&
+               WritePaintHex("DECOMPRESSED_BYTES"u8, (ulong)progress.DecompressedBytesProduced) &&
+               WritePaintHex("SCALARS"u8, (ulong)tree.TextScalarsUsed) &&
+               WritePaintHex("TOKENS"u8, (ulong)progress.TokensEmitted) &&
+               WritePaintHex("NODES"u8, (ulong)tree.NodeCount) &&
+               WritePaintHex("ELEMENTS"u8, (ulong)tree.ElementCount) &&
+               WritePaintHex("CSS_RULES"u8, (ulong)css.RulesParsed) &&
+               WritePaintHex("CSS_SELECTOR_MATCHES"u8, (ulong)css.SelectorMatches) &&
+               WritePaintHex("CSS_ELEMENTS_STYLED"u8, (ulong)css.ElementsStyled) &&
+               WritePaintHex("VIEWPORT_WIDTH"u8, 800) &&
+               WritePaintHex("VIEWPORT_HEIGHT"u8, 600) &&
+               WritePaintHex("LAYOUT_BOXES"u8, (ulong)layoutTelemetry.LayoutBoxCount) &&
+               WritePaintHex("LAYOUT_LINES"u8, (ulong)layoutTelemetry.LineCount) &&
+               WritePaintHex("LAYOUT_TEXT_FRAGMENTS"u8, (ulong)layoutTelemetry.TextFragmentCount) &&
+               WritePaintHex("LAYOUT_DISPLAY_NONE_SKIPS"u8, (ulong)layoutTelemetry.DisplayNoneSkips) &&
+               WritePaintHex("PAINT_COMMANDS"u8, (ulong)paintTelemetry.CommandsEmitted) &&
+               WritePaintHex("PAINT_COMMAND_CAPACITY"u8, (ulong)_paintEngine.CommandCapacity) &&
+               WritePaintHex("PAINT_COMMAND_PEAK"u8, (ulong)paintTelemetry.PeakCommandUsage) &&
+               WritePaintHex("PAINT_FILL_COMMANDS"u8, (ulong)paintTelemetry.FillCommands) &&
+               WritePaintHex("PAINT_BORDER_COMMANDS"u8, (ulong)paintTelemetry.BorderCommands) &&
+               WritePaintHex("PAINT_TEXT_COMMANDS"u8, (ulong)paintTelemetry.TextCommands) &&
+               WritePaintHex("PAINT_IMAGE_PLACEHOLDERS"u8, (ulong)paintTelemetry.ImagePlaceholderCommands) &&
+               WritePaintHex("PAINT_CLIP_PUSHES"u8, (ulong)paintTelemetry.ClipPushes) &&
+               WritePaintHex("PAINT_CLIP_POPS"u8, (ulong)paintTelemetry.ClipPops) &&
+               WritePaintHex("PAINT_CLIP_PEAK"u8, (ulong)paintTelemetry.PeakClipDepth) &&
+               WritePaintHex("PAINT_CLIP_CAPACITY"u8, (ulong)_paintEngine.ClipDepthCapacity) &&
+               WritePaintHex("PAINT_CULLED"u8, (ulong)paintTelemetry.OffscreenCommandsCulled) &&
+               WritePaintHex("PAINT_TRANSPARENT_SKIPS"u8, (ulong)paintTelemetry.TransparentBackgroundsSkipped) &&
+               WritePaintHex("PAINT_UNSUPPORTED_BORDERS"u8, (ulong)paintTelemetry.UnsupportedBorderStyles) &&
+               WritePaintHex("PAINT_POSITIONED"u8, (ulong)paintTelemetry.PositionedCommands) &&
+               WritePaintHex("PAINT_NEGATIVE_Z"u8, (ulong)paintTelemetry.NegativeZOrderCount) &&
+               WritePaintHex("PAINT_NORMAL_Z"u8, (ulong)paintTelemetry.NormalZOrderCount) &&
+               WritePaintHex("PAINT_POSITIVE_Z"u8, (ulong)paintTelemetry.PositiveZOrderCount) &&
+               WritePaintLayoutRecord("BODY"u8, bodyBox) && WritePaintLayoutRecord("MAIN"u8, mainBox) &&
+               WritePaintLayoutRecord("NOTE"u8, noteBox) && WritePaintCommandPrefix() &&
+               WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE46_DOCUMENT_HASH_WORD=0x"u8, documentHash) &&
+               WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE46_STYLE_HASH_WORD=0x"u8, styleHash) &&
+               WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE46_LAYOUT_HASH_WORD=0x"u8, layoutHash) &&
+               WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE46_PAINT_HASH_WORD=0x"u8, paintHash) &&
+               KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE46_RESOURCE_COMPLETE\r\n"u8) &&
+               KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE46_RESOURCE_PASS\r\n"u8);
+    }
+
+    private bool WritePaintLayoutRecord(ReadOnlySpan<byte> name, ManagedLayoutBox box)
+    {
+        return KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_BOX_NAME=0x"u8, (ulong)name.Length) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_BOX_SOURCE=0x"u8, (ulong)box.SourceNodeIndex) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_BOX_X=0x"u8, (ulong)box.BorderBox.X) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_BOX_Y=0x"u8, (ulong)box.BorderBox.Y) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_BOX_WIDTH=0x"u8, (ulong)box.BorderBox.Width) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_BOX_HEIGHT=0x"u8, (ulong)box.BorderBox.Height);
+    }
+
+    private bool WritePaintHex(ReadOnlySpan<byte> name, ulong value) =>
+        KernelLog.Write(PhasePrefix) && KernelLog.Write(name) &&
+        KernelLog.WriteHexLine("=0x"u8, value);
+
+    private bool WritePaintCommandPrefix()
+    {
+        int count = Math.Min(_paintEngine?.CommandsEmitted ?? 0, 16);
+        for (int index = 0; index != count; ++index)
+        {
+            if (_paintEngine == null || !_paintEngine.TryGetCommand(index, out ManagedPaintCommand command) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_INDEX=0x"u8, (ulong)index) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_KIND=0x"u8, (ulong)command.Kind) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_BOX=0x"u8, (ulong)command.SourceBoxIndex) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_CLIP_DEPTH=0x"u8, command.ClipDepth) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_X=0x"u8, (ulong)command.Rect.X) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_Y=0x"u8, (ulong)command.Rect.Y) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_WIDTH=0x"u8, (ulong)command.Rect.Width) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_HEIGHT=0x"u8, (ulong)command.Rect.Height) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_COLOR=0x"u8, command.Color) ||
+                !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE46_COMMAND_Z=0x"u8, (ulong)command.ZIndex))
+                return false;
+        }
+        return true;
     }
 
     private bool WriteLayoutRecord(ReadOnlySpan<byte> name, ManagedLayoutBox box)

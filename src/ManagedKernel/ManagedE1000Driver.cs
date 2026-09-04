@@ -40,6 +40,8 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase44CapacityModeEnabled;
     private static bool s_phase45ModeEnabled;
     private static bool s_phase45CapacityModeEnabled;
+    private static bool s_phase46ModeEnabled;
+    private static bool s_phase46CapacityModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -73,6 +75,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase43Passed;
     private bool _phase44Passed;
     private bool _phase45Passed;
+    private bool _phase46Passed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -101,6 +104,8 @@ internal sealed class ManagedE1000Driver
     private bool _phase44CapacityRequested;
     private bool _phase45Requested;
     private bool _phase45CapacityRequested;
+    private bool _phase46Requested;
+    private bool _phase46CapacityRequested;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -138,6 +143,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase43Passed => _phase43Passed;
     internal bool Phase44Passed => _phase44Passed;
     internal bool Phase45Passed => _phase45Passed;
+    internal bool Phase46Passed => _phase46Passed;
 
     internal static void EnablePhase35Mode()
     {
@@ -194,6 +200,16 @@ internal sealed class ManagedE1000Driver
         s_phase45CapacityModeEnabled = true;
     }
 
+    internal static void EnablePhase46Mode()
+    {
+        s_phase46ModeEnabled = true;
+    }
+
+    internal static void EnablePhase46CapacityMode()
+    {
+        s_phase46CapacityModeEnabled = true;
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -226,6 +242,8 @@ internal sealed class ManagedE1000Driver
         _phase44Requested = s_phase44ModeEnabled || _phase44CapacityRequested;
         _phase45CapacityRequested = s_phase45CapacityModeEnabled;
         _phase45Requested = s_phase45ModeEnabled || _phase45CapacityRequested;
+        _phase46CapacityRequested = s_phase46CapacityModeEnabled;
+        _phase46Requested = s_phase46ModeEnabled || _phase46CapacityRequested;
         return TryStartCore();
     }
 
@@ -340,7 +358,16 @@ internal sealed class ManagedE1000Driver
             Phase16MacLow = ((uint)mac2 << 24) | ((uint)mac3 << 16) |
                             ((uint)mac4 << 8) | mac5;
             _ethernet!.InitializeMac();
-            if (_phase45Requested)
+            if (_phase46Requested)
+            {
+                if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE46_STARTING\r\n"u8) ||
+                    !_ethernet.TryRunPhase46(_phase46CapacityRequested))
+                {
+                    KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE46_START_FAILED\r\n"u8);
+                    return AbortStart();
+                }
+            }
+            else if (_phase45Requested)
             {
                 if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE45_STARTING\r\n"u8) ||
                     !_ethernet.TryRunPhase45(_phase45CapacityRequested))
@@ -492,6 +519,8 @@ internal sealed class ManagedE1000Driver
         s_phase44CapacityModeEnabled = false;
         s_phase45ModeEnabled = false;
         s_phase45CapacityModeEnabled = false;
+        s_phase46ModeEnabled = false;
+        s_phase46CapacityModeEnabled = false;
         bool safe = true;
         if (_ethernet != null)
         {
@@ -541,7 +570,7 @@ internal sealed class ManagedE1000Driver
     {
         if (_state != ManagedE1000DriverState.Running) return false;
         _state = ManagedE1000DriverState.Stopping;
-        ManagedEthernetLayer? ethernet = (_phase35Requested || _phase39Requested || _phase40Requested || _phase41Requested || _phase42Requested || _phase43Requested || _phase43CapacityRequested || _phase44Requested || _phase44CapacityRequested || _phase45Requested || _phase45CapacityRequested || _phase34Requested || _phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
+        ManagedEthernetLayer? ethernet = (_phase35Requested || _phase39Requested || _phase40Requested || _phase41Requested || _phase42Requested || _phase43Requested || _phase43CapacityRequested || _phase44Requested || _phase44CapacityRequested || _phase45Requested || _phase45CapacityRequested || _phase46Requested || _phase46CapacityRequested || _phase34Requested || _phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
             ? ManagedNetworkServiceBackend.LiveEthernet ?? _ethernet
             : _ethernet;
         if (ethernet != null)
@@ -565,6 +594,7 @@ internal sealed class ManagedE1000Driver
             _phase43Passed = ethernet.Phase43Passed;
             _phase44Passed = ethernet.Phase44Passed;
             _phase45Passed = ethernet.Phase45Passed;
+            _phase46Passed = ethernet.Phase46Passed;
         }
         bool result = (ethernet == null || ethernet.TryStop()) &&
                       DisableEngines() && ReleaseDmaAndRestorePci();
@@ -696,8 +726,9 @@ internal sealed class ManagedE1000Driver
             !_phase42Requested && !_phase43Requested && !_phase43CapacityRequested &&
             !_phase44Requested && !_phase44CapacityRequested &&
             !_phase45Requested && !_phase45CapacityRequested &&
+            !_phase46Requested && !_phase46CapacityRequested &&
             !RunDmaCapacityNegativeTest()) return false;
-        if (!KernelLog.Write(_phase35Requested || _phase40Requested || _phase41Requested || _phase42Requested || _phase43Requested || _phase43CapacityRequested || _phase44Requested || _phase44CapacityRequested
+        if (!KernelLog.Write(_phase35Requested || _phase40Requested || _phase41Requested || _phase42Requested || _phase43Requested || _phase43CapacityRequested || _phase44Requested || _phase44CapacityRequested || _phase46Requested || _phase46CapacityRequested
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_CONCURRENT_RNG\r\n"u8
                 : "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_OK\r\n"u8))
             return false;

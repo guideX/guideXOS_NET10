@@ -5,7 +5,7 @@ param(
     [ValidateSet('ManagedEntryProbe', 'ManagedKernel')]
     [Alias('Payload')]
     [string]$PayloadMode = 'ManagedEntryProbe',
-    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessGroupAffinityFailureExperiment', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectActiveLimitExperiment', 'IsProcessInJob', 'IsProcessInJobDisabled', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'RegisterOnexitMarkerMutation', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled', 'CreateEventW', 'CreateEventWDisabled', 'CreateMemoryResourceNotification', 'CreateMemoryResourceNotificationDisabled', 'CreateThread', 'CreateThreadDisabled', 'SetThreadPriority', 'SetThreadPriorityDisabled', 'ResumeThread', 'ResumeThreadDisabled', 'GlobalMemoryStatusEx', 'GlobalMemoryStatusExDisabled', 'VirtualMemory', 'NativeAotEventWait', 'ManagedKernelPhase11', 'ManagedKernelPhase25', 'ManagedKernelPhase26', 'ManagedKernelPhase27', 'ManagedKernelPhase28', 'ManagedKernelPhase29', 'ManagedKernelPhase30', 'ManagedKernelPhase31', 'ManagedKernelPhase32', 'ManagedKernelPhase33', 'ManagedKernelPhase34', 'ManagedKernelPhase35', 'ManagedKernelPhase39', 'ManagedKernelPhase40', 'ManagedKernelPhase41', 'ManagedKernelPhase42', 'ManagedKernelPhase43', 'ManagedKernelPhase44', 'ManagedKernelPhase45', 'SyntheticScheduler')]
+    [ValidateSet('Normal', 'InvalidBootInfo', 'NullSerial', 'UnresolvedImport', 'InvokeFailfast', 'ExceptionProbe', 'ExceptionProbeContinueSearch', 'ExceptionRegistryAllContinueSearch', 'ExceptionRegistryInvalidReturn', 'ExceptionRegistryEmpty', 'ExceptionRegistryNested', 'TimeDisabled', 'TimeInvalidMonth', 'TimeInvalidDay', 'TimeInvalidTimezone', 'TimeFixedZero', 'TimeMarkerMutation', 'PerfDisabled', 'PerfStallProbe', 'CrtOnexitInit', 'CrtOnexitDisabled', 'CrtOnexitMarkerMutation', 'SlistInit', 'SlistDisabled', 'SlistMarkerMutation', 'CrtInittermE', 'CrtInittermEDisabled', 'CrtInittermEMarkerMutation', 'CrtInitterm', 'CrtInittermDisabled', 'CrtInittermMarkerMutation', 'CrtStrcmp', 'CrtStrcmpDisabled', 'CrtStrlen', 'CrtStrlenDisabled', 'GetEnvironmentVariableW', 'GetEnvironmentVariableWDisabled', 'GetEnvironmentVariableWMarkerMutation', 'CrtStricmp', 'CrtStricmpDisabled', 'CrtStricmpMarkerMutation', 'GetSystemInfo', 'GetSystemInfoDisabled', 'GetSystemInfoMarkerMutation', 'GetNumaHighestNodeNumber', 'GetNumaHighestNodeNumberDisabled', 'GetNumaHighestNodeNumberSuccessExperiment', 'GetNumaHighestNodeNumberFailureExperiment', 'GetProcessGroupAffinity', 'GetProcessGroupAffinityDisabled', 'GetProcessGroupAffinityMarkerMutation', 'GetProcessGroupAffinityFailureExperiment', 'GetProcessAffinityMask', 'GetProcessAffinityMaskDisabled', 'GetProcessAffinityMaskMarkerMutation', 'GetProcessAffinityMaskFailureExperiment', 'QueryInformationJobObject', 'QueryInformationJobObjectDisabled', 'QueryInformationJobObjectActiveLimitExperiment', 'IsProcessInJob', 'IsProcessInJobDisabled', 'GetModuleHandleW', 'GetModuleHandleWDisabled', 'GetModuleHandleWNamedMainExperiment', 'GetModuleHandleWForcedFailure', 'GetProcAddress', 'GetProcAddressDisabled', 'GetProcAddressSyntheticPointer', 'GetProcAddressWrongError', 'RegisterOnexit', 'RegisterOnexitDisabled', 'RegisterOnexitMarkerMutation', 'Malloc', 'MallocDisabled', 'VectoredExceptionHandler', 'VectoredExceptionHandlerDisabled', 'CreateEventW', 'CreateEventWDisabled', 'CreateMemoryResourceNotification', 'CreateMemoryResourceNotificationDisabled', 'CreateThread', 'CreateThreadDisabled', 'SetThreadPriority', 'SetThreadPriorityDisabled', 'ResumeThread', 'ResumeThreadDisabled', 'GlobalMemoryStatusEx', 'GlobalMemoryStatusExDisabled', 'VirtualMemory', 'NativeAotEventWait', 'ManagedKernelPhase11', 'ManagedKernelPhase25', 'ManagedKernelPhase26', 'ManagedKernelPhase27', 'ManagedKernelPhase28', 'ManagedKernelPhase29', 'ManagedKernelPhase30', 'ManagedKernelPhase31', 'ManagedKernelPhase32', 'ManagedKernelPhase33', 'ManagedKernelPhase34', 'ManagedKernelPhase35', 'ManagedKernelPhase39', 'ManagedKernelPhase40', 'ManagedKernelPhase41', 'ManagedKernelPhase42', 'ManagedKernelPhase43', 'ManagedKernelPhase44', 'ManagedKernelPhase45', 'ManagedKernelPhase46', 'SyntheticScheduler')]
     [string]$Scenario = 'Normal',
     [switch]$EnableNativeAotStartup,
     [switch]$EnableNativeAotManagedCallback,
@@ -31,6 +31,8 @@ param(
     [switch]$EnableManagedKernelPhase44Capacity,
     [switch]$EnableManagedKernelPhase45,
     [switch]$EnableManagedKernelPhase45Capacity,
+    [switch]$EnableManagedKernelPhase46,
+    [switch]$EnableManagedKernelPhase46Capacity,
     [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
@@ -1182,7 +1184,7 @@ if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase25') 
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE25_STANDALONE'
 }
 if ($PayloadMode -eq 'ManagedKernel' -and
-    $Scenario -in @('ManagedKernelPhase26', 'ManagedKernelPhase29', 'ManagedKernelPhase30', 'ManagedKernelPhase31', 'ManagedKernelPhase32', 'ManagedKernelPhase33', 'ManagedKernelPhase34', 'ManagedKernelPhase35', 'ManagedKernelPhase39', 'ManagedKernelPhase40', 'ManagedKernelPhase41', 'ManagedKernelPhase42', 'ManagedKernelPhase43', 'ManagedKernelPhase44', 'ManagedKernelPhase45')) {
+    $Scenario -in @('ManagedKernelPhase26', 'ManagedKernelPhase29', 'ManagedKernelPhase30', 'ManagedKernelPhase31', 'ManagedKernelPhase32', 'ManagedKernelPhase33', 'ManagedKernelPhase34', 'ManagedKernelPhase35', 'ManagedKernelPhase39', 'ManagedKernelPhase40', 'ManagedKernelPhase41', 'ManagedKernelPhase42', 'ManagedKernelPhase43', 'ManagedKernelPhase44', 'ManagedKernelPhase45', 'ManagedKernelPhase46')) {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE11'
     if ($Scenario -eq 'ManagedKernelPhase26') {
         $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE26'
@@ -1246,6 +1248,12 @@ if ($PayloadMode -eq 'ManagedKernel' -and
     }
     if ($EnableManagedKernelPhase45Capacity) {
         $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE45_CAPACITY'
+    }
+    if ($EnableManagedKernelPhase46) {
+        $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE46'
+    }
+    if ($EnableManagedKernelPhase46Capacity) {
+        $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE46_CAPACITY'
     }
 }
 if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase27') {
