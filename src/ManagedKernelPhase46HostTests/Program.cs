@@ -19,6 +19,10 @@ internal static class Program
             OrderingAndScroll();
             CapacityCancellationAndReset();
             ValidatorCoverage();
+            AncestorOpacityComposition();
+            FixedPositioningAndScroll();
+            PreflightFailureState();
+            ZOrderMagnitudeAndSourceValidation();
             Console.WriteLine($"MANAGED_KERNEL_PHASE46_SIZES command={Unsafe.SizeOf<ManagedPaintCommand>()} rect={Unsafe.SizeOf<ManagedLayoutRect>()} edges={Unsafe.SizeOf<ManagedLayoutEdges>()} options={Unsafe.SizeOf<ManagedPaintArenaOptions>()}");
             Console.WriteLine($"MANAGED_KERNEL_PHASE46_HOST_TESTS_PASS cases={s_cases}");
             return 0;
@@ -251,7 +255,206 @@ internal static class Program
             new ManagedLayoutEdges(0, 0, 0, 0), ManagedCssBorderStyle.None,
             ManagedPaintFontId.DefaultUi, 0, 0, ManagedCssFontStyle.Normal, 10_000, 0);
         Check(!ManagedPaintValidator.Validate(new[] { badBox }, builder.Document, layout, out _),
-              "validator-invalid-box-ref");
+               "validator-invalid-box-ref");
+    }
+
+    private static void AncestorOpacityComposition()
+    {
+        CheckOpacityPair("1", "1", 10_000, "opacity-one-one");
+        CheckOpacityPair(".5", "1", 5_000, "opacity-half-one");
+        CheckOpacityPair("1", ".5", 5_000, "opacity-one-half");
+        CheckOpacityPair(".5", ".5", 2_500, "opacity-half-half");
+        CheckOpacityPair(".5", ".3333", 1_666, "opacity-fixed-point-floor");
+
+        (ManagedHtmlTreeBuilder builder, ManagedCssEngine css) = Styled(
+            "<div id=outer style='opacity:.5'><div id=middle style='opacity:.5'>" +
+            "<div id=inner style='opacity:.5;background-color:red;border-width:1px;border-style:solid;" +
+            "border-color:#0000ff;color:green'>" +
+            "nested<img id=image width=12 height=8></div></div></div>", "");
+        ManagedLayoutEngine layout = Layout(builder, css, 240, 120);
+        ManagedPaintEngine paint = new(layout);
+        Check(paint.TryGenerate(240, 120), "opacity-three-level-generate");
+        int inner = GetBoxIndex(layout, builder, "inner");
+        ManagedPaintCommand fill = FindCommand(paint, ManagedPaintCommandKind.FillRectangle, inner);
+        ManagedPaintCommand border = FindCommand(paint, ManagedPaintCommandKind.BorderRectangle, inner);
+        ManagedPaintCommand text = FindFirst(paint, ManagedPaintCommandKind.TextRun);
+        ManagedPaintCommand image = FindCommand(paint, ManagedPaintCommandKind.ImagePlaceholder,
+                                                 GetBoxIndex(layout, builder, "image"));
+        Check(fill.Opacity == 1_250 && border.Opacity == 1_250 && text.Opacity == 1_250 &&
+              image.Opacity == 1_250, "opacity-three-level-all-primitives");
+        Check(fill.Color == 0x1FFF0000U && border.Color == 0x1F0000FFU &&
+              text.Color == 0x1F008000U && image.Color == 0x1F808080U,
+              "opacity-three-level-alpha-packing");
+
+        (builder, css) = Styled(
+            "<div id=zero style='opacity:0'><div id=desc style='background-color:red;color:blue'>zero" +
+            "</div></div><div id=sibling style='background-color:green'>sibling</div>", "");
+        layout = Layout(builder, css, 240, 120);
+        paint = new(layout);
+        Check(paint.TryGenerate(240, 120), "opacity-zero-generate");
+        ManagedPaintCommand zero = FindCommand(paint, ManagedPaintCommandKind.FillRectangle,
+                                                GetBoxIndex(layout, builder, "desc"));
+        ManagedPaintCommand sibling = FindCommand(paint, ManagedPaintCommandKind.FillRectangle,
+                                                   GetBoxIndex(layout, builder, "sibling"));
+        Check(zero.Opacity == 0 && (zero.Color & 0xFF000000U) == 0,
+              "opacity-zero-descendant-effective-zero");
+        Check(sibling.Opacity == 10_000 && sibling.Color == 0xFF008000U,
+              "opacity-sibling-does-not-leak");
+        paint.Reset();
+        Check(paint.CommandsEmitted == 0 && paint.State == ManagedPaintState.Reset &&
+              !paint.CanonicalHashAvailable && paint.TryGenerate(240, 120),
+              "opacity-reset-removes-prior-state");
+        ManagedPaintCommand resetSibling = FindCommand(paint, ManagedPaintCommandKind.FillRectangle,
+                                                        GetBoxIndex(layout, builder, "sibling"));
+        Check(resetSibling.Opacity == 10_000, "opacity-reset-regenerates-default");
+    }
+
+    private static void CheckOpacityPair(string parentOpacity, string childOpacity,
+                                         int expected, string name)
+    {
+        (ManagedHtmlTreeBuilder builder, ManagedCssEngine css) = Styled(
+            "<div id=parent style='opacity:" + parentOpacity + "'><div id=child " +
+            "style='opacity:" + childOpacity + ";background-color:#804020;color:#204060;" +
+            "border-width:1px;border-style:solid;border-color:#102030'>text<img id=image width=8 height=6></div></div>", "");
+        ManagedLayoutEngine layout = Layout(builder, css, 180, 100);
+        ManagedPaintEngine paint = new(layout);
+        Check(paint.TryGenerate(180, 100), name + "-generate");
+        int child = GetBoxIndex(layout, builder, "child");
+        Check(FindCommand(paint, ManagedPaintCommandKind.FillRectangle, child).Opacity == expected,
+              name + "-background");
+        Check(FindCommand(paint, ManagedPaintCommandKind.BorderRectangle, child).Opacity == expected,
+              name + "-border");
+        Check(FindFirst(paint, ManagedPaintCommandKind.TextRun).Opacity == expected,
+              name + "-text");
+        Check(FindCommand(paint, ManagedPaintCommandKind.ImagePlaceholder,
+                          GetBoxIndex(layout, builder, "image")).Opacity == expected,
+              name + "-image");
+    }
+
+    private static void FixedPositioningAndScroll()
+    {
+        (ManagedHtmlTreeBuilder builder, ManagedCssEngine css) = Styled(
+            "<div id=normal></div><div id=fixedText>fixed text</div>" +
+            "<div id=fixed><div id=fixedChild>child</div></div>",
+            "#normal{background-color:green;width:30px;height:18px}" +
+            "#fixedText{position:fixed;left:20px;top:8px;width:60px;height:12px}" +
+            "#fixed{position:fixed;left:20px;top:24px;width:42px;height:30px;overflow:hidden;" +
+            "background-color:red;border-width:2px;border-style:solid;border-color:#0000ff}" +
+            "#fixedChild{background-color:#ffff00;width:80px;height:12px}");
+        ManagedLayoutEngine layout = Layout(builder, css, 240, 140);
+        ManagedPaintEngine atOrigin = new(layout);
+        ManagedPaintEngine atScroll = new(layout);
+        ManagedPaintEngine atScrollAgain = new(layout);
+        Check(atOrigin.TryGenerate(240, 140, 0, 0), "fixed-scroll-origin-generate");
+        Check(atScroll.TryGenerate(240, 140, 9, 17), "fixed-scroll-nonzero-generate");
+        Check(atScrollAgain.TryGenerate(240, 140, 9, 17), "fixed-scroll-repeat-generate");
+        int normal = GetBoxIndex(layout, builder, "normal");
+        int fixedBox = GetBoxIndex(layout, builder, "fixed");
+        int fixedChild = GetBoxIndex(layout, builder, "fixedChild");
+        ManagedPaintCommand normalOrigin = FindCommand(atOrigin, ManagedPaintCommandKind.FillRectangle, normal);
+        ManagedPaintCommand normalScroll = FindCommand(atScroll, ManagedPaintCommandKind.FillRectangle, normal);
+        ManagedPaintCommand fixedOrigin = FindCommand(atOrigin, ManagedPaintCommandKind.FillRectangle, fixedBox);
+        ManagedPaintCommand fixedScroll = FindCommand(atScroll, ManagedPaintCommandKind.FillRectangle, fixedBox);
+        ManagedPaintCommand fixedBorderOrigin = FindCommand(atOrigin, ManagedPaintCommandKind.BorderRectangle, fixedBox);
+        ManagedPaintCommand fixedBorderScroll = FindCommand(atScroll, ManagedPaintCommandKind.BorderRectangle, fixedBox);
+        ManagedPaintCommand fixedChildOrigin = FindCommand(atOrigin, ManagedPaintCommandKind.FillRectangle, fixedChild);
+        ManagedPaintCommand fixedChildScroll = FindCommand(atScroll, ManagedPaintCommandKind.FillRectangle, fixedChild);
+        ManagedPaintCommand fixedTextOrigin = FindFirst(atOrigin, ManagedPaintCommandKind.TextRun);
+        ManagedPaintCommand fixedTextScroll = FindFirst(atScroll, ManagedPaintCommandKind.TextRun);
+        Check(normalScroll.Rect.X == normalOrigin.Rect.X - 9 &&
+              normalScroll.Rect.Y == normalOrigin.Rect.Y - 17, "normal-content-scrolls");
+        Check(fixedScroll.Rect == fixedOrigin.Rect && fixedScroll.ClipRect == fixedOrigin.ClipRect,
+              "fixed-background-viewport-anchored");
+        Check(fixedBorderScroll.Rect == fixedBorderOrigin.Rect, "fixed-border-viewport-anchored");
+        Check(fixedTextScroll.Rect == fixedTextOrigin.Rect &&
+              fixedChildScroll.Rect == fixedChildOrigin.Rect &&
+              fixedChildScroll.ClipRect == fixedChildOrigin.ClipRect,
+              "fixed-descendants-and-text-stay-anchored");
+        Check(atScroll.ScrollX == 9 && atScroll.ScrollY == 17 &&
+              atScrollAgain.Telemetry.CommandsEmitted == atScroll.Telemetry.CommandsEmitted,
+              "fixed-scroll-telemetry");
+        Span<byte> originHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> scrollHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> repeatHash = stackalloc byte[ManagedSha256.DigestSize];
+        Check(atOrigin.TryCopyCanonicalPaintHash(originHash) && atScroll.TryCopyCanonicalPaintHash(scrollHash) &&
+              atScrollAgain.TryCopyCanonicalPaintHash(repeatHash) &&
+              !originHash.SequenceEqual(scrollHash) && scrollHash.SequenceEqual(repeatHash),
+              "fixed-scroll-hash-determinism");
+        Check(atOrigin.Validate(out _) && atScroll.Validate(out _), "fixed-scroll-validator");
+    }
+
+    private static void PreflightFailureState()
+    {
+        (ManagedHtmlTreeBuilder builder, ManagedCssEngine css) = Styled(
+            "<div id=box style='background-color:red;overflow:hidden;width:60px;height:20px'>valid</div>", "");
+        ManagedLayoutEngine layout = Layout(builder, css, 160, 80);
+        ManagedPaintEngine paint = new(layout);
+        Check(paint.TryGenerate(160, 80), "preflight-success-before-failure");
+        int priorCount = paint.CommandsEmitted;
+        Span<byte> priorHash = stackalloc byte[ManagedSha256.DigestSize];
+        Check(priorCount > 2 && paint.TryCopyCanonicalPaintHash(priorHash), "preflight-prior-state");
+
+        Check(!paint.TryGenerate(-1, 80) && paint.State == ManagedPaintState.Failed &&
+              paint.FailureReason == ManagedPaintFailureReason.InvalidViewport &&
+              paint.CommandsEmitted == 0 && paint.RemainingCommandCapacity == paint.CommandCapacity &&
+              paint.CurrentClipDepth == 0 && paint.ClipPushes == 0 && paint.ClipPops == 0 &&
+              paint.LayoutBoxesVisited == 0 && paint.FillCommands == 0 &&
+              paint.NegativeZOrderCount == 0 && paint.NormalZOrderCount == 0 &&
+              paint.PositiveZOrderCount == 0 &&
+              paint.Telemetry.CommandsEmitted == 0 && paint.Telemetry.State == ManagedPaintState.Failed &&
+              paint.Telemetry.FailureReason == ManagedPaintFailureReason.InvalidViewport,
+              "preflight-failure-state-cleared");
+        Check(!paint.CanonicalHashAvailable && !paint.TryCopyCanonicalPaintHash(priorHash) &&
+              !paint.TryGetCommand(0, out _), "preflight-prior-hash-and-command-hidden");
+        Check(paint.TryGenerate(160, 80), "preflight-success-after-failure");
+        Span<byte> first = stackalloc byte[ManagedSha256.DigestSize];
+        Check(paint.TryCopyCanonicalPaintHash(first), "preflight-success-hash");
+        Check(first.SequenceEqual(priorHash), "preflight-success-restores-determinism");
+        paint.Reset();
+        Check(paint.State == ManagedPaintState.Reset && paint.CommandsEmitted == 0 &&
+              paint.CurrentClipDepth == 0 && !paint.CanonicalHashAvailable,
+              "preflight-reset-after-failure");
+        builder.Reset();
+        Check(!paint.TryGenerate(160, 80) && paint.State == ManagedPaintState.Failed &&
+              paint.FailureReason == ManagedPaintFailureReason.InvalidDocument &&
+              paint.CommandsEmitted == 0 && paint.CurrentClipDepth == 0 &&
+              paint.Telemetry.FailureReason == ManagedPaintFailureReason.InvalidDocument &&
+              !paint.CanonicalHashAvailable,
+              "preflight-invalid-document-state-cleared");
+        Check(!paint.TryCopyCanonicalPaintHash(first) &&
+              paint.State == ManagedPaintState.Failed &&
+              paint.CommandsEmitted == 0, "preflight-failed-result-remains-cleared");
+    }
+
+    private static void ZOrderMagnitudeAndSourceValidation()
+    {
+        (ManagedHtmlTreeBuilder builder, ManagedCssEngine css) = Styled(
+            "<div id=negativeHigh style='position:absolute;z-index:-1;top:2px;width:10px;height:10px;background-color:red'>high</div>" +
+            "<div id=negativeLow style='position:absolute;z-index:-2;top:4px;width:10px;height:10px;background-color:blue'>low</div>" +
+            "<div id=positiveHigh style='position:absolute;z-index:2;top:6px;width:10px;height:10px;background-color:red'>high</div>" +
+            "<div id=positiveLow style='position:absolute;z-index:1;top:8px;width:10px;height:10px;background-color:blue'>low</div>", "");
+        ManagedLayoutEngine layout = Layout(builder, css, 160, 80);
+        ManagedPaintEngine paint = new(layout);
+        Check(paint.TryGenerate(160, 80) && paint.Validate(out _), "z-magnitude-generate-validate");
+        int negativeHigh = GetBoxIndex(layout, builder, "negativeHigh");
+        int negativeLow = GetBoxIndex(layout, builder, "negativeLow");
+        int positiveHigh = GetBoxIndex(layout, builder, "positiveHigh");
+        int positiveLow = GetBoxIndex(layout, builder, "positiveLow");
+        Check(IndexOfSource(paint, negativeLow) < IndexOfSource(paint, negativeHigh) &&
+              IndexOfSource(paint, positiveLow) < IndexOfSource(paint, positiveHigh),
+              "z-magnitude-sorted-within-buckets");
+
+        ManagedHtmlNodeHandle textNode = FindId(builder, "negativeHigh");
+        Check(layout.TryGetBoxForNode(textNode, out int sourceBox), "source-validation-box");
+        ManagedPaintCommand mismatched = new(ManagedPaintCommandKind.FillRectangle, 0,
+            ManagedPaintCommandFlags.None, sourceBox, builder.Document.BodyElement.Index, 0, 0, -1, 0,
+            new ManagedLayoutRect(0, 0, 1, 1), new ManagedLayoutRect(0, 0, 10, 10), 0xFFFFFFFFU,
+            new ManagedLayoutEdges(0, 0, 0, 0), ManagedCssBorderStyle.None,
+            ManagedPaintFontId.DefaultUi, 0, 0, ManagedCssFontStyle.Normal, 10_000, 0);
+        Check(!ManagedPaintValidator.Validate(new[] { mismatched }, builder.Document, layout,
+            out ManagedPaintValidationFailureReason mismatchReason) &&
+              mismatchReason == ManagedPaintValidationFailureReason.SourceBoxNodeMismatch,
+              "validator-source-box-node-pairing");
     }
 
     private static ManagedLayoutEngine Layout(ManagedHtmlTreeBuilder builder,

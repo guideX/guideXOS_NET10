@@ -251,7 +251,10 @@ public enum ManagedPaintValidationFailureReason : byte
     InvalidBorder = 10,
     ClipDepthMismatch = 11,
     ClipNotBalanced = 12,
-    OrderingViolation = 13
+    OrderingViolation = 13,
+    InvalidOpacity = 14,
+    InvalidFlags = 15,
+    SourceBoxNodeMismatch = 16
 }
 
 public static class ManagedPaintValidator
@@ -265,6 +268,7 @@ public static class ManagedPaintValidator
             return Fail(ManagedPaintValidationFailureReason.NotGenerated, out reason);
         int depth = 0;
         int previousBucket = int.MinValue;
+        int previousZIndex = int.MinValue;
         int previousBox = -1;
         for (int index = 0; index != commands.Length; ++index)
         {
@@ -285,6 +289,13 @@ public static class ManagedPaintValidator
                 return Fail(ManagedPaintValidationFailureReason.InvalidSourceBox, out reason);
             if (command.SourceNodeIndex >= 0 && !document.IsValid(NodeHandle(document, command.SourceNodeIndex)))
                 return Fail(ManagedPaintValidationFailureReason.InvalidSourceNode, out reason);
+            if (command.Opacity < 0 || command.Opacity > 10_000)
+                return Fail(ManagedPaintValidationFailureReason.InvalidOpacity, out reason);
+            if (((byte)command.Flags & ~(byte)ManagedPaintCommandFlags.Positioned) != 0)
+                return Fail(ManagedPaintValidationFailureReason.InvalidFlags, out reason);
+            if (command.SourceBoxIndex >= 0 && command.SourceNodeIndex >= 0 &&
+                sourceBox.SourceNodeIndex != command.SourceNodeIndex)
+                return Fail(ManagedPaintValidationFailureReason.SourceBoxNodeMismatch, out reason);
             if (command.Kind == ManagedPaintCommandKind.BeginClip)
             {
                 ++depth;
@@ -333,10 +344,13 @@ public static class ManagedPaintValidator
             {
                 if (command.SourceBoxIndex < 0) return Fail(ManagedPaintValidationFailureReason.InvalidSourceBox, out reason);
                 int bucket = command.ZIndex < 0 ? -1 : command.ZIndex > 0 ? 1 : 0;
-                if (bucket < previousBucket || (bucket == previousBucket &&
-                                                command.SourceBoxIndex < previousBox))
+                if (bucket < previousBucket ||
+                    (bucket == previousBucket &&
+                     ((bucket != 0 && command.ZIndex < previousZIndex) ||
+                      (command.ZIndex == previousZIndex && command.SourceBoxIndex < previousBox))))
                     return Fail(ManagedPaintValidationFailureReason.OrderingViolation, out reason);
                 previousBucket = bucket;
+                previousZIndex = command.ZIndex;
                 previousBox = command.SourceBoxIndex;
             }
         }
@@ -552,30 +566,26 @@ public sealed class ManagedPaintEngine
             scrollY < -ManagedLayoutLimits.MaximumCoordinate ||
             scrollY > ManagedLayoutLimits.MaximumCoordinate)
             return Fail(ManagedPaintFailureReason.InvalidViewport);
-        if (!_layout.IsLaidOut || !_layout.Validate(out ManagedLayoutValidationFailureReason layoutFailure) ||
-            layoutFailure != ManagedLayoutValidationFailureReason.None)
-            return Fail(ManagedPaintFailureReason.InvalidLayout);
         if (!_document.IsValid(_document.DocumentNode) ||
             !_document.Validate(out ManagedHtmlDocumentValidationFailureReason documentFailure) ||
             documentFailure != ManagedHtmlDocumentValidationFailureReason.None)
             return Fail(ManagedPaintFailureReason.InvalidDocument);
+        if (!_layout.IsLaidOut || !_layout.Validate(out ManagedLayoutValidationFailureReason layoutFailure) ||
+            layoutFailure != ManagedLayoutValidationFailureReason.None)
+            return Fail(ManagedPaintFailureReason.InvalidLayout);
         if (!_styles.IsStyled || _styles.Document != _document)
             return Fail(ManagedPaintFailureReason.InvalidComputedStyle);
         _viewportWidth = viewport.Width;
         _viewportHeight = viewport.Height;
         _scrollX = scrollX;
         _scrollY = scrollY;
-        if (!BuildOrder()) return false;
+        if (!BuildOrder()) return FailPreflight(_failureReason);
         _countOnly = true;
-        if (!RunGenerationPass() || !CloseAllClips()) return false;
+        if (!RunGenerationPass() || !CloseAllClips())
+            return FailPreflight(_failureReason);
         _plannedCount = _used;
         if (_plannedCount > _commands.Length)
-        {
-            _used = 0;
-            _peak = 0;
-            _countOnly = false;
-            return Fail(ManagedPaintFailureReason.PaintCommandCapacityExceeded);
-        }
+            return FailPreflight(ManagedPaintFailureReason.PaintCommandCapacityExceeded);
         ClearPassState();
         _countOnly = false;
         if (!RunGenerationPass()) return false;
@@ -621,9 +631,8 @@ public sealed class ManagedPaintEngine
         for (int index = 1; index != _layout.LayoutBoxCount; ++index)
         {
             int candidate = _order[index];
-            int candidateBucket = ZBucket(candidate);
             int cursor = index;
-            while (cursor > 0 && ZBucket(_order[cursor - 1]) > candidateBucket)
+            while (cursor > 0 && ComparePaintOrder(candidate, _order[cursor - 1]) < 0)
             {
                 _order[cursor] = _order[cursor - 1];
                 --cursor;
@@ -712,11 +721,10 @@ public sealed class ManagedPaintEngine
             ++_transparentBackgroundsSkipped;
             return true;
         }
-        if (!TryTransform(box.BorderBox, out ManagedLayoutRect rect))
+        if (!TryTransform(boxIndex, box.BorderBox, out ManagedLayoutRect rect))
             return Fail(ManagedPaintFailureReason.GeometryOverflow);
-        uint color = ApplyOpacity(style.BackgroundColor, style.Opacity);
         return EmitPrimitive(boxIndex, box.SourceNodeIndex, ManagedPaintCommandKind.FillRectangle,
-            rect, color, new ManagedLayoutEdges(0, 0, 0, 0), ManagedCssBorderStyle.None,
+            rect, style.BackgroundColor, new ManagedLayoutEdges(0, 0, 0, 0), ManagedCssBorderStyle.None,
             style, 0, 0, -1, out _);
     }
 
@@ -725,23 +733,23 @@ public sealed class ManagedPaintEngine
         if (style.BorderStyle == ManagedCssBorderStyle.None ||
             (box.Border.Top == 0 && box.Border.Right == 0 &&
              box.Border.Bottom == 0 && box.Border.Left == 0)) return true;
-        if (!TryTransform(box.BorderBox, out ManagedLayoutRect rect))
+        if (!TryTransform(boxIndex, box.BorderBox, out ManagedLayoutRect rect))
             return Fail(ManagedPaintFailureReason.GeometryOverflow);
         if (style.BorderStyle != ManagedCssBorderStyle.Solid) ++_unsupportedBorderStyles;
         return EmitPrimitive(boxIndex, box.SourceNodeIndex, ManagedPaintCommandKind.BorderRectangle,
-            rect, ApplyOpacity(style.BorderColor, style.Opacity), box.Border,
+            rect, style.BorderColor, box.Border,
             style.BorderStyle, style, 0, 0, -1, out _);
     }
 
     private bool EmitText(int boxIndex, ManagedLayoutTextFragment fragment,
                           ManagedComputedStyle style)
     {
-        if (!TryTransform(fragment.Rectangle, out ManagedLayoutRect rect))
+        if (!TryTransform(boxIndex, fragment.Rectangle, out ManagedLayoutRect rect))
             return Fail(ManagedPaintFailureReason.GeometryOverflow);
         int baseline = AddChecked(rect.Y, fragment.Style.FontSize, out bool baselineOk);
         if (!baselineOk) return Fail(ManagedPaintFailureReason.GeometryOverflow);
         return EmitPrimitive(boxIndex, fragment.SourceNodeIndex, ManagedPaintCommandKind.TextRun,
-            rect, ApplyOpacity(style.Color, style.Opacity), new ManagedLayoutEdges(0, 0, 0, 0),
+            rect, style.Color, new ManagedLayoutEdges(0, 0, 0, 0),
             ManagedCssBorderStyle.None, style, fragment.SourceOffset, fragment.SourceLength,
             fragment.LineIndex, out _, fragment.Style, baseline);
     }
@@ -749,10 +757,10 @@ public sealed class ManagedPaintEngine
     private bool EmitImage(int boxIndex, int sourceNodeIndex, ManagedLayoutRect sourceRect,
                            ManagedComputedStyle style)
     {
-        if (!TryTransform(sourceRect, out ManagedLayoutRect rect))
+        if (!TryTransform(boxIndex, sourceRect, out ManagedLayoutRect rect))
             return Fail(ManagedPaintFailureReason.GeometryOverflow);
         return EmitPrimitive(boxIndex, sourceNodeIndex, ManagedPaintCommandKind.ImagePlaceholder,
-            rect, ApplyOpacity(0xFF808080U, style.Opacity), new ManagedLayoutEdges(0, 0, 0, 0),
+            rect, 0xFF808080U, new ManagedLayoutEdges(0, 0, 0, 0),
             ManagedCssBorderStyle.None, style, 0, 0, -1, out _);
     }
 
@@ -769,6 +777,8 @@ public sealed class ManagedPaintEngine
             ++_offscreenCommandsCulled;
             return true;
         }
+        if (!TryGetEffectiveOpacity(boxIndex, style, out int effectiveOpacity)) return false;
+        color = ApplyOpacity(color, effectiveOpacity);
         ManagedLayoutTextStyle actualTextStyle = textStyle ?? new ManagedLayoutTextStyle(
             Math.Max(1, ResolveFontSize(style.FontSize)), style.FontWeight, style.FontStyle);
         ManagedLayoutRect clip = _clipStack[_clipDepth - 1];
@@ -777,7 +787,7 @@ public sealed class ManagedPaintEngine
         ManagedPaintCommand command = new(kind, (byte)_clipDepth, flags, boxIndex,
             sourceNodeIndex, sourceOffset, sourceLength, lineIndex, baseline, rect, clip, color,
             border, borderStyle, ManagedPaintFontId.DefaultUi, actualTextStyle.FontSize,
-            actualTextStyle.FontWeight, actualTextStyle.FontStyle, style.Opacity,
+            actualTextStyle.FontWeight, actualTextStyle.FontStyle, effectiveOpacity,
             EffectiveZIndex(boxIndex));
         if (!Emit(command)) return false;
         emitted = true;
@@ -796,6 +806,9 @@ public sealed class ManagedPaintEngine
     {
         _clipPathScratch.AsSpan().Fill(-1);
         int count = 0;
+        int fixedBoundary = FindFixedAncestor(boxIndex);
+        if (fixedBoundary == boxIndex)
+            return true;
         int parent = boxIndex;
         if (parent >= 0 && _layout.TryGetBox(parent, out ManagedLayoutBox currentBox))
             parent = currentBox.ParentIndex;
@@ -809,6 +822,7 @@ public sealed class ManagedPaintEngine
                     return Fail(ManagedPaintFailureReason.PaintClipDepthExceeded);
                 _clipPathScratch[count++] = parent;
             }
+            if (parent == fixedBoundary) break;
             parent = box.ParentIndex;
         }
         /* The parent chain is collected leaf-to-root; reverse it into the
@@ -851,7 +865,7 @@ public sealed class ManagedPaintEngine
             int clipBoxIndex = _clipPathScratch[_activeClipPathCount];
             if (!_layout.TryGetBox(clipBoxIndex, out ManagedLayoutBox box))
                 return Fail(ManagedPaintFailureReason.InvalidLayout);
-            if (!TryTransform(box.ClipRect, out ManagedLayoutRect clipRect))
+            if (!TryTransform(clipBoxIndex, box.ClipRect, out ManagedLayoutRect clipRect))
                 return Fail(ManagedPaintFailureReason.GeometryOverflow);
             clipRect = Intersect(_clipStack[_clipDepth - 1], clipRect);
             int nextDepth = _clipDepth + 1;
@@ -932,6 +946,34 @@ public sealed class ManagedPaintEngine
         _positionedCommands = 0;
         _hashAvailable = false;
         _paintHash.AsSpan().Clear();
+    }
+
+    private bool FailPreflight(ManagedPaintFailureReason reason)
+    {
+        if (reason == ManagedPaintFailureReason.None) reason = ManagedPaintFailureReason.InvalidState;
+        ClearFailedAttemptState();
+        _failureReason = reason;
+        _state = reason == ManagedPaintFailureReason.Cancelled
+            ? ManagedPaintState.Cancelled : ManagedPaintState.Failed;
+        return false;
+    }
+
+    private void ClearFailedAttemptState()
+    {
+        _commands.AsSpan().Clear();
+        _clipStack.AsSpan().Clear();
+        _activeClipPath.AsSpan().Clear();
+        _clipPathScratch.AsSpan().Clear();
+        _order.AsSpan().Clear();
+        ClearPassState();
+        _negativeZOrderCount = 0;
+        _normalZOrderCount = 0;
+        _positiveZOrderCount = 0;
+        _plannedCount = 0;
+        _countOnly = false;
+        _generated = false;
+        _hashAvailable = false;
+        _hash.Reset();
     }
 
     private bool ComputePaintHash()
@@ -1015,6 +1057,20 @@ public sealed class ManagedPaintEngine
         return 0;
     }
 
+    private int ComparePaintOrder(int left, int right)
+    {
+        int leftBucket = ZBucket(left);
+        int rightBucket = ZBucket(right);
+        if (leftBucket != rightBucket) return leftBucket.CompareTo(rightBucket);
+        if (leftBucket != 0)
+        {
+            int leftZ = EffectiveZIndex(left);
+            int rightZ = EffectiveZIndex(right);
+            if (leftZ != rightZ) return leftZ.CompareTo(rightZ);
+        }
+        return left.CompareTo(right);
+    }
+
     private int boxZIndex(int boxIndex) =>
         _layout.TryGetBox(boxIndex, out ManagedLayoutBox box) ? box.ZIndex : 0;
 
@@ -1033,6 +1089,20 @@ public sealed class ManagedPaintEngine
     private bool IsPositionedBox(int boxIndex) =>
         _layout.TryGetBox(boxIndex, out ManagedLayoutBox box) && IsPositioned(box);
 
+    private int FindFixedAncestor(int boxIndex)
+    {
+        int current = boxIndex;
+        while (current >= 0)
+        {
+            if (!_layout.TryGetBox(current, out ManagedLayoutBox box)) return -1;
+            if ((box.Flags & ManagedLayoutBoxFlags.Fixed) != 0) return current;
+            current = box.ParentIndex;
+        }
+        return -1;
+    }
+
+    private bool IsViewportAnchored(int boxIndex) => FindFixedAncestor(boxIndex) >= 0;
+
     private static bool IsPositioned(ManagedLayoutBox box) =>
         (box.Flags & (ManagedLayoutBoxFlags.Relative | ManagedLayoutBoxFlags.Absolute |
                       ManagedLayoutBoxFlags.Fixed)) != 0;
@@ -1049,10 +1119,13 @@ public sealed class ManagedPaintEngine
     private int BoxSourceNode(int boxIndex) =>
         _layout.TryGetBox(boxIndex, out ManagedLayoutBox box) ? box.SourceNodeIndex : -1;
 
-    private bool TryTransform(ManagedLayoutRect source, out ManagedLayoutRect result)
+    private bool TryTransform(int boxIndex, ManagedLayoutRect source,
+                              out ManagedLayoutRect result)
     {
-        long x = (long)source.X - _scrollX;
-        long y = (long)source.Y - _scrollY;
+        int scrollX = IsViewportAnchored(boxIndex) ? 0 : _scrollX;
+        int scrollY = IsViewportAnchored(boxIndex) ? 0 : _scrollY;
+        long x = (long)source.X - scrollX;
+        long y = (long)source.Y - scrollY;
         if (x < -ManagedLayoutLimits.MaximumCoordinate || x > ManagedLayoutLimits.MaximumCoordinate ||
             y < -ManagedLayoutLimits.MaximumCoordinate || y > ManagedLayoutLimits.MaximumCoordinate ||
             (long)source.Width + x > ManagedLayoutLimits.MaximumCoordinate ||
@@ -1088,6 +1161,39 @@ public sealed class ManagedPaintEngine
         uint alpha = ((color >> 24) * (uint)opacity) / 10_000U;
         return (alpha << 24) | (color & 0x00FFFFFFU);
     }
+
+    private bool TryGetEffectiveOpacity(int boxIndex, ManagedComputedStyle localStyle,
+                                        out int effectiveOpacity)
+    {
+        effectiveOpacity = ClampOpacity(localStyle.Opacity);
+        if (!_layout.TryGetBox(boxIndex, out ManagedLayoutBox box))
+            return Fail(ManagedPaintFailureReason.InvalidLayout);
+        ManagedHtmlNodeHandle node = NodeHandle(box.SourceNodeIndex);
+        if (_document.GetNodeKind(node) == ManagedHtmlNodeKind.Text)
+            node = _document.GetParent(node);
+        else if (_document.GetNodeKind(node) != ManagedHtmlNodeKind.Element)
+            return true;
+
+        node = _document.GetParent(node);
+        while (node != ManagedHtmlNodeHandle.Invalid)
+        {
+            if (_document.GetNodeKind(node) == ManagedHtmlNodeKind.Element)
+            {
+                if (!_styles.TryGetComputedStyle(node, out ManagedComputedStyle ancestorStyle))
+                    return Fail(ManagedPaintFailureReason.InvalidComputedStyle);
+                effectiveOpacity = ComposeOpacity(ancestorStyle.Opacity, effectiveOpacity);
+            }
+            node = _document.GetParent(node);
+        }
+        return true;
+    }
+
+    private static int ClampOpacity(int opacity) => Math.Clamp(opacity, 0, 10_000);
+
+    /* Opacity is represented as a 0..10,000 fixed-point fraction. Composition
+       truncates toward zero, matching ApplyOpacity's alpha arithmetic. */
+    private static int ComposeOpacity(int ancestorOpacity, int localOpacity) =>
+        (int)((long)ClampOpacity(ancestorOpacity) * ClampOpacity(localOpacity) / 10_000L);
 
     private static int ResolveFontSize(ManagedCssLength value)
     {

@@ -2311,8 +2311,12 @@ public sealed class ManagedCssEngine
         if (position < value.Length && (value[position] == '+' || value[position] == '-'))
             negative = value[position++] == '-';
         int whole = 0;
+        bool hasDigit = false;
         while (position < value.Length && value[position] >= '0' && value[position] <= '9')
+        {
+            hasDigit = true;
             whole = whole * 10 + value[position++] - '0';
+        }
         int fraction = 0;
         int fractionDigits = 0;
         if (position < value.Length && value[position] == '.')
@@ -2320,12 +2324,13 @@ public sealed class ManagedCssEngine
             ++position;
             while (position < value.Length && value[position] >= '0' && value[position] <= '9')
             {
+                hasDigit = true;
                 if (fractionDigits == 4) return false;
                 fraction = fraction * 10 + value[position++] - '0';
                 ++fractionDigits;
             }
         }
-        if (position != value.Length || (whole == 0 && fractionDigits == 0)) return false;
+        if (position != value.Length || !hasDigit) return false;
         int scale = fractionDigits switch { 0 => 1, 1 => 10, 2 => 100, 3 => 1000, _ => 10000 };
         int fixedValue = whole * 10000 + fraction * (10000 / scale);
         number = negative ? -fixedValue : fixedValue;

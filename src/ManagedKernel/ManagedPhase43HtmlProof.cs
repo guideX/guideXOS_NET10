@@ -591,6 +591,8 @@ internal sealed class ManagedPhase43HtmlProof
             !_layoutEngine.TryGetBox(noteIndex, out ManagedLayoutBox noteBox))
             return false;
 
+        if (!RunPaintSemanticProof(mainIndex, noteIndex)) return false;
+
         Span<byte> documentHash = stackalloc byte[ManagedSha256.DigestSize];
         Span<byte> styleHash = stackalloc byte[ManagedSha256.DigestSize];
         Span<byte> layoutHash = stackalloc byte[ManagedSha256.DigestSize];
@@ -644,6 +646,76 @@ internal sealed class ManagedPhase43HtmlProof
                WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE46_PAINT_HASH_WORD=0x"u8, paintHash) &&
                KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE46_RESOURCE_COMPLETE\r\n"u8) &&
                KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE46_RESOURCE_PASS\r\n"u8);
+    }
+
+    private bool RunPaintSemanticProof(int normalBoxIndex, int nestedOpacityBoxIndex)
+    {
+        if (_paintEngine == null || _layoutEngine == null) return false;
+        ManagedHtmlNodeHandle fixedNode = FindElementByClass("neg"u8);
+        if (fixedNode == ManagedHtmlNodeHandle.Invalid ||
+            !_layoutEngine.TryGetBoxForNode(fixedNode, out int fixedBoxIndex))
+            return false;
+
+        ManagedPaintEngine scrolled = new(_layoutEngine);
+        if (!scrolled.TryGenerate(800, 600, 0, 37) ||
+            !scrolled.Validate(out ManagedPaintValidationFailureReason validation) ||
+            validation != ManagedPaintValidationFailureReason.None)
+            return false;
+        bool normalOriginFound = TryFindPaintCommand(_paintEngine,
+            ManagedPaintCommandKind.BorderRectangle, normalBoxIndex,
+            out ManagedPaintCommand normalOrigin);
+        bool normalScrolledFound = TryFindPaintCommand(scrolled,
+            ManagedPaintCommandKind.BorderRectangle, normalBoxIndex,
+            out ManagedPaintCommand normalScrolled);
+        bool fixedOriginFound = TryFindPaintCommand(_paintEngine,
+            ManagedPaintCommandKind.FillRectangle, fixedBoxIndex,
+            out ManagedPaintCommand fixedOrigin);
+        bool fixedScrolledFound = TryFindPaintCommand(scrolled,
+            ManagedPaintCommandKind.FillRectangle, fixedBoxIndex,
+            out ManagedPaintCommand fixedScrolled);
+        bool fixedBorderOriginFound = TryFindPaintCommand(_paintEngine,
+            ManagedPaintCommandKind.BorderRectangle, fixedBoxIndex,
+            out ManagedPaintCommand fixedBorderOrigin);
+        bool fixedBorderScrolledFound = TryFindPaintCommand(scrolled,
+            ManagedPaintCommandKind.BorderRectangle, fixedBoxIndex,
+            out ManagedPaintCommand fixedBorderScrolled);
+        bool nestedOpacityFound = TryFindPaintCommand(_paintEngine,
+            ManagedPaintCommandKind.FillRectangle, nestedOpacityBoxIndex,
+            out ManagedPaintCommand nestedOpacity);
+        if (!normalOriginFound || !normalScrolledFound || !fixedOriginFound ||
+            !fixedScrolledFound || !fixedBorderOriginFound || !fixedBorderScrolledFound ||
+            !nestedOpacityFound)
+            return false;
+
+        bool normalScrolledByDocument = normalScrolled.Rect.X == normalOrigin.Rect.X &&
+            normalScrolled.Rect.Y == normalOrigin.Rect.Y - 37;
+        bool fixedViewportAnchored = fixedScrolled.Rect == fixedOrigin.Rect &&
+            fixedScrolled.ClipRect == fixedOrigin.ClipRect &&
+            fixedBorderScrolled.Rect == fixedBorderOrigin.Rect;
+        bool nestedOpacityComposed = nestedOpacity.Opacity == 2_500 &&
+            nestedOpacity.Color == 0x3F123456U;
+        if (!normalScrolledByDocument || !fixedViewportAnchored || !nestedOpacityComposed)
+            return false;
+
+        return KernelLog.Write(PhasePrefix) && KernelLog.Write("FIXED_SCROLL_PROOF_PASS\r\n"u8) &&
+               KernelLog.Write(PhasePrefix) && KernelLog.Write("NESTED_OPACITY_PROOF_PASS\r\n"u8) &&
+               KernelLog.Write(PhasePrefix) && KernelLog.Write("FIXED_SCROLL_PROOF_VALUES=normal-document-scroll-fixed-viewport\r\n"u8) &&
+               KernelLog.Write(PhasePrefix) && KernelLog.Write("NESTED_OPACITY_PROOF_VALUES=2500-0x3F123456\r\n"u8);
+    }
+
+    private static bool TryFindPaintCommand(ManagedPaintEngine engine,
+                                            ManagedPaintCommandKind kind,
+                                            int sourceBoxIndex,
+                                            out ManagedPaintCommand command)
+    {
+        for (int index = 0; index != engine.CommandsEmitted; ++index)
+        {
+            if (engine.TryGetCommand(index, out command) &&
+                command.Kind == kind && command.SourceBoxIndex == sourceBoxIndex)
+                return true;
+        }
+        command = default;
+        return false;
     }
 
     private bool WritePaintLayoutRecord(ReadOnlySpan<byte> name, ManagedLayoutBox box)
