@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase47HostTests</PathMap>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\ManagedKernelPhase44HostTests\ManagedHttpBodySinkResult.cs" Link="ManagedHttpBodySinkResult.cs" />
+    <Compile Include="..\ManagedKernel\ManagedSha256.cs" Link="ManagedSha256.cs" />
+    <Compile Include="..\ManagedKernel\ManagedHtmlTokenizer.cs" Link="ManagedHtmlTokenizer.cs" />
+    <Compile Include="..\ManagedKernel\ManagedHtmlDocument.cs" Link="ManagedHtmlDocument.cs" />
+    <Compile Include="..\ManagedKernel\ManagedCss.cs" Link="ManagedCss.cs" />
+    <Compile Include="..\ManagedKernel\ManagedLayout.cs" Link="ManagedLayout.cs" />
+    <Compile Include="..\ManagedKernel\ManagedPaint.cs" Link="ManagedPaint.cs" />
+    <Compile Include="..\ManagedKernel\ManagedSoftwareRasterizer.cs" Link="ManagedSoftwareRasterizer.cs" />
+  </ItemGroup>
+</Project>

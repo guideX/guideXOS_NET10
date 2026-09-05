@@ -537,6 +537,16 @@ public sealed class ManagedHtmlDocument
         IsValid(handle) && _nodes[handle.Index].Kind == ManagedHtmlNodeKind.Text
             ? _nodes[handle.Index].TextLength : 0;
 
+    public bool TryGetTextScalar(ManagedHtmlNodeHandle handle, int offset, out uint scalar)
+    {
+        scalar = 0;
+        if (!IsValid(handle) || _nodes[handle.Index].Kind != ManagedHtmlNodeKind.Text ||
+            offset < 0 || offset >= _nodes[handle.Index].TextLength)
+            return false;
+        scalar = _text[_nodes[handle.Index].TextOffset + offset];
+        return true;
+    }
+
     public bool TryCopyText(ManagedHtmlNodeHandle handle, Span<uint> destination,
                             out int length)
     {

@@ -65,6 +65,27 @@ internal sealed class ManagedPhase43HtmlProof
     private bool _bodyReceivedLogged;
     private bool _pauseObserved;
     private int _stablePausedPolls;
+    private ManagedSoftwareRasterizer? _rasterizer;
+    private ManagedFramebuffer _rasterFramebuffer;
+    private readonly byte[] _rasterFirstFramebufferHash =
+        new byte[ManagedSha256.DigestSize];
+    private ManagedRasterTelemetry _rasterTelemetry;
+    private int _rasterFixedX;
+    private int _rasterFixedY;
+    private int _rasterNormalScrollX;
+    private int _rasterNormalScrollY;
+    private uint _rasterFixedPixel;
+    private uint _rasterNormalOriginPixel;
+    private uint _rasterNormalScrollPixel;
+    private uint _rasterNestedPixel;
+    private uint _rasterTextPixel;
+    private uint _rasterImagePixel;
+    private int _rasterTextX;
+    private int _rasterTextY;
+    private int _rasterImageX;
+    private int _rasterImageY;
+    private uint _rasterNestedAlpha;
+    private uint _rasterNestedColor;
 
     internal ManagedPhase43HtmlProof(ManagedNetworkService service,
                                      bool capacityControl = false,
@@ -592,6 +613,7 @@ internal sealed class ManagedPhase43HtmlProof
             return false;
 
         if (!RunPaintSemanticProof(mainIndex, noteIndex)) return false;
+        if (!RunRasterProof(mainIndex, noteIndex)) return false;
 
         Span<byte> documentHash = stackalloc byte[ManagedSha256.DigestSize];
         Span<byte> styleHash = stackalloc byte[ManagedSha256.DigestSize];
@@ -702,6 +724,226 @@ internal sealed class ManagedPhase43HtmlProof
                KernelLog.Write(PhasePrefix) && KernelLog.Write("FIXED_SCROLL_PROOF_VALUES=normal-document-scroll-fixed-viewport\r\n"u8) &&
                KernelLog.Write(PhasePrefix) && KernelLog.Write("NESTED_OPACITY_PROOF_VALUES=2500-0x3F123456\r\n"u8);
     }
+
+    private bool RunRasterProof(int normalBoxIndex, int nestedOpacityBoxIndex)
+    {
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE47_RASTER_BEGIN\r\n"u8) ||
+            !RunRasterProofCore(normalBoxIndex, nestedOpacityBoxIndex))
+        {
+            if (_rasterizer != null)
+                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE47_RASTER_FAILURE=0x"u8,
+                                       (ulong)_rasterizer.FailureReason);
+            return false;
+        }
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE47_RASTER_TRY_OK\r\n"u8))
+            return false;
+        ManagedFramebuffer framebuffer = _rasterFramebuffer;
+        ManagedRasterTelemetry telemetry = _rasterTelemetry;
+        if (!WriteRasterHex("FRAMEBUFFER_WIDTH"u8, framebuffer.Width) ||
+            !WriteRasterHex("FRAMEBUFFER_HEIGHT"u8, framebuffer.Height) ||
+            !WriteRasterHex("FRAMEBUFFER_STRIDE"u8, framebuffer.Stride) ||
+            !WriteRasterHex("FRAMEBUFFER_FORMAT_ARGB8888"u8,
+                            (long)framebuffer.PixelFormat) ||
+            !WriteRasterHex("FRAMEBUFFER_ACTIVE_BYTES"u8,
+                            (long)framebuffer.Width * framebuffer.Height * 4) ||
+            !WriteRasterTelemetry(telemetry) ||
+            !WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE47_FRAMEBUFFER_HASH_WORD=0x"u8,
+                         _rasterFirstFramebufferHash) ||
+            !WriteRasterPixel("FIXED_SCROLL_PIXEL"u8, _rasterFixedX, _rasterFixedY,
+                              _rasterFixedPixel) ||
+            !WriteRasterPixel("NORMAL_SCROLL_PIXEL"u8, _rasterNormalScrollX,
+                              _rasterNormalScrollY, _rasterNormalScrollPixel) ||
+            !WriteRasterHex("NESTED_OPACITY_COMMAND_ALPHA"u8, _rasterNestedAlpha) ||
+            !WriteRasterHex("NESTED_OPACITY_COMMAND_COLOR"u8, _rasterNestedColor) ||
+            !WriteRasterHex("NESTED_OPACITY_OUTPUT_PIXEL"u8, (long)_rasterNestedPixel) ||
+            !WriteRasterPixel("TEXT_PROOF_PIXEL"u8, _rasterTextX, _rasterTextY,
+                              _rasterTextPixel) ||
+            !WriteRasterPixel("IMAGE_PROOF_PIXEL"u8, _rasterImageX, _rasterImageY,
+                              _rasterImagePixel) ||
+            !WriteRasterHex("NORMAL_ORIGIN_PIXEL"u8, (long)_rasterNormalOriginPixel))
+            return false;
+        return KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE47_RASTER_VALIDATOR_PASS\r\n"u8) &&
+               KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE47_FRAMEBUFFER_TOO_SMALL_NEGATIVE_PASS\r\n"u8) &&
+               KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE47_RASTER_PASS\r\n"u8);
+    }
+
+    private bool RunRasterProofCore(int normalBoxIndex, int nestedOpacityBoxIndex)
+    {
+        if (_paintEngine == null || _layoutEngine == null) return false;
+        const int width = 160;
+        const int height = 180;
+        uint[] framebufferStorage = new uint[width * height];
+        ManagedFramebuffer framebuffer = new(framebufferStorage, width, height);
+        ManagedSoftwareRasterizer rasterizer = new();
+        if (!rasterizer.TryRender(_paintEngine, framebuffer) || !rasterizer.HashValid)
+            return false;
+
+        ManagedPaintCommand normal = default;
+        ManagedPaintCommand fixedCommand = default;
+        ManagedPaintCommand nested = default;
+        ManagedPaintCommand image = default;
+        ManagedPaintCommand text = default;
+        ManagedPaintCommand border = default;
+        bool normalFound = TryFindPaintCommand(_paintEngine,
+            ManagedPaintCommandKind.BorderRectangle, normalBoxIndex, out normal);
+        bool fixedFound = false;
+        bool nestedFound = TryFindPaintCommand(_paintEngine,
+            ManagedPaintCommandKind.FillRectangle, nestedOpacityBoxIndex, out nested);
+        bool imageFound = false;
+        bool textFound = false;
+        bool borderFound = TryFindPaintCommand(_paintEngine,
+            ManagedPaintCommandKind.BorderRectangle, normalBoxIndex, out border);
+        for (int index = 0; index != _paintEngine.CommandsEmitted; ++index)
+        {
+            if (!_paintEngine.TryGetCommand(index, out ManagedPaintCommand command)) return false;
+            if (!fixedFound && command.Kind == ManagedPaintCommandKind.FillRectangle &&
+                command.Flags == ManagedPaintCommandFlags.Positioned)
+            {
+                fixedCommand = command;
+                fixedFound = true;
+            }
+            if (!imageFound && command.Kind == ManagedPaintCommandKind.ImagePlaceholder)
+            {
+                image = command;
+                imageFound = true;
+            }
+            if (!textFound && command.Kind == ManagedPaintCommandKind.TextRun)
+            {
+                text = command;
+                textFound = true;
+            }
+        }
+        if (!normalFound || !fixedFound || !nestedFound || !imageFound || !textFound ||
+            !borderFound) return false;
+        if (nested.Color != 0x3F123456U || nested.Opacity != 2_500) return false;
+        _rasterFramebuffer = framebuffer;
+        _rasterizer = rasterizer;
+        _rasterTelemetry = rasterizer.Telemetry;
+        if (!rasterizer.TryCopyFramebufferHash(_rasterFirstFramebufferHash)) return false;
+        _rasterNestedAlpha = nested.Color >> 24;
+        _rasterNestedColor = nested.Color;
+        _rasterNestedPixel = PixelAt(framebuffer,
+            ClampSample(nested.Rect.X + 20, 0, framebuffer.Width - 1),
+            ClampSample(nested.Rect.Y + 20, 0, framebuffer.Height - 1));
+        _rasterTextX = ClampSample(text.Rect.X + 1, 0, framebuffer.Width - 1);
+        _rasterTextY = ClampSample(text.Rect.Y + 1, 0, framebuffer.Height - 1);
+        _rasterTextPixel = PixelAt(framebuffer, _rasterTextX, _rasterTextY);
+        _rasterImageX = ClampSample(image.Rect.X + 3, 0, framebuffer.Width - 1);
+        _rasterImageY = ClampSample(image.Rect.Y + 3, 0, framebuffer.Height - 1);
+        _rasterImagePixel = PixelAt(framebuffer, _rasterImageX, _rasterImageY);
+
+        ManagedPaintEngine scrolled = new(_layoutEngine);
+        if (!scrolled.TryGenerate(800, 600, 0, 5) ||
+            !scrolled.Validate(out ManagedPaintValidationFailureReason scrollValidation) ||
+            scrollValidation != ManagedPaintValidationFailureReason.None)
+            return false;
+        if (!TryFindPaintCommand(scrolled, ManagedPaintCommandKind.BorderRectangle,
+                                 normalBoxIndex, out ManagedPaintCommand normalScrolled) ||
+            !TryFindPaintCommand(scrolled, ManagedPaintCommandKind.FillRectangle,
+                                 fixedCommand.SourceBoxIndex, out ManagedPaintCommand fixedScrolled))
+            return false;
+        int normalX = normal.Rect.X + 1;
+        int normalY = normal.Rect.Y + 1;
+        int normalScrollX = normalScrolled.Rect.X + 1;
+        int normalScrollY = normalScrolled.Rect.Y + 1;
+        int fixedX = fixedCommand.Rect.X + 2;
+        int fixedY = fixedCommand.Rect.Y + 2;
+        if (!framebuffer.TryGetPixel(normalX, normalY, out uint normalPixel) ||
+            normalScrollX < 0 || normalScrollY < 0 ||
+            normalScrollX >= width || normalScrollY >= height ||
+            !framebuffer.TryGetPixel(fixedX, fixedY, out uint fixedOriginPixel))
+            return false;
+        _rasterNormalOriginPixel = normalPixel;
+        _rasterFixedX = fixedX;
+        _rasterFixedY = fixedY;
+        _rasterNormalScrollX = normalScrollX;
+        _rasterNormalScrollY = normalScrollY;
+        if (!rasterizer.TryRender(scrolled, framebuffer)) return false;
+        if (!framebuffer.TryGetPixel(normalScrollX, normalScrollY, out uint normalScrolledPixel) ||
+            !framebuffer.TryGetPixel(fixedX, fixedY, out uint fixedScrolledPixel) ||
+            normalPixel != normalScrolledPixel || fixedOriginPixel != fixedScrolledPixel)
+            return false;
+        _rasterFixedPixel = fixedScrolledPixel;
+        _rasterNormalScrollPixel = normalScrolledPixel;
+        uint[] shortStorage = new uint[width * height - 1];
+        ManagedFramebuffer tooSmall = new(shortStorage, width, height);
+        if (rasterizer.TryRender(_paintEngine, tooSmall) ||
+            rasterizer.FailureReason != ManagedRasterFailureReason.FramebufferTooSmall ||
+            rasterizer.CommandsProcessed != 0 || rasterizer.HashValid ||
+            !rasterizer.TryRender(_paintEngine, framebuffer)) return false;
+        Span<byte> finalHash = stackalloc byte[ManagedSha256.DigestSize];
+        if (!rasterizer.TryCopyFramebufferHash(finalHash) ||
+            !finalHash.SequenceEqual(_rasterFirstFramebufferHash)) return false;
+        return true;
+    }
+
+    private static int ClampSample(int value, int lower, int upper) =>
+        Math.Clamp(value, lower, upper);
+
+    private static uint PixelAt(ManagedFramebuffer framebuffer, int x, int y) =>
+        framebuffer.TryGetPixel(x, y, out uint pixel) ? pixel : 0;
+
+    private bool WriteRasterTelemetry(ManagedRasterTelemetry telemetry)
+    {
+        return WriteRasterHex("RASTER_COMMANDS_PROCESSED"u8, telemetry.CommandsProcessed) &&
+               WriteRasterHex("RASTER_FILLS"u8, telemetry.FillCommands) &&
+               WriteRasterHex("RASTER_BORDERS"u8, telemetry.BorderCommands) &&
+               WriteRasterHex("RASTER_TEXT_COMMANDS"u8, telemetry.TextCommands) &&
+               WriteRasterHex("RASTER_IMAGES"u8, telemetry.ImagePlaceholderCommands) &&
+               WriteRasterHex("RASTER_CLIP_PUSHES"u8, telemetry.ClipPushes) &&
+               WriteRasterHex("RASTER_CLIP_POPS"u8, telemetry.ClipPops) &&
+               WriteRasterHex("RASTER_CLIP_PEAK"u8, telemetry.PeakClipDepth) &&
+               WriteRasterHex("RASTER_GLYPH_REQUESTS"u8, telemetry.GlyphRequests) &&
+               WriteRasterHex("RASTER_GLYPHS_RENDERED"u8, telemetry.GlyphsRendered) &&
+               WriteRasterHex("RASTER_FALLBACK_GLYPHS"u8, telemetry.FallbackGlyphs) &&
+               WriteRasterHex("RASTER_GLYPH_PIXELS_CONSIDERED"u8,
+                              telemetry.GlyphPixelsConsidered) &&
+               WriteRasterHex("RASTER_FILL_PIXELS"u8, telemetry.FillPixelsWritten) &&
+               WriteRasterHex("RASTER_BORDER_PIXELS"u8, telemetry.BorderPixelsWritten) &&
+               WriteRasterHex("RASTER_GLYPH_PIXELS"u8, telemetry.GlyphPixelsWritten) &&
+               WriteRasterHex("RASTER_IMAGE_PIXELS"u8, telemetry.ImagePixelsWritten) &&
+               WriteRasterHex("RASTER_CLEAR_PIXELS"u8, telemetry.ClearPixelsWritten) &&
+               WriteRasterHex("RASTER_TOTAL_PIXELS"u8, telemetry.TotalPixelsWritten) &&
+               WriteRasterHex("RASTER_BLENDED_PIXELS"u8, telemetry.BlendedPixels) &&
+               WriteRasterHex("RASTER_TRANSPARENT_SKIPS"u8, telemetry.TransparentSkips) &&
+               WriteRasterHex("RASTER_OFFSCREEN_SKIPS"u8, telemetry.FullyOffscreenPrimitives) &&
+               WriteRasterHex("RASTER_CANCEL_CHECKPOINTS"u8, telemetry.CancellationCheckpoints) &&
+               WriteRasterHex("RASTER_DIRTY_EMPTY"u8, telemetry.DirtyBounds.IsEmpty ? 1 : 0) &&
+               WriteRasterHex("RASTER_DIRTY_MIN_X"u8, telemetry.DirtyBounds.MinX) &&
+               WriteRasterHex("RASTER_DIRTY_MIN_Y"u8, telemetry.DirtyBounds.MinY) &&
+               WriteRasterHex("RASTER_DIRTY_MAX_X"u8, telemetry.DirtyBounds.MaxX) &&
+               WriteRasterHex("RASTER_DIRTY_MAX_Y"u8, telemetry.DirtyBounds.MaxY) &&
+               WriteRasterHex("RASTER_STATE"u8, (long)telemetry.State) &&
+               WriteRasterHex("RASTER_FAILURE"u8, (long)telemetry.FailureReason) &&
+               WriteRasterHex("RASTER_HASH_VALID"u8, telemetry.HashValid ? 1 : 0);
+    }
+
+    private bool WriteRasterPixel(ReadOnlySpan<byte> name, int x, int y, uint pixel)
+    {
+        return WriteRasterField("GXOS_NET10:MANAGED_HTTPS_PHASE47_PIXEL_"u8,
+                                name, "_X=0x"u8, (ulong)x) &&
+               WriteRasterField("GXOS_NET10:MANAGED_HTTPS_PHASE47_PIXEL_"u8,
+                                name, "_Y=0x"u8, (ulong)y) &&
+               WriteRasterField("GXOS_NET10:MANAGED_HTTPS_PHASE47_PIXEL_"u8,
+                                name, "_VALUE=0x"u8, pixel);
+    }
+
+    private static bool WriteRasterField(ReadOnlySpan<byte> prefix,
+                                         ReadOnlySpan<byte> name,
+                                         ReadOnlySpan<byte> suffix, ulong value)
+    {
+        Span<byte> buffer = stackalloc byte[128];
+        int length = prefix.Length + name.Length + suffix.Length;
+        if (length > buffer.Length) return false;
+        prefix.CopyTo(buffer);
+        name.CopyTo(buffer[prefix.Length..]);
+        suffix.CopyTo(buffer[(prefix.Length + name.Length)..]);
+        return KernelLog.WriteHexLine(buffer[..length], value);
+    }
+
+    private static bool WriteRasterHex(ReadOnlySpan<byte> name, long value) =>
+        WriteRasterField("GXOS_NET10:MANAGED_HTTPS_PHASE47_"u8, name, "=0x"u8,
+                         (ulong)value);
 
     private static bool TryFindPaintCommand(ManagedPaintEngine engine,
                                             ManagedPaintCommandKind kind,
