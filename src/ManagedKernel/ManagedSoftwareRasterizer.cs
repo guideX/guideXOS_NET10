@@ -163,6 +163,28 @@ public readonly struct ManagedRasterGlyph
         _row5 = row5;
         _row6 = row6;
         _row7 = row7;
+        _face = null;
+        _metadata = default;
+    }
+
+    internal ManagedRasterGlyph(ManagedPhase48FontFace face,
+                                ManagedPhase48GlyphMetadata metadata, bool fallback)
+    {
+        Width = metadata.Width;
+        Height = metadata.Height;
+        Advance = metadata.Advance;
+        IsFallback = fallback;
+        _rowScale = 1;
+        _row0 = 0;
+        _row1 = 0;
+        _row2 = 0;
+        _row3 = 0;
+        _row4 = 0;
+        _row5 = 0;
+        _row6 = 0;
+        _row7 = 0;
+        _face = face;
+        _metadata = metadata;
     }
 
     private readonly uint _row0;
@@ -174,12 +196,17 @@ public readonly struct ManagedRasterGlyph
     private readonly uint _row6;
     private readonly uint _row7;
     private readonly byte _rowScale;
+    private readonly ManagedPhase48FontFace? _face;
+    private readonly ManagedPhase48GlyphMetadata _metadata;
 
     public int Width { get; }
     public int Height { get; }
     public int Advance { get; }
     public bool IsFallback { get; }
     public int Scale => Math.Max(1, (int)_rowScale);
+    public int BearingX => _face == null ? 0 : _metadata.BearingX;
+    public int BearingY => _face == null ? 0 : _metadata.BearingY;
+    public bool UsesBaselineMetrics => _face != null;
 
     public uint GetRowMask(int row)
     {
@@ -197,6 +224,15 @@ public readonly struct ManagedRasterGlyph
             7 => _row7,
             _ => 0
         };
+    }
+
+    public byte GetCoverage(int row, int column)
+    {
+        if (row < 0 || column < 0 || row >= Height || column >= Width) return 0;
+        if (_face != null) return _face.GetCoverage(in _metadata, row, column);
+        int bit = 24 - column;
+        return bit >= 0 && (_rowScale != 0) && (GetRowMask(row) & (1U << bit)) != 0
+            ? (byte)255 : (byte)0;
     }
 }
 
@@ -1004,17 +1040,22 @@ public sealed class ManagedSoftwareRasterizer
             for (int row = 0; row != glyph.Height; ++row)
             {
                 if (ShouldCancel()) return Fail(ManagedRasterFailureReason.Cancelled);
-                uint mask = glyph.GetRowMask(row);
                 for (int column = 0; column != glyph.Width; ++column)
                 {
                     ++_glyphPixelsConsidered;
-                    int bit = 24 - column;
-                    if (bit < 0 || (mask & (1U << bit)) == 0) continue;
-                    long x = cursorX + column;
-                    long y = (long)command.Rect.Y + row;
+                    int coverage = glyph.GetCoverage(row, column);
+                    if (coverage == 0) continue;
+                    int effectiveAlpha = ((int)(command.Color >> 24) * coverage) / 255;
+                    if (effectiveAlpha == 0) continue;
+                    uint color = (command.Color & 0x00FFFFFFU) |
+                        ((uint)effectiveAlpha << 24);
+                    long x = cursorX + glyph.BearingX + column;
+                    long y = glyph.UsesBaselineMetrics
+                        ? (long)command.BaselineY + glyph.BearingY + row
+                        : (long)command.Rect.Y + row;
                     if (x < int.MinValue || x > int.MaxValue || y < int.MinValue || y > int.MaxValue)
                         continue;
-                    if (!BlendPixel((int)x, (int)y, command.Color, PixelKind.Glyph)) return false;
+                    if (!BlendPixel((int)x, (int)y, color, PixelKind.Glyph)) return false;
                 }
             }
             cursorX += glyph.Advance;

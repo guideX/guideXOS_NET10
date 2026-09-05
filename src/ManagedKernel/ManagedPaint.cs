@@ -254,7 +254,8 @@ public enum ManagedPaintValidationFailureReason : byte
     OrderingViolation = 13,
     InvalidOpacity = 14,
     InvalidFlags = 15,
-    SourceBoxNodeMismatch = 16
+    SourceBoxNodeMismatch = 16,
+    InvalidFontId = 17
 }
 
 public static class ManagedPaintValidator
@@ -293,6 +294,8 @@ public static class ManagedPaintValidator
                 return Fail(ManagedPaintValidationFailureReason.InvalidOpacity, out reason);
             if (((byte)command.Flags & ~(byte)ManagedPaintCommandFlags.Positioned) != 0)
                 return Fail(ManagedPaintValidationFailureReason.InvalidFlags, out reason);
+            if (command.FontId != ManagedPaintFontId.DefaultUi)
+                return Fail(ManagedPaintValidationFailureReason.InvalidFontId, out reason);
             if (command.SourceBoxIndex >= 0 && command.SourceNodeIndex >= 0 &&
                 sourceBox.SourceNodeIndex != command.SourceNodeIndex)
                 return Fail(ManagedPaintValidationFailureReason.SourceBoxNodeMismatch, out reason);
@@ -402,6 +405,7 @@ public sealed class ManagedPaintEngine
     private readonly int[] _order;
     private readonly ManagedSha256 _hash = new();
     private readonly byte[] _paintHash = new byte[ManagedSha256.DigestSize];
+    private readonly IManagedLayoutTextTypography? _typography;
     private int _used;
     private int _peak;
     private int _activeClipPathCount;
@@ -441,10 +445,15 @@ public sealed class ManagedPaintEngine
         : this(layout, ManagedPaintArenaOptions.Default) { }
 
     public ManagedPaintEngine(ManagedLayoutEngine layout, ManagedPaintArenaOptions options)
+        : this(layout, options, null) { }
+
+    public ManagedPaintEngine(ManagedLayoutEngine layout, ManagedPaintArenaOptions options,
+                              IManagedLayoutTextTypography? typography)
     {
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _document = layout.Document;
         _styles = layout.Styles;
+        _typography = typography;
         _commands = new ManagedPaintCommand[options.CommandCapacity];
         _clipStack = new ManagedLayoutRect[options.ClipDepthCapacity];
         _activeClipPath = new int[options.ClipDepthCapacity];
@@ -746,7 +755,11 @@ public sealed class ManagedPaintEngine
     {
         if (!TryTransform(boxIndex, fragment.Rectangle, out ManagedLayoutRect rect))
             return Fail(ManagedPaintFailureReason.GeometryOverflow);
-        int baseline = AddChecked(rect.Y, fragment.Style.FontSize, out bool baselineOk);
+        ManagedLayoutTextStyle typographyStyle = fragment.Style;
+        int baselineOffset = _typography == null
+            ? fragment.Style.FontSize : _typography.GetBaseline(in typographyStyle);
+        if (baselineOffset <= 0) return Fail(ManagedPaintFailureReason.GeometryOverflow);
+        int baseline = AddChecked(rect.Y, baselineOffset, out bool baselineOk);
         if (!baselineOk) return Fail(ManagedPaintFailureReason.GeometryOverflow);
         return EmitPrimitive(boxIndex, fragment.SourceNodeIndex, ManagedPaintCommandKind.TextRun,
             rect, style.Color, new ManagedLayoutEdges(0, 0, 0, 0),

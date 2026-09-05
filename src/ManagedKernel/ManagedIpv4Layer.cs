@@ -135,6 +135,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase44Passed;
     private bool _phase45Passed;
     private bool _phase46Passed;
+    private bool _phase48Passed;
+    private bool _phase49Passed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -212,6 +214,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase44Passed => _phase44Passed;
     internal bool Phase45Passed => _phase45Passed;
     internal bool Phase46Passed => _phase46Passed;
+    internal bool Phase48Passed => _phase48Passed;
+    internal bool Phase49Passed => _phase49Passed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -1018,21 +1022,36 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool TryRunPhase46(bool capacityControl = false) =>
         TryRunPhase44Core(capacityControl, true, true);
 
-    private bool TryRunPhase44Core(bool capacityControl, bool layoutMode, bool paintMode = false)
+    internal bool TryRunPhase48(bool capacityControl = false) =>
+        TryRunPhase44Core(capacityControl, true, true, true);
+
+    internal bool TryRunPhase49() =>
+        TryRunPhase44Core(false, true, true, true, true);
+
+    private bool TryRunPhase44Core(bool capacityControl, bool layoutMode, bool paintMode = false,
+                                   bool fontMode = false, bool presentationMode = false)
     {
-        if ((paintMode ? _phase46Passed : layoutMode ? _phase45Passed : _phase44Passed) || _active || _networkService == null)
+        if ((presentationMode ? _phase49Passed : fontMode ? _phase48Passed : paintMode ? _phase46Passed : layoutMode ? _phase45Passed : _phase44Passed) || _active || _networkService == null)
         {
-            KernelLog.Write(paintMode
+            KernelLog.Write(presentationMode
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE49_IPV4_GUARD_FAILED\r\n"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE48_IPV4_GUARD_FAILED\r\n"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE46_IPV4_GUARD_FAILED\r\n"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE45_IPV4_GUARD_FAILED\r\n"u8
                 : "GXOS_NET10:MANAGED_KERNEL_PHASE44_IPV4_GUARD_FAILED\r\n"u8);
             return false;
         }
-        _phase43Consumer ??= new ManagedPhase43HtmlProof(_networkService, capacityControl, true, layoutMode, paintMode);
+        _phase43Consumer ??= new ManagedPhase43HtmlProof(_networkService, capacityControl, true, layoutMode, paintMode, fontMode, presentationMode);
         if (!_arp.TryBeginDhcp())
         {
-            KernelLog.Write(paintMode
+            KernelLog.Write(presentationMode
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE49_ARP_DHCP_BEGIN_FAILED\r\n"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE48_ARP_DHCP_BEGIN_FAILED\r\n"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE46_ARP_DHCP_BEGIN_FAILED\r\n"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE45_ARP_DHCP_BEGIN_FAILED\r\n"u8
@@ -1052,55 +1071,99 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _gatewayIpv4Value = 0;
         _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
         if (!_udpEndpoints.TryRegister(DhcpClientPort, ManagedUdpEndpointHandler.Dhcpv4Client) ||
-            !KernelLog.Write(paintMode
+            !KernelLog.Write(presentationMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_BEGIN\r\n"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_BEGIN\r\n"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_BEGIN\r\n"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_BEGIN\r\n"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_BEGIN\r\n"u8) ||
             !TryRunDhcpDora(requireDnsServer: true, requireGateway: false)) return false;
-        if (!KernelLog.Write(paintMode
+        if (!KernelLog.Write(presentationMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_DHCP_COMPLETE\r\n"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_DHCP_COMPLETE\r\n"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_DHCP_COMPLETE\r\n"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_DHCP_COMPLETE\r\n"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_COMPLETE\r\n"u8) ||
             !_udpEndpoints.TryUnregister(DhcpClientPort) ||
-            !KernelLog.Write(paintMode
+            !KernelLog.Write(presentationMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_DHCP_UNREGISTERED\r\n"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_DHCP_UNREGISTERED\r\n"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_DHCP_UNREGISTERED\r\n"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_DHCP_UNREGISTERED\r\n"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_UNREGISTERED\r\n"u8) ||
             !_udpEndpoints.TryRegister(DnsClientPort, ManagedUdpEndpointHandler.DnsResolver) ||
             !PublishNetworkServiceStatus() ||
-            !KernelLog.Write(paintMode
+            !KernelLog.Write(presentationMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_CONFIGURED\r\n"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_CONFIGURED\r\n"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_CONFIGURED\r\n"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CONFIGURED\r\n"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CONFIGURED\r\n"u8) ||
-            !KernelLog.WriteHexLine(paintMode
+            !KernelLog.WriteHexLine(presentationMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_IPV4=0x"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_IPV4=0x"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_IPV4=0x"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_IPV4=0x"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_IPV4=0x"u8, _localIpv4Value) ||
-            !KernelLog.WriteHexLine(paintMode
+            !KernelLog.WriteHexLine(presentationMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_SUBNET=0x"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_SUBNET=0x"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_SUBNET=0x"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_SUBNET=0x"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_SUBNET=0x"u8, _subnetMaskValue) ||
-            !KernelLog.WriteHexLine(paintMode
+            !KernelLog.WriteHexLine(presentationMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_GATEWAY=0x"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_GATEWAY=0x"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_GATEWAY=0x"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_GATEWAY=0x"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_GATEWAY=0x"u8, _gatewayIpv4Value) ||
-            !KernelLog.WriteHexLine(paintMode
+            !KernelLog.WriteHexLine(presentationMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_DNS=0x"u8
+                : fontMode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_DNS=0x"u8
+                : paintMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE46_DNS=0x"u8
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_DNS=0x"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_DNS=0x"u8, DnsServerValue)) return false;
         ManagedNetworkServiceBackend.SetLiveIpv4(this);
         if (!_phase43Consumer.TryRun()) return false;
-        if (paintMode) _phase46Passed = !capacityControl;
+        if (presentationMode) _phase49Passed = true;
+        else if (fontMode) _phase48Passed = !capacityControl;
+        else if (paintMode) _phase46Passed = !capacityControl;
         else if (layoutMode) _phase45Passed = !capacityControl;
         else _phase44Passed = !capacityControl;
+        if (presentationMode)
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE49_PASS\r\n"u8);
+            return true;
+        }
+        if (fontMode)
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE48_PASS\r\n"u8);
+            return true;
+        }
         if (paintMode)
         {
             KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE46_PASS\r\n"u8);

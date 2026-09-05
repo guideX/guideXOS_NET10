@@ -13,6 +13,11 @@
 /* The first stable native/managed guideXOS service contract. */
 #define GX_MANAGED_KERNEL_ABI_V1 1U
 #define GX_MANAGED_KERNEL_ARCH_X64 0x8664U
+#define GX_MANAGED_KERNEL_FRAMEBUFFER_ABI_V1 1U
+#define GX_MANAGED_KERNEL_FRAMEBUFFER_V1_SIZE 64U
+#define GX_MANAGED_KERNEL_FRAMEBUFFER_PIXEL_FORMAT_RGBX 0U
+#define GX_MANAGED_KERNEL_FRAMEBUFFER_PIXEL_FORMAT_BGRX 1U
+#define GX_MANAGED_KERNEL_FRAMEBUFFER_PIXEL_FORMAT_BIT_MASK 2U
 #define GX_MANAGED_KERNEL_INIT_REQUEST_V1_SIZE 16U
 #define GX_MANAGED_KERNEL_SYSTEM_INFO_V1_SIZE 32U
 #define GX_MANAGED_KERNEL_SERVICE_VERSION_V1 1U
@@ -121,6 +126,25 @@ enum {
     GX_MANAGED_CAPABILITY_SERVICE_ABI = 1ULL << 0,
     GX_MANAGED_CAPABILITY_SYSTEM_INFORMATION = 1ULL << 1
 };
+
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t FramebufferBase;
+    uint64_t FramebufferSize;
+    uint32_t Width;
+    uint32_t Height;
+    uint32_t PixelsPerScanLine;
+    uint32_t BytesPerPixel;
+    uint32_t PixelFormat;
+    uint32_t RedMask;
+    uint32_t GreenMask;
+    uint32_t BlueMask;
+    uint32_t ReservedMask;
+    uint32_t Reserved;
+} GX_MANAGED_KERNEL_FRAMEBUFFER_V1;
+#pragma pack(pop)
 
 enum {
     GX_MANAGED_HOST_CAPABILITY_ABI = 1ULL << 0,
@@ -751,6 +775,19 @@ _Static_assert(offsetof(GX_MANAGED_KERNEL_INIT_REQUEST_V1, Architecture) == 8,
                "managed kernel init request Architecture offset");
 _Static_assert(offsetof(GX_MANAGED_KERNEL_INIT_REQUEST_V1, Flags) == 12,
                "managed kernel init request Flags offset");
+_Static_assert(sizeof(GX_MANAGED_KERNEL_FRAMEBUFFER_V1) ==
+                   GX_MANAGED_KERNEL_FRAMEBUFFER_V1_SIZE,
+               "managed framebuffer descriptor size");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_FRAMEBUFFER_V1, FramebufferBase) == 8,
+               "managed framebuffer base offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_FRAMEBUFFER_V1, FramebufferSize) == 16,
+               "managed framebuffer size offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_FRAMEBUFFER_V1, Width) == 24,
+               "managed framebuffer width offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_FRAMEBUFFER_V1, PixelsPerScanLine) == 32,
+               "managed framebuffer stride offset");
+_Static_assert(offsetof(GX_MANAGED_KERNEL_FRAMEBUFFER_V1, PixelFormat) == 40,
+               "managed framebuffer format offset");
 _Static_assert(sizeof(GX_MANAGED_KERNEL_SYSTEM_INFO_V1) ==
                    GX_MANAGED_KERNEL_SYSTEM_INFO_V1_SIZE,
                "managed kernel system info size");

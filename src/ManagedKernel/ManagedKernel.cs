@@ -5,12 +5,33 @@ using System.Runtime.InteropServices;
 namespace GuideXOS.Net10.ManagedKernel;
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct GxManagedKernelFramebufferV1
+{
+    internal const uint ExpectedSize = 64;
+
+    internal uint Size;
+    internal uint AbiVersion;
+    internal ulong FramebufferBase;
+    internal ulong FramebufferSize;
+    internal uint Width;
+    internal uint Height;
+    internal uint PixelsPerScanLine;
+    internal uint BytesPerPixel;
+    internal uint PixelFormat;
+    internal uint RedMask;
+    internal uint GreenMask;
+    internal uint BlueMask;
+    internal uint ReservedMask;
+    internal uint Reserved;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
 internal unsafe struct GuideXBootInfo
 {
     internal const uint ExpectedMagic = 0x534F5847;
     internal const ushort CurrentVersion = 1;
     internal const uint ArchitectureX64 = 0x8664;
-    internal const ushort MinimumSize = 24;
+    internal const ushort MinimumSize = 88;
 
     internal uint Magic;
     internal ushort Version;
@@ -18,6 +39,7 @@ internal unsafe struct GuideXBootInfo
     internal uint Architecture;
     internal uint Flags;
     internal ulong SerialWrite;
+    internal GxManagedKernelFramebufferV1 Video;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -493,7 +515,8 @@ internal static unsafe class ManagedKernelLayout
 {
     internal static bool IsValid()
     {
-        return sizeof(GuideXBootInfo) == 24 &&
+        return sizeof(GuideXBootInfo) == 88 &&
+               sizeof(GxManagedKernelFramebufferV1) == 64 &&
                sizeof(GxManagedKernelInitializeRequestV1) == 16 &&
                sizeof(GxManagedKernelSystemInfoV1) == 32 &&
                sizeof(GxManagedKernelBootResourceSummaryV1) == 56 &&
@@ -526,6 +549,21 @@ internal static unsafe class ManagedKernelLayout
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Architecture)).ToInt32() == 8 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Flags)).ToInt32() == 12 &&
                Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.SerialWrite)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GuideXBootInfo>(nameof(GuideXBootInfo.Video)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.Size)).ToInt32() == 0 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.AbiVersion)).ToInt32() == 4 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.FramebufferBase)).ToInt32() == 8 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.FramebufferSize)).ToInt32() == 16 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.Width)).ToInt32() == 24 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.Height)).ToInt32() == 28 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.PixelsPerScanLine)).ToInt32() == 32 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.BytesPerPixel)).ToInt32() == 36 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.PixelFormat)).ToInt32() == 40 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.RedMask)).ToInt32() == 44 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.GreenMask)).ToInt32() == 48 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.BlueMask)).ToInt32() == 52 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.ReservedMask)).ToInt32() == 56 &&
+               Marshal.OffsetOf<GxManagedKernelFramebufferV1>(nameof(GxManagedKernelFramebufferV1.Reserved)).ToInt32() == 60 &&
                Marshal.OffsetOf<GxManagedKernelInitializeRequestV1>(nameof(GxManagedKernelInitializeRequestV1.Size)).ToInt32() == 0 &&
                Marshal.OffsetOf<GxManagedKernelInitializeRequestV1>(nameof(GxManagedKernelInitializeRequestV1.AbiVersion)).ToInt32() == 4 &&
                Marshal.OffsetOf<GxManagedKernelInitializeRequestV1>(nameof(GxManagedKernelInitializeRequestV1.Architecture)).ToInt32() == 8 &&
@@ -844,6 +882,10 @@ internal static unsafe class ManagedKernelContract
     private static int s_phase45CapacityMode;
     private static int s_phase46Mode;
     private static int s_phase46CapacityMode;
+    private static int s_phase48Mode;
+    private static int s_phase49Mode;
+    private static int s_framebufferInstalled;
+    private static GxManagedKernelFramebufferV1 s_framebuffer;
     private static ManagedE1000Driver? s_phase14Driver;
     private static int s_dmaServicesInstalled;
     private static ulong s_dmaCapabilities;
@@ -867,6 +909,11 @@ internal static unsafe class ManagedKernelContract
 
     internal static bool IsStarted =>
         s_lifecycleState == (int)LifecycleState.Started;
+
+    internal static bool FramebufferInstalled => s_framebufferInstalled != 0;
+
+    internal static GxManagedKernelFramebufferV1 FramebufferDescriptor =>
+        s_framebuffer;
     internal static bool MemoryServicesInstalled => s_memoryServicesInstalled != 0;
     internal static nuint MemoryAllocatePagesAddress => s_memoryAllocatePagesAddress;
     internal static nuint MemoryReleasePagesAddress => s_memoryReleasePagesAddress;
@@ -1135,6 +1182,64 @@ internal static unsafe class ManagedKernelContract
         }
 
         s_lifecycleState = (int)LifecycleState.Initialized;
+        return ManagedOk;
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallFramebuffer")]
+    internal static uint InstallFramebuffer(uint requestedAbiVersion,
+                                              nuint framebufferAddress)
+    {
+        if (requestedAbiVersion != AbiVersionV1)
+            return UnsupportedAbi;
+        if (!IsInitialized)
+            return NotInitialized;
+        if (s_framebufferInstalled != 0)
+            return AlreadyInitialized;
+        if (framebufferAddress == 0 ||
+            !IsRangeValid(framebufferAddress,
+                (nuint)GxManagedKernelFramebufferV1.ExpectedSize))
+            return InvalidArgument;
+        if (s_lifecycleState != (int)LifecycleState.Ready &&
+            s_lifecycleState != (int)LifecycleState.Started)
+            return InvalidState;
+
+        GxManagedKernelFramebufferV1 descriptor =
+            *(GxManagedKernelFramebufferV1*)framebufferAddress;
+        ManagedPhysicalFramebufferDescriptor physical =
+            new(descriptor.FramebufferBase, descriptor.FramebufferSize,
+                descriptor.Width, descriptor.Height, descriptor.PixelsPerScanLine,
+                descriptor.BytesPerPixel,
+                (ManagedPhysicalFramebufferPixelFormat)descriptor.PixelFormat,
+                descriptor.RedMask, descriptor.GreenMask, descriptor.BlueMask,
+                descriptor.ReservedMask);
+        if (descriptor.Size != GxManagedKernelFramebufferV1.ExpectedSize ||
+            descriptor.AbiVersion != AbiVersionV1 ||
+            !ManagedFramebufferPresenter.TryValidateDescriptor(
+                in physical, out _))
+            return InvalidArgument;
+        s_framebuffer = descriptor;
+        s_framebufferInstalled = 1;
+        if (!KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_DESCRIPTOR_ACCEPTED\r\n"u8) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_BASE=0x"u8,
+                descriptor.FramebufferBase) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_SIZE=0x"u8,
+                descriptor.FramebufferSize) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_WIDTH=0x"u8,
+                descriptor.Width) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_HEIGHT=0x"u8,
+                descriptor.Height) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_STRIDE=0x"u8,
+                descriptor.PixelsPerScanLine) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_FORMAT=0x"u8,
+                descriptor.PixelFormat))
+            return InvalidState;
         return ManagedOk;
     }
 
@@ -2538,6 +2643,38 @@ internal static unsafe class ManagedKernelContract
             ManagedE1000Driver.EnablePhase46CapacityMode();
             return ManagedOk;
         }
+        if (stage == 16)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_dmaServicesInstalled == 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            if (!ManagedVirtioRngKernelProof.TryStartPhase35Provider())
+                return InvalidState;
+            if (!ManagedHtmlResourceRequest.PrimeNativeKernelTokenizer())
+                return InvalidState;
+            if (!ManagedCssEngine.PrimeNativeKernelArenas())
+                return InvalidState;
+            s_phase48Mode = 1;
+            ManagedE1000Driver.EnablePhase48Mode();
+            return ManagedOk;
+        }
+        if (stage == 17)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_dmaServicesInstalled == 0 || !FramebufferInstalled ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            if (!ManagedVirtioRngKernelProof.TryStartPhase35Provider() ||
+                !ManagedHtmlResourceRequest.PrimeNativeKernelTokenizer() ||
+                !ManagedCssEngine.PrimeNativeKernelArenas())
+                return InvalidState;
+            s_phase49Mode = 1;
+            ManagedE1000Driver.EnablePhase49Mode();
+            return ManagedOk;
+        }
         if (stage == 1)
         {
             if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
@@ -2549,6 +2686,7 @@ internal static unsafe class ManagedKernelContract
                  s_phase44Mode == 0 && s_phase44CapacityMode == 0 &&
                  s_phase45Mode == 0 && s_phase45CapacityMode == 0 &&
                  s_phase46Mode == 0 && s_phase46CapacityMode == 0 &&
+                 s_phase48Mode == 0 && s_phase49Mode == 0 &&
                  ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0))
                 return InvalidState;
             ManagedE1000Driver? candidate = ManagedE1000Driver.TryCreate();
@@ -2586,6 +2724,8 @@ internal static unsafe class ManagedKernelContract
             s_phase45CapacityMode = 0;
             s_phase46Mode = 0;
             s_phase46CapacityMode = 0;
+            s_phase48Mode = 0;
+            s_phase49Mode = 0;
             bool rxProof = s_phase14Driver.RxProofReceived;
             bool phase15RxProof = s_phase14Driver.RxPhase15Received;
             bool phase16Proof = s_phase14Driver.Phase16Passed;
@@ -2608,6 +2748,8 @@ internal static unsafe class ManagedKernelContract
             bool phase44Proof = s_phase14Driver.Phase44Passed;
             bool phase45Proof = s_phase14Driver.Phase45Passed;
             bool phase46Proof = s_phase14Driver.Phase46Passed;
+            bool phase48Proof = s_phase14Driver.Phase48Passed;
+            bool phase49Proof = s_phase14Driver.Phase49Passed;
             s_phase14TeardownRun = 1;
             if (!KernelLog.Write(rxProof
                     ? "PHASE 14 FIRST MANAGED PCI DRIVER COMPLETE — DMA TX/RX PROVEN\r\n"u8
@@ -2658,7 +2800,11 @@ internal static unsafe class ManagedKernelContract
                 (phase45Proof &&
                  !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE45_PASS\r\n"u8)) ||
                 (phase46Proof &&
-                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE46_PASS\r\n"u8)))
+                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE46_PASS\r\n"u8)) ||
+                (phase48Proof &&
+                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE48_PASS\r\n"u8)) ||
+                (phase49Proof &&
+                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE49_PASS\r\n"u8)))
                 return InvalidState;
             s_phase14Driver = null;
             return ManagedOk;
@@ -2945,7 +3091,7 @@ internal static unsafe class ManagedKernelContract
         baselineMetrics = s_driverRegistry.Metrics;
         if (!s_driverRegistry.ValidateInvariants() ||
             !s_driverRegistry.TryGetBinding(0, out binding) ||
-            !s_deviceInventory.TryGetDevice(0, out accountingDevice) ||
+            !s_deviceInventory!.TryGetDevice(0, out accountingDevice) ||
             !PciConfiguration.TryRead16(in accountingDevice, 0, out _) ||
             !s_driverRegistry.ValidateInvariants())
         {
@@ -3456,6 +3602,17 @@ internal sealed class Phase4KernelMemoryProvider : IKernelMemoryProvider
 
 internal static unsafe class KernelLog
 {
+    /* Host-log validation accepts the NativeAOT image and the loader stack.
+       Keep formatted hex records in image-backed scratch storage so a deep
+       proof call cannot make an otherwise valid record fail merely because a
+       transient stack span fell outside the loader's conservative range. */
+    private struct HexScratch
+    {
+        internal unsafe fixed byte Bytes[128];
+    }
+
+    private static HexScratch s_hexScratch;
+
     internal static ReadOnlySpan<byte> ManagedStartLog =>
         "GXOS_NET10:MANAGED_KERNEL_HOST_LOG_FROM_MANAGED\r\n"u8;
     internal static ReadOnlySpan<byte> ManagedHostLogCallOk =>
@@ -3470,19 +3627,22 @@ internal static unsafe class KernelLog
 
     internal static bool WriteHexLine(ReadOnlySpan<byte> prefix, ulong value)
     {
-        Span<byte> buffer = stackalloc byte[128];
         ReadOnlySpan<byte> digits = "0123456789ABCDEF"u8;
         if (prefix.Length > 108) return false;
-        prefix.CopyTo(buffer);
-        for (int index = 0; index != 16; ++index)
+        fixed (byte* address = s_hexScratch.Bytes)
         {
-            int shift = (15 - index) * 4;
-            buffer[prefix.Length + index] =
-                digits[(int)((value >> shift) & 0xFUL)];
+            Span<byte> buffer = new(address, 128);
+            prefix.CopyTo(buffer);
+            for (int index = 0; index != 16; ++index)
+            {
+                int shift = (15 - index) * 4;
+                buffer[prefix.Length + index] =
+                    digits[(int)((value >> shift) & 0xFUL)];
+            }
+            buffer[prefix.Length + 16] = (byte)'\r';
+            buffer[prefix.Length + 17] = (byte)'\n';
+            return Write(buffer[..(prefix.Length + 18)]);
         }
-        buffer[prefix.Length + 16] = (byte)'\r';
-        buffer[prefix.Length + 17] = (byte)'\n';
-        return Write(buffer[..(prefix.Length + 18)]);
     }
 }
 

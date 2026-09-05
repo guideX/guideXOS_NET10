@@ -4,10 +4,11 @@
     <OutputType>Exe</OutputType>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
-    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase47HostTests</PathMap>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase49HostTests</PathMap>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\ManagedKernelPhase44HostTests\ManagedHttpBodySinkResult.cs" Link="ManagedHttpBodySinkResult.cs" />
@@ -18,6 +19,7 @@
     <Compile Include="..\ManagedKernel\ManagedLayout.cs" Link="ManagedLayout.cs" />
     <Compile Include="..\ManagedKernel\ManagedPaint.cs" Link="ManagedPaint.cs" />
     <Compile Include="..\ManagedKernel\ManagedSoftwareRasterizer.cs" Link="ManagedSoftwareRasterizer.cs" />
+    <Compile Include="..\ManagedKernel\ManagedFramebufferPresenter.cs" Link="ManagedFramebufferPresenter.cs" />
     <Compile Include="..\ManagedKernel\ManagedPhase48Font.cs" Link="ManagedPhase48Font.cs" />
     <Compile Include="..\ManagedKernel\ManagedPhase48GeneratedFontData.g.cs" Link="ManagedPhase48GeneratedFontData.g.cs" />
   </ItemGroup>

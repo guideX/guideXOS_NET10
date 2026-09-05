@@ -144,6 +144,11 @@ public interface IManagedLayoutTextMetrics
     int GetLineHeight(in ManagedLayoutTextStyle style);
 }
 
+public interface IManagedLayoutTextTypography
+{
+    int GetBaseline(in ManagedLayoutTextStyle style);
+}
+
 /// <summary>
 /// Authoritative Phase 45 metrics.  It intentionally does not call an OS font
 /// stack: every scalar has a deterministic advance and every run has a

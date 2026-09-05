@@ -39,6 +39,9 @@ param(
     [switch]$EnablePhase45CapacityControl,
     [switch]$EnablePhase46Protocol,
     [switch]$EnablePhase46CapacityControl,
+    [switch]$EnablePhase48Protocol,
+    [switch]$EnablePhase49Protocol,
+    [switch]$CaptureQemuScreen,
     [switch]$EnablePhase42MalformedControl,
     [switch]$EnableManagedKernelPhase35,
     [switch]$EnablePhase32NegativeControl,
@@ -103,6 +106,17 @@ if ($EnablePhase46Protocol -and
 }
 if ($EnablePhase46CapacityControl -and -not $EnablePhase46Protocol) {
     throw '-EnablePhase46CapacityControl requires -EnablePhase46Protocol.'
+}
+if ($EnablePhase48Protocol -and
+    (!$EnablePhase15Rx -or $Phase15NetworkBackend -ne 'dgram')) {
+    throw '-EnablePhase48Protocol requires -EnablePhase15Rx -Phase15NetworkBackend dgram.'
+}
+if ($EnablePhase49Protocol -and
+    (!$EnablePhase15Rx -or $Phase15NetworkBackend -ne 'dgram')) {
+    throw '-EnablePhase49Protocol requires -EnablePhase15Rx -Phase15NetworkBackend dgram.'
+}
+if ($CaptureQemuScreen -and -not $EnablePhase49Protocol) {
+    throw '-CaptureQemuScreen requires -EnablePhase49Protocol.'
 }
 if ($EnablePhase42MalformedControl -and -not $EnablePhase42Protocol) {
     throw '-EnablePhase42MalformedControl requires -EnablePhase42Protocol.'
@@ -356,6 +370,35 @@ function Send-Key11([Net.Sockets.TcpClient]$monitor, [System.Diagnostics.Process
         $afterMarker, (Get-Date).ToUniversalTime(), $key))
     $injectionLog.Flush()
     Write-Timeline11 $script:phase11Timeline 'HOST_KEY_INJECT' "after=$afterMarker key=$key"
+}
+
+function Request-QemuScreenDump11([Net.Sockets.TcpClient]$monitor,
+                                   [System.Diagnostics.Process]$process,
+                                   [IO.StreamWriter]$injectionLog,
+                                   [string]$path,
+                                   [datetime]$deadline) {
+    Require11 ($monitor.Connected -and !$process.HasExited) 'QEMU monitor is not connected for screendump.'
+    $monitor.Client.NoDelay = $true
+    $commandPath = $path.Replace('\', '/')
+    $bytes = [Text.Encoding]::ASCII.GetBytes("screendump $commandPath`n")
+    $monitor.GetStream().Write($bytes, 0, $bytes.Length)
+    $monitor.GetStream().Flush()
+    $injectionLog.WriteLine(('{0} utc={1:o} monitor_command=screendump path={2}' -f
+        'PHASE49_VISIBLE_PAGE_PASS', (Get-Date).ToUniversalTime(), $commandPath))
+    $injectionLog.Flush()
+    Write-Timeline11 $script:phase11Timeline 'QEMU_SCREEN_DUMP_REQUESTED' "path=$commandPath"
+    while ((Get-Date) -lt $deadline) {
+        if ($process.HasExited) { throw 'QEMU exited before screendump completed.' }
+        if (Test-Path -LiteralPath $path) {
+            $length = (Get-Item -LiteralPath $path).Length
+            if ($length -gt 32) {
+                Write-Timeline11 $script:phase11Timeline 'QEMU_SCREEN_DUMP_READY' "bytes=$length"
+                return
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw "QEMU screendump was not created: $path"
 }
 
 function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false,
@@ -1293,6 +1336,52 @@ function New-Phase46GzipBody11 {
     try { return ,([byte[]]$stream.ToArray()) } finally { $stream.Dispose() }
 }
 
+function New-Phase48GzipBody11 {
+    $compressed = New-Phase46GzipBody11
+    $inputStream = [IO.MemoryStream]::new($compressed)
+    $gzipInput = [IO.Compression.GZipStream]::new($inputStream, [IO.Compression.CompressionMode]::Decompress)
+    try {
+        $reader = [IO.StreamReader]::new($gzipInput, [Text.Encoding]::UTF8)
+        try { $html = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally {
+        $gzipInput.Dispose()
+        $inputStream.Dispose()
+    }
+    $html = $html.Replace('GuideX Phase 46', 'GuideX Phase 48').Replace('Phase 46', 'Phase 48')
+    $body = [Text.Encoding]::UTF8.GetBytes($html)
+    $stream = [IO.MemoryStream]::new()
+    $gzip = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionLevel]::Optimal, $true)
+    try { $gzip.Write($body, 0, $body.Length) } finally { $gzip.Dispose() }
+    try { return ,([byte[]]$stream.ToArray()) } finally { $stream.Dispose() }
+}
+
+function New-Phase49GzipBody11 {
+    $compressed = New-Phase46GzipBody11
+    $inputStream = [IO.MemoryStream]::new($compressed)
+    $gzipInput = [IO.Compression.GZipStream]::new($inputStream, [IO.Compression.CompressionMode]::Decompress)
+    try {
+        $reader = [IO.StreamReader]::new($gzipInput, [Text.Encoding]::UTF8)
+        try { $html = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally {
+        $gzipInput.Dispose()
+        $inputStream.Dispose()
+    }
+    # Preserve Phase 46's semantic scene and its scalar budget while replacing
+    # the visible proof text with the first managed-page title and glyph-width
+    # sample.  The presenter receives the same bounded rendering pipeline.
+    $html = $html.Replace('GuideX Phase 46', 'GuideX Phase 49').
+        Replace('Phase 46', 'Phase 49').
+        Replace('Bounded display list', 'guideXOS Managed Kernel').
+        Replace('semantic paint commands', 'iiii WWWW 0123456789').
+        Replace('</style>', '.phase49-red{display:block;position:fixed;top:28px;left:4px;width:20px;height:8px;background-color:red;z-index:3}.phase49-green{display:block;position:fixed;top:28px;left:28px;width:20px;height:8px;background-color:#00FF00;z-index:3}.phase49-blue{display:block;position:fixed;top:28px;left:52px;width:20px;height:8px;background-color:blue;z-index:3}.phase49-black{display:block;position:fixed;top:28px;left:76px;width:20px;height:8px;background-color:black;z-index:3}.phase49-nontrivial{display:block;position:fixed;top:28px;left:100px;width:20px;height:8px;background-color:#123456;z-index:3}.phase49-badge{display:block;position:fixed;top:44px;left:4px;width:34px;height:10px;background-color:#8385C7;border-width:1px;border-style:solid;border-color:white;z-index:3}</style>').
+        Replace('</body>', '<div class=phase49-red></div><div class=phase49-green></div><div class=phase49-blue></div><div class=phase49-black></div><div class=phase49-nontrivial></div><div class=phase49-badge>PASS</div></body>')
+    $body = [Text.Encoding]::UTF8.GetBytes($html)
+    $stream = [IO.MemoryStream]::new()
+    $gzip = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionLevel]::Optimal, $true)
+    try { $gzip.Write($body, 0, $body.Length) } finally { $gzip.Dispose() }
+    try { return ,([byte[]]$stream.ToArray()) } finally { $stream.Dispose() }
+}
+
 function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
                               [int]$rxPort, [int]$timeoutSeconds,
                               [System.Diagnostics.Process]$process,
@@ -1312,6 +1401,8 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
                                [bool]$negativeControl,
                                [bool]$resourceProof = $false) {
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $phase49 = [bool]$EnablePhase49Protocol
+    $phase48 = [bool]$EnablePhase48Protocol
     $phase46 = [bool]$EnablePhase46Protocol
     $phase46Capacity = [bool]$EnablePhase46CapacityControl
     $phase45 = [bool]$EnablePhase45Protocol
@@ -1324,8 +1415,8 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
     $phase42Malformed = [bool]$EnablePhase42MalformedControl
     $phase41 = [bool]$EnablePhase41Protocol
     $phase40 = [bool]$EnablePhase40Protocol
-    $compressedResource = $resourceProof -or $phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46
-    $phaseMarker = if ($phase46) { 'PHASE46' } elseif ($phase45) { 'PHASE45' } elseif ($phase44) { 'PHASE44' } elseif ($phase43) { 'PHASE43' } elseif ($phase42) { 'PHASE42' } elseif ($phase41) { 'PHASE41' } elseif ($phase40) { 'PHASE40' } elseif ($resourceProof) { 'PHASE39' } else { 'PHASE34' }
+    $compressedResource = $resourceProof -or $phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46 -or $phase48 -or $phase49
+    $phaseMarker = if ($phase49) { 'PHASE49' } elseif ($phase48) { 'PHASE48' } elseif ($phase46) { 'PHASE46' } elseif ($phase45) { 'PHASE45' } elseif ($phase44) { 'PHASE44' } elseif ($phase43) { 'PHASE43' } elseif ($phase42) { 'PHASE42' } elseif ($phase41) { 'PHASE41' } elseif ($phase40) { 'PHASE40' } elseif ($resourceProof) { 'PHASE39' } else { 'PHASE34' }
     $dnsQueryFrame = Receive-AnyDns20Frame $peerUdp $timeoutSeconds $hostname
     $dnsQueryPayload = Get-DnsPayload20 $dnsQueryFrame
     $expectedQuestion = New-Phase34DnsQuestion11 $hostname
@@ -1341,7 +1432,7 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
         '127.0.0.1', $rxPort) -eq $dnsResponseFrame.Length) `
         "Phase 34 DNS response send was short for $hostname."
     Write-Phase20Frame $injectionLog ('phase34_dns_response_{0}' -f $hop) $dnsResponseFrame
-    if (-not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
+    if (-not $phase49 -and -not $phase48 -and -not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
         Wait-Marker11 ("GXOS_NET10:MANAGED_HTTPS_{0}_DNS_SUCCESS" -f $phaseMarker) $deadline `
             $process $stream $serialLog $text $receiveBuffer
     }
@@ -1367,7 +1458,7 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
         '127.0.0.1', $rxPort) -eq $synAckFrame.Length) `
         "Phase 34 SYNACK send was short for hop $hop."
     Write-Phase22Frame $injectionLog ('phase34_peer_synack_{0}' -f $hop) $synAckFrame
-    if (-not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
+    if (-not $phase49 -and -not $phase48 -and -not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
         Wait-Marker11 ("GXOS_NET10:MANAGED_HTTPS_{0}_TCP_CONNECTED" -f $phaseMarker) $deadline `
             $process $stream $serialLog $text $receiveBuffer
     }
@@ -1485,7 +1576,7 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
         (0x6101 + $hop) $timeoutSeconds
     [uint32]$serverNext = $serverNext + $serverFinished.Length
 
-    if (-not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
+    if (-not $phase49 -and -not $phase48 -and -not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
         Wait-Marker11 ("GXOS_NET10:MANAGED_HTTPS_{0}_HTTP_REQUEST_ENCRYPTED_SENT" -f $phaseMarker) `
             $deadline $process $stream $serialLog $text $receiveBuffer
     }
@@ -1507,7 +1598,7 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
         $guestIp $hostIp $clientPort $serverPort $serverNext $clientNext (0x6102 + $hop)
 
     if ($compressedResource) {
-        $encodedBody = if ($phase46) { New-Phase46GzipBody11 } elseif ($phase45) { New-Phase45GzipBody11 } elseif ($phase44) { New-Phase44GzipBody11 } elseif ($phase43) { New-Phase43GzipBody11 } elseif ($phase42) { New-Phase42GzipBody11 } elseif ($phase41) { New-Phase41GzipBody11 } elseif ($phase40) { New-Phase40GzipBody11 } else {
+        $encodedBody = if ($phase49) { New-Phase49GzipBody11 } elseif ($phase48) { New-Phase48GzipBody11 } elseif ($phase46) { New-Phase46GzipBody11 } elseif ($phase45) { New-Phase45GzipBody11 } elseif ($phase44) { New-Phase44GzipBody11 } elseif ($phase43) { New-Phase43GzipBody11 } elseif ($phase42) { New-Phase42GzipBody11 } elseif ($phase41) { New-Phase41GzipBody11 } elseif ($phase40) { New-Phase40GzipBody11 } else {
             $plainBody = New-Object byte[] 16884
             for ($index = 0; $index -lt $plainBody.Length; ++$index) {
                 $plainBody[$index] = [byte](($index * 31 + 7) -band 0xFF)
@@ -1517,8 +1608,8 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
         $headerBytes = [Text.Encoding]::ASCII.GetBytes(
             ("HTTP/1.1 200 OK`r`nContent-Length: {0}`r`nContent-Type: {1}`r`n{2}Connection: close`r`n`r`n" -f
                 $encodedBody.Length,
-                $(if ($phase46 -or $phase45 -or $phase44 -or $phase43 -or $phase42) { 'text/html; charset=utf-8' } elseif ($phase41) { 'text/plain; charset=utf-8' } else { 'application/octet-stream' }),
-                $(if ($phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46) { "Content-Encoding: gzip`r`n" } else { '' })))
+                $(if ($phase49 -or $phase48 -or $phase46 -or $phase45 -or $phase44 -or $phase43 -or $phase42) { 'text/html; charset=utf-8' } elseif ($phase41) { 'text/plain; charset=utf-8' } else { 'application/octet-stream' }),
+                $(if ($phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46 -or $phase48 -or $phase49) { "Content-Encoding: gzip`r`n" } else { '' })))
         $responseBytes = New-Object byte[] ($headerBytes.Length + $encodedBody.Length)
         $headerBytes.CopyTo($responseBytes, 0)
         $encodedBody.CopyTo($responseBytes, $headerBytes.Length)
@@ -1696,8 +1787,12 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
                                        [byte[]]$guestIpBytes,
                                        [byte[]]$hostIpBytes,
                                        [bool]$negativeControl,
-                                       [bool]$resourceProof = $false) {
+                                       [bool]$resourceProof = $false,
+                                       [Net.Sockets.TcpClient]$screenMonitor = $null,
+                                       [string]$screenPath = '') {
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $phase49 = [bool]$EnablePhase49Protocol
+    $phase48 = [bool]$EnablePhase48Protocol
     $phase46 = [bool]$EnablePhase46Protocol
     $phase46Capacity = [bool]$EnablePhase46CapacityControl
     $phase45 = [bool]$EnablePhase45Protocol
@@ -1710,8 +1805,8 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
     $phase42Malformed = [bool]$EnablePhase42MalformedControl
     $phase41 = [bool]$EnablePhase41Protocol
     $phase40 = [bool]$EnablePhase40Protocol
-    $compressedResource = $resourceProof -or $phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46
-    $phaseMarker = if ($phase46) { 'PHASE46' } elseif ($phase45) { 'PHASE45' } elseif ($phase44) { 'PHASE44' } elseif ($phase43) { 'PHASE43' } elseif ($phase42) { 'PHASE42' } elseif ($phase41) { 'PHASE41' } elseif ($phase40) { 'PHASE40' } else { 'PHASE34' }
+    $compressedResource = $resourceProof -or $phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46 -or $phase48 -or $phase49
+    $phaseMarker = if ($phase49) { 'PHASE49' } elseif ($phase48) { 'PHASE48' } elseif ($phase46) { 'PHASE46' } elseif ($phase45) { 'PHASE45' } elseif ($phase44) { 'PHASE44' } elseif ($phase43) { 'PHASE43' } elseif ($phase42) { 'PHASE42' } elseif ($phase41) { 'PHASE41' } elseif ($phase40) { 'PHASE40' } else { 'PHASE34' }
     Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_DISCOVER_SENT' $deadline $process $stream $serialLog $text $receiveBuffer
     $discoverFrame = Receive-AnyPhase19Frame $peerUdp $timeoutSeconds 'Phase 34 DHCPDISCOVER'
     $discoverPayload = Get-DhcpPayload19 $discoverFrame
@@ -1756,7 +1851,9 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
     $hopCount = if ($compressedResource) { 1 } elseif ($negativeControl) { 2 } else { 4 }
     if ($compressedResource) {
         $hosts = @('www.example.com'); $ports = @(443)
-        if ($phase46) { $paths = @('/phase46/gzip') }
+        if ($phase49) { $paths = @('/phase49/gzip') }
+        elseif ($phase48) { $paths = @('/phase48/gzip') }
+        elseif ($phase46) { $paths = @('/phase46/gzip') }
         elseif ($phase45) { $paths = @('/phase45/gzip') }
         elseif ($phase44) { $paths = @('/phase44/gzip') }
         elseif ($phase43) { $paths = @('/phase43/gzip') }
@@ -1811,7 +1908,20 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE43_CAPACITY_NEGATIVE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
         return 'NEGATIVE_PASS_PHASE43'
     }
-    if ($phase46) {
+    if ($phase49) {
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE49_RESOURCE_COMPLETE' $deadline $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE49_RESOURCE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE49_GOP_PRESENT_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE49_VISIBLE_PAGE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+        if ($null -ne $screenMonitor -and -not [string]::IsNullOrEmpty($screenPath)) {
+            Request-QemuScreenDump11 $screenMonitor $process $injectionLog $screenPath $deadline
+        }
+        Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE49_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+    } elseif ($phase48) {
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE48_RESOURCE_COMPLETE' $deadline $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE48_RESOURCE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE48_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+    } elseif ($phase46) {
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE46_RESOURCE_COMPLETE' $deadline $process $stream $serialLog $text $receiveBuffer
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE46_RESOURCE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
         Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE46_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
@@ -1844,7 +1954,11 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE34_TEARDOWN_COMPLETE' $deadline $process $stream $serialLog $text $receiveBuffer
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE34_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
     }
-    if ($phase46) {
+    if ($phase49) {
+        return 'PASS_PHASE49'
+    } elseif ($phase48) {
+        return 'PASS_PHASE48'
+    } elseif ($phase46) {
         return 'PASS_PHASE46'
     } elseif ($phase45) {
         return 'PASS_PHASE45'
@@ -2696,6 +2810,7 @@ try {
         $code = Join-Path $run 'edk2-code.fd'
         $vars = Join-Path $run 'edk2-vars.fd'
         $serial = Join-Path $run 'serial.log'
+        $screenPath = Join-Path $run 'qemu-screen.ppm'
         $injections = Join-Path $run 'injections.log'
         $timelinePath = Join-Path $run 'timeline.log'
         $commandLinePath = Join-Path $run 'qemu-commandline.log'
@@ -2745,7 +2860,7 @@ try {
             '-chardev', "socket,id=serial0,host=127.0.0.1,port=$serialPort,server=on,wait=on,telnet=off,ipv4=on,nodelay=on",
             '-serial', 'none', '-device', 'isa-serial,chardev=serial0,iobase=0x3f8,irq=4,wakeup=on',
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
-            '-display', 'none', '-no-reboot', '-no-shutdown')
+            '-display', $(if ($CaptureQemuScreen) { 'gtk' } else { 'none' }), '-no-reboot', '-no-shutdown')
         if ($EnablePhase15Rx) {
             if (-not $Phase15KeepDefaultNic -and
                 $Phase15NetworkBackend -eq 'dgram') {
@@ -2856,7 +2971,7 @@ try {
                     'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
                 Require11 $macMatch.Success 'Phase 15 did not publish the runtime e1000 MAC.'
                 $destinationMac = ($macMatch.Groups[1].Value + $macMatch.Groups[2].Value)
-                $injectOutput = if ($EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol) {
+                $injectOutput = if ($EnablePhase48Protocol -or $EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol) {
                     @(Send-Phase15DgramFrame11 $peerUdp $rxPort $destinationMac `
                         '127.0.0.1' $false $false $false $false $false $false $false $false $false $true)
                 } elseif ($EnablePhase33Protocol) {
@@ -2901,7 +3016,7 @@ try {
                 } elseif ($Phase15AcceptEitherOutcome) {
                     $phase15Outcome = Wait-Phase15Outcome11 `
                         $deadline $process $stream $logStream $text $buffer
-                } elseif ($EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol -or $EnablePhase33Protocol -or $EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol -or $EnablePhase18Protocol -or $EnablePhase17Protocol -or
+                } elseif ($EnablePhase49Protocol -or $EnablePhase48Protocol -or $EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol -or $EnablePhase33Protocol -or $EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol -or $EnablePhase18Protocol -or $EnablePhase17Protocol -or
                           $EnablePhase16Protocol) {
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' `
                         $deadline $process $stream $logStream $text $buffer
@@ -2910,12 +3025,24 @@ try {
                     $guestMacBytes = New-MacBytes16 $destinationMac
                     $broadcastMac = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
                     $hostMacBytes = [byte[]](0x02, 0x15, 0, 0, 0, 2)
-                    $guestIpBytes = if ($EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol -or $EnablePhase33Protocol -or $EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol) {
+                    $guestIpBytes = if ($EnablePhase49Protocol -or $EnablePhase48Protocol -or $EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol -or $EnablePhase33Protocol -or $EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol) {
                         [byte[]](10, 15, 0, 42)
                     } else { [byte[]](10, 15, 0, 1) }
                     $hostIpBytes = [byte[]](10, 15, 0, 2)
                     $broadcastIpBytes = [byte[]](255, 255, 255, 255)
-                    if ($EnablePhase46Protocol -or $EnablePhase46CapacityControl) {
+                    if ($EnablePhase49Protocol) {
+                        $phase15Outcome = Invoke-Phase34HttpsExchange11 `
+                            $peerUdp $rxPort $TimeoutSeconds $process $stream `
+                            $logStream $text $buffer $injectionLog `
+                            $guestMacBytes $hostMacBytes $guestIpBytes $hostIpBytes `
+                            $false $false $monitor $screenPath
+                    } elseif ($EnablePhase48Protocol) {
+                        $phase15Outcome = Invoke-Phase34HttpsExchange11 `
+                            $peerUdp $rxPort $TimeoutSeconds $process $stream `
+                            $logStream $text $buffer $injectionLog `
+                            $guestMacBytes $hostMacBytes $guestIpBytes $hostIpBytes `
+                            $false $false
+                    } elseif ($EnablePhase46Protocol -or $EnablePhase46CapacityControl) {
                         $phase15Outcome = Invoke-Phase34HttpsExchange11 `
                             $peerUdp $rxPort $TimeoutSeconds $process $stream `
                             $logStream $text $buffer $injectionLog `
@@ -3882,7 +4009,7 @@ try {
                         Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_BOUND' `
                             $deadline $process $stream $logStream $text $buffer
                     }
-                    if (-not $EnablePhase46Protocol -and -not $EnablePhase46CapacityControl -and -not $EnablePhase45Protocol -and -not $EnablePhase45CapacityControl -and -not $EnablePhase44Protocol -and -not $EnablePhase44CapacityControl -and -not $EnablePhase43Protocol -and -not $EnablePhase42Protocol -and -not $EnablePhase41Protocol -and -not $EnablePhase40Protocol -and -not $EnablePhase39Protocol -and -not $EnablePhase34Protocol -and -not $EnablePhase33Protocol -and -not $EnablePhase32Protocol -and -not $EnablePhase23Protocol -and -not $EnablePhase22Protocol -and -not $EnablePhase20Protocol -and -not $EnablePhase21Protocol) {
+                    if (-not $EnablePhase49Protocol -and -not $EnablePhase48Protocol -and -not $EnablePhase46Protocol -and -not $EnablePhase46CapacityControl -and -not $EnablePhase45Protocol -and -not $EnablePhase45CapacityControl -and -not $EnablePhase44Protocol -and -not $EnablePhase44CapacityControl -and -not $EnablePhase43Protocol -and -not $EnablePhase42Protocol -and -not $EnablePhase41Protocol -and -not $EnablePhase40Protocol -and -not $EnablePhase39Protocol -and -not $EnablePhase34Protocol -and -not $EnablePhase33Protocol -and -not $EnablePhase32Protocol -and -not $EnablePhase23Protocol -and -not $EnablePhase22Protocol -and -not $EnablePhase20Protocol -and -not $EnablePhase21Protocol) {
                     $zeroMac = [byte[]](0, 0, 0, 0, 0, 0)
                     $guestRequest = New-Phase16ArpFrame11 `
                         $broadcastMac $guestMacBytes 1 $guestIpBytes $zeroMac $hostIpBytes
@@ -3926,7 +4053,13 @@ try {
                     Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESPONDER_PASS' `
                         $deadline $process $stream $logStream $text $buffer
                     }
-                    if ($EnablePhase46Protocol -or $EnablePhase46CapacityControl) {
+                    if ($EnablePhase49Protocol) {
+                        # Phase 49 completed its bounded visible-page proof
+                        # and screen capture in the resource helper above.
+                    } elseif ($EnablePhase48Protocol) {
+                        # Phase 48 completed its bounded real-font exchange
+                        # and waits for its proof markers above.
+                    } elseif ($EnablePhase46Protocol -or $EnablePhase46CapacityControl) {
                         # Phase 46 completed its bounded paint exchange and
                         # waits for its proof markers above.
                     } elseif ($EnablePhase45Protocol -or $EnablePhase45CapacityControl) {
@@ -4419,6 +4552,34 @@ try {
                         !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
                         !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
                 "Boot $sequence reported an unexpected Phase 46 paint capacity-control result."
+        } elseif ($EnablePhase49Protocol) {
+            Require11 ($phase15Outcome -eq 'PASS_PHASE49') `
+                "Boot $sequence did not complete the Phase 49 visible framebuffer proof: $phase15Outcome."
+            Require11 ($finalText.Contains('GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_DESCRIPTOR_ACCEPTED') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_INSTALL_PASS') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE49_GOP_PRESENT_PASS') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE49_VISIBLE_PAGE_PASS') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE49_SOURCE_UNCHANGED=1') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE49_DESTINATION_HASH_WORD=') -and
+                        !$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
+                        !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
+                        !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
+                "Boot $sequence reported an unexpected Phase 49 visible framebuffer result."
+            if ($CaptureQemuScreen) {
+                Require11 (Test-Path -LiteralPath $screenPath) `
+                    "Boot $sequence did not produce the requested QEMU screen capture."
+            }
+        } elseif ($EnablePhase48Protocol) {
+            Require11 ($phase15Outcome -eq 'PASS_PHASE48') `
+                "Boot $sequence did not complete the Phase 48 bounded font integration proof: $phase15Outcome."
+            Require11 ($finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE48_PAINT_VERIFIED') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE48_PAINT_HASH_WORD=') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE48_FONT_SEMANTIC_HASH_WORD=') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE48_RASTER_PASS') -and
+                        !$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
+                        !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
+                        !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
+                "Boot $sequence reported an unexpected Phase 48 bounded font result."
         } elseif ($EnablePhase46Protocol) {
             Require11 ($phase15Outcome -eq 'PASS_PHASE46') `
                 "Boot $sequence did not complete the Phase 46 bounded display-list proof: $phase15Outcome."

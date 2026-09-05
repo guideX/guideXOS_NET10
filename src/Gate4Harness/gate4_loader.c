@@ -190,6 +190,41 @@ typedef EFI_STATUS (EFIAPI *EFI_EXIT_BOOT_SERVICES)(EFI_HANDLE ImageHandle, EFI_
 typedef EFI_STATUS (EFIAPI *EFI_GET_NEXT_MONOTONIC_COUNT)(uint64_t *Count);
 typedef EFI_STATUS (EFIAPI *EFI_STALL)(uint64_t Microseconds);
 typedef EFI_STATUS (EFIAPI *EFI_SET_WATCHDOG_TIMER)(uint64_t Timeout, uint64_t WatchdogCode, EFI_UINTN DataSize, uint16_t *WatchdogData);
+typedef EFI_STATUS (EFIAPI *EFI_LOCATE_PROTOCOL)(EFI_GUID *Protocol,
+                                                  void *Registration,
+                                                  void **Interface);
+
+typedef enum {
+    GXOS_EFI_PIXEL_RED_GREEN_BLUE_RESERVED = 0,
+    GXOS_EFI_PIXEL_BLUE_GREEN_RED_RESERVED = 1,
+    GXOS_EFI_PIXEL_BIT_MASK = 2,
+    GXOS_EFI_PIXEL_BLT_ONLY = 3
+} GXOS_EFI_GRAPHICS_PIXEL_FORMAT;
+
+typedef struct {
+    uint32_t Version;
+    uint32_t HorizontalResolution;
+    uint32_t VerticalResolution;
+    GXOS_EFI_GRAPHICS_PIXEL_FORMAT PixelFormat;
+    uint32_t PixelInformation[4];
+    uint32_t PixelsPerScanLine;
+} GXOS_EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+
+typedef struct {
+    uint32_t MaxMode;
+    uint32_t Mode;
+    GXOS_EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
+    uint64_t SizeOfInfo;
+    uint64_t FrameBufferBase;
+    uint64_t FrameBufferSize;
+} GXOS_EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
+
+typedef struct {
+    void *QueryMode;
+    void *SetMode;
+    void *Blt;
+    GXOS_EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
+} GXOS_EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
 typedef struct {
     EFI_TABLE_HEADER Hdr;
@@ -223,6 +258,20 @@ typedef struct {
     EFI_GET_NEXT_MONOTONIC_COUNT GetNextMonotonicCount;
     EFI_STALL Stall;
     EFI_SET_WATCHDOG_TIMER SetWatchdogTimer;
+    void *ConnectController;
+    void *DisconnectController;
+    void *OpenProtocol;
+    void *CloseProtocol;
+    void *OpenProtocolInformation;
+    void *ProtocolsPerHandle;
+    void *LocateHandleBuffer;
+    EFI_LOCATE_PROTOCOL LocateProtocol;
+    void *InstallMultipleProtocolInterfaces;
+    void *UninstallMultipleProtocolInterfaces;
+    void *CalculateCrc32;
+    void *CopyMem;
+    void *SetMem;
+    void *CreateEventEx;
 } EFI_BOOT_SERVICES;
 
 typedef struct {
@@ -291,6 +340,7 @@ typedef struct {
 
 static const EFI_GUID gLoadedImageProtocol = {0x5B1B31A1, 0x9562, 0x11D2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static const EFI_GUID gSimpleFileSystemProtocol = {0x964E5B22, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
+static const EFI_GUID gEfiGraphicsOutputProtocol = {0x9042A9DE, 0x23DC, 0x4A38, {0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A}};
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
 static const EFI_GUID gEfiPciIoProtocol = {0x4CF5B200, 0x68B8, 0x4CA5, {0x9E, 0xEC, 0xB2, 0x3E, 0x3F, 0x50, 0x02, 0x9A}};
 #endif
@@ -324,6 +374,23 @@ typedef struct {
 
 #pragma pack(push, 1)
 typedef struct {
+    uint32_t Size;
+    uint32_t AbiVersion;
+    uint64_t FramebufferBase;
+    uint64_t FramebufferSize;
+    uint32_t Width;
+    uint32_t Height;
+    uint32_t PixelsPerScanLine;
+    uint32_t BytesPerPixel;
+    uint32_t PixelFormat;
+    uint32_t RedMask;
+    uint32_t GreenMask;
+    uint32_t BlueMask;
+    uint32_t ReservedMask;
+    uint32_t Reserved;
+} GuideXVideoMode;
+
+typedef struct {
     uint8_t descriptor;
     uint16_t length;
     uint8_t resource_type;
@@ -345,6 +412,7 @@ typedef struct {
     uint32_t Architecture;
     uint32_t Flags;
     uint64_t SerialWrite;
+    GuideXVideoMode Video;
 } GuideXBootInfo;
 #pragma pack(pop)
 
@@ -358,6 +426,8 @@ typedef uint32_t (EFIAPI *ManagedKernelQuerySystemInfoEntry)(
     uintptr_t output_capacity);
 typedef uint32_t (EFIAPI *ManagedKernelInstallBootResourcesEntry)(
     uint32_t requested_abi_version, uintptr_t publication_address);
+typedef uint32_t (EFIAPI *ManagedKernelInstallFramebufferEntry)(
+    uint32_t requested_abi_version, uintptr_t framebuffer_address);
 typedef uint32_t (EFIAPI *ManagedKernelQueryBootResourcesEntry)(
     uint32_t requested_abi_version, uintptr_t output_address,
     uintptr_t output_capacity);
@@ -442,17 +512,22 @@ static ManagedKernelRunPhase31Entry g_managed_kernel_run_phase31;
 enum {
     GUIDEX_BOOT_MAGIC = 0x534F5847u,
     GUIDEX_BOOT_VERSION = 1u,
-    GUIDEX_BOOT_SIZE = 24u,
+    GUIDEX_BOOT_SIZE = 88u,
     GUIDEX_BOOT_ARCH_X64 = 0x8664u
 };
 
-_Static_assert(sizeof(GuideXBootInfo) == 24, "GuideXBootInfo size must remain 24 bytes");
+_Static_assert(sizeof(GuideXVideoMode) == 64, "GuideXVideoMode size");
+_Static_assert(offsetof(GuideXVideoMode, FramebufferBase) == 8, "GuideXVideoMode base offset");
+_Static_assert(offsetof(GuideXVideoMode, FramebufferSize) == 16, "GuideXVideoMode size offset");
+_Static_assert(offsetof(GuideXVideoMode, PixelsPerScanLine) == 32, "GuideXVideoMode stride offset");
+_Static_assert(sizeof(GuideXBootInfo) == 88, "GuideXBootInfo size");
 _Static_assert(offsetof(GuideXBootInfo, Magic) == 0, "GuideXBootInfo.Magic offset");
 _Static_assert(offsetof(GuideXBootInfo, Version) == 4, "GuideXBootInfo.Version offset");
 _Static_assert(offsetof(GuideXBootInfo, Size) == 6, "GuideXBootInfo.Size offset");
 _Static_assert(offsetof(GuideXBootInfo, Architecture) == 8, "GuideXBootInfo.Architecture offset");
 _Static_assert(offsetof(GuideXBootInfo, Flags) == 12, "GuideXBootInfo.Flags offset");
 _Static_assert(offsetof(GuideXBootInfo, SerialWrite) == 16, "GuideXBootInfo.SerialWrite offset");
+_Static_assert(offsetof(GuideXBootInfo, Video) == 24, "GuideXBootInfo.Video offset");
 _Static_assert(sizeof(uintptr_t) == 8, "Gate 4 requires x64 pointers");
 _Static_assert(GUIDEX_BOOT_MAGIC == 0x534F5847u, "GuideXBootInfo magic");
 _Static_assert(GUIDEX_BOOT_VERSION == 1u, "GuideXBootInfo version");
@@ -639,7 +714,7 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_config_read_service(
         offset, width, result_address, result_capacity);
 }
 
-#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE40) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE41) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE42) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46_CAPACITY)
+#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE40) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE41) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE42) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE48) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE49)
 #define GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS 2U
 #else
 #define GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS 1U
@@ -708,7 +783,7 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
         for (slot_index = 0; slot_index != GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS;
              ++slot_index) {
             if (g_managed_kernel_pci_command_slots[slot_index].live != 0) {
-#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE40) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE41) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE42) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46_CAPACITY)
+#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE40) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE41) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE42) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE48) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE49)
                 if (g_managed_kernel_pci_command_slots[slot_index].resource_id ==
                     resource_id) return GX_MANAGED_INVALID_STATE;
 #else
@@ -4730,6 +4805,7 @@ typedef struct {
     uint32_t managed_kernel_initialize_rva;
     uint32_t managed_kernel_query_system_info_rva;
     uint32_t managed_kernel_install_boot_resources_rva;
+    uint32_t managed_kernel_install_framebuffer_rva;
     uint32_t managed_kernel_query_boot_resources_rva;
     uint32_t managed_kernel_query_memory_region_rva;
     uint32_t managed_kernel_install_host_services_rva;
@@ -13853,6 +13929,16 @@ static void managed_kernel_phase14_driver(
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase46-capacity-mode");
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE46_CAPACITY_MODE_SELECTED\r\n");
 #endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE48
+    status = run_phase14(16U);
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase48-mode");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE48_MODE_SELECTED\r\n");
+#endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE49
+    status = run_phase14(17U);
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase49-mode");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE49_MODE_SELECTED\r\n");
+#endif
     status = run_phase14(1U);
     if (status != GX_MANAGED_OK || run_phase14(1U) != GX_MANAGED_INVALID_STATE ||
         run_phase14(2U) != GX_MANAGED_OK ||
@@ -17790,6 +17876,7 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION initialize_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION query_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION install_framebuffer_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION boot_resources_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION memory_region_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION install_host_services_resolution = {0};
@@ -17843,6 +17930,10 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedKernelInstallBootResources",
                                    &install_resolution);
+    GXOS_NATIVEAOT_EXPORT_STATUS install_framebuffer_status =
+        gxos_nativeaot_find_export(&export_image,
+                                   "GxManagedKernelInstallFramebuffer",
+                                   &install_framebuffer_resolution);
     GXOS_NATIVEAOT_EXPORT_STATUS boot_resources_status =
         gxos_nativeaot_find_export(&export_image,
                                    "GxManagedQueryBootResources",
@@ -17998,6 +18089,9 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     if (install_host_services_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInstallHostServices-export-missing");
     }
+    if (install_framebuffer_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("GxManagedKernelInstallFramebuffer-export-missing");
+    }
     if (install_entropy_services_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("GxManagedKernelInstallEntropyServices-export-missing");
     }
@@ -18113,6 +18207,8 @@ static void find_managed_kernel_exports(PE_IMAGE *image)
     image->managed_kernel_initialize_rva = initialize_resolution.rva;
     image->managed_kernel_query_system_info_rva = query_resolution.rva;
     image->managed_kernel_install_boot_resources_rva = install_resolution.rva;
+    image->managed_kernel_install_framebuffer_rva =
+        install_framebuffer_resolution.rva;
     image->managed_kernel_query_boot_resources_rva = boot_resources_resolution.rva;
     image->managed_kernel_query_memory_region_rva = memory_region_resolution.rva;
     image->managed_kernel_install_host_services_rva =
@@ -19572,6 +19668,77 @@ static const uint16_t gPayloadPath[] = {
 };
 #endif
 
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+/* GOP is queried while Boot Services are alive.  Only the immutable mode
+   descriptor crosses the handoff; no managed code calls a UEFI protocol after
+   ExitBootServices. */
+static void capture_graphics_output(EFI_SYSTEM_TABLE *system_table)
+{
+    EFI_BOOT_SERVICES *boot_services;
+    GXOS_EFI_GRAPHICS_OUTPUT_PROTOCOL *graphics = 0;
+    GXOS_EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *mode;
+    GXOS_EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
+    EFI_STATUS status;
+
+    zero_bytes((uint8_t *)&g_boot_info.Video, sizeof(g_boot_info.Video));
+    g_boot_info.Video.Size = GX_MANAGED_KERNEL_FRAMEBUFFER_V1_SIZE;
+    g_boot_info.Video.AbiVersion = GX_MANAGED_KERNEL_FRAMEBUFFER_ABI_V1;
+    if (system_table == 0 || system_table->BootServices == 0 ||
+        system_table->BootServices->LocateProtocol == 0) {
+        serial_text("GXOS_NET10:GOP_NOT_AVAILABLE=BOOT_SERVICES\r\n");
+        return;
+    }
+    boot_services = system_table->BootServices;
+    status = boot_services->LocateProtocol(
+        (EFI_GUID *)&gEfiGraphicsOutputProtocol, 0, (void **)&graphics);
+    if (EFI_ERROR(status) || graphics == 0 || graphics->Mode == 0 ||
+        graphics->Mode->Info == 0 ||
+        graphics->Mode->SizeOfInfo < sizeof(GXOS_EFI_GRAPHICS_OUTPUT_MODE_INFORMATION)) {
+        serial_field_hex("GXOS_NET10:GOP_NOT_AVAILABLE=0x", status);
+        serial_text("\r\n");
+        return;
+    }
+    mode = graphics->Mode;
+    info = mode->Info;
+    g_boot_info.Video.FramebufferBase = mode->FrameBufferBase;
+    g_boot_info.Video.FramebufferSize = mode->FrameBufferSize;
+    g_boot_info.Video.Width = info->HorizontalResolution;
+    g_boot_info.Video.Height = info->VerticalResolution;
+    g_boot_info.Video.PixelsPerScanLine = info->PixelsPerScanLine;
+    g_boot_info.Video.BytesPerPixel = 4;
+    g_boot_info.Video.PixelFormat = (uint32_t)info->PixelFormat;
+    g_boot_info.Video.RedMask = info->PixelInformation[0];
+    g_boot_info.Video.GreenMask = info->PixelInformation[1];
+    g_boot_info.Video.BlueMask = info->PixelInformation[2];
+    g_boot_info.Video.ReservedMask = info->PixelInformation[3];
+    serial_text("GXOS_NET10:GOP_ACQUIRED_BEFORE_EXIT_BOOT_SERVICES=1\r\n");
+    serial_field_hex("GXOS_NET10:GOP_FRAMEBUFFER_BASE=0x",
+                     g_boot_info.Video.FramebufferBase);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GOP_FRAMEBUFFER_SIZE=0x",
+                     g_boot_info.Video.FramebufferSize);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GOP_WIDTH=0x", g_boot_info.Video.Width);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GOP_HEIGHT=0x", g_boot_info.Video.Height);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GOP_PIXELS_PER_SCAN_LINE=0x",
+                     g_boot_info.Video.PixelsPerScanLine);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GOP_PIXEL_FORMAT=0x",
+                     g_boot_info.Video.PixelFormat);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GOP_RED_MASK=0x", g_boot_info.Video.RedMask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GOP_GREEN_MASK=0x", g_boot_info.Video.GreenMask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GOP_BLUE_MASK=0x", g_boot_info.Video.BlueMask);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:GOP_RESERVED_MASK=0x", g_boot_info.Video.ReservedMask);
+    serial_text("\r\n");
+}
+#endif
+
 static void read_payload(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table, PE_IMAGE *image)
 {
     EFI_LOADED_IMAGE_PROTOCOL *loaded_image = 0;
@@ -19625,6 +19792,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_initialize_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_query_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_resolution = {0};
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_framebuffer_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_boot_resources_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_memory_region_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_install_host_services_resolution = {0};
@@ -19669,6 +19837,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     ManagedKernelInitializeEntry managed_kernel_initialize;
     ManagedKernelQuerySystemInfoEntry managed_kernel_query_system_info;
     ManagedKernelInstallBootResourcesEntry managed_kernel_install_boot_resources;
+    ManagedKernelInstallFramebufferEntry managed_kernel_install_framebuffer;
     ManagedKernelQueryBootResourcesEntry managed_kernel_query_boot_resources;
     ManagedKernelQueryMemoryRegionEntry managed_kernel_query_memory_region;
     ManagedKernelInstallHostServicesEntry managed_kernel_install_host_services;
@@ -19781,6 +19950,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:LOADER_START\r\n");
     g_phase = PHASE_LOADER;
     boot_services = system_table->BootServices;
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+    capture_graphics_output(system_table);
+#endif
 #ifdef GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF
     if (!gxos_synthetic_scheduler_proof(
             boot_services->AllocatePages, boot_services->FreePages,
@@ -19946,6 +20118,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         image.managed_kernel_install_boot_resources_rva;
     managed_kernel_install_resolution.address =
         (uintptr_t)(image.actual_base + image.managed_kernel_install_boot_resources_rva);
+    managed_kernel_install_framebuffer_resolution.rva =
+        image.managed_kernel_install_framebuffer_rva;
+    managed_kernel_install_framebuffer_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_install_framebuffer_rva);
     managed_kernel_boot_resources_resolution.rva =
         image.managed_kernel_query_boot_resources_rva;
     managed_kernel_boot_resources_resolution.address =
@@ -20090,6 +20266,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_query_resolution.address;
     managed_kernel_install_boot_resources = (ManagedKernelInstallBootResourcesEntry)
         managed_kernel_install_resolution.address;
+    managed_kernel_install_framebuffer = (ManagedKernelInstallFramebufferEntry)
+        managed_kernel_install_framebuffer_resolution.address;
     managed_kernel_query_boot_resources = (ManagedKernelQueryBootResourcesEntry)
         managed_kernel_boot_resources_resolution.address;
     managed_kernel_query_memory_region = (ManagedKernelQueryMemoryRegionEntry)
@@ -21316,6 +21494,16 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         &g_managed_kernel_entropy_services);
     restore_nativeaot_tls();
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE3_PASS\r\n");
+    activate_nativeaot_tls();
+    managed_kernel_status = managed_kernel_install_framebuffer(
+        GX_MANAGED_KERNEL_FRAMEBUFFER_ABI_V1,
+        (uintptr_t)&g_boot_info.Video);
+    if (managed_kernel_status != GX_MANAGED_OK) {
+        restore_nativeaot_tls();
+        fail("managed-kernel-framebuffer-install");
+    }
+    restore_nativeaot_tls();
+    serial_text("GXOS_NET10:MANAGED_KERNEL_FRAMEBUFFER_INSTALL_PASS\r\n");
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE25_STANDALONE
     activate_nativeaot_tls();
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE25_BEGIN\r\n");
