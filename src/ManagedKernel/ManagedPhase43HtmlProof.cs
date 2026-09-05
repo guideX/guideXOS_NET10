@@ -84,6 +84,18 @@ internal sealed class ManagedPhase43HtmlProof
     private int _rasterTextY;
     private int _rasterImageX;
     private int _rasterImageY;
+    private uint _rasterScaledGlyphScalar;
+    private int _rasterScaledGlyphScale;
+    private int _rasterScaledGlyphSourceWidth;
+    private int _rasterScaledGlyphSourceHeight;
+    private int _rasterScaledGlyphOutputWidth;
+    private int _rasterScaledGlyphOutputHeight;
+    private int _rasterScaledGlyphRowAX;
+    private int _rasterScaledGlyphRowAY;
+    private int _rasterScaledGlyphRowBX;
+    private int _rasterScaledGlyphRowBY;
+    private uint _rasterScaledGlyphRowAPixel;
+    private uint _rasterScaledGlyphRowBPixel;
     private uint _rasterNestedAlpha;
     private uint _rasterNestedColor;
 
@@ -749,6 +761,16 @@ internal sealed class ManagedPhase43HtmlProof
             !WriteRasterTelemetry(telemetry) ||
             !WriteDigest("GXOS_NET10:MANAGED_HTTPS_PHASE47_FRAMEBUFFER_HASH_WORD=0x"u8,
                          _rasterFirstFramebufferHash) ||
+            !WriteRasterHex("SCALED_GLYPH_SCALAR"u8, _rasterScaledGlyphScalar) ||
+            !WriteRasterHex("SCALED_GLYPH_SCALE"u8, _rasterScaledGlyphScale) ||
+            !WriteRasterHex("SCALED_GLYPH_SOURCE_WIDTH"u8, _rasterScaledGlyphSourceWidth) ||
+            !WriteRasterHex("SCALED_GLYPH_SOURCE_HEIGHT"u8, _rasterScaledGlyphSourceHeight) ||
+            !WriteRasterHex("SCALED_GLYPH_OUTPUT_WIDTH"u8, _rasterScaledGlyphOutputWidth) ||
+            !WriteRasterHex("SCALED_GLYPH_OUTPUT_HEIGHT"u8, _rasterScaledGlyphOutputHeight) ||
+            !WriteRasterPixel("SCALED_GLYPH_ROW_A_PIXEL"u8, _rasterScaledGlyphRowAX,
+                              _rasterScaledGlyphRowAY, _rasterScaledGlyphRowAPixel) ||
+            !WriteRasterPixel("SCALED_GLYPH_ROW_B_PIXEL"u8, _rasterScaledGlyphRowBX,
+                              _rasterScaledGlyphRowBY, _rasterScaledGlyphRowBPixel) ||
             !WriteRasterPixel("FIXED_SCROLL_PIXEL"u8, _rasterFixedX, _rasterFixedY,
                               _rasterFixedPixel) ||
             !WriteRasterPixel("NORMAL_SCROLL_PIXEL"u8, _rasterNormalScrollX,
@@ -763,6 +785,7 @@ internal sealed class ManagedPhase43HtmlProof
             !WriteRasterHex("NORMAL_ORIGIN_PIXEL"u8, (long)_rasterNormalOriginPixel))
             return false;
         return KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE47_RASTER_VALIDATOR_PASS\r\n"u8) &&
+               KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE47_SCALED_GLYPH_PROOF_PASS\r\n"u8) &&
                KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE47_FRAMEBUFFER_TOO_SMALL_NEGATIVE_PASS\r\n"u8) &&
                KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE47_RASTER_PASS\r\n"u8);
     }
@@ -831,6 +854,7 @@ internal sealed class ManagedPhase43HtmlProof
         _rasterImageX = ClampSample(image.Rect.X + 3, 0, framebuffer.Width - 1);
         _rasterImageY = ClampSample(image.Rect.Y + 3, 0, framebuffer.Height - 1);
         _rasterImagePixel = PixelAt(framebuffer, _rasterImageX, _rasterImageY);
+        if (!TryRecordScaledGlyphProof(framebuffer)) return false;
 
         ManagedPaintEngine scrolled = new(_layoutEngine);
         if (!scrolled.TryGenerate(800, 600, 0, 5) ||
@@ -883,6 +907,69 @@ internal sealed class ManagedPhase43HtmlProof
     private static uint PixelAt(ManagedFramebuffer framebuffer, int x, int y) =>
         framebuffer.TryGetPixel(x, y, out uint pixel) ? pixel : 0;
 
+    private bool TryRecordScaledGlyphProof(ManagedFramebuffer framebuffer)
+    {
+        if (_paintEngine == null) return false;
+        ManagedHtmlDocument document = _tree.Document;
+        for (int commandIndex = 0; commandIndex != _paintEngine.CommandsEmitted; ++commandIndex)
+        {
+            if (!_paintEngine.TryGetCommand(commandIndex, out ManagedPaintCommand command) ||
+                command.Kind != ManagedPaintCommandKind.TextRun)
+                continue;
+            ManagedHtmlNodeHandle node = new(command.SourceNodeIndex,
+                                              document.DocumentNode.Generation);
+            long cursorX = command.Rect.X;
+            for (int offset = 0; offset != command.SourceLength; ++offset)
+            {
+                if (!document.TryGetTextScalar(node, command.SourceOffset + offset,
+                                               out uint scalar) ||
+                    !ManagedProofGlyphSource.Instance.TryGetGlyph(
+                        scalar, command.FontId, command.FontSize, command.FontWeight,
+                        command.FontStyle, out ManagedRasterGlyph glyph))
+                    return false;
+                int scale = glyph.Scale;
+                if (scale > 1 && (command.Color & 0x00FFFFFFU) != 0)
+                {
+                    for (int sourceRow = 0; sourceRow != 7; ++sourceRow)
+                    {
+                        int rowA = sourceRow * scale;
+                        int rowB = rowA + 1;
+                        uint mask = glyph.GetRowMask(rowA);
+                        if (mask == 0 || glyph.GetRowMask(rowB) != mask) continue;
+                        for (int column = 0; column != glyph.Width; ++column)
+                        {
+                            int bit = 24 - column;
+                            if (bit < 0 || (mask & (1U << bit)) == 0) continue;
+                            long x = cursorX + column;
+                            long y = (long)command.Rect.Y + rowA;
+                            if (x < 0 || x >= framebuffer.Width || y < 0 ||
+                                y + 1 >= framebuffer.Height) continue;
+                            if (!framebuffer.TryGetPixel((int)x, (int)y, out uint pixelA) ||
+                                !framebuffer.TryGetPixel((int)x, (int)(y + 1),
+                                                          out uint pixelB) ||
+                                pixelA != pixelB || pixelA == 0xFF000000U) continue;
+                            _rasterScaledGlyphScalar = scalar;
+                            _rasterScaledGlyphScale = scale;
+                            _rasterScaledGlyphSourceWidth = glyph.Width / scale;
+                            _rasterScaledGlyphSourceHeight = glyph.Height / scale;
+                            _rasterScaledGlyphOutputWidth = glyph.Width;
+                            _rasterScaledGlyphOutputHeight = glyph.Height;
+                            _rasterScaledGlyphRowAX = (int)x;
+                            _rasterScaledGlyphRowAY = (int)y;
+                            _rasterScaledGlyphRowBX = (int)x;
+                            _rasterScaledGlyphRowBY = (int)(y + 1);
+                            _rasterScaledGlyphRowAPixel = pixelA;
+                            _rasterScaledGlyphRowBPixel = pixelB;
+                            return true;
+                        }
+                    }
+                }
+                cursorX += glyph.Advance;
+            }
+        }
+        return false;
+    }
+
     private bool WriteRasterTelemetry(ManagedRasterTelemetry telemetry)
     {
         return WriteRasterHex("RASTER_COMMANDS_PROCESSED"u8, telemetry.CommandsProcessed) &&
@@ -896,6 +983,7 @@ internal sealed class ManagedPhase43HtmlProof
                WriteRasterHex("RASTER_GLYPH_REQUESTS"u8, telemetry.GlyphRequests) &&
                WriteRasterHex("RASTER_GLYPHS_RENDERED"u8, telemetry.GlyphsRendered) &&
                WriteRasterHex("RASTER_FALLBACK_GLYPHS"u8, telemetry.FallbackGlyphs) &&
+               WriteRasterHex("RASTER_SCALED_GLYPHS"u8, telemetry.ScaledGlyphs) &&
                WriteRasterHex("RASTER_GLYPH_PIXELS_CONSIDERED"u8,
                               telemetry.GlyphPixelsConsidered) &&
                WriteRasterHex("RASTER_FILL_PIXELS"u8, telemetry.FillPixelsWritten) &&

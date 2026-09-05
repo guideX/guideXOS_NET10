@@ -275,15 +275,14 @@ internal static class Program
                 ManagedCssFontStyle.Normal, out ManagedRasterGlyph second) &&
               first.Width == second.Width && first.GetRowMask(0) == second.GetRowMask(0),
               "glyph-repeat-determinism");
-        Check(glyphs.TryGetGlyph('A', ManagedPaintFontId.DefaultUi, 16, 400,
-            ManagedCssFontStyle.Normal, out ManagedRasterGlyph scale2) && scale2.Width == 10 &&
-              scale2.Height == 14 && scale2.Advance == 12 &&
-              scale2.GetRowMask(0) == scale2.GetRowMask(1) &&
-              scale2.GetRowMask(2) == scale2.GetRowMask(3) &&
-              scale2.GetRowMask(0) != scale2.GetRowMask(2) &&
-              glyphs.TryGetGlyph('A', ManagedPaintFontId.DefaultUi, 24, 400,
-                ManagedCssFontStyle.Normal, out ManagedRasterGlyph scale3) && scale3.Width == 15,
-              "glyph-integer-nearest-neighbor-scaling");
+        Check(GlyphScaleMatches(glyphs, 8, 1, 5, 7, 6),
+              "glyph-nearest-neighbor-scale-1x");
+        Check(GlyphScaleMatches(glyphs, 16, 2, 10, 14, 12),
+              "glyph-nearest-neighbor-scale-2x");
+        Check(GlyphScaleMatches(glyphs, 24, 3, 15, 21, 18),
+              "glyph-nearest-neighbor-scale-3x");
+        Check(GlyphScaleMatches(glyphs, 32, 4, 20, 28, 24),
+              "glyph-nearest-neighbor-scale-4x");
 
         Scene scene = Styled("<div id=text>Abz 42? ☃</div>",
             "#text{color:#102030;font-size:8px}");
@@ -403,9 +402,9 @@ internal static class Program
             "fixed-selected-pixel-invariant");
         uint normalPixelOrigin = 0;
         uint normalPixelScroll = 0;
-        bool normalPixels = originFramebuffer.TryGetPixel(normalOrigin.Rect.X + 4,
+        bool normalPixels = originFramebuffer.TryGetPixel(normalOrigin.Rect.X + 14,
             normalOrigin.Rect.Y + 4, out normalPixelOrigin) &&
-            scrollFramebuffer.TryGetPixel(normalScroll.Rect.X + 4, normalScroll.Rect.Y + 4,
+            scrollFramebuffer.TryGetPixel(normalScroll.Rect.X + 14, normalScroll.Rect.Y + 4,
                 out normalPixelScroll) && normalPixelOrigin == 0xFFFF0000U &&
             normalPixelScroll == 0xFFFF0000U;
         Check(normalPixels, "normal-selected-pixel-moves-" + normalOrigin.Rect.X + "," +
@@ -667,6 +666,41 @@ internal static class Program
     {
         ++s_cases;
         if (!condition) throw new InvalidOperationException(name);
+    }
+
+    private static bool GlyphScaleMatches(IManagedRasterGlyphSource glyphs,
+                                          int fontSize, int scale, int width,
+                                          int height, int advance)
+    {
+        if (!glyphs.TryGetGlyph('A', ManagedPaintFontId.DefaultUi, fontSize, 400,
+                ManagedCssFontStyle.Normal, out ManagedRasterGlyph scaled) ||
+            !glyphs.TryGetGlyph('A', ManagedPaintFontId.DefaultUi, 8, 400,
+                ManagedCssFontStyle.Normal, out ManagedRasterGlyph source) ||
+            scaled.Width != width || scaled.Height != height || scaled.Advance != advance)
+            return false;
+
+        for (int sourceRow = 0; sourceRow != 7; ++sourceRow)
+        {
+            uint expected = ScaleMask(source.GetRowMask(sourceRow), scale);
+            for (int copy = 0; copy != scale; ++copy)
+            {
+                if (scaled.GetRowMask(sourceRow * scale + copy) != expected)
+                    return false;
+            }
+        }
+        return scaled.GetRowMask(height) == 0;
+    }
+
+    private static uint ScaleMask(uint sourceMask, int scale)
+    {
+        uint result = 0;
+        for (int sourceColumn = 0; sourceColumn != 5; ++sourceColumn)
+        {
+            if ((sourceMask & (1U << (24 - sourceColumn))) == 0) continue;
+            for (int copy = 0; copy != scale; ++copy)
+                result |= 1U << (24 - (sourceColumn * scale + copy));
+        }
+        return result;
     }
 
     private sealed class Scene

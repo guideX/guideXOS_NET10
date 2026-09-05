@@ -1,5 +1,32 @@
 # Phase 47 — bounded deterministic software rasterizer
 
+## Interrupted-run recovery record
+
+The host PC hard-rebooted during final Phase 47 validation. Recovery began
+from the live repository, not from an assumed revision. The starting branch was
+`nativeaot-managed-kernel-integration`, starting HEAD was
+`7615f4ccd6098e5bb79503b3ea7ce82413c0daf7` (subject `...`), upstream was
+`origin/nativeaot-managed-kernel-integration`, and the branch was 0 ahead / 0
+behind. The starting worktree was clean, with no tracked modifications or
+untracked files. No source file was partially written or corrupt; generated
+validation directories from earlier attempts were retained as evidence and
+were not used as final proof.
+
+The checked-out HEAD already contained the Phase 47 glyph repair. The audit
+confirmed that the original defect was real: the proof glyph source repeated
+columns horizontally for integer scaling but emitted only its seven source
+rows vertically. A 2×–4× glyph therefore had blank rows below the original
+seven-row bitmap. The corrected implementation maps both axes with integer
+nearest-neighbour selection: `sourceRow = outputRow / scale` and
+`sourceColumn = outputColumn / scale`; each source pixel becomes an `S × S`
+block. The repair was preserved and covered by new host tests plus a guest
+scaled-glyph proof.
+
+The Phase 46 PowerShell wrapper also contained a tooling-only compatibility
+defect: `SHA256.HashData` was unavailable in the Windows PowerShell runtime
+used by the proof. It now uses `SHA256.Create().ComputeHash()` and retains
+SHA-256 semantics; no weaker checksum was substituted.
+
 Phase 47 adds a platform-portable software raster stage after the Phase 46
 validated display list.  It is deliberately not a GOP/PCI/framebuffer-driver
 integration: the caller supplies the framebuffer storage and owns its lifetime.
@@ -91,8 +118,12 @@ ascent/descent metrics. The proof atlas is seven rows by five columns and
 covers space, A–Z (with lowercase mapped to the corresponding compact proof
 shape), digits, and common punctuation. Missing scalars use a fixed `?`
 fallback and are counted. Font sizes select 1× through 4× integer nearest-
-neighbour scaling in both axes, with no antialiasing. Text scalars are read directly from
-the document's bounded arena through `TryGetTextScalar`.
+neighbour scaling in both axes, with no antialiasing. Text scalars are read
+directly from the document's bounded arena through `TryGetTextScalar`.
+
+The proof atlas base glyph is 5×7 with a 6-pixel advance. The supported proof
+dimensions are 5×7 at 1×, 10×14 at 2×, 15×21 at 3×, and 20×28 at 4×; advances
+are 6, 12, 18, and 24 respectively.
 
 ## Hash and telemetry
 
@@ -133,33 +164,96 @@ scanline buffer, or per-glyph allocation.
 
 ## Authoritative proof record
 
-The native fixture reports 68 tokens, 41 document nodes, 13 CSS rules, 33
-layout boxes, 16 lines, 51 text fragments, and 59 paint commands. Its raster
-record is 3 fills, 2 borders, 47 text commands, 1 image, clip push/pop 3/3,
-peak depth 3, 189 glyph requests/rendered, 8 fallbacks, 26,460 considered
-glyph pixels, 8,232 fill pixels, 684 border pixels, 2,755 glyph pixels, 96
-image pixels, 40,567 total writes, 11,671 blended writes, and dirty bounds
-`[0,0]..[159,179]`. The selected proof values include fixed pixel
-`(8,6)=FF102070`, normal scrolled pixel `(29,18)=FF081119`, nested command
-`0x3F123456`, nested output `FF0B1A28`, and image sample `(44,179)=FFB0B0B0`.
+The final source-aligned proof is retained under
+`artifacts\phase47-raster-final8-20260905` and completed 3/3 fresh QEMU
+boots. The final Phase 47 host suite reports 955 assertions, up from the
+previous 952: the added checks are
+`glyph-nearest-neighbor-scale-1x`, `glyph-nearest-neighbor-scale-2x`,
+`glyph-nearest-neighbor-scale-3x`, and
+`glyph-nearest-neighbor-scale-4x`. They verify exact dimensions and advances,
+every vertically repeated row, every horizontally repeated column, clipping,
+and deterministic lookup. The four checks fail against the old
+horizontally-only implementation because its extra rows are zero.
 
-The host suite reports 952 assertions. Existing Phase 44, 45, and 46 host
-suites report 66, 292, and 1,846 respectively (2,204 existing; 3,156 combined).
-NativeAOT publishing with SDK 10.0.400/MSBuild 18.9.6 succeeds with the three
-pre-existing warnings (one `CS8602`, two `CA2014`) and zero errors; the current
-payload is 2,439,168 bytes,
-SHA-256
-`9EB3815A27C0813C2512D12F862A72A7C79E09B2EC0B2B6FFA313B454281939A`.
+The final host totals are Phase 44 = 66, Phase 45 = 292, Phase 46 = 1,846,
+and Phase 47 = 955, for an arithmetic aggregate of 3,159 assertions. The
+final native payload is 2,444,288 bytes. The standalone final publish hash is
+`E2D4F343888F0829D6D04B7688D86EC4F12399B46B002A3EB023F2A2338CBB8C`; the
+source-aligned payload used by the authoritative QEMU run is 2,444,288 bytes
+with hash
+`DDAD75E91B5213F5F6BE8DC3C8780F4B961642C268EAFD7FFBCA7F0EDF8169D6`.
+Both were produced from the same corrected source; the difference is the
+path-dependent NativeAOT output artifact.
 
-Phase 44, corrected Phase 45, and corrected Phase 46 evidence each contain
-3/3 QEMU boots with the final payload. The Phase 47 runner performs the full
-Phase 46 HTTPS pipeline and completes 3/3 fresh boots, including the validator
-pass and one-word-short framebuffer negative control. QEMU is
-`C:\Program Files\qemu\qemu-system-x86_64.exe`; the final process count is
-zero. Current native Phase 47 evidence is retained under the generated
-`artifacts\phase47-raster-*` directory; earlier corrected Phase 44/45 evidence
-is retained under `artifacts\phase47-qemu-phase44-current` and
-`artifacts\phase47-qemu-phase45-current`.
+The requested SDK 10.0.302 was not installed; repository fallback used SDK
+10.0.400 and MSBuild 18.9.6+14fbf8d52 (`18.9.6.38015`). NativeAOT completed
+with zero errors and the expected warning profile: one `CS8602` and two
+`CA2014` warnings. QEMU is
+`C:\Program Files\qemu\qemu-system-x86_64.exe` version 11.0.0.0.
+
+The resource pipeline reports HTTP 200, Content-Type length 24
+(`text/html; charset=utf-8`), gzip encoding, 776 encoded bytes, 1,574 decoded
+bytes, 1,143 Unicode scalars, 68 HTML tokens, 41 document nodes, 13 CSS rules,
+14 selector matches, 33 layout boxes, 16 lines, 51 text fragments, and 59
+display commands. The final resource SHA-256 is
+`88F996E3FBC184B7725B7D5D347B283C3E87F006C5912352D95EA2F84F30754B`.
+
+The final framebuffer is 160×180, stride 160, ARGB8888, with 115,200 active
+bytes and 115,200 backing bytes. Raster telemetry is: 59 commands processed,
+3 fills, 2 borders, 47 text commands, 1 image placeholder, clip pushes/pops
+3/3, peak clip depth 3, 189 glyph requests and 189 glyphs rendered, 8
+fallback glyphs, 189 scaled glyphs, 26,460 glyph pixels considered, 5,510
+glyph pixels written, 8,232 fill pixels, 684 border pixels, 96 image pixels,
+43,322 total pixels written, 14,426 blended pixels, zero transparent skips,
+zero offscreen skips, and dirty bounds `[0,0]..[159,179]`. The final
+framebuffer SHA-256 is
+`6F671E61760024E683A40BC5FED749FF902746702E8C4431715BCD5EB0340548`.
+
+The scaled guest proof records scalar `0x6E` (`n`), scale 2, source 5×7,
+output 10×14, row A `(7,5)=FF102070`, and the vertically repeated row B
+`(7,6)=FF102070`. It emits
+`GXOS_NET10:MANAGED_HTTPS_PHASE47_SCALED_GLYPH_PROOF_PASS` on all 3 boots.
+The same final proof records fixed `(8,6)=FF102070`, normal scrolled
+`(29,18)=FF081119`, nested command alpha `0x3F` and color `0x3F123456` with
+output `FF0B1A28`, text `(8,6)=FF102070`, and image `(44,179)=FFB0B0B0`.
+The Phase 46 fixed-scroll and nested-opacity controls also pass 3/3 inside
+the final pipeline; their semantic markers are
+`normal-document-scroll-fixed-viewport` and `2500-0x3F123456`.
+
+The final display-list and framebuffer/raster validators pass. The
+framebuffer-too-small negative control passes 3/3 with zero writes, no stale
+hash or telemetry, and a healthy kernel marker. Host guard/canary tests pass;
+the final guest proof uses the caller-owned guarded framebuffer contract, with
+the host guard suite providing the explicit padded/offset canary coverage.
+
+Hash-chain isolation is clean: resource, document, style, layout, and
+display-list hashes remain unchanged from the pre-fix proof. The final hashes
+are resource `88F996E3FBC184B7725B7D5D347B283C3E87F006C5912352D95EA2F84F30754B`,
+document `9C10390C80349958863E40612E8F8E7755F14CB4B461597073F7782A5C620882`,
+style `109E9C5887415F84BEB090216DC906F3505EC3905AD303AF71C424FE06DB63B4`,
+layout `5BFA6AAA55309A627D06770FD357E0550AB572E0A9BCE0673BCF06B1828D1089`,
+and display list
+`677EAC49EC7EC785A3B11F6B494B43B14CB8ED25C4B7666C6B2529BA79F8BF39`.
+Only raster telemetry, selected pixels, and the framebuffer hash changed: the
+corrected implementation now writes repeated vertical glyph rows, while all
+upstream inputs and commands remain identical.
+
+The selected Phase 47 pixel set includes at least twelve exact values across
+the guest proof and host regression fixtures: scaled row A `(7,5)=FF102070`,
+scaled repeated row B `(7,6)=FF102070`, fixed guest `(8,6)=FF102070`, normal
+guest `(29,18)=FF081119`, nested-opacity guest `FF0B1A28`, text guest
+`(8,6)=FF102070`, image guest `(44,179)=FFB0B0B0`, host nested-opacity
+`FF040D15`, host fixed blue `FF0000FF`, host normal red `FFFF0000`, host
+z-order overlap `(6,6)=FF445566`, and host border corner `FFFF00FF`.
+
+Standalone final-source QEMU regressions also pass: Phase 44 = 3/3 in
+`artifacts\phase44-final-source-20260905`, Phase 45 = 3/3 in
+`artifacts\phase45-final-source-retry2-20260905`, and corrected Phase 46 =
+3/3 in `artifacts\phase46-final-source-20260905`. The authoritative Phase 47
+proof is in `artifacts\phase47-raster-final8-20260905`. OVMF code SHA-256 is
+`33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A` and the
+OVMF vars template SHA-256 is
+`5D2AC383371B408398ACCEE7EC27C8C09EA5B74A0DE0CEEA6513388B15BE5D1E`.
 
 ## Verification
 
@@ -185,13 +279,14 @@ Gate 4 harness, performs three fresh QEMU boots of the deterministic Phase 46
 HTTPS fixture, then requires the Phase 47 raster pass, the short-framebuffer
 negative marker, fixed/scroll and nested-alpha proof output, eight framebuffer
 hash words, and byte-for-byte identical Phase 47 telemetry/pixel lines across
-all runs.  It intentionally leaves the generated evidence directory in place
+all runs. It intentionally leaves the generated evidence directory in place
 for inspection and does not commit or push changes. The native proof currently
 uses a caller-owned 160×180 ARGB8888 surface: 160×120 clips the fixture's image
 sample, while 320×240 is unnecessarily slow under QEMU TCG. The host suite
 also exercises larger 320×240 surfaces and padded/offset guard layouts; no
 physical display is required.
 
-The next sensible step is a Phase 48 physical-output adapter or production
-font/image backend, keeping this deterministic in-memory rasterizer as the
-semantic reference.
+Phase 48 was not started during this recovery. Remaining Phase 47 limitations
+are the intentional proof glyph atlas, placeholder image primitive, in-memory
+framebuffer, and absence of shaping, antialiasing, image decoding, or physical
+output.

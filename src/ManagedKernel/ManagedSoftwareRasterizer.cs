@@ -179,11 +179,12 @@ public readonly struct ManagedRasterGlyph
     public int Height { get; }
     public int Advance { get; }
     public bool IsFallback { get; }
+    public int Scale => Math.Max(1, (int)_rowScale);
 
     public uint GetRowMask(int row)
     {
         if (row < 0 || row >= Height) return 0;
-            int sourceRow = row / Math.Max(1, (int)_rowScale);
+        int sourceRow = row / Math.Max(1, (int)_rowScale);
         return sourceRow switch
         {
             0 => _row0,
@@ -363,6 +364,7 @@ public readonly struct ManagedRasterTelemetry
         GlyphRequests = rasterizer.GlyphRequests;
         GlyphsRendered = rasterizer.GlyphsRendered;
         FallbackGlyphs = rasterizer.FallbackGlyphs;
+        ScaledGlyphs = rasterizer.ScaledGlyphs;
         GlyphPixelsConsidered = rasterizer.GlyphPixelsConsidered;
         GlyphPixelsWritten = rasterizer.GlyphPixelsWritten;
         FillPixelsWritten = rasterizer.FillPixelsWritten;
@@ -394,6 +396,7 @@ public readonly struct ManagedRasterTelemetry
     public int GlyphRequests { get; }
     public int GlyphsRendered { get; }
     public int FallbackGlyphs { get; }
+    public int ScaledGlyphs { get; }
     public long GlyphPixelsConsidered { get; }
     public long GlyphPixelsWritten { get; }
     public long FillPixelsWritten { get; }
@@ -439,6 +442,7 @@ public sealed class ManagedSoftwareRasterizer
     private int _glyphRequests;
     private int _glyphsRendered;
     private int _fallbackGlyphs;
+    private int _scaledGlyphs;
     private long _glyphPixelsConsidered;
     private long _glyphPixelsWritten;
     private long _fillPixelsWritten;
@@ -487,6 +491,7 @@ public sealed class ManagedSoftwareRasterizer
     public int GlyphRequests => _glyphRequests;
     public int GlyphsRendered => _glyphsRendered;
     public int FallbackGlyphs => _fallbackGlyphs;
+    public int ScaledGlyphs => _scaledGlyphs;
     public long GlyphPixelsConsidered => _glyphPixelsConsidered;
     public long GlyphPixelsWritten => _glyphPixelsWritten;
     public long FillPixelsWritten => _fillPixelsWritten;
@@ -537,6 +542,7 @@ public sealed class ManagedSoftwareRasterizer
         _glyphRequests = 0;
         _glyphsRendered = 0;
         _fallbackGlyphs = 0;
+        _scaledGlyphs = 0;
         _glyphPixelsConsidered = 0;
         _glyphPixelsWritten = 0;
         _fillPixelsWritten = 0;
@@ -684,6 +690,7 @@ public sealed class ManagedSoftwareRasterizer
         _glyphRequests = 0;
         _glyphsRendered = 0;
         _fallbackGlyphs = 0;
+        _scaledGlyphs = 0;
         _glyphPixelsConsidered = 0;
         _glyphPixelsWritten = 0;
         _fillPixelsWritten = 0;
@@ -991,6 +998,7 @@ public sealed class ManagedSoftwareRasterizer
                 return Fail(ManagedRasterFailureReason.GlyphSourceFailure);
             ++_glyphsRendered;
             if (glyph.IsFallback) ++_fallbackGlyphs;
+            if (glyph.Scale > 1) ++_scaledGlyphs;
             if (_cancelAfterGlyphs >= 0 && _glyphsRendered >= _cancelAfterGlyphs)
                 _cancelRequested = true;
             for (int row = 0; row != glyph.Height; ++row)
