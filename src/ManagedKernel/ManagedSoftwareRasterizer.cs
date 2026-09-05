@@ -142,11 +142,19 @@ public readonly struct ManagedRasterGlyph
     public ManagedRasterGlyph(int width, int height, int advance, bool fallback,
                               uint row0, uint row1, uint row2, uint row3,
                               uint row4, uint row5, uint row6, uint row7)
+        : this(width, height, advance, fallback, 1,
+               row0, row1, row2, row3, row4, row5, row6, row7) { }
+
+    internal ManagedRasterGlyph(int width, int height, int advance, bool fallback,
+                                int rowScale,
+                                uint row0, uint row1, uint row2, uint row3,
+                                uint row4, uint row5, uint row6, uint row7)
     {
         Width = width;
         Height = height;
         Advance = advance;
         IsFallback = fallback;
+        _rowScale = rowScale < 1 || rowScale > byte.MaxValue ? (byte)1 : (byte)rowScale;
         _row0 = row0;
         _row1 = row1;
         _row2 = row2;
@@ -165,24 +173,30 @@ public readonly struct ManagedRasterGlyph
     private readonly uint _row5;
     private readonly uint _row6;
     private readonly uint _row7;
+    private readonly byte _rowScale;
 
     public int Width { get; }
     public int Height { get; }
     public int Advance { get; }
     public bool IsFallback { get; }
 
-    public uint GetRowMask(int row) => row switch
+    public uint GetRowMask(int row)
     {
-        0 => _row0,
-        1 => _row1,
-        2 => _row2,
-        3 => _row3,
-        4 => _row4,
-        5 => _row5,
-        6 => _row6,
-        7 => _row7,
-        _ => 0
-    };
+        if (row < 0 || row >= Height) return 0;
+            int sourceRow = row / Math.Max(1, (int)_rowScale);
+        return sourceRow switch
+        {
+            0 => _row0,
+            1 => _row1,
+            2 => _row2,
+            3 => _row3,
+            4 => _row4,
+            5 => _row5,
+            6 => _row6,
+            7 => _row7,
+            _ => 0
+        };
+    }
 }
 
 public interface IManagedRasterGlyphSource
@@ -220,7 +234,7 @@ public sealed class ManagedProofGlyphSource : IManagedRasterGlyphSource
 
     private static ManagedRasterGlyph Scale(GlyphPattern pattern, int scale, bool fallback)
     {
-        return new ManagedRasterGlyph(5 * scale, 7 * scale, 6 * scale, fallback,
+        return new ManagedRasterGlyph(5 * scale, 7 * scale, 6 * scale, fallback, scale,
             ScaleRow(pattern.Row0, scale), ScaleRow(pattern.Row1, scale),
             ScaleRow(pattern.Row2, scale), ScaleRow(pattern.Row3, scale),
             ScaleRow(pattern.Row4, scale), ScaleRow(pattern.Row5, scale),

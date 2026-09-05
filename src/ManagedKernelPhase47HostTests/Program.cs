@@ -278,9 +278,12 @@ internal static class Program
         Check(glyphs.TryGetGlyph('A', ManagedPaintFontId.DefaultUi, 16, 400,
             ManagedCssFontStyle.Normal, out ManagedRasterGlyph scale2) && scale2.Width == 10 &&
               scale2.Height == 14 && scale2.Advance == 12 &&
+              scale2.GetRowMask(0) == scale2.GetRowMask(1) &&
+              scale2.GetRowMask(2) == scale2.GetRowMask(3) &&
+              scale2.GetRowMask(0) != scale2.GetRowMask(2) &&
               glyphs.TryGetGlyph('A', ManagedPaintFontId.DefaultUi, 24, 400,
                 ManagedCssFontStyle.Normal, out ManagedRasterGlyph scale3) && scale3.Width == 15,
-              "glyph-integer-scaling");
+              "glyph-integer-nearest-neighbor-scaling");
 
         Scene scene = Styled("<div id=text>Abz 42? ☃</div>",
             "#text{color:#102030;font-size:8px}");

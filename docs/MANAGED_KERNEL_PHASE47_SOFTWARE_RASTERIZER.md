@@ -91,7 +91,7 @@ ascent/descent metrics. The proof atlas is seven rows by five columns and
 covers space, A–Z (with lowercase mapped to the corresponding compact proof
 shape), digits, and common punctuation. Missing scalars use a fixed `?`
 fallback and are counted. Font sizes select 1× through 4× integer nearest-
-neighbour scaling, with no antialiasing. Text scalars are read directly from
+neighbour scaling in both axes, with no antialiasing. Text scalars are read directly from
 the document's bounded arena through `TryGetTextScalar`.
 
 ## Hash and telemetry
@@ -145,18 +145,21 @@ image pixels, 40,567 total writes, 11,671 blended writes, and dirty bounds
 
 The host suite reports 952 assertions. Existing Phase 44, 45, and 46 host
 suites report 66, 292, and 1,846 respectively (2,204 existing; 3,156 combined).
-NativeAOT publishing with SDK 10.0.400/MSBuild 18.9.6 succeeds with zero build warnings
-and errors for the Phase 47 payload; the final payload is 2,439,168 bytes,
+NativeAOT publishing with SDK 10.0.400/MSBuild 18.9.6 succeeds with the three
+pre-existing warnings (one `CS8602`, two `CA2014`) and zero errors; the current
+payload is 2,439,168 bytes,
 SHA-256
-`00ABE18FD1CEED4FB3D5E31114B4DDBB4E1D084690F8A29B4C71AB25CC8BE810`.
+`9EB3815A27C0813C2512D12F862A72A7C79E09B2EC0B2B6FFA313B454281939A`.
 
 Phase 44, corrected Phase 45, and corrected Phase 46 evidence each contain
 3/3 QEMU boots with the final payload. The Phase 47 runner performs the full
 Phase 46 HTTPS pipeline and completes 3/3 fresh boots, including the validator
 pass and one-word-short framebuffer negative control. QEMU is
 `C:\Program Files\qemu\qemu-system-x86_64.exe`; the final process count is
-zero. Current evidence is retained under `artifacts\phase47-qemu-phase44-current`,
-`artifacts\phase47-qemu-phase45-current`, and `artifacts\phase47-qemu-final6`.
+zero. Current native Phase 47 evidence is retained under the generated
+`artifacts\phase47-raster-*` directory; earlier corrected Phase 44/45 evidence
+is retained under `artifacts\phase47-qemu-phase44-current` and
+`artifacts\phase47-qemu-phase45-current`.
 
 ## Verification
 
