@@ -125,7 +125,7 @@ foreach ($serial in $serialLogs) {
     Require51 ((Get-Hex51 $text 'GXOS_NET10:MANAGED_HTTPS_PHASE51_EMBEDDED_PARSED') -eq 1) 'Phase 51 embedded stylesheet count changed.'
     Require51 ((Get-Hex51 $text 'GXOS_NET10:MANAGED_HTTPS_PHASE51_STYLESHEET_A_CONTENT_ENCODING') -ne 0 -and
                (Get-Hex51 $text 'GXOS_NET10:MANAGED_HTTPS_PHASE51_STYLESHEET_B_CONTENT_ENCODING') -ne 0) 'Phase 51 CSS gzip telemetry missing.'
-    Require51 ((Get-Hex51 $text 'GXOS_NET10:MANAGED_HTTPS_PHASE51_TARGET_COLOR') -eq 0xFF0000FF) 'Phase 51 target did not resolve to external blue CSS.'
+    Require51 ((Get-Hex51 $text 'GXOS_NET10:MANAGED_HTTPS_PHASE51_TARGET_COLOR') -eq [UInt64]4278190335) 'Phase 51 target did not resolve to external blue CSS.'
     Require51 ((Get-Hex51 $text 'GXOS_NET10:MANAGED_HTTPS_PHASE51_SOURCE_UNCHANGED') -eq 1) 'Phase 51 presentation mutated the source framebuffer.'
     $screenPath = Join-Path (Split-Path -Parent $serial.FullName) 'qemu-screen.ppm'
     Require51 (Test-Path -LiteralPath $screenPath) "Missing QEMU screen capture: $screenPath"

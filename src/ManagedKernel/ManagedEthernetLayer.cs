@@ -64,6 +64,8 @@ internal sealed class ManagedEthernetLayer
     internal bool Phase49Passed => _ipv4.Phase49Passed;
     internal bool Phase50Passed => _ipv4.Phase50Passed;
     internal bool Phase51Passed => _ipv4.Phase51Passed;
+    internal bool Phase51NegativeMimeControlPassed =>
+        _ipv4.Phase51NegativeMimeControlPassed;
 
     internal void EnablePhase34Polling()
     {

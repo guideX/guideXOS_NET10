@@ -84,6 +84,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase49Passed;
     private bool _phase50Passed;
     private bool _phase51Passed;
+    private bool _phase51NegativeMimeControlPassed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -160,6 +161,8 @@ internal sealed class ManagedE1000Driver
     internal bool Phase49Passed => _phase49Passed;
     internal bool Phase50Passed => _phase50Passed;
     internal bool Phase51Passed => _phase51Passed;
+    internal bool Phase51NegativeMimeControlPassed =>
+        _phase51NegativeMimeControlPassed;
 
     internal static void EnablePhase35Mode()
     {
@@ -679,6 +682,8 @@ internal sealed class ManagedE1000Driver
             _phase49Passed = ethernet.Phase49Passed;
             _phase50Passed = ethernet.Phase50Passed;
             _phase51Passed = ethernet.Phase51Passed;
+            _phase51NegativeMimeControlPassed =
+                ethernet.Phase51NegativeMimeControlPassed;
         }
         bool result = (ethernet == null || ethernet.TryStop()) &&
                       DisableEngines() && ReleaseDmaAndRestorePci();

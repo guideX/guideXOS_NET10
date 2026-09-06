@@ -221,6 +221,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase49Passed => _phase49Passed;
     internal bool Phase50Passed => _phase50Passed;
     internal bool Phase51Passed => _phase51Passed;
+    internal bool Phase51NegativeMimeControlPassed =>
+        _phase51Consumer?.NegativeMimeControlPassed ?? false;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -1083,6 +1085,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
             return false;
         ManagedNetworkServiceBackend.SetLiveIpv4(this);
         if (!_phase51Consumer.TryRun()) return false;
+        if (_phase51Consumer.NegativeMimeControlPassed) return true;
         _phase51Passed = true;
         return KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_PASS\r\n"u8);
     }

@@ -96,3 +96,61 @@ three successful serial logs.
 This phase intentionally does not claim JavaScript, media fetching, CSS
 `@import`, selector expansion beyond the bounded CSS engine, or an unbounded
 browser cache. Those remain outside the Phase 51 contract.
+
+## Phase 51A acceptance closure
+
+The acceptance-closure result is **Outcome B — core Phase 51 proven, acceptance
+evidence incomplete**. The implementation remains bounded and the host suites
+pass from the final source tree, but the required fresh guest matrix was not
+completed in this environment.
+
+The final-source NativeAOT build used the installed .NET 10.0.400 SDK fallback
+and MSBuild 18.9.6. It produced a 4,683,264-byte payload with SHA-256
+`F6730C6FA17E4C14E08E52D7E5110046BC16031809918530ABA67E4B3A444614`.
+The build had one pre-existing CS0169 warning for `KernelLog.s_hexScratch` and
+zero errors.
+
+The host closure counts are Phase 47 = 955, Phase 48 = 397, Phase 49 = 694,
+Phase 50 = 683, and Phase 51 = 1,083, for an aggregate of 3,812 cases. All
+five suites passed. The Phase 51 source still permits two external resources in
+the guest proof, reserves four external CSS records, limits href scratch to 512
+scalars, CSS delivery to a 16,384-scalar stylesheet, and retains the fixed CSS
+arena capacities documented above.
+The guest proof also deliberately uses the existing 256-byte compatibility
+entity/body bound and a 16 KiB decoded stylesheet bound; these are proof-fixture
+limits, not a relaxed MIME or unbounded-body policy.
+
+The wrong-MIME control uses the production DNS → TCP → TLS → HTTP response
+metadata path and leaves the strict `text/css` gate intact. A completed
+final-source boot is retained in
+`artifacts/phase51a-final-wrong-mime-7`: it reached HTTP 200,
+`text/html; charset=utf-8`, `ExternalStylesheetContentTypeRejected`, zero CSS
+scalars/rules/declarations, `MANAGED_KERNEL_PHASE51_WRONG_MIME_CONTROL_PASS`,
+and the Phase 14 accounting/health markers without a fault. The negative
+harness marks this as a control result rather than a visible-page success.
+However, the required 3/3 fresh negative guest runs were not completed because
+the deterministic TLS fixture intermittently stalled before the response
+boundary on subsequent boots. The negative harness includes only proof-fixture
+changes: the wrong-MIME response, explicit acceptance markers, and early
+negative teardown after MIME rejection; it does not weaken production policy.
+
+The prior three-boot positive evidence remains in
+`artifacts/phase51a-final-positive-2` and retains the complete two-resource
+proof: external A → embedded style → external B, with B winning equal-specificity
+`color: #0000FF` and external geometry affecting width, padding, and border.
+Its payload was the immediately preceding closure build, not the final payload
+hash above. A fresh positive run against the final payload was not completed
+after the final negative-control propagation change, so that directory is
+supporting evidence rather than final-authoritative evidence for Outcome A.
+
+The production close path remains bounded polling with normal FIN teardown for
+successful resources. The MIME-negative path terminates at metadata rejection
+and uses the normal driver teardown/accounting path; it does not wait for the
+successful-page FIN sequence. No Phase 47–50 fresh QEMU regression matrix was
+completed during this closure, and the full guest successful-load/reset/
+wrong-MIME reuse sequence therefore remains open even though host reset/cancel
+coverage passes.
+
+No Phase 52 work was started. Phase 51A should be reopened for the missing
+fresh guest matrix and authoritative final-source positive/negative 3/3 runs
+before Phase 52 begins.

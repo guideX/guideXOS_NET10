@@ -567,6 +567,8 @@ public sealed class ManagedPageResourceOrchestrator
         _activeRequest = _nextRequestIndex++;
         _currentRules = _styles.RulesParsed;
         _currentDeclarations = _styles.DeclarationsParsed;
+        KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE51_EXTERNAL_REQUEST_STARTED=0x"u8,
+                               (ulong)_activeRequest);
         NetworkOperationResult begin = _stylesheetResource.BeginGetUrl(
             _resolvedUrlScratch.AsSpan(0, resolvedLength), _stylesheetParser);
         if (begin != NetworkOperationResult.Started)

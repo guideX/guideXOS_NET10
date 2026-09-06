@@ -24,6 +24,8 @@ internal sealed class ManagedPhase51HtmlProof
     private readonly ManagedNetworkService _service;
     private readonly ManagedPageResourceOrchestrator _page;
 
+    internal bool NegativeMimeControlPassed { get; private set; }
+
     internal ManagedPhase51HtmlProof(ManagedNetworkService service)
     {
         _service = service;
@@ -46,6 +48,7 @@ internal sealed class ManagedPhase51HtmlProof
 
     internal bool TryRun()
     {
+        NegativeMimeControlPassed = false;
         if (!_service.GetStatus().DhcpBound || !_service.GetStatus().Configured ||
             !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_RESOURCE_READY\r\n"u8) ||
             !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_BEGIN_GET\r\n"u8))
@@ -85,6 +88,13 @@ internal sealed class ManagedPhase51HtmlProof
                 KernelLog.WriteHexLine(
                     "GXOS_NET10:MANAGED_HTTPS_PHASE51_CSS_FAILURE=0x"u8,
                     (ulong)_page.CssFailureReason);
+                if (_page.FailureReason ==
+                        ManagedPageFailureReason.ExternalStylesheetContentTypeRejected &&
+                    TryReportWrongMimeControl())
+                {
+                    NegativeMimeControlPassed = true;
+                    return true;
+                }
                 return false;
             }
             if (_page.State == ManagedPageResourceState.Complete)
@@ -92,6 +102,41 @@ internal sealed class ManagedPhase51HtmlProof
         }
         KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_POLL_LIMIT_FAILURE\r\n"u8);
         return false;
+    }
+
+    /* This is an acceptance-only witness for the production MIME boundary.  It
+       does not relax ManagedPageResourceOrchestrator: the page remains Failed,
+       no rejected response is parsed, and no page-success marker is emitted. */
+    private bool TryReportWrongMimeControl()
+    {
+        ManagedTextProgressSnapshot progress = _page.StylesheetResource.Progress;
+        ManagedPageResourceTelemetry telemetry = _page.Telemetry;
+        if (progress.StatusCode < 200 || progress.StatusCode >= 300 ||
+            progress.MimeClassification != ManagedMimeClassification.Html ||
+            telemetry.StylesheetScalars != 0 ||
+            telemetry.ExternalStylesheetsLoaded != 0)
+            return false;
+        return KernelLog.WriteHexLine(
+                   "GXOS_NET10:MANAGED_HTTPS_PHASE51_WRONG_MIME_HTTP_STATUS=0x"u8,
+                   (ulong)progress.StatusCode) &&
+               KernelLog.Write(
+                   "GXOS_NET10:MANAGED_HTTPS_PHASE51_WRONG_MIME_CONTENT_TYPE=text/html; charset=utf-8\r\n"u8) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:MANAGED_HTTPS_PHASE51_WRONG_MIME_CLASSIFICATION=0x"u8,
+                   (ulong)progress.MimeClassification) &&
+               KernelLog.Write(
+                   "GXOS_NET10:MANAGED_HTTPS_PHASE51_WRONG_MIME_REJECTION=ExternalStylesheetContentTypeRejected\r\n"u8) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:MANAGED_HTTPS_PHASE51_WRONG_MIME_CSS_SCALARS=0x"u8,
+                   (ulong)telemetry.StylesheetScalars) &&
+               KernelLog.Write(
+                   "GXOS_NET10:MANAGED_HTTPS_PHASE51_WRONG_MIME_CSS_RULES=0x0000000000000000\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:MANAGED_HTTPS_PHASE51_WRONG_MIME_CSS_DECLARATIONS=0x0000000000000000\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:MANAGED_HTTPS_PHASE51_NO_VISIBLE_PAGE_PASS\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:MANAGED_HTTPS_PHASE51_WRONG_MIME_CONTROL_PASS\r\n"u8);
     }
 
     private bool FinishSuccess()
