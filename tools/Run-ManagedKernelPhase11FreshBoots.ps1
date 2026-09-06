@@ -57,6 +57,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:phase11RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$script:phase11RunDeadline = $null
+$script:phase11StderrPath = $null
 if ($EnablePhase32NegativeControl -and -not $EnablePhase32Protocol) {
     throw '-EnablePhase32NegativeControl requires -EnablePhase32Protocol.'
 }
@@ -152,22 +155,75 @@ function Require11([bool]$condition, [string]$message) {
     if (!$condition) { throw $message }
 }
 
-function Get-OwnedQemu11 {
-    $scope = @([IO.Path]::GetFullPath($gate), [IO.Path]::GetFullPath($evidence))
+function Get-QemuInventory11 {
     try {
-        return @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'" |
-            Where-Object {
-                $commandLine = [string]$_.CommandLine
-                $scope | Where-Object {
-                    $commandLine.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
-                } | Select-Object -First 1
-            })
+        $entries = @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'")
     } catch {
-        # Restricted Windows runners may deny process command-line inspection.
-        # Treat any visible QEMU process as owned so a concurrent boot cannot
-        # be mistaken for a clean fixture.
-        return @(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue)
+        # Command-line ownership is required before a process may be stopped.
+        # If Windows denies that inspection, report UNKNOWN and refuse cleanup.
+        return @(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Process = $_
+                    ProcessId = $_.Id
+                    ParentProcessId = 0
+                    CreationDate = ''
+                    Ownership = 'UNKNOWN'
+                    CpuSeconds = $null
+                    CommandLine = 'UNAVAILABLE'
+                }
+            })
     }
+    foreach ($entry in $entries) {
+        $commandLine = [string]$entry.CommandLine
+        $underRepository = $commandLine.IndexOf($script:phase11RepositoryRoot,
+            [StringComparison]::OrdinalIgnoreCase) -ge 0
+        $hasFixturePath = $commandLine -match '(?i)(\\artifacts\\|\\evidence\\|fat:rw:ESP)'
+        $process = Get-Process -Id ([int]$entry.ProcessId) -ErrorAction SilentlyContinue
+        $cpuSeconds = $null
+        if ($null -ne $process) {
+            try { $cpuSeconds = $process.CPU } catch { }
+        }
+        [pscustomobject]@{
+            Process = $process
+            ProcessId = [int]$entry.ProcessId
+            ParentProcessId = [int]$entry.ParentProcessId
+            CreationDate = [string]$entry.CreationDate
+            Ownership = if ($underRepository -and $hasFixturePath) { 'OWNED' } else { 'UNRELATED' }
+            CpuSeconds = $cpuSeconds
+            CommandLine = $commandLine
+        }
+    }
+}
+
+function Write-QemuInventory11([string]$path, [string]$phase) {
+    $inventory = @(Get-QemuInventory11)
+    Add-Content -LiteralPath $path -Value ("phase={0} qemu_count={1}" -f $phase, $inventory.Count) -Encoding ascii
+    foreach ($entry in $inventory) {
+        $cpu = if ($null -eq $entry.CpuSeconds) { 'unavailable' } else { [string]$entry.CpuSeconds }
+        Add-Content -LiteralPath $path -Value ("pid={0} ownership={1} cpu_seconds={2} command_line={3}" -f `
+            $entry.ProcessId, $entry.Ownership, $cpu, $entry.CommandLine) -Encoding ascii
+    }
+}
+
+function Get-OwnedQemu11 {
+    return @(Get-QemuInventory11 |
+        Where-Object { $_.Ownership -eq 'OWNED' } |
+        ForEach-Object { $_.Process } |
+        Where-Object { $null -ne $_ })
+}
+
+function Ensure-CleanQemuState11([string]$inventoryPath, [string]$phase) {
+    Write-QemuInventory11 $inventoryPath ("{0}_BEFORE" -f $phase)
+    $before = @(Get-QemuInventory11)
+    $unknown = @($before | Where-Object { $_.Ownership -eq 'UNKNOWN' })
+    Require11 ($unknown.Count -eq 0) 'QEMU ownership is unavailable; refusing to stop an unclassified process.'
+    foreach ($entry in @($before | Where-Object { $_.Ownership -eq 'OWNED' })) {
+        Stop-OwnedQemu11 $entry.Process
+    }
+    Write-QemuInventory11 $inventoryPath ("{0}_AFTER" -f $phase)
+    $remaining = @(Get-QemuInventory11 | Where-Object { $_.Ownership -eq 'OWNED' })
+    Require11 ($remaining.Count -eq 0) 'Repository-owned QEMU cleanup failed.'
 }
 
 function Stop-OwnedQemu11([System.Diagnostics.Process]$process) {
@@ -184,10 +240,23 @@ function Stop-OwnedQemu11([System.Diagnostics.Process]$process) {
     }
 }
 
+function Get-QemuFault11 {
+    if ([string]::IsNullOrEmpty($script:phase11StderrPath) -or
+        !(Test-Path -LiteralPath $script:phase11StderrPath)) {
+        return ''
+    }
+    try { return [string](Get-Content -LiteralPath $script:phase11StderrPath -Raw -ErrorAction Stop) }
+    catch { return '' }
+}
+
 function Connect-Tcp11([int]$port, [System.Diagnostics.Process]$process,
                        [datetime]$deadline, [string]$name) {
     while ((Get-Date) -lt $deadline) {
         if ($process.HasExited) { throw "QEMU exited before $name connection on port $port." }
+        $qemuFault = Get-QemuFault11
+        if ($qemuFault -match '(?i)X64 Exception Type|Triple fault|CPU exception') {
+            throw "QEMU reported a CPU fault before $name connection on port $port."
+        }
         $client = [Net.Sockets.TcpClient]::new()
         try {
             $attempt = $client.ConnectAsync('127.0.0.1', $port)
@@ -203,6 +272,14 @@ function Get-FreeUdpPort11 {
     $probe = [Net.Sockets.UdpClient]::new([Net.IPAddress]::Loopback, 0)
     try { return ([Net.IPEndPoint]$probe.Client.LocalEndPoint).Port }
     finally { $probe.Dispose() }
+}
+
+function Get-Phase11Deadline11([int]$seconds) {
+    $candidate = (Get-Date).AddSeconds($seconds)
+    if ($null -ne $script:phase11RunDeadline -and $script:phase11RunDeadline -lt $candidate) {
+        return $script:phase11RunDeadline
+    }
+    return $candidate
 }
 
 function Pump-Serial11([System.IO.Stream]$stream, [IO.FileStream]$logStream,
@@ -244,6 +321,10 @@ function Wait-Marker11([string]$marker, [datetime]$deadline,
             $transcript.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -or
             $transcript.Contains('GXOS_NET10:PAGE_FAULT_')) {
             throw "QEMU reported a fault while waiting for $marker."
+        }
+        $qemuFault = Get-QemuFault11
+        if ($qemuFault -match '(?i)X64 Exception Type|Triple fault|CPU exception') {
+            throw "QEMU reported a CPU fault while waiting for $marker."
         }
         if ($process.HasExited) { throw "QEMU exited while waiting for $marker." }
         Start-Sleep -Milliseconds 25
@@ -794,7 +875,7 @@ function Invoke-Phase32HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
                                        [byte[]]$guestIpBytes,
                                        [byte[]]$hostIpBytes,
                                        [bool]$negativeControl) {
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_DISCOVER_SENT' $deadline $process $stream $serialLog $text $receiveBuffer
     $discoverFrame = Receive-AnyPhase19Frame $peerUdp $timeoutSeconds 'Phase 32 DHCPDISCOVER'
     $discoverPayload = Get-DhcpPayload19 $discoverFrame
@@ -1004,7 +1085,7 @@ function Invoke-Phase33HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
                                        [byte[]]$guestIpBytes,
                                        [byte[]]$hostIpBytes,
                                        [bool]$negativeControl) {
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_DISCOVER_SENT' $deadline $process $stream $serialLog $text $receiveBuffer
     $discoverFrame = Receive-AnyPhase19Frame $peerUdp $timeoutSeconds 'Phase 33 DHCPDISCOVER'
     $discoverPayload = Get-DhcpPayload19 $discoverFrame
@@ -1488,7 +1569,7 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
                                [string]$path,
                                [bool]$negativeControl,
                                [bool]$resourceProof = $false) {
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     $phase51 = [bool]($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl)
     $phase50 = [bool]$EnablePhase50Protocol
     $phase49 = [bool]$EnablePhase49Protocol
@@ -1934,7 +2015,7 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
                                        [bool]$resourceProof = $false,
                                        [Net.Sockets.TcpClient]$screenMonitor = $null,
                                        [string]$screenPath = '') {
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     $phase51 = [bool]($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl)
     $phase50 = [bool]$EnablePhase50Protocol
     $phase49 = [bool]$EnablePhase49Protocol
@@ -2013,6 +2094,9 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
     for ($hop = 0; $hop -lt $hopCount; ++$hop) {
         $hopResult = Invoke-Phase34Hop11 $peerUdp $rxPort $timeoutSeconds $process $stream $serialLog $text $receiveBuffer $injectionLog `
             $guestMacBytes $hostMacBytes $guestIpBytes $hostIpBytes $hop $hosts[$hop] $ports[$hop] $paths[$hop] $negativeControl $resourceProof
+        if ($EnablePhase51WrongMimeControl -and $hopResult -eq 'PASS_PHASE51_WRONG_MIME') {
+            return 'PASS_PHASE51_WRONG_MIME'
+        }
         if ($negativeControl -and $hopResult -eq 'EXPECTED_FAILURE') {
             $transcript = $text.ToString()
             Require11 (!$transcript.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE34_PASS') -and
@@ -2055,9 +2139,6 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
     if ($phase43Capacity) {
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE43_CAPACITY_NEGATIVE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
         return 'NEGATIVE_PASS_PHASE43'
-    }
-    if ($EnablePhase51WrongMimeControl -and $hopResult -eq 'PASS_PHASE51_WRONG_MIME') {
-        return 'PASS_PHASE51_WRONG_MIME'
     }
     if ($phase51) {
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE51_RESOURCE_COMPLETE' $deadline $process $stream $serialLog $text $receiveBuffer
@@ -2198,7 +2279,7 @@ function Receive-ExpectedPhase16Frame11([Net.Sockets.UdpClient]$peerUdp,
                                          [string]$name,
                                          [int]$timeoutSeconds) {
     $peerUdp.Client.ReceiveTimeout = 1000
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     $seen = 0
     while ((Get-Date) -lt $deadline) {
         try {
@@ -2309,7 +2390,7 @@ function Receive-ExpectedPhase17Frame([Net.Sockets.UdpClient]$peerUdp,
                                        [byte[]]$expected,
                                        [string]$name, [int]$timeoutSeconds) {
     $peerUdp.Client.ReceiveTimeout = 1000
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     $seen = 0
     while ((Get-Date) -lt $deadline) {
         try {
@@ -2566,7 +2647,7 @@ function Repair-TcpChecksum22([byte[]]$frame, [byte[]]$sourceIp,
 function Receive-AnyPhase22TcpFrame([Net.Sockets.UdpClient]$peerUdp,
                                      [int]$timeoutSeconds, [string]$name) {
     $peerUdp.Client.ReceiveTimeout = 1000
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     while ((Get-Date) -lt $deadline) {
         try {
             $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
@@ -2594,7 +2675,7 @@ function Receive-ExpectedPhase22TcpFrame([Net.Sockets.UdpClient]$peerUdp,
                                          [byte[]]$payload,
                                          [bool]$requireMss) {
     $peerUdp.Client.ReceiveTimeout = 1000
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     $seen = 0
     while ((Get-Date) -lt $deadline) {
         try {
@@ -2730,7 +2811,7 @@ function Get-DnsPayload20([byte[]]$frame) {
 function Receive-AnyDns20Frame([Net.Sockets.UdpClient]$peerUdp,
                                 [int]$timeoutSeconds, [string]$name) {
     $peerUdp.Client.ReceiveTimeout = 1000
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     while ((Get-Date) -lt $deadline) {
         try {
             $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
@@ -2833,7 +2914,7 @@ function Write-Phase19Frame([IO.StreamWriter]$log, [string]$name,
 function Receive-AnyPhase19Frame([Net.Sockets.UdpClient]$peerUdp,
                                   [int]$timeoutSeconds, [string]$name) {
     $peerUdp.Client.ReceiveTimeout = 1000
-    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    $deadline = Get-Phase11Deadline11 $timeoutSeconds
     while ((Get-Date) -lt $deadline) {
         try {
             $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
@@ -2939,7 +3020,8 @@ if ($Phase15EnableQemuReceiveTrace) {
         ($Phase15NetworkBackend -eq 'dgram' -or $EnableManagedKernelPhase35)) `
         'Phase 15 QEMU receive tracing requires an active RX backend.'
 }
-Require11 (@(Get-OwnedQemu11).Count -eq 0) 'An owned QEMU process is already running.'
+New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+Ensure-CleanQemuState11 (Join-Path $evidence 'qemu-process-preflight.log') 'RUNNER_PREFLIGHT'
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
 (& $qemu --version 2>&1) | Set-Content -LiteralPath (Join-Path $evidence 'qemu-version.log') -Encoding ascii
 
@@ -2977,9 +3059,9 @@ $requiredMarkers = @(
 $owned = @()
 try {
     for ($sequence = 1; $sequence -le $RunCount; $sequence++) {
-        Require11 (@(Get-OwnedQemu11).Count -eq 0) "A QEMU process already owns boot $sequence."
         $run = Join-Path $evidence ("runs\run-{0}" -f $sequence)
         New-Item -ItemType Directory -Force -Path $run | Out-Null
+        Ensure-CleanQemuState11 (Join-Path $run 'qemu-process-preflight.log') ("BOOT_{0}_PREFLIGHT" -f $sequence)
         $code = Join-Path $run 'edk2-code.fd'
         $vars = Join-Path $run 'edk2-vars.fd'
         $serial = Join-Path $run 'serial.log'
@@ -3089,12 +3171,15 @@ try {
                 $listenerDetail += " rx_port=$rxPort peer_port=$peerPort"
             }
             Write-Timeline11 $timeline 'HOST_LISTENERS_READY' $listenerDetail
+            Write-Timeline11 $timeline 'HOST_FIXTURE_READY' 'protocol=phase15-dgram-tcp-tls-http state=clean-peer-bound'
             Write-Timeline11 $timeline 'FIRMWARE_IDENTITY' "code_sha256=$codeHash vars_sha256=$varsHash"
             $process = Start-Process -FilePath $qemu -ArgumentList $arguments -WorkingDirectory $gate `
                 -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
             $owned += $process
+            $script:phase11StderrPath = $stderr
             Write-Timeline11 $timeline 'QEMU_STARTED' "pid=$($process.Id)"
-            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            $script:phase11RunDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            $deadline = $script:phase11RunDeadline
             $client = Connect-Tcp11 $serialPort $process $deadline 'serial'
             $monitor = Connect-Tcp11 $monitorPort $process $deadline 'monitor'
             Write-Timeline11 $timeline 'SERIAL_AND_MONITOR_CONNECTED'
@@ -4194,7 +4279,7 @@ try {
                         Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_BOUND' `
                             $deadline $process $stream $logStream $text $buffer
                     }
-                    if (-not $EnablePhase51Protocol -and -not $EnablePhase50Protocol -and -not $EnablePhase49Protocol -and -not $EnablePhase48Protocol -and -not $EnablePhase46Protocol -and -not $EnablePhase46CapacityControl -and -not $EnablePhase45Protocol -and -not $EnablePhase45CapacityControl -and -not $EnablePhase44Protocol -and -not $EnablePhase44CapacityControl -and -not $EnablePhase43Protocol -and -not $EnablePhase42Protocol -and -not $EnablePhase41Protocol -and -not $EnablePhase40Protocol -and -not $EnablePhase39Protocol -and -not $EnablePhase34Protocol -and -not $EnablePhase33Protocol -and -not $EnablePhase32Protocol -and -not $EnablePhase23Protocol -and -not $EnablePhase22Protocol -and -not $EnablePhase20Protocol -and -not $EnablePhase21Protocol) {
+                    if (-not $EnablePhase51Protocol -and -not $EnablePhase51WrongMimeControl -and -not $EnablePhase50Protocol -and -not $EnablePhase49Protocol -and -not $EnablePhase48Protocol -and -not $EnablePhase46Protocol -and -not $EnablePhase46CapacityControl -and -not $EnablePhase45Protocol -and -not $EnablePhase45CapacityControl -and -not $EnablePhase44Protocol -and -not $EnablePhase44CapacityControl -and -not $EnablePhase43Protocol -and -not $EnablePhase42Protocol -and -not $EnablePhase41Protocol -and -not $EnablePhase40Protocol -and -not $EnablePhase39Protocol -and -not $EnablePhase34Protocol -and -not $EnablePhase33Protocol -and -not $EnablePhase32Protocol -and -not $EnablePhase23Protocol -and -not $EnablePhase22Protocol -and -not $EnablePhase20Protocol -and -not $EnablePhase21Protocol) {
                     $zeroMac = [byte[]](0, 0, 0, 0, 0, 0)
                     $guestRequest = New-Phase16ArpFrame11 `
                         $broadcastMac $guestMacBytes 1 $guestIpBytes $zeroMac $hostIpBytes
@@ -4238,7 +4323,7 @@ try {
                     Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESPONDER_PASS' `
                         $deadline $process $stream $logStream $text $buffer
                     }
-                    if ($EnablePhase51Protocol) {
+                    if ($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl) {
                         # Phase 51 completed its multi-resource page proof and
                         # screen capture in the resource helper above.
                     } elseif ($EnablePhase50Protocol) {
@@ -4668,7 +4753,8 @@ try {
                 # The negative proof returns before the success-path close;
                 # stop only this run's owned QEMU before draining the otherwise
                 # open serial stream.  The wrapper validates the complete file.
-                Start-Sleep -Milliseconds 500
+                Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED' `
+                    $deadline $process $stream $logStream $text $buffer
                 Stop-OwnedQemu11 $process
                 Pump-Serial11 $stream $logStream $text $buffer
             } else {
@@ -4685,6 +4771,8 @@ try {
             Stop-OwnedQemu11 $process
             if ($null -ne $timeline) { $timeline.Dispose() }
             $script:phase11Timeline = $null
+            $script:phase11RunDeadline = $null
+            $script:phase11StderrPath = $null
         }
         if ($Phase15EnableFilterDump) {
             Require11 (Test-Path -LiteralPath $pcapPath) `
