@@ -32,8 +32,8 @@ internal static class Program
     {
         ManagedPhase48FontRegistry registry = ManagedPhase48FontRegistry.Instance;
         Check(registry.FaceCount == 8, "eight-faces");
-        Check(registry.AtlasBytes == 8 * 260 * 160, "atlas-bytes");
-        Check(registry.MetadataCount == 8 * 95, "metadata-count");
+        Check(registry.AtlasBytes == 8 * (260 * 160 + 260 * 180), "atlas-bytes");
+        Check(registry.MetadataCount == 8 * 201, "metadata-count");
         Check(ManagedPhase48GlyphMetadata.SizeInBytes == 10, "metadata-size");
         Check(registry.LargestGlyphWidth <= 20 && registry.LargestGlyphHeight <= 20,
               "bounded-glyph-dimensions");
@@ -53,9 +53,10 @@ internal static class Program
         {
             Check(registry.TryGetFace((ManagedPhase48FontFaceId)index,
                                       out ManagedPhase48FontFace face), "face-present");
-            Check(face.FamilyName == "Roboto" && face.GlyphCount == 95,
+            Check(face.FamilyName == "Roboto" && face.GlyphCount == 201,
                   "face-identity");
-            Check(face.AtlasByteCount == 41_600 && face.AtlasWidth == 260 && face.AtlasHeight == 160,
+            Check(face.AtlasByteCount == 88_400 && face.AtlasWidth == 260 && face.AtlasHeight == 160 &&
+                  face.ExtendedAtlasWidth == 260 && face.ExtendedAtlasHeight == 180,
                   "face-atlas-shape");
             Check(face.LineHeight == face.Ascent + face.Descent + face.LineGap,
                   "line-metric-relation");
@@ -104,7 +105,10 @@ internal static class Program
                 ManagedCssFontStyle.Normal, out ManagedRasterGlyph glyph), "ascii-lookup");
             Check(!glyph.IsFallback && glyph.Advance > 0, "ascii-hit");
         }
-        uint[] unsupported = { 0xE9, 0x3BB, 0x4E2D, 0x1F600, 0xD800 };
+        Check(registry.TryGetGlyph(0xE9, ManagedPaintFontId.DefaultUi, 12, 400,
+            ManagedCssFontStyle.Normal, out ManagedRasterGlyph accented) &&
+              !accented.IsFallback, "latin1-accent-hit");
+        uint[] unsupported = { 0x3BB, 0x4E2D, 0x1F600, 0xD800 };
         foreach (uint scalar in unsupported)
         {
             bool valid = scalar != 0xD800;
@@ -120,7 +124,7 @@ internal static class Program
         ManagedPhase48FontTelemetry telemetry = registry.Telemetry;
         Check(telemetry.AsciiLookups == 96 && telemetry.NonAsciiLookups == 4,
               "lookup-telemetry");
-        Check(telemetry.FallbackLookups == 4 && telemetry.GlyphHits == telemetry.GlyphLookups,
+        Check(telemetry.FallbackLookups == 3 && telemetry.GlyphHits == telemetry.GlyphLookups,
               "fallback-telemetry");
     }
 

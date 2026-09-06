@@ -1,4 +1,4 @@
-# Managed Phase 48 Font Provenance
+# Managed Phase 48/50 Font Provenance
 
 Phase 48 embeds a bounded, generated bitmap representation of the existing
 guideXOS Roboto assets. Runtime code contains only static byte arrays and
@@ -60,3 +60,35 @@ range, metadata layout, face metrics, metadata records, and atlas bytes. The
 host proof currently reports:
 
 `4872C3D6EA0701697830CD9FCB21294BF097584B6014C70CEE8D52359A6BE5F0`
+
+## Phase 50 extension
+
+Phase 50 keeps the eight PNG atlases and adds a second fixed atlas page per
+face, generated from the matching local Roboto TTF files. The TTF cmap audit
+confirmed complete U+00A0..U+00FF coverage and the ten selected punctuation
+scalars U+2013, U+2014, U+2018, U+2019, U+201C, U+201D, U+2022, U+2026, U+20AC,
+and U+2122 for all four styles and both nominal sizes.
+
+| TTF face | Source SHA-256 |
+| --- | --- |
+| Roboto-Regular.ttf | `DBD285B518E398832F6F4A736109C355CE25A49546BFCE41BAB256C9EF7E56EB` |
+| Roboto-Bold.ttf | `27467020FEBCE4C0AC8482EA8E8D6F32BF8C5721FB9C301344D0E3F4D93A0119` |
+| Roboto-Italic.ttf | `5A2F18DBDBE3AC07F14D38817D1FD22DF4E8E3B74F661F7AE7B29CC8140092BC` |
+| Roboto-BoldItalic.ttf | `8234ADD45022E40D0AD293C8A2854A8F387E53DB5C433698FE6D89C8D1B5362E` |
+
+The generated extended page is 260x180 (13x9 20x20 cells), with 106 records
+per face: the dense 96-code-point Latin-1 map followed by a sorted ten-entry
+sparse punctuation map. The generated output is deterministic; two generator
+runs produced identical 1,062,494-byte C# outputs with SHA-256
+`56018ABA6A19C6747F5DD4FF7F4EF5907415140119598CDE062750F8D4D23670`.
+
+Phase 50 totals are 201 glyphs per face, 1,608 glyphs, 707,200 alpha bytes,
+and 16,080 metadata bytes. The semantic hash is now computed in the
+`GXOS-P50-FONT` domain and is:
+
+`4184C857A49DABEF9ED19BA97EB0DBF87879EAD873F835336149BADB0F7D094A`
+
+Only the bounded Latin-1 and common-punctuation subset is runtime-declared.
+The source TTF audit also observed partial Greek and Cyrillic cmap coverage,
+but those code points are intentionally not embedded or advertised by this
+phase.

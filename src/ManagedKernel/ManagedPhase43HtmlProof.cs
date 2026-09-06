@@ -42,10 +42,12 @@ internal sealed class ManagedPhase43HtmlProof
         0xE2, 0x8A, 0x13, 0x8D, 0xFB, 0x82, 0xEB, 0x21
     };
     private static ReadOnlySpan<byte> Hostname => "www.example.com"u8;
-    private ReadOnlySpan<byte> Path => _presentationMode ? "/phase49/gzip"u8 : _fontMode ? "/phase48/gzip"u8 : _paintMode ? "/phase46/gzip"u8 :
+    private ReadOnlySpan<byte> Path => _phase50Mode ? "/phase50/gzip"u8 : _presentationMode ? "/phase49/gzip"u8 : _fontMode ? "/phase48/gzip"u8 : _paintMode ? "/phase46/gzip"u8 :
         (_layoutMode ? "/phase45/gzip"u8 :
         (_cssMode ? "/phase44/gzip"u8 : "/phase43/gzip"u8));
-    private ReadOnlySpan<byte> PhasePrefix => _presentationMode
+    private ReadOnlySpan<byte> PhasePrefix => _phase50Mode
+        ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_"u8
+        : _presentationMode
         ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_"u8
         : _fontMode
         ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_"u8
@@ -67,6 +69,7 @@ internal sealed class ManagedPhase43HtmlProof
     private readonly bool _paintMode;
     private readonly bool _fontMode;
     private readonly bool _presentationMode;
+    private readonly bool _phase50Mode;
     private ManagedPaintEngine? _paintEngine;
     private bool _bodyReceivedLogged;
     private bool _pauseObserved;
@@ -111,7 +114,8 @@ internal sealed class ManagedPhase43HtmlProof
                                      bool layoutMode = false,
                                      bool paintMode = false,
                                      bool fontMode = false,
-                                     bool presentationMode = false)
+                                     bool presentationMode = false,
+                                     bool phase50Mode = false)
     {
         _service = service;
         _capacityControl = capacityControl;
@@ -120,6 +124,7 @@ internal sealed class ManagedPhase43HtmlProof
         _paintMode = paintMode;
         _fontMode = fontMode;
         _presentationMode = presentationMode;
+        _phase50Mode = phase50Mode;
         _tree = capacityControl && !cssMode
             ? new ManagedHtmlTreeBuilder(new ManagedHtmlDocumentArenaOptions(
                 80, 65_536, 2_048, 16_384, 128))
@@ -609,7 +614,7 @@ internal sealed class ManagedPhase43HtmlProof
             paintTelemetry.TextCommands == 0 || layoutTelemetry.TextScalarsMeasured == 0)
             return false;
         if (!RunPaintSemanticProof(mainIndex, noteIndex) || !RunPhase48RasterProof() ||
-            (_presentationMode && !RunPhase49PresentationProof()))
+            (_presentationMode && !RunPresentationProof()))
             return false;
 
         byte[] hashStorage = new byte[ManagedSha256.DigestSize * 5];
@@ -638,6 +643,8 @@ internal sealed class ManagedPhase43HtmlProof
             return false;
         return KernelLog.Write(PhasePrefix) && KernelLog.Write("FONT_VALIDATED\r\n"u8) &&
                WritePhase48ResourceTelemetry(in progress) &&
+               WritePhase50ResourceTelemetry(in progress) &&
+               WritePhase50CoverageTelemetry(in fontTelemetry) &&
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE48_FONT_FACE_COUNT=0x"u8, (ulong)fontTelemetry.FaceCount) &&
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE48_FONT_ACTIVE_FACE=0x"u8, (ulong)fontTelemetry.ActiveFaceId) &&
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE48_FONT_ATLAS_BYTES=0x"u8, (ulong)fontTelemetry.AtlasBytes) &&
@@ -826,12 +833,27 @@ internal sealed class ManagedPhase43HtmlProof
                KernelLog.Write(PhasePrefix) && KernelLog.Write("RASTER_PASS\r\n"u8);
     }
 
-    private bool RunPhase49PresentationProof()
+    private ReadOnlySpan<byte> PresentationPrefix => _phase50Mode
+        ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_"u8
+        : "GXOS_NET10:MANAGED_HTTPS_PHASE49_"u8;
+
+    private bool WritePresentationMarker(ReadOnlySpan<byte> phase49,
+                                         ReadOnlySpan<byte> phase50) =>
+        KernelLog.Write(_phase50Mode ? phase50 : phase49);
+
+    private bool WritePresentationHex(ReadOnlySpan<byte> phase49,
+                                      ReadOnlySpan<byte> phase50,
+                                      ulong value) =>
+        KernelLog.WriteHexLine(_phase50Mode ? phase50 : phase49, value);
+
+    private bool RunPresentationProof()
     {
         if (!_presentationMode || !_rasterFramebuffer.TryGetPixel(0, 0, out _) ||
             !ManagedKernelContract.FramebufferInstalled)
         {
-            KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE49_PRESENTATION_FAILURE=NO_FRAMEBUFFER\r\n"u8);
+            WritePresentationMarker(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE49_PRESENTATION_FAILURE=NO_FRAMEBUFFER\r\n"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_PRESENTATION_FAILURE=NO_FRAMEBUFFER\r\n"u8);
             return false;
         }
         GxManagedKernelFramebufferV1 descriptor =
@@ -851,11 +873,14 @@ internal sealed class ManagedPhase43HtmlProof
             ? (int)((descriptor.Width - (uint)_rasterFramebuffer.Width) / 2) : 0;
         int y = descriptor.Height > (uint)_rasterFramebuffer.Height
             ? (int)((descriptor.Height - (uint)_rasterFramebuffer.Height) / 2) : 0;
-        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE49_PRESENTATION_BEGIN\r\n"u8) ||
+        if (!WritePresentationMarker(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE49_PRESENTATION_BEGIN\r\n"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_PRESENTATION_BEGIN\r\n"u8) ||
             !presenter.TryPresent(in _rasterFramebuffer, in physical, destination, x, y))
         {
-            KernelLog.WriteHexLine(
+            WritePresentationHex(
                 "GXOS_NET10:MANAGED_HTTPS_PHASE49_PRESENTATION_FAILURE=0x"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_PRESENTATION_FAILURE=0x"u8,
                 (ulong)presenter.Telemetry.FailureReason);
             return false;
         }
@@ -865,42 +890,54 @@ internal sealed class ManagedPhase43HtmlProof
             !presenter.TryCopyDestinationHash(destinationHash) ||
             !presenter.Telemetry.SourceHashUnchanged)
             return false;
-        if (!KernelLog.WriteHexLine(
+        if (!WritePresentationHex(
                 "GXOS_NET10:MANAGED_HTTPS_PHASE49_PRESENTED_PIXELS=0x"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_PRESENTED_PIXELS=0x"u8,
                 (ulong)presenter.Telemetry.PixelsWritten) ||
-            !KernelLog.WriteHexLine(
+            !WritePresentationHex(
                 "GXOS_NET10:MANAGED_HTTPS_PHASE49_CLIPPED_PIXELS=0x"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_CLIPPED_PIXELS=0x"u8,
                 (ulong)presenter.Telemetry.PixelsClipped) ||
-            !KernelLog.WriteHexLine(
+            !WritePresentationHex(
                 "GXOS_NET10:MANAGED_HTTPS_PHASE49_PRESENTATION_X=0x"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_PRESENTATION_X=0x"u8,
                 (ulong)x) ||
-            !KernelLog.WriteHexLine(
+            !WritePresentationHex(
                 "GXOS_NET10:MANAGED_HTTPS_PHASE49_PRESENTATION_Y=0x"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_PRESENTATION_Y=0x"u8,
                 (ulong)y) ||
             !WritePhase49Digest(sourceHash, true) ||
             !WritePhase49Digest(destinationHash, false) ||
-            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE49_SOURCE_UNCHANGED=1\r\n"u8) ||
-            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE49_GOP_PRESENT_PASS\r\n"u8) ||
-            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE49_VISIBLE_PAGE_PASS\r\n"u8))
+            !WritePresentationMarker(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE49_SOURCE_UNCHANGED=1\r\n"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_SOURCE_UNCHANGED=1\r\n"u8) ||
+            !WritePresentationMarker(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE49_GOP_PRESENT_PASS\r\n"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_GOP_PRESENT_PASS\r\n"u8) ||
+            !WritePresentationMarker(
+                "GXOS_NET10:MANAGED_HTTPS_PHASE49_VISIBLE_PAGE_PASS\r\n"u8,
+                "GXOS_NET10:MANAGED_HTTPS_PHASE50_VISIBLE_PAGE_PASS\r\n"u8))
             return false;
         return true;
     }
 
-    private static bool WritePhase49Digest(ReadOnlySpan<byte> digest, bool source)
+    private bool WritePhase49Digest(ReadOnlySpan<byte> digest, bool source)
     {
         for (int offset = 0; offset != digest.Length; offset += 4)
         {
-            if (!(source
-                    ? KernelLog.WriteHexLine(
-                        "GXOS_NET10:MANAGED_HTTPS_PHASE49_SOURCE_FRAMEBUFFER_HASH_WORD=0x"u8,
-                        ReadPhase48DigestWord(digest, offset))
-                    : KernelLog.WriteHexLine(
-                        "GXOS_NET10:MANAGED_HTTPS_PHASE49_DESTINATION_HASH_WORD=0x"u8,
-                        ReadPhase48DigestWord(digest, offset))))
+            if (!WritePresentationHex(
+                    source
+                        ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_SOURCE_FRAMEBUFFER_HASH_WORD=0x"u8
+                        : "GXOS_NET10:MANAGED_HTTPS_PHASE49_DESTINATION_HASH_WORD=0x"u8,
+                    source
+                        ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_SOURCE_FRAMEBUFFER_HASH_WORD=0x"u8
+                        : "GXOS_NET10:MANAGED_HTTPS_PHASE50_DESTINATION_HASH_WORD=0x"u8,
+                    ReadPhase48DigestWord(digest, offset)))
                 return false;
         }
         return true;
     }
+
 
     private bool WritePhase48RasterPixel(int index, int x, int y, uint pixel)
     {
@@ -935,6 +972,54 @@ internal sealed class ManagedPhase43HtmlProof
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE48_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(resourceHash, 20)) &&
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE48_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(resourceHash, 24)) &&
                KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE48_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(resourceHash, 28));
+    }
+
+    private bool WritePhase50ResourceTelemetry(in ManagedHtmlProgressSnapshot progress)
+    {
+        if (!_phase50Mode) return true;
+        byte[] hashStorage = new byte[ManagedSha256.DigestSize];
+        Span<byte> hash = hashStorage;
+        if (!_resource.TryCopyResourceDigest(hash)) return false;
+        return KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_STATUS=0x"u8,
+                                      (ulong)progress.StatusCode) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_DECOMPRESSED_BYTES=0x"u8,
+                                      (ulong)progress.DecompressedBytesProduced) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_ENCODED_BYTES=0x"u8,
+                                      (ulong)progress.EncodedBytesReceived) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(hash, 0)) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(hash, 4)) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(hash, 8)) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(hash, 12)) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(hash, 16)) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(hash, 20)) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(hash, 24)) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_RESOURCE_SHA256_WORD=0x"u8, ReadPhase48DigestWord(hash, 28));
+    }
+
+    private bool WritePhase50CoverageTelemetry(in ManagedPhase48FontTelemetry telemetry)
+    {
+        if (!_phase50Mode) return true;
+        ManagedPhase48FontRegistry fonts = ManagedPhase48FontRegistry.Instance;
+        return KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_COVERAGE_FLAGS=0x"u8,
+                                      (ulong)fonts.CoverageFlags) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_GLYPHS_PER_FACE=0x"u8,
+                                      (ulong)fonts.GlyphsPerFace) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_TOTAL_GLYPHS=0x"u8,
+                                      (ulong)(fonts.GlyphsPerFace * fonts.FaceCount)) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_LATIN1_LOOKUPS=0x"u8,
+                                      (ulong)telemetry.Latin1Lookups) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_SPARSE_PUNCTUATION_LOOKUPS=0x"u8,
+                                      (ulong)telemetry.SparsePunctuationLookups) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_GLYPH_FALLBACKS=0x"u8,
+                                      (ulong)telemetry.GlyphFallbacks) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_FACE_FALLBACKS=0x"u8,
+                                      (ulong)telemetry.FaceFallbacks) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_NBSP_COUNT=0x"u8,
+                                      (ulong)telemetry.NbspCount) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_NONASCII_RASTERIZED_GLYPHS=0x"u8,
+                                      (ulong)telemetry.NonAsciiRasterizedGlyphs) &&
+               KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE50_FONT_EXTENDED_ATLAS_BYTES=0x"u8,
+                                      (ulong)(fonts.AtlasBytes - (8 * ManagedPhase48GeneratedFontData.AsciiAtlasWidth * ManagedPhase48GeneratedFontData.AsciiAtlasHeight)));
     }
 
     private static bool WritePhase48Digest(int kind,

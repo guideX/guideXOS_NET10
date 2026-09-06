@@ -355,6 +355,7 @@ public readonly struct ManagedLayoutTelemetry
         TextScalarsMeasured = engine.TextScalarsMeasured;
         SoftWrapCount = engine.SoftWrapCount;
         ForcedBreakCount = engine.ForcedBreakCount;
+        NbspPreventedBreakCount = engine.NbspPreventedBreakCount;
         DisplayNoneSkips = engine.DisplayNoneSkips;
         PositionedBoxCount = engine.PositionedBoxCount;
         HorizontalOverflowCount = engine.HorizontalOverflowCount;
@@ -379,6 +380,7 @@ public readonly struct ManagedLayoutTelemetry
     public int TextScalarsMeasured { get; }
     public int SoftWrapCount { get; }
     public int ForcedBreakCount { get; }
+    public int NbspPreventedBreakCount { get; }
     public int DisplayNoneSkips { get; }
     public int PositionedBoxCount { get; }
     public int HorizontalOverflowCount { get; }
@@ -486,6 +488,7 @@ public sealed class ManagedLayoutEngine
     private int _textScalarsMeasured;
     private int _softWrapCount;
     private int _forcedBreakCount;
+    private int _nbspPreventedBreakCount;
     private int _displayNoneSkips;
     private int _positionedBoxCount;
     private int _horizontalOverflowCount;
@@ -537,6 +540,7 @@ public sealed class ManagedLayoutEngine
     public int TextScalarsMeasured => _textScalarsMeasured;
     public int SoftWrapCount => _softWrapCount;
     public int ForcedBreakCount => _forcedBreakCount;
+    public int NbspPreventedBreakCount => _nbspPreventedBreakCount;
     public int DisplayNoneSkips => _displayNoneSkips;
     public int PositionedBoxCount => _positionedBoxCount;
     public int HorizontalOverflowCount => _horizontalOverflowCount;
@@ -576,6 +580,7 @@ public sealed class ManagedLayoutEngine
         _textScalarsMeasured = 0;
         _softWrapCount = 0;
         _forcedBreakCount = 0;
+        _nbspPreventedBreakCount = 0;
         _displayNoneSkips = 0;
         _positionedBoxCount = 0;
         _horizontalOverflowCount = 0;
@@ -1201,11 +1206,11 @@ public sealed class ManagedLayoutEngine
                        style.WhiteSpace == ManagedCssWhiteSpace.PreWrap;
             bool noWrap = style.WhiteSpace == ManagedCssWhiteSpace.NoWrap ||
                           style.WhiteSpace == ManagedCssWhiteSpace.Pre;
-            bool collapsible = IsAsciiWhitespace(scalar) && !pre;
+            bool collapsible = IsBreakingWhitespace(scalar) && !pre;
             if (collapsible)
             {
                 int begin = offset++;
-                while (offset < length && IsAsciiWhitespace(_document.Text[textOffset + offset])) ++offset;
+                while (offset < length && IsBreakingWhitespace(_document.Text[textOffset + offset])) ++offset;
                 if (scalar == '\n' && style.WhiteSpace == ManagedCssWhiteSpace.PreLine)
                 {
                     if (!ForceBreak(ownerBoxIndex, contentX, ref currentX, ref lineY, ref lineHeight,
@@ -1247,7 +1252,7 @@ public sealed class ManagedLayoutEngine
             while (offset < length)
             {
                 uint value = _document.Text[textOffset + offset];
-                if ((!pre && IsAsciiWhitespace(value)) || (pre && value == '\n')) break;
+                if ((!pre && IsBreakingWhitespace(value)) || (pre && value == '\n')) break;
                 ++offset;
             }
             int wordLength = offset - beginWord;
@@ -1277,6 +1282,9 @@ public sealed class ManagedLayoutEngine
             if (total > ManagedLayoutLimits.MaximumCoordinate) return Fail(ManagedLayoutFailureReason.GeometryOverflow);
         }
         int width = (int)total;
+        bool containsNbsp = ContainsNonBreakingSpace(sourceOffset, length);
+        if (containsNbsp && width > contentWidth && contentWidth > 0)
+            ++_nbspPreventedBreakCount;
         if (!noWrap && lineHasContent && currentX - contentX + width > contentWidth)
         {
             if (!ForceBreak(ownerBoxIndex, contentX, ref currentX, ref lineY, ref lineHeight,
@@ -1284,7 +1292,7 @@ public sealed class ManagedLayoutEngine
                             ref lineHasContent)) return false;
             ++_softWrapCount;
         }
-        if (!noWrap && width > contentWidth && contentWidth > 0)
+        if (!noWrap && !containsNbsp && width > contentWidth && contentWidth > 0)
         {
             int consumed = 0;
             while (consumed < length)
@@ -1779,8 +1787,15 @@ public sealed class ManagedLayoutEngine
     private static bool ValidRect(ManagedLayoutRect rect) => rect.Width >= 0 && rect.Height >= 0;
     private static bool IsInFlow(ManagedLayoutBoxRecord box) =>
         (box.Flags & (ManagedLayoutBoxFlags.Absolute | ManagedLayoutBoxFlags.Fixed)) == 0;
-    private static bool IsAsciiWhitespace(uint scalar) => scalar == 0x20 || scalar == 0x09 ||
+    private static bool IsBreakingWhitespace(uint scalar) => scalar == 0x20 || scalar == 0x09 ||
         scalar == 0x0A || scalar == 0x0C || scalar == 0x0D;
+
+    private bool ContainsNonBreakingSpace(int sourceOffset, int length)
+    {
+        for (int index = 0; index != length; ++index)
+            if (_document.Text[sourceOffset + index] == 0xA0) return true;
+        return false;
+    }
 
     private static ManagedLayoutRect Union(ManagedLayoutRect left, ManagedLayoutRect right)
     {

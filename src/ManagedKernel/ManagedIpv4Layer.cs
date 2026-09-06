@@ -137,6 +137,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase46Passed;
     private bool _phase48Passed;
     private bool _phase49Passed;
+    private bool _phase50Passed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -216,6 +217,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase46Passed => _phase46Passed;
     internal bool Phase48Passed => _phase48Passed;
     internal bool Phase49Passed => _phase49Passed;
+    internal bool Phase50Passed => _phase50Passed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -1028,10 +1030,14 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool TryRunPhase49() =>
         TryRunPhase44Core(false, true, true, true, true);
 
+    internal bool TryRunPhase50() =>
+        TryRunPhase44Core(false, true, true, true, true, true);
+
     private bool TryRunPhase44Core(bool capacityControl, bool layoutMode, bool paintMode = false,
-                                   bool fontMode = false, bool presentationMode = false)
+                                   bool fontMode = false, bool presentationMode = false,
+                                   bool phase50Mode = false)
     {
-        if ((presentationMode ? _phase49Passed : fontMode ? _phase48Passed : paintMode ? _phase46Passed : layoutMode ? _phase45Passed : _phase44Passed) || _active || _networkService == null)
+        if ((phase50Mode ? _phase50Passed : presentationMode ? _phase49Passed : fontMode ? _phase48Passed : paintMode ? _phase46Passed : layoutMode ? _phase45Passed : _phase44Passed) || _active || _networkService == null)
         {
             KernelLog.Write(presentationMode
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE49_IPV4_GUARD_FAILED\r\n"u8
@@ -1044,7 +1050,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 : "GXOS_NET10:MANAGED_KERNEL_PHASE44_IPV4_GUARD_FAILED\r\n"u8);
             return false;
         }
-        _phase43Consumer ??= new ManagedPhase43HtmlProof(_networkService, capacityControl, true, layoutMode, paintMode, fontMode, presentationMode);
+        _phase43Consumer ??= new ManagedPhase43HtmlProof(_networkService, capacityControl, true, layoutMode, paintMode, fontMode, presentationMode || phase50Mode, phase50Mode);
         if (!_arp.TryBeginDhcp())
         {
             KernelLog.Write(presentationMode
@@ -1149,11 +1155,17 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_DNS=0x"u8, DnsServerValue)) return false;
         ManagedNetworkServiceBackend.SetLiveIpv4(this);
         if (!_phase43Consumer.TryRun()) return false;
-        if (presentationMode) _phase49Passed = true;
+        if (phase50Mode) _phase50Passed = true;
+        else if (presentationMode) _phase49Passed = true;
         else if (fontMode) _phase48Passed = !capacityControl;
         else if (paintMode) _phase46Passed = !capacityControl;
         else if (layoutMode) _phase45Passed = !capacityControl;
         else _phase44Passed = !capacityControl;
+        if (phase50Mode)
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE50_PASS\r\n"u8);
+            return true;
+        }
         if (presentationMode)
         {
             KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE49_PASS\r\n"u8);
