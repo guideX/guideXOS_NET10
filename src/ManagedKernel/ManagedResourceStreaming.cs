@@ -714,6 +714,10 @@ public sealed class ManagedResourceRequest
     public ManagedResourceProtocol Protocol => _protocol;
     public ManagedResourceState State => _state;
     public ManagedResourceFailureReason FailureReason => _failureReason;
+    public ManagedHttpsUrl FinalUrl => _protocol == ManagedResourceProtocol.Https
+        ? _https!.FinalUrl : default;
+    public int RedirectCount => _protocol == ManagedResourceProtocol.Https
+        ? _https!.RedirectCount : 0;
     public ManagedResourceConsumerFailureReason ConsumerFailureReason =>
         _consumerFailureReason;
     public int MaximumEntityLength => _maximumEntityLength;
@@ -735,6 +739,8 @@ public sealed class ManagedResourceRequest
     internal bool RequestSent => _https?.RequestSent ?? false;
     internal bool ApplicationDataReceived =>
         _https?.ApplicationDataReceived ?? false;
+    internal bool ResponseBodyComplete => _protocol == ManagedResourceProtocol.Http
+        ? _http!.ResponseBodyComplete : _https!.ResponseBodyComplete;
 
     public NetworkOperationResult BeginGet(ReadOnlySpan<byte> hostname,
                                            ReadOnlySpan<byte> path,

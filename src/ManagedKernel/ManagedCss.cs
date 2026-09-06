@@ -9,6 +9,38 @@ public enum ManagedCssSourceKind : byte
     Inline = 2
 }
 
+public enum ManagedCssStyleSourceKind : byte
+{
+    None = 0,
+    Embedded = 1,
+    External = 2
+}
+
+public readonly struct ManagedCssStyleSource
+{
+    internal ManagedCssStyleSource(ManagedCssStyleSourceKind kind,
+                                   ManagedHtmlNodeHandle node,
+                                   bool alternate,
+                                   bool hasHref,
+                                   bool hasType,
+                                   int hrefLength)
+    {
+        Kind = kind;
+        Node = node;
+        IsAlternate = alternate;
+        HasHref = hasHref;
+        HasType = hasType;
+        HrefLength = hrefLength;
+    }
+
+    public ManagedCssStyleSourceKind Kind { get; }
+    public ManagedHtmlNodeHandle Node { get; }
+    public bool IsAlternate { get; }
+    public bool HasHref { get; }
+    public bool HasType { get; }
+    public int HrefLength { get; }
+}
+
 public enum ManagedCssParseFailureReason : byte
 {
     None = 0,
@@ -209,16 +241,19 @@ public readonly struct ManagedCssArenaOptions
         int selectorCapacity,
         int selectorStepCapacity,
         int declarationCapacity,
-        int computedStyleCapacity = ManagedCssLimits.DefaultComputedStyleCapacity)
+        int computedStyleCapacity = ManagedCssLimits.DefaultComputedStyleCapacity,
+        int externalStylesheetCapacity = ManagedCssLimits.DefaultExternalStylesheetCapacity)
     {
         Validate(stylesheetCapacity, ruleCapacity, selectorCapacity,
-                 selectorStepCapacity, declarationCapacity, computedStyleCapacity);
+                 selectorStepCapacity, declarationCapacity, computedStyleCapacity,
+                 externalStylesheetCapacity);
         StylesheetCapacity = stylesheetCapacity;
         RuleCapacity = ruleCapacity;
         SelectorCapacity = selectorCapacity;
         SelectorStepCapacity = selectorStepCapacity;
         DeclarationCapacity = declarationCapacity;
         ComputedStyleCapacity = computedStyleCapacity;
+        ExternalStylesheetCapacity = externalStylesheetCapacity;
     }
 
     public static ManagedCssArenaOptions Default => new(
@@ -235,17 +270,20 @@ public readonly struct ManagedCssArenaOptions
     public int SelectorStepCapacity { get; }
     public int DeclarationCapacity { get; }
     public int ComputedStyleCapacity { get; }
+    public int ExternalStylesheetCapacity { get; }
 
     private static void Validate(int stylesheetCapacity, int ruleCapacity,
                                  int selectorCapacity, int selectorStepCapacity,
-                                 int declarationCapacity, int computedStyleCapacity)
+                                 int declarationCapacity, int computedStyleCapacity,
+                                 int externalStylesheetCapacity)
     {
         if (stylesheetCapacity <= 0 || stylesheetCapacity > ManagedCssLimits.MaximumStylesheetCapacity ||
             ruleCapacity <= 0 || ruleCapacity > ManagedCssLimits.MaximumRuleCapacity ||
             selectorCapacity <= 0 || selectorCapacity > ManagedCssLimits.MaximumSelectorCapacity ||
             selectorStepCapacity <= 0 || selectorStepCapacity > ManagedCssLimits.MaximumSelectorStepCapacity ||
             declarationCapacity <= 0 || declarationCapacity > ManagedCssLimits.MaximumDeclarationCapacity ||
-            computedStyleCapacity <= 0 || computedStyleCapacity > ManagedCssLimits.MaximumComputedStyleCapacity)
+            computedStyleCapacity <= 0 || computedStyleCapacity > ManagedCssLimits.MaximumComputedStyleCapacity ||
+            externalStylesheetCapacity <= 0 || externalStylesheetCapacity > ManagedCssLimits.MaximumExternalStylesheetCapacity)
             throw new ArgumentOutOfRangeException(nameof(ruleCapacity));
     }
 }
@@ -260,7 +298,7 @@ public static class ManagedCssLimits
     public const int DefaultAttributeSelectorCapacity = 256;
     public const int DefaultDeclarationCapacity = 1024;
     public const int DefaultComputedStyleCapacity = 1024;
-    public const int DefaultExternalStylesheetCapacity = 16;
+    public const int DefaultExternalStylesheetCapacity = 4;
     public const int SelectorNameCapacity = 16_384;
     public const int MaximumSelectorSteps = 8;
     public const int MaximumClassesPerStep = 8;
@@ -276,6 +314,9 @@ public static class ManagedCssLimits
     public const int MaximumSelectorStepCapacity = 8192;
     public const int MaximumDeclarationCapacity = 16_384;
     public const int MaximumComputedStyleCapacity = 4096;
+    public const int MaximumExternalStylesheetCapacity = 16;
+    public const int MaximumStreamingRuleScalars = 16_384;
+    public const int MaximumExternalStylesheetHrefLength = 512;
 }
 
 public readonly struct ManagedCssTelemetry
@@ -307,6 +348,7 @@ public readonly struct ManagedCssTelemetry
         SelectorCapacity = engine.SelectorCapacity;
         DeclarationCapacity = engine.DeclarationCapacity;
         ComputedStyleCapacity = engine.ComputedStyleCapacity;
+        ExternalStylesheetCapacity = engine.ExternalStylesheetCapacity;
         StylesheetPeak = engine.StylesheetPeak;
         RulePeak = engine.RulePeak;
         SelectorPeak = engine.SelectorPeak;
@@ -339,6 +381,7 @@ public readonly struct ManagedCssTelemetry
     public int SelectorCapacity { get; }
     public int DeclarationCapacity { get; }
     public int ComputedStyleCapacity { get; }
+    public int ExternalStylesheetCapacity { get; }
     public int StylesheetPeak { get; }
     public int RulePeak { get; }
     public int SelectorPeak { get; }
@@ -599,6 +642,11 @@ public sealed class ManagedCssEngine
     private readonly byte[] _propertyScratch = new byte[64];
     private readonly uint[] _externalRelScratch = new uint[64];
     private readonly byte[] _externalHrefScratch = new byte[ManagedCssLimits.MaximumValueLength];
+    /* This is a single-rule window, never a stylesheet buffer.  Comments are
+       discarded while they cross the window, and completed rules are
+       committed directly to the normal selector/declaration arenas. */
+    private readonly uint[] _streamRuleScratch =
+        new uint[ManagedCssLimits.MaximumStreamingRuleScalars];
     private readonly byte[] _styleHash = new byte[ManagedSha256.DigestSize];
     private readonly ManagedSha256 _hash = new();
     private ManagedCssParseFailureReason _failureReason;
@@ -611,11 +659,21 @@ public sealed class ManagedCssEngine
     private int _attributeSelectorCount;
     private int _declarationCount;
     private int _externalCount;
+    private int _streamStylesheetIndex;
+    private int _streamRuleLength;
+    private int _streamBraceDepth;
+    private bool _streamSawOpenBrace;
+    private bool _streamInComment;
+    private bool _streamCommentStar;
+    private bool _streamPendingSlash;
+    private bool _streamActive;
+    private int _streamScalarsConsumed;
     private int _nameUsed;
     private int _sourceOrder;
     private int _matchGeneration;
     private bool _styled;
     private bool _styleHashAvailable;
+    private bool _freshlyPrimed;
     private int _stylesheetsPeak;
     private int _rulesPeak;
     private int _selectorsPeak;
@@ -659,7 +717,7 @@ public sealed class ManagedCssEngine
             ManagedCssLimits.DefaultAttributeSelectorCapacity, options.SelectorStepCapacity / 2 + 1)];
         _declarations = new ManagedCssDeclarationRecord[options.DeclarationCapacity];
         _inline = new ManagedCssInlineRecord[options.ComputedStyleCapacity];
-        _external = new ManagedCssExternalStylesheetRecord[ManagedCssLimits.DefaultExternalStylesheetCapacity];
+        _external = new ManagedCssExternalStylesheetRecord[options.ExternalStylesheetCapacity];
         _computed = new ManagedComputedStyle[options.ComputedStyleCapacity];
         _matchedRules = new int[options.ComputedStyleCapacity];
         _winners = new ManagedCssCascadeCandidate[(int)ManagedCssProperty.Count];
@@ -672,20 +730,31 @@ public sealed class ManagedCssEngine
     internal static bool PrimeNativeKernelArenas()
     {
         if (s_nativeKernelDefaultArena == null)
+        {
             s_nativeKernelDefaultArena = new ManagedCssEngine(
                 null, ManagedCssArenaOptions.Default, true);
+        }
         return true;
     }
 
     internal static ManagedCssEngine? TakeNativeKernelArena(
-        ManagedHtmlDocument document, bool capacityControl)
+        ManagedHtmlDocument document, bool capacityControl, bool reset = true)
     {
         ManagedCssEngine? engine = s_nativeKernelDefaultArena;
         s_nativeKernelDefaultArena = null;
         if (engine == null) return null;
         engine._document = document;
         engine._ruleCapacityLimit = capacityControl ? 1 : engine._rules.Length;
-        engine.Reset();
+        /* A freshly primed arena is already zeroed by its constructor.  The
+           guest page proof takes that arena before any CSS has been parsed;
+           skipping a second full-arena clear avoids doing a large managed
+           memory walk in the driver-start path. */
+        if (reset) engine.Reset();
+        else
+        {
+            engine.PrepareForReuse();
+            engine._freshlyPrimed = true;
+        }
         return engine;
     }
 
@@ -697,6 +766,7 @@ public sealed class ManagedCssEngine
     public int SelectorCapacity => _selectors.Length;
     public int DeclarationCapacity => _declarations.Length;
     public int ComputedStyleCapacity => _computed.Length;
+    public int ExternalStylesheetCapacity => _external.Length;
     public int StylesheetsParsed => _stylesheetCount;
     public int RulesParsed => _ruleCount;
     public int SelectorsParsed => _selectorCount;
@@ -740,21 +810,8 @@ public sealed class ManagedCssEngine
         return ComputeStyleHash();
     }
 
-    public void Reset()
+    private void PrepareForReuse()
     {
-        _stylesheets.AsSpan().Clear();
-        _rules.AsSpan().Clear();
-        _selectors.AsSpan().Clear();
-        _steps.AsSpan().Clear();
-        _classes.AsSpan().Clear();
-        _attributeSelectors.AsSpan().Clear();
-        _declarations.AsSpan().Clear();
-        _inline.AsSpan().Clear();
-        _external.AsSpan().Clear();
-        _computed.AsSpan().Clear();
-        _matchedRules.AsSpan().Clear();
-        _selectorNames.AsSpan().Clear();
-        _matchVisited.AsSpan().Clear();
         _failureReason = ManagedCssParseFailureReason.None;
         _stylesheetCount = 0;
         _ruleCount = 0;
@@ -764,11 +821,21 @@ public sealed class ManagedCssEngine
         _attributeSelectorCount = 0;
         _declarationCount = 0;
         _externalCount = 0;
+        _streamStylesheetIndex = -1;
+        _streamRuleLength = 0;
+        _streamBraceDepth = 0;
+        _streamSawOpenBrace = false;
+        _streamInComment = false;
+        _streamCommentStar = false;
+        _streamPendingSlash = false;
+        _streamActive = false;
+        _streamScalarsConsumed = 0;
         _nameUsed = 0;
         _sourceOrder = 0;
         _matchGeneration = 0;
         _styled = false;
         _styleHashAvailable = false;
+        _freshlyPrimed = false;
         _stylesheetsPeak = 0;
         _rulesPeak = 0;
         _selectorsPeak = 0;
@@ -789,6 +856,24 @@ public sealed class ManagedCssEngine
         _rulesSkipped = 0;
         _declarationsSkipped = 0;
         _maximumSelectorDepth = 0;
+    }
+
+    public void Reset()
+    {
+        _stylesheets.AsSpan().Clear();
+        _rules.AsSpan().Clear();
+        _selectors.AsSpan().Clear();
+        _steps.AsSpan().Clear();
+        _classes.AsSpan().Clear();
+        _attributeSelectors.AsSpan().Clear();
+        _declarations.AsSpan().Clear();
+        _inline.AsSpan().Clear();
+        _external.AsSpan().Clear();
+        _computed.AsSpan().Clear();
+        _matchedRules.AsSpan().Clear();
+        _selectorNames.AsSpan().Clear();
+        _matchVisited.AsSpan().Clear();
+        PrepareForReuse();
         _styleHash.AsSpan().Clear();
         _hash.Reset();
     }
@@ -800,6 +885,157 @@ public sealed class ManagedCssEngine
         ManagedCssInput input = ManagedCssInput.FromSpan(source);
         return ParseStylesheet(ref input, _stylesheetCount - 1) &&
                _failureReason == ManagedCssParseFailureReason.None;
+    }
+
+    /// <summary>
+    /// Starts one external stylesheet in the same CSS arenas used by
+    /// embedded styles.  Callers feed decoded scalar windows with
+    /// <see cref="AppendExternalStylesheet"/> and finish with
+    /// <see cref="CompleteExternalStylesheet"/>.  No stylesheet-sized input
+    /// is retained.
+    /// </summary>
+    public bool BeginExternalStylesheet()
+    {
+        if (_failureReason != ManagedCssParseFailureReason.None || _streamActive)
+            return false;
+        if (!BeginStylesheet(-1)) return false;
+        _streamStylesheetIndex = _stylesheetCount - 1;
+        _streamRuleLength = 0;
+        _streamBraceDepth = 0;
+        _streamSawOpenBrace = false;
+        _streamInComment = false;
+        _streamCommentStar = false;
+        _streamPendingSlash = false;
+        _streamScalarsConsumed = 0;
+        _streamActive = true;
+        return true;
+    }
+
+    /// <summary>Feeds one bounded decoded scalar window to the CSS parser.</summary>
+    public bool AppendExternalStylesheet(ReadOnlySpan<uint> scalars)
+    {
+        if (!_streamActive || _failureReason != ManagedCssParseFailureReason.None)
+            return false;
+        for (int index = 0; index != scalars.Length; ++index)
+        {
+            if (!AppendExternalScalar(scalars[index])) return false;
+            ++_streamScalarsConsumed;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Finishes the current external stylesheet.  Malformed trailing CSS is
+    /// handled by the existing recoverable parser policy; arena failures are
+    /// preserved verbatim.
+    /// </summary>
+    public bool CompleteExternalStylesheet()
+    {
+        if (!_streamActive || _failureReason != ManagedCssParseFailureReason.None)
+            return false;
+        if (_streamPendingSlash && !AppendStreamRuleScalar('/')) return false;
+        _streamPendingSlash = false;
+        if (_streamInComment)
+        {
+            _streamInComment = false;
+            _streamCommentStar = false;
+        }
+        if (_streamRuleLength != 0)
+        {
+            if (!ParseStreamRule()) return false;
+            _streamRuleLength = 0;
+        }
+        _streamActive = false;
+        UpdatePeaks();
+        return _failureReason == ManagedCssParseFailureReason.None;
+    }
+
+    /// <summary>Aborts a streaming stylesheet without committing more input.</summary>
+    public void CancelExternalStylesheet()
+    {
+        if (!_streamActive) return;
+        _streamActive = false;
+        _streamRuleLength = 0;
+        _streamBraceDepth = 0;
+        _streamSawOpenBrace = false;
+        _streamInComment = false;
+        _streamCommentStar = false;
+        _streamPendingSlash = false;
+    }
+
+    public int ExternalStylesheetScalarsConsumed => _streamScalarsConsumed;
+    public bool IsExternalStylesheetStreaming => _streamActive;
+
+    /// <summary>Begins one embedded stylesheet at its document-order position.</summary>
+    public bool TryParseEmbeddedStylesheet(ManagedHtmlNodeHandle style)
+    {
+        if (_failureReason != ManagedCssParseFailureReason.None ||
+            !_document.IsValid(style) ||
+            _document.GetNodeKind(style) != ManagedHtmlNodeKind.Element ||
+            _document.GetElementTag(style) != ManagedHtmlTag.Style)
+            return false;
+        if (!BeginStylesheet(style.Index)) return false;
+        ManagedCssInput input = ManagedCssInput.FromTextChildren(_document, style);
+        return ParseStylesheet(ref input, _stylesheetCount - 1) &&
+               _failureReason == ManagedCssParseFailureReason.None;
+    }
+
+    /// <summary>Resets and begins incremental author stylesheet processing.</summary>
+    public bool BeginAuthorStyles()
+    {
+        if (_freshlyPrimed) _freshlyPrimed = false;
+        else Reset();
+        return _document != null && _document.IsValid(_document.DocumentNode);
+    }
+
+    /// <summary>Parses inline attributes after all author stylesheet sources.</summary>
+    public bool CompleteAuthorStyles()
+    {
+        if (_streamActive || _failureReason != ManagedCssParseFailureReason.None ||
+            !ParseInlineStyles() || !ComputeStyles()) return false;
+        _styled = true;
+        return ComputeStyleHash();
+    }
+
+    /// <summary>
+    /// Reads one style source descriptor without constructing a node list.
+    /// Alternate stylesheets are described but are intentionally not loaded by
+    /// the Phase 51 orchestrator.
+    /// </summary>
+    public bool TryGetStyleSource(int nodeIndex, out ManagedCssStyleSource source)
+    {
+        source = default;
+        ManagedHtmlNodeHandle node = NodeHandle(nodeIndex);
+        if (node == ManagedHtmlNodeHandle.Invalid ||
+            _document.GetNodeKind(node) != ManagedHtmlNodeKind.Element)
+            return false;
+        ManagedHtmlTag tag = _document.GetElementTag(node);
+        if (tag == ManagedHtmlTag.Style)
+        {
+            source = new(ManagedCssStyleSourceKind.Embedded, node, false,
+                         false, false, 0);
+            return true;
+        }
+        if (tag != ManagedHtmlTag.Link ||
+            !_document.TryFindAttribute(node, ManagedHtmlAttributeName.Rel,
+                                        out ManagedHtmlAttributeView rel) ||
+            !_document.TryCopyAttributeValue(node, rel.Index, _externalRelScratch,
+                                             out int relLength, out bool relHasValue) ||
+            !relHasValue || !_ContainsAsciiToken(_externalRelScratch.AsSpan(0, relLength),
+                                                  "stylesheet"u8))
+            return false;
+        bool alternate = _ContainsAsciiToken(_externalRelScratch.AsSpan(0, relLength),
+                                             "alternate"u8);
+        bool hasHref = _document.TryFindAttribute(node, ManagedHtmlAttributeName.Href,
+                                                   out ManagedHtmlAttributeView href) &&
+                       href.HasValue;
+        int hrefLength = hasHref ? href.ValueLength : 0;
+        bool hasType = _document.TryFindAttribute(node, ManagedHtmlAttributeName.Type,
+                                                   out ManagedHtmlAttributeView type) &&
+                       type.HasValue;
+        source = new(ManagedCssStyleSourceKind.External, node, alternate,
+                     hasHref, hasType, hrefLength);
+        return true;
     }
 
     public bool TryGetComputedStyle(ManagedHtmlNodeHandle handle,
@@ -2579,6 +2815,84 @@ public sealed class ManagedCssEngine
         }
     }
 
+    private bool AppendExternalScalar(uint scalar)
+    {
+        if (_streamInComment)
+        {
+            if (_streamCommentStar && scalar == '/')
+            {
+                _streamInComment = false;
+                _streamCommentStar = false;
+            }
+            else _streamCommentStar = scalar == '*';
+            return true;
+        }
+
+        if (_streamPendingSlash)
+        {
+            _streamPendingSlash = false;
+            if (scalar == '*')
+            {
+                /* CSS comments behave as a separator.  Only this one scalar
+                   is retained; comment bodies never enter the scratch. */
+                if (!AppendStreamRuleScalar(' ')) return false;
+                _streamInComment = true;
+                _streamCommentStar = false;
+                return true;
+            }
+            if (!AppendStreamRuleScalar('/')) return false;
+        }
+
+        if (scalar == '/')
+        {
+            _streamPendingSlash = true;
+            return true;
+        }
+        if (!AppendStreamRuleScalar(scalar)) return false;
+        if (scalar == '{')
+        {
+            ++_streamBraceDepth;
+            _streamSawOpenBrace = true;
+        }
+        else if (scalar == '}' && _streamBraceDepth != 0)
+        {
+            --_streamBraceDepth;
+            if (_streamBraceDepth == 0 && _streamSawOpenBrace)
+            {
+                if (!ParseStreamRule()) return false;
+                _streamRuleLength = 0;
+                _streamSawOpenBrace = false;
+            }
+        }
+        else if (scalar == ';' && !_streamSawOpenBrace)
+        {
+            /* @charset/@import and malformed top-level statements are
+               consumed by the existing at-rule recovery path. */
+            if (!ParseStreamRule()) return false;
+            _streamRuleLength = 0;
+        }
+        return true;
+    }
+
+    private bool AppendStreamRuleScalar(uint scalar)
+    {
+        if (_streamRuleLength == _streamRuleScratch.Length)
+        {
+            _failureReason = ManagedCssParseFailureReason.ValueTooLong;
+            return false;
+        }
+        _streamRuleScratch[_streamRuleLength++] = scalar;
+        return true;
+    }
+
+    private bool ParseStreamRule()
+    {
+        if (_streamRuleLength == 0) return true;
+        ManagedCssInput input = ManagedCssInput.FromSpan(
+            _streamRuleScratch.AsSpan(0, _streamRuleLength));
+        return ParseStylesheet(ref input, _streamStylesheetIndex);
+    }
+
     private void UpdatePeaks()
     {
         if (_ruleCount > _rulesPeak) _rulesPeak = _ruleCount;
@@ -2605,9 +2919,13 @@ public sealed class ManagedCssEngine
     {
         if (value.Length != expected.Length) return false;
         for (int index = 0; index != value.Length; ++index)
-            if (value[index] > 0x7F || (byte)value[index] != expected[index]) return false;
+            if (value[index] > 0x7F ||
+                ToAsciiLower((byte)value[index]) != ToAsciiLower(expected[index])) return false;
         return true;
     }
+
+    private static byte ToAsciiLower(byte value) =>
+        value is >= (byte)'A' and <= (byte)'Z' ? (byte)(value + ('a' - 'A')) : value;
 
     private ManagedHtmlNodeHandle NodeHandle(int index)
     {

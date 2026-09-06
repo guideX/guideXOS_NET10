@@ -1014,7 +1014,8 @@ public enum ManagedTextFailureReason : byte
     TransportFailure = 17,
     TlsFailure = 18,
     TeardownFailure = 19,
-    RequestFailure = 20
+    RequestFailure = 20,
+    HttpFailure = 21
 }
 
 public readonly struct ManagedTextProgressSnapshot
@@ -1085,6 +1086,8 @@ public sealed class ManagedTextResourceRequest
     private readonly ManagedResourceRequest _resource;
     private readonly bool _allowUnknownMime;
     private readonly bool _allowBinaryMime;
+    private readonly ManagedMimeClassification _requiredMime;
+    private readonly bool _requireSuccessfulStatus;
     private readonly ManagedTextResourceAdapter _adapter;
     private readonly ManagedResourceSha256Consumer _resourceHash = new();
     private readonly ManagedResourceCompositeConsumer _resourceConsumer;
@@ -1105,10 +1108,14 @@ public sealed class ManagedTextResourceRequest
     public ManagedTextResourceRequest(ManagedNetworkService service,
                                       int maximumEntityLength = ManagedHttpLimits.MaximumStreamedBodyLength,
                                       int maximumDecodedResourceLength = ManagedContentEncodingLimits.MaximumDecodedResourceLength,
-                                      bool allowUnknownMime = false, bool allowBinaryMime = false)
+                                      bool allowUnknownMime = false, bool allowBinaryMime = false,
+                                      ManagedMimeClassification requiredMime = ManagedMimeClassification.Unknown,
+                                      bool requireSuccessfulStatus = false)
     {
         _resource = new(service, maximumEntityLength, maximumDecodedResourceLength);
         _allowUnknownMime = allowUnknownMime; _allowBinaryMime = allowBinaryMime;
+        _requiredMime = requiredMime;
+        _requireSuccessfulStatus = requireSuccessfulStatus;
         _adapter = new(this); _resourceConsumer = new(_adapter, _resourceHash); _state = ManagedResourceState.Idle;
     }
 
@@ -1117,10 +1124,14 @@ public sealed class ManagedTextResourceRequest
                                       ManagedHttpsValidationTime validationTime,
                                       int maximumEntityLength = ManagedHttpLimits.MaximumStreamedBodyLength,
                                       int maximumDecodedResourceLength = ManagedContentEncodingLimits.MaximumDecodedResourceLength,
-                                      bool allowUnknownMime = false, bool allowBinaryMime = false)
+                                      bool allowUnknownMime = false, bool allowBinaryMime = false,
+                                      ManagedMimeClassification requiredMime = ManagedMimeClassification.Unknown,
+                                      bool requireSuccessfulStatus = false)
     {
         _resource = new(service, trustedRoot, validationTime, maximumEntityLength, maximumDecodedResourceLength);
         _allowUnknownMime = allowUnknownMime; _allowBinaryMime = allowBinaryMime;
+        _requiredMime = requiredMime;
+        _requireSuccessfulStatus = requireSuccessfulStatus;
         _adapter = new(this); _resourceConsumer = new(_adapter, _resourceHash); _state = ManagedResourceState.Idle;
     }
 
@@ -1132,11 +1143,15 @@ public sealed class ManagedTextResourceRequest
                                         bool compactTlsProfile,
                                         int maximumDecodedResourceLength,
                                         bool allowUnknownMime = false,
-                                        bool allowBinaryMime = false)
+                                        bool allowBinaryMime = false,
+                                        ManagedMimeClassification requiredMime = ManagedMimeClassification.Unknown,
+                                        bool requireSuccessfulStatus = false)
     {
         _resource = new(service, trustedRoot, in validationTime, random,
                          maximumEntityLength, compactTlsProfile, maximumDecodedResourceLength);
         _allowUnknownMime = allowUnknownMime; _allowBinaryMime = allowBinaryMime;
+        _requiredMime = requiredMime;
+        _requireSuccessfulStatus = requireSuccessfulStatus;
         _adapter = new(this); _resourceConsumer = new(_adapter, _resourceHash); _state = ManagedResourceState.Idle;
     }
 
@@ -1147,6 +1162,12 @@ public sealed class ManagedTextResourceRequest
     public ManagedTextCharset Charset => _charset;
     public ManagedTextCharsetSource CharsetSource => _charsetSource;
     public ManagedMimeClassification MimeClassification => _mime;
+    public ManagedMimeClassification RequiredMime => _requiredMime;
+    public bool RequiresSuccessfulStatus => _requireSuccessfulStatus;
+    public ManagedHttpsUrl FinalUrl => _resource.FinalUrl;
+    public int RedirectCount => _resource.RedirectCount;
+    internal NetworkTcpState TcpState => _resource.TcpState;
+    internal bool ResponseBodyComplete => _resource.ResponseBodyComplete;
     public ManagedTextProgressSnapshot Progress => CreateProgress();
     public NetworkOperationResult BeginGet(ReadOnlySpan<byte> hostname,
                                            ReadOnlySpan<byte> path,
@@ -1264,6 +1285,18 @@ public sealed class ManagedTextResourceRequest
         else metadata = ManagedContentTypeParser.Parse(_contentType.AsSpan(0, length));
         _mime = metadata.Classification;
         if (metadata.IsMalformed) { Fail(ManagedTextFailureReason.MalformedContentType); return; }
+        if (_requireSuccessfulStatus &&
+            (available.StatusCode < 200 || available.StatusCode >= 300))
+        {
+            Fail(ManagedTextFailureReason.HttpFailure);
+            return;
+        }
+        if (_requiredMime != ManagedMimeClassification.Unknown &&
+            _mime != _requiredMime)
+        {
+            Fail(ManagedTextFailureReason.UnsupportedMime);
+            return;
+        }
         if ((_mime == ManagedMimeClassification.Binary && !_allowBinaryMime) ||
             (_mime == ManagedMimeClassification.Unknown && !_allowUnknownMime)) { Fail(ManagedTextFailureReason.UnsupportedMime); return; }
         if (metadata.CharsetState == ManagedCharsetDeclarationState.Unsupported) { _charsetSource = ManagedTextCharsetSource.Unsupported; Fail(ManagedTextFailureReason.UnsupportedCharset); return; }

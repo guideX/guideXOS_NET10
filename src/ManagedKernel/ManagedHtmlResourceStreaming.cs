@@ -197,10 +197,13 @@ public sealed class ManagedHtmlResourceRequest
 
     public ManagedHtmlResourceRequest(ManagedNetworkService service,
                                       int maximumEntityLength = ManagedHttpLimits.MaximumStreamedBodyLength,
-                                      int maximumDecodedResourceLength = ManagedContentEncodingLimits.MaximumDecodedResourceLength)
+                                      int maximumDecodedResourceLength = ManagedContentEncodingLimits.MaximumDecodedResourceLength,
+                                      bool requireSuccessfulStatus = false)
     {
         _text = new ManagedTextResourceRequest(service, maximumEntityLength,
-                                                maximumDecodedResourceLength);
+                                                maximumDecodedResourceLength,
+                                                requiredMime: ManagedMimeClassification.Unknown,
+                                                requireSuccessfulStatus: requireSuccessfulStatus);
         _scalarAdapter = new(this);
         _state = ManagedResourceState.Idle;
     }
@@ -209,11 +212,14 @@ public sealed class ManagedHtmlResourceRequest
                                       ReadOnlySpan<byte> trustedRoot,
                                       ManagedHttpsValidationTime validationTime,
                                       int maximumEntityLength = ManagedHttpLimits.MaximumStreamedBodyLength,
-                                      int maximumDecodedResourceLength = ManagedContentEncodingLimits.MaximumDecodedResourceLength)
+                                      int maximumDecodedResourceLength = ManagedContentEncodingLimits.MaximumDecodedResourceLength,
+                                      bool requireSuccessfulStatus = false)
     {
         _text = new ManagedTextResourceRequest(service, trustedRoot, validationTime,
                                                 maximumEntityLength,
-                                                maximumDecodedResourceLength);
+                                                maximumDecodedResourceLength,
+                                                requiredMime: ManagedMimeClassification.Unknown,
+                                                requireSuccessfulStatus: requireSuccessfulStatus);
         _scalarAdapter = new(this);
         _state = ManagedResourceState.Idle;
     }
@@ -224,13 +230,16 @@ public sealed class ManagedHtmlResourceRequest
                                         ManagedSecureRandom random,
                                         int maximumEntityLength,
                                         bool compactTlsProfile,
-                                        int maximumDecodedResourceLength)
+                                        int maximumDecodedResourceLength,
+                                        bool requireSuccessfulStatus = false)
     {
         _text = new ManagedTextResourceRequest(service, trustedRoot,
                                                 in validationTime, random,
                                                 maximumEntityLength,
                                                 compactTlsProfile,
-                                                maximumDecodedResourceLength);
+                                                maximumDecodedResourceLength,
+                                                requiredMime: ManagedMimeClassification.Unknown,
+                                                requireSuccessfulStatus: requireSuccessfulStatus);
         _scalarAdapter = new(this);
         _tokenizer = TakeNativeKernelTokenizer();
         _state = ManagedResourceState.Idle;
@@ -251,8 +260,14 @@ public sealed class ManagedHtmlResourceRequest
     }
 
     public ManagedResourceState State => _state;
+    public ManagedResourceProtocol Protocol => _text.Protocol;
+    public bool RequiresSuccessfulStatus => _text.RequiresSuccessfulStatus;
     public ManagedHtmlFailureReason FailureReason => _failureReason;
     public ManagedTextFailureReason TextFailureReason => _text.FailureReason;
+    public ManagedHttpsUrl FinalUrl => _text.FinalUrl;
+    public int RedirectCount => _text.RedirectCount;
+    internal NetworkTcpState TcpState => _text.TcpState;
+    internal bool ResponseBodyComplete => _text.ResponseBodyComplete;
     public ManagedHtmlProgressSnapshot Progress => CreateProgress();
     public ManagedHtmlTokenizer Tokenizer => _tokenizer!;
     public ManagedHtmlTreeBuilder? TreeBuilder => _consumer as ManagedHtmlTreeBuilder;
@@ -491,6 +506,8 @@ public sealed class ManagedHtmlResourceRequest
             case ManagedTextFailureReason.TeardownFailure:
                 _failureReason = ManagedHtmlFailureReason.TeardownFailure; break;
             case ManagedTextFailureReason.RequestFailure:
+                _failureReason = ManagedHtmlFailureReason.RequestFailure; break;
+            case ManagedTextFailureReason.HttpFailure:
                 _failureReason = ManagedHtmlFailureReason.RequestFailure; break;
             default:
                 MapTokenizerFailure(); break;

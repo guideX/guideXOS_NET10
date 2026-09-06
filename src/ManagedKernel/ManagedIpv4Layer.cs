@@ -97,6 +97,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private ManagedPhase41TextProof? _phase41Consumer;
     private ManagedPhase42HtmlProof? _phase42Consumer;
     private ManagedPhase43HtmlProof? _phase43Consumer;
+    private ManagedPhase51HtmlProof? _phase51Consumer;
     private readonly ManagedTcpConnection _tcp;
     private uint _localIpv4Value;
     private uint _peerIpv4Value;
@@ -138,6 +139,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase48Passed;
     private bool _phase49Passed;
     private bool _phase50Passed;
+    private bool _phase51Passed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -218,6 +220,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase48Passed => _phase48Passed;
     internal bool Phase49Passed => _phase49Passed;
     internal bool Phase50Passed => _phase50Passed;
+    internal bool Phase51Passed => _phase51Passed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -1032,6 +1035,57 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
 
     internal bool TryRunPhase50() =>
         TryRunPhase44Core(false, true, true, true, true, true);
+
+    internal bool TryRunPhase51()
+    {
+        if (_phase51Passed || _active || _networkService == null)
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE51_IPV4_GUARD_FAILED\r\n"u8);
+            return false;
+        }
+        _phase51Consumer ??= new ManagedPhase51HtmlProof(_networkService);
+        if (!_arp.TryBeginDhcp())
+        {
+            KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE51_ARP_DHCP_BEGIN_FAILED\r\n"u8);
+            return false;
+        }
+        _active = true;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _pending.Clear();
+        _localIpv4.AsSpan().Clear();
+        _subnetMask.AsSpan().Clear();
+        _gatewayIpv4.AsSpan().Clear();
+        _localIpv4Value = 0;
+        _subnetMaskValue = 0;
+        _gatewayIpv4Value = 0;
+        _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_BEGIN\r\n"u8) ||
+            !TryRunDhcpDora(requireDnsServer: true, requireGateway: false) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_DHCP_COMPLETE\r\n"u8) ||
+            !_udpEndpoints.TryUnregister(DhcpClientPort) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_DHCP_UNREGISTERED\r\n"u8) ||
+            !_udpEndpoints.TryRegister(DnsClientPort,
+                                       ManagedUdpEndpointHandler.DnsResolver) ||
+            !PublishNetworkServiceStatus() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_CONFIGURED\r\n"u8) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE51_IPV4=0x"u8,
+                                    _localIpv4Value) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE51_SUBNET=0x"u8,
+                                    _subnetMaskValue) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE51_GATEWAY=0x"u8,
+                                    _gatewayIpv4Value) ||
+            !KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE51_DNS=0x"u8,
+                                    DnsServerValue))
+            return false;
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        if (!_phase51Consumer.TryRun()) return false;
+        _phase51Passed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_PASS\r\n"u8);
+    }
 
     private bool TryRunPhase44Core(bool capacityControl, bool layoutMode, bool paintMode = false,
                                    bool fontMode = false, bool presentationMode = false,
