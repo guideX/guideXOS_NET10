@@ -17,6 +17,7 @@ internal static class Program
             ValidatorCoverage();
             LayoutPaintIntegration();
             RasterCoverageAndBaseline();
+            CurrentPhase48SceneRasterRegression();
             IsolatedProofRegression();
             Console.WriteLine($"MANAGED_KERNEL_PHASE48_HOST_TESTS_PASS cases={s_cases}");
             return 0;
@@ -244,6 +245,64 @@ internal static class Program
               "proof-scaling-preserved");
         Check(scaled.GetCoverage(0, 0) == 0 && scaled.GetCoverage(0, 4) == 255,
               "proof-coverage-adapter");
+    }
+
+    private static void CurrentPhase48SceneRasterRegression()
+    {
+        const string css = "body{display:block;font-size:16px;color:#204060;margin:8px;padding:4px;overflow-x:hidden}" +
+            "#main{display:block;width:75%;min-width:320px;max-width:700px;margin:10px 12px 14px 16px;padding:8px 9px 10px 11px;border-width:2px;border-style:solid;border-color:#112233;position:relative;overflow:hidden;opacity:.5;z-index:1}" +
+            "article{display:block}.note{margin-top:5px;opacity:.5;background-color:#123456}.inline{display:inline;font-weight:bold}" +
+            ".hidden{visibility:hidden;background-color:red}.gone{display:none;background-color:blue}pre{display:block;white-space:pre-wrap}" +
+            ".neg{display:block;position:fixed;top:4px;left:6px;width:40px;height:12px;z-index:-1;background-color:blue;border-width:1px;border-style:solid;border-color:white}" +
+            ".pos{display:block;position:absolute;top:8px;left:10px;width:42px;height:12px;z-index:2;background-color:green}" +
+            "table{display:table}tr{display:table-row}td{display:table-cell}";
+        const string body = "<main id=main><article><h1>Bounded display list</h1><p class=note>Phase 48 <span class=inline>semantic paint commands</span> stay bounded and deterministic.<br>Second line.</p>" +
+            "<p>Unicode: R&#233;sum&#233; &#955;&#951; &#20013; &#9733; &#128578;.</p><pre id=pre>pre line one\r\npre line two with preserved spaces</pre>" +
+            "<img id=logo width=32 height=16 alt=logo><div class=hidden><span>hidden descendant</span></div><div class=gone>must not produce a box</div>" +
+            "<div class=neg>negative z</div><div class=pos>positive z</div><table><tr><td>A</td><td>B</td></tr></table></article></main>";
+        ManagedHtmlTreeBuilder builder = Parse(
+            "<!doctype html><html><head><title>GuideX Phase 48</title><style>" + css +
+            "</style></head><body>" + body + "</body></html>");
+        ManagedCssEngine cssEngine = new(builder.Document);
+        Check(cssEngine.TryStyle(), "phase48-scene-style");
+        ManagedPhase48FontRegistry registry = ManagedPhase48FontRegistry.Instance;
+        registry.ResetTelemetry();
+        ManagedLayoutEngine layout = new(builder.Document, cssEngine,
+            ManagedLayoutArenaOptions.Default, registry);
+        Scene scene = new(builder, cssEngine, layout);
+        Check(scene.Layout.TryLayout(800, 600) && scene.Layout.Validate(out _),
+              "phase48-scene-layout");
+        ManagedPaintEngine paint = new(scene.Layout, ManagedPaintArenaOptions.Default,
+                                       registry);
+        Check(paint.TryGenerate(800, 600) && paint.Validate(out _),
+              "phase48-scene-paint");
+        Check(paint.CommandsEmitted == 59, "phase48-scene-command-count");
+        uint[] storage = new uint[160 * 180];
+        ManagedSoftwareRasterizer rasterizer = new();
+        Check(rasterizer.TryRender(paint, new ManagedFramebuffer(storage, 160, 180),
+                                   registry,
+                                   new ManagedRasterRenderOptions(true, 0xFF101820U)),
+              "phase48-scene-raster");
+        Check(rasterizer.CommandsProcessed == 59 && rasterizer.HashValid &&
+              rasterizer.GlyphRequests > 0 && rasterizer.GlyphPixelsWritten > 0,
+              "phase48-scene-raster-telemetry");
+        Console.WriteLine($"MANAGED_KERNEL_PHASE48_SCENE_RASTER commands={rasterizer.CommandsProcessed} framebuffer=160x180 clear_pixels={rasterizer.ClearPixelsWritten} glyph_requests={rasterizer.GlyphRequests} glyph_pixels_considered={rasterizer.GlyphPixelsConsidered} glyph_pixels_written={rasterizer.GlyphPixelsWritten} total_pixels_written={rasterizer.TotalPixelsWritten}");
+        Span<byte> hash = stackalloc byte[ManagedSha256.DigestSize];
+        Check(rasterizer.TryCopyFramebufferHash(hash), "phase48-scene-raster-hash");
+        const string expectedFramebufferHash =
+            "78026946D7846617F13104ED2540526DE779A26F1B8EDE893BF5FF5A1BE3D624";
+        Check(Convert.ToHexString(hash) == expectedFramebufferHash,
+              "phase48-scene-raster-deterministic-hash");
+        Console.WriteLine($"MANAGED_KERNEL_PHASE48_SCENE_RASTER_HASH={expectedFramebufferHash}");
+        Span<byte> documentHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> styleHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> layoutHash = stackalloc byte[ManagedSha256.DigestSize];
+        Span<byte> paintHash = stackalloc byte[ManagedSha256.DigestSize];
+        Check(builder.TryCopyCanonicalHash(documentHash), "phase48-scene-document-hash");
+        Check(cssEngine.TryCopyCanonicalStyleHash(styleHash), "phase48-scene-style-hash");
+        Check(layout.TryCopyCanonicalLayoutHash(layoutHash), "phase48-scene-layout-hash");
+        Check(paint.TryCopyCanonicalPaintHash(paintHash), "phase48-scene-paint-hash");
+        Console.WriteLine($"MANAGED_KERNEL_PHASE48_SCENE_HASHES document={Convert.ToHexString(documentHash)} style={Convert.ToHexString(styleHash)} layout={Convert.ToHexString(layoutHash)} paint={Convert.ToHexString(paintHash)}");
     }
 
     private static int Measure(ManagedPhase48FontRegistry registry, string value,

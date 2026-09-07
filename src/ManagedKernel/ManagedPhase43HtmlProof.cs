@@ -738,6 +738,10 @@ internal sealed class ManagedPhase43HtmlProof
         const int width = 160;
         const int height = 180;
         uint clearColor = 0xFF101820U;
+        /* Phase 51D's eager CSS prime remains live while this legacy proof
+           owns its document-bound CSS engine.  Reclaim only the nursery
+           before the fixed caller framebuffer allocation. */
+        GC.Collect(0);
         uint[] storage = new uint[width * height];
         ManagedFramebuffer framebuffer = new(storage, width, height);
         ManagedPhase48FontRegistry fonts = ManagedPhase48FontRegistry.Instance;

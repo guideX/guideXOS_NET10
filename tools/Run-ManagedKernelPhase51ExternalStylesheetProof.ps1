@@ -65,6 +65,9 @@ function Require51([bool]$condition, [string]$message) {
 
 function Get-Hex51([string]$text, [string]$name) {
     $match = [regex]::Match($text, [regex]::Escape($name) + '=0x([0-9A-Fa-f]+)')
+    if (-not $match.Success) {
+        $match = [regex]::Match($text, [regex]::Escape($name) + '=([0-9]+)')
+    }
     Require51 $match.Success "Missing $name in serial evidence."
     return [Convert]::ToUInt64($match.Groups[1].Value, 16)
 }

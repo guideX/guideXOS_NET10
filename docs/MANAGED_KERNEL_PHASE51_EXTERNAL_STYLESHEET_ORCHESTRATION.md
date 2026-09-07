@@ -352,3 +352,80 @@ proof-only limits remain the fixed Phase 48–51 fixture sizes and the bounded
 font/Unicode fixtures. No repository-owned QEMU remains after cleanup; any
 remaining QEMU process is unrelated to this repository and is reported by the
 final process inventory.
+
+## Phase 51E closure — shared legacy raster allocation regression
+
+Phase 48–50 current-source guest proofs are now closed. The accepted historical
+source used the primed CSS arena, while Phase 51D intentionally changed the
+legacy Phase 43 proof constructor to a document-bound `new ManagedCssEngine`.
+With the eager prime still live, the current proof reached the same deterministic
+59-command scene but stopped at the framebuffer allocation immediately before
+`ManagedSoftwareRasterizer.TryRender`; the rasterizer itself was not entered.
+The command-level and glyph audits found no non-terminating raster loop, integer
+overflow, invalid glyph metadata, or framebuffer-bound violation. The attempted
+historical arena reuse instead stalled in `TryStyle` under the current source.
+
+The smallest evidenced correction is a generation-0 collection immediately before
+the fixed `uint[160 * 180]` caller-owned framebuffer allocation in
+`ManagedPhase43HtmlProof`. This releases nursery pressure from the duplicate
+current-source CSS construction without changing the Phase 47 API, capacities,
+clipping, source-over, z-order, fixed scroll, nested opacity, real-font metrics,
+Unicode coverage, or GOP presenter. The render remains bounded at 28,800
+framebuffer pixels; the current Phase 48 scene completes 59 commands, 189 glyph
+requests, 5,777 considered glyph pixels, 2,815 glyph pixels written, and 38,443
+total pixel writes.
+
+The exact host replay regression is
+`ManagedKernelPhase48HostTests.CurrentPhase48SceneRasterRegression`. It builds
+the same Phase 48 HTML/CSS scene, requires exactly 59 commands, renders into the
+160×180 framebuffer, and asserts the deterministic framebuffer hash
+`78026946D7846617F13104ED2540526DE779A26F1B8EDE893BF5FF5A1BE3D624`.
+The guest-only NativeAOT allocation behavior is covered by the fresh QEMU proofs;
+the host replay guards the exact finite display-list/raster semantics.
+
+Final current-source evidence:
+
+- Phase 48: `artifacts/phase51e-phase48-final-20260907-1129`, 3/3, payload
+  `45A921D66947563ABDEBB08CDEAC47017175CAB3820B3B3999AA8F3B05776B52`,
+  4,689,408 bytes; framebuffer hash
+  `78026946D7846617F13104ED2540526DE779A26F1B8EDE893BF5FF5A1BE3D624`.
+- Phase 49: `artifacts/phase51e-phase49-final-20260907`, 3/3, deterministic
+  screen raw hash `DF0B97385B8737A73C96B8F04651DEC4E326B49448FC4671F9BC9A7413D6F320`,
+  pixel hash `42B515730AE5A3549341B7DCB19FD09265202C15A5FA0312A8D61A71EE3EDF91`,
+  1280×800.
+- Phase 50: `artifacts/phase51e-phase50-final-20260907`, 3/3, font semantic
+  hash `4184C857A49DABEF9ED19BA97EB0DBF87879EAD873F835336149BADB0F7D094A`,
+  coverage flags `0x7`, 201 glyphs per face, 1,608 total glyphs, NBSP count 3,
+  screen hash `4359B06D9037BD3C25B9638F4810E8032517A8970F33736957B09DFEB36C9789`.
+- Phase 51 positive: `artifacts/phase51e-phase51-positive-final2-20260907`,
+  3/3; reset/reuse: `artifacts/phase51e-phase51-reset-reuse-final-20260907`,
+  1/1. The positive payload is
+  `25968A9A05CE6A2568B6FCECD059D6DF9406AC6EFF6F32D593A1BFD983D690FC`,
+  4,689,408 bytes. Source order remains external A → embedded style →
+  external B; external B wins equal-specificity color and geometry. The final
+  Phase 51 document/style/layout/paint/framebuffer/physical hashes remain the
+  accepted `9B20FEC68FEFB0EF49A4ED91C8D77BEA16C35613A3CCAD376AA2F0E697B46107`,
+  `A7C26D4AE91334D2FA89018254A027E9F827678C21EF36531FFD52716D6197B5`,
+  `A9653C355B93AE8DFBC6B5C12D13CC067CBC81E74624D70C79B7B5849E857A13`,
+  `643178D94EFCED13ACBD1647409D244653FB19C7FD9C22442FD09F5FD823B6F8`,
+  `4A0BE12669919BB7D3309AC9F11513706E61C5818076C6AB9908A96721FEA0C5`,
+  and `0FCBB759E9EA8166D6CC8F8976025EE933A82D21BBE8D897B8894E5805D9E862`.
+  Screen hashes remain raw
+  `5ABE0CBAD302CEB63906CC47AFBEEEFA83C9D1DF43356B63F19F8BD8B96985F9` and
+  pixels `B26DD5EDED47E5A870AE0E91D938511AE08F5A7093010A03AE3BBE7A22C40AB8`.
+
+Fresh host counts are Phase 47 = 955, Phase 48 = 698, Phase 49 = 694,
+Phase 50 = 683, and Phase 51 = 1,083, aggregate 4,113. The requested SDK
+remains 10.0.302; the installed fallback used is .NET SDK 10.0.400 with MSBuild
+18.9.6. The final NativeAOT payload is 4,689,408 bytes; no persistent memory
+capacity changed and the only runtime cost is one generation-0 collection at the
+legacy proof framebuffer allocation. The Phase 51 external stylesheet wrapper
+also accepts the proof's existing decimal `SOURCE_UNCHANGED=1` marker in its
+post-checker.
+
+Phase 47 host coverage remains green at 955. Its separate legacy guest wrapper
+was attempted in 3-run mode and stopped at `PHASE47_RASTER_BEGIN`; this does not
+share the Phase 48–50 proof allocation boundary and does not obscure the 3/3
+Phase 48, 49, and 50 guest proofs. No temporary Phase 51E witnesses remain.
+The final Phase 51E outcome is **Outcome A — Phase 51 fully accepted; Phase 52 is
+safe to begin.**
