@@ -25,6 +25,7 @@ internal static class Program
             TestCompatibilityLimitsAndFailures();
             TestHttpClientProgressAndCancellation();
             TestHttpsCancellationParity();
+            TestTextMimeFailureResetReleasesTransport();
             Console.WriteLine(
                 $"MANAGED_KERNEL_PHASE38_HOST_TESTS_PASS cases={s_cases}");
             return 0;
@@ -459,6 +460,42 @@ internal static class Program
         Check(client.Reset() == NetworkOperationResult.Success &&
               client.Progress.State == ManagedHttpTransferState.Idle,
               "https-cancel-reset-parity");
+    }
+
+    private static void TestTextMimeFailureResetReleasesTransport()
+    {
+        byte[] response = Ascii(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n" +
+            "Content-Length: 4\r\nConnection: close\r\n\r\nfail");
+        HttpFixtureBackend backend = new(response);
+        ManagedNetworkService service = ManagedNetworkService.CreateForTests(backend);
+        backend.Attach(service);
+        ManagedTextResourceRequest resource = new(
+            service, requiredMime: ManagedMimeClassification.Css,
+            requireSuccessfulStatus: true);
+        ManagedTextCountConsumer consumer = new();
+        Check(resource.BeginGet("phase38.test"u8, "/wrong-mime"u8, consumer) ==
+                  NetworkOperationResult.Started, "text-mime-failure-begin");
+        for (int poll = 0; poll != 100 &&
+             resource.State != ManagedResourceState.Failed; ++poll)
+        {
+            NetworkOperationResult result = resource.Poll();
+            Check(result == NetworkOperationResult.Success ||
+                  result == NetworkOperationResult.Failed,
+                  "text-mime-failure-poll-" + poll);
+        }
+        Check(resource.State == ManagedResourceState.Failed &&
+              resource.FailureReason == ManagedTextFailureReason.UnsupportedMime,
+              "text-mime-failure-terminal");
+        Check(resource.Cancel() == NetworkOperationResult.Success &&
+              resource.State == ManagedResourceState.Cancelled &&
+              resource.TcpState == NetworkTcpState.Closed &&
+              backend.TeardownCount != 0,
+              "text-mime-failure-cancel-releases-transport");
+        Check(resource.Reset() == NetworkOperationResult.Success &&
+              resource.State == ManagedResourceState.Idle &&
+              resource.TcpState == NetworkTcpState.Closed,
+              "text-mime-failure-reset-reuses-resource");
     }
 
     private static ManagedHttpResponseParser NewStreamingParser() =>

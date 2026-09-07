@@ -760,6 +760,7 @@ public sealed class ManagedCssEngine
 
     public ManagedHtmlDocument Document => _document;
     public ManagedCssParseFailureReason FailureReason => _failureReason;
+    internal bool CanonicalHashAvailable => _styleHashAvailable;
     public bool IsStyled => _styled;
     public int StylesheetCapacity => _stylesheets.Length;
     public int RuleCapacity => _ruleCapacityLimit;

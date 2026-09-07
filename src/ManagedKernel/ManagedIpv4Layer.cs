@@ -140,6 +140,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase49Passed;
     private bool _phase50Passed;
     private bool _phase51Passed;
+    private bool _phase51ResetReusePassed;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -223,6 +224,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase51Passed => _phase51Passed;
     internal bool Phase51NegativeMimeControlPassed =>
         _phase51Consumer?.NegativeMimeControlPassed ?? false;
+    internal bool Phase51ResetReusePassed => _phase51ResetReusePassed;
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -1038,9 +1040,10 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool TryRunPhase50() =>
         TryRunPhase44Core(false, true, true, true, true, true);
 
-    internal bool TryRunPhase51()
+    internal bool TryRunPhase51(bool resetReuse = false)
     {
-        if (_phase51Passed || _active || _networkService == null)
+        if ((resetReuse ? _phase51ResetReusePassed : _phase51Passed) ||
+            _active || _networkService == null)
         {
             KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE51_IPV4_GUARD_FAILED\r\n"u8);
             return false;
@@ -1084,6 +1087,12 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                                     DnsServerValue))
             return false;
         ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        if (resetReuse)
+        {
+            if (!_phase51Consumer.TryRunResetReuse()) return false;
+            _phase51ResetReusePassed = true;
+            return true;
+        }
         if (!_phase51Consumer.TryRun()) return false;
         if (_phase51Consumer.NegativeMimeControlPassed) return true;
         _phase51Passed = true;
@@ -1096,7 +1105,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     {
         if ((phase50Mode ? _phase50Passed : presentationMode ? _phase49Passed : fontMode ? _phase48Passed : paintMode ? _phase46Passed : layoutMode ? _phase45Passed : _phase44Passed) || _active || _networkService == null)
         {
-            KernelLog.Write(presentationMode
+            KernelLog.Write(phase50Mode
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE50_IPV4_GUARD_FAILED\r\n"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE49_IPV4_GUARD_FAILED\r\n"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE48_IPV4_GUARD_FAILED\r\n"u8
@@ -1110,7 +1121,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _phase43Consumer ??= new ManagedPhase43HtmlProof(_networkService, capacityControl, true, layoutMode, paintMode, fontMode, presentationMode || phase50Mode, phase50Mode);
         if (!_arp.TryBeginDhcp())
         {
-            KernelLog.Write(presentationMode
+            KernelLog.Write(phase50Mode
+                ? "GXOS_NET10:MANAGED_KERNEL_PHASE50_ARP_DHCP_BEGIN_FAILED\r\n"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE49_ARP_DHCP_BEGIN_FAILED\r\n"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE48_ARP_DHCP_BEGIN_FAILED\r\n"u8
@@ -1133,8 +1146,11 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         _subnetMaskValue = 0;
         _gatewayIpv4Value = 0;
         _peerIpv4Value = ManagedEthernetProtocol.ReadUInt32Network(_peerIpv4, 0);
-        if (!_udpEndpoints.TryRegister(DhcpClientPort, ManagedUdpEndpointHandler.Dhcpv4Client) ||
-            !KernelLog.Write(presentationMode
+        if (!_udpEndpoints.TryRegister(DhcpClientPort,
+                                       ManagedUdpEndpointHandler.Dhcpv4Client) ||
+            !KernelLog.Write(phase50Mode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_BEGIN\r\n"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_BEGIN\r\n"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_BEGIN\r\n"u8
@@ -1144,7 +1160,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_BEGIN\r\n"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_BEGIN\r\n"u8) ||
             !TryRunDhcpDora(requireDnsServer: true, requireGateway: false)) return false;
-        if (!KernelLog.Write(presentationMode
+        if (!KernelLog.Write(phase50Mode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_DHCP_COMPLETE\r\n"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_DHCP_COMPLETE\r\n"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_DHCP_COMPLETE\r\n"u8
@@ -1154,7 +1172,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_DHCP_COMPLETE\r\n"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_COMPLETE\r\n"u8) ||
             !_udpEndpoints.TryUnregister(DhcpClientPort) ||
-            !KernelLog.Write(presentationMode
+            !KernelLog.Write(phase50Mode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_DHCP_UNREGISTERED\r\n"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_DHCP_UNREGISTERED\r\n"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_DHCP_UNREGISTERED\r\n"u8
@@ -1165,7 +1185,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_DHCP_UNREGISTERED\r\n"u8) ||
             !_udpEndpoints.TryRegister(DnsClientPort, ManagedUdpEndpointHandler.DnsResolver) ||
             !PublishNetworkServiceStatus() ||
-            !KernelLog.Write(presentationMode
+            !KernelLog.Write(phase50Mode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_CONFIGURED\r\n"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_CONFIGURED\r\n"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_CONFIGURED\r\n"u8
@@ -1174,7 +1196,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_CONFIGURED\r\n"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_CONFIGURED\r\n"u8) ||
-            !KernelLog.WriteHexLine(presentationMode
+            !KernelLog.WriteHexLine(phase50Mode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_IPV4=0x"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_IPV4=0x"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_IPV4=0x"u8
@@ -1183,7 +1207,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_IPV4=0x"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_IPV4=0x"u8, _localIpv4Value) ||
-            !KernelLog.WriteHexLine(presentationMode
+            !KernelLog.WriteHexLine(phase50Mode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_SUBNET=0x"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_SUBNET=0x"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_SUBNET=0x"u8
@@ -1192,7 +1218,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_SUBNET=0x"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_SUBNET=0x"u8, _subnetMaskValue) ||
-            !KernelLog.WriteHexLine(presentationMode
+            !KernelLog.WriteHexLine(phase50Mode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_GATEWAY=0x"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_GATEWAY=0x"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_GATEWAY=0x"u8
@@ -1201,7 +1229,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 : layoutMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE45_GATEWAY=0x"u8
                 : "GXOS_NET10:MANAGED_HTTPS_PHASE44_GATEWAY=0x"u8, _gatewayIpv4Value) ||
-            !KernelLog.WriteHexLine(presentationMode
+            !KernelLog.WriteHexLine(phase50Mode
+                ? "GXOS_NET10:MANAGED_HTTPS_PHASE50_DNS=0x"u8
+                : presentationMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE49_DNS=0x"u8
                 : fontMode
                 ? "GXOS_NET10:MANAGED_HTTPS_PHASE48_DNS=0x"u8

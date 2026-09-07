@@ -1246,7 +1246,7 @@ public sealed class ManagedTextResourceRequest
     }
     public NetworkOperationResult Cancel()
     {
-        if (_state == ManagedResourceState.Completed || _state == ManagedResourceState.Cancelled || _state == ManagedResourceState.Failed) return NetworkOperationResult.Success;
+        if (_state == ManagedResourceState.Completed || _state == ManagedResourceState.Cancelled) return NetworkOperationResult.Success;
         NetworkOperationResult result = _resource.Cancel(); _adapter.Cancel(); _consumer?.Cancel();
         _pauseRequested = false; _state = ManagedResourceState.Cancelled; _failureReason = ManagedTextFailureReason.Cancelled;
         return result;

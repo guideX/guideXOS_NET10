@@ -130,7 +130,7 @@ internal sealed class ManagedPhase43HtmlProof
                 80, 65_536, 2_048, 16_384, 128))
             : new ManagedHtmlTreeBuilder();
         _cssEngine = cssMode
-            ? ManagedCssEngine.TakeNativeKernelArena(_tree.Document, capacityControl && !layoutMode)
+            ? new ManagedCssEngine(_tree.Document)
             : null;
         ManagedSecureRandom random = new(new FixedEntropy(CreateEntropy()));
         _resource = new(service, ManagedTls12Phase31Fixtures.Root,
@@ -592,8 +592,9 @@ internal sealed class ManagedPhase43HtmlProof
         }
         _paintEngine = new ManagedPaintEngine(_layoutEngine,
             ManagedPaintArenaOptions.Default, fonts);
-        if (!KernelLog.Write(PhasePrefix) || !KernelLog.Write("PAINT_ENGINE_CREATED\r\n"u8) ||
-            !_paintEngine.TryGenerate(800, 600) ||
+        if (!KernelLog.Write(PhasePrefix) || !KernelLog.Write("PAINT_ENGINE_CREATED\r\n"u8))
+            return false;
+        if (!_paintEngine.TryGenerate(800, 600) ||
             !_paintEngine.Validate(out ManagedPaintValidationFailureReason paintValidation) ||
             paintValidation != ManagedPaintValidationFailureReason.None)
             return false;

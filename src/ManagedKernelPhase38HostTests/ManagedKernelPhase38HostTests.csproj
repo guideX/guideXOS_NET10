@@ -36,6 +36,8 @@
     <Compile Include="..\ManagedKernel\ManagedNetworkService.cs" Link="ManagedNetworkService.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpsClient.cs" Link="ManagedHttpsClient.cs" />
     <Compile Include="..\ManagedKernel\ManagedHttpsUrl.cs" Link="ManagedHttpsUrl.cs" />
+    <Compile Include="..\ManagedKernel\ManagedResourceStreaming.cs" Link="ManagedResourceStreaming.cs" />
+    <Compile Include="..\ManagedKernel\ManagedTextDecoding.cs" Link="ManagedTextDecoding.cs" />
     <Compile Include="..\ManagedKernelPhase26HostTests\ManagedVirtioRngDriverStub.cs" Link="ManagedVirtioRngDriver.cs" />
     <Compile Include="..\ManagedKernelPhase31HostTests\ManagedTls12KernelLogStub.cs" Link="ManagedTls12KernelLogStub.cs" />
     <Compile Include="..\ManagedKernelPhase33HostTests\ManagedKernelContractStub.cs" Link="ManagedKernelContractStub.cs" />

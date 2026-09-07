@@ -893,8 +893,7 @@ public sealed class ManagedResourceRequest
     public NetworkOperationResult Cancel()
     {
         if (_state == ManagedResourceState.Completed ||
-            _state == ManagedResourceState.Cancelled ||
-            _state == ManagedResourceState.Failed)
+            _state == ManagedResourceState.Cancelled)
             return NetworkOperationResult.Success;
         NetworkOperationResult result = _protocol == ManagedResourceProtocol.Http
             ? _http!.Cancel() : _https!.Cancel();

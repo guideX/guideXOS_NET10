@@ -476,6 +476,7 @@ public sealed class ManagedPageResourceOrchestrator
         _stylesheetParser.Reset();
         _tree.Reset();
         _styles.Reset();
+        _skipInitialAuthorReset = true;
         _layout = null;
         _paint = null;
         _rasterizer = null;
@@ -486,6 +487,53 @@ public sealed class ManagedPageResourceOrchestrator
         _failureReason = ManagedPageFailureReason.None;
         _cssFailureReason = ManagedCssParseFailureReason.None;
         return NetworkOperationResult.Success;
+    }
+
+    internal bool IsResetForReuse()
+    {
+        ManagedPageResourceTelemetry telemetry = Telemetry;
+        ManagedHtmlProgressSnapshot document = _documentResource.Progress;
+        ManagedTextProgressSnapshot stylesheet = _stylesheetResource.Progress;
+        return _state == ManagedPageResourceState.Idle &&
+               _failureReason == ManagedPageFailureReason.None &&
+               _cssFailureReason == ManagedCssParseFailureReason.None &&
+               !_documentFinalUrl.IsValid && !_currentResolvedUrl.IsValid &&
+               _sourceCursor == 0 && _currentSourceNode == -1 &&
+               _activeRequest == -1 && _nextRequestIndex == 0 &&
+               _currentRules == 0 && _currentDeclarations == 0 &&
+               !_activeExternalRequest &&
+               _stylesheetParser.State == ManagedResourceConsumerState.Idle &&
+               _stylesheetParser.FailureReason == ManagedTextConsumerFailureReason.None &&
+               _stylesheetParser.ScalarsProcessed == 0 &&
+               _documentResource.State == ManagedResourceState.Idle &&
+               _documentResource.FailureReason == ManagedHtmlFailureReason.None &&
+               !_documentResource.FinalUrl.IsValid &&
+               _documentResource.TcpState == NetworkTcpState.Closed &&
+               document.State == ManagedResourceState.Idle &&
+               document.StatusCode == 0 && document.ScalarsProduced == 0 &&
+               document.ScalarsDelivered == 0 &&
+               _stylesheetResource.State == ManagedResourceState.Idle &&
+               _stylesheetResource.FailureReason == ManagedTextFailureReason.None &&
+               !_stylesheetResource.FinalUrl.IsValid &&
+               _stylesheetResource.TcpState == NetworkTcpState.Closed &&
+               stylesheet.State == ManagedResourceState.Idle &&
+               stylesheet.StatusCode == 0 && stylesheet.ScalarsProduced == 0 &&
+               stylesheet.ScalarsDelivered == 0 &&
+               _tree.Document.NodeCount == 0 &&
+               !_tree.Document.CanonicalHashAvailable &&
+               !_styles.IsStyled && _styles.StylesheetsParsed == 0 &&
+               _styles.RulesParsed == 0 && _styles.DeclarationsParsed == 0 &&
+               !_styles.CanonicalHashAvailable &&
+               telemetry.ExternalStylesheetsEncountered == 0 &&
+               telemetry.ExternalStylesheetRequestsStarted == 0 &&
+               telemetry.ExternalStylesheetsLoaded == 0 &&
+               telemetry.EmbeddedStylesheetsParsed == 0 &&
+               telemetry.StyleSourcesVisited == 0 &&
+               telemetry.CurrentSourceNodeIndex == -1 &&
+               telemetry.ActiveExternalRequestIndex == -1 &&
+               telemetry.DocumentScalars == 0 && telemetry.StylesheetScalars == 0 &&
+               _layout == null && _paint == null && _rasterizer == null &&
+               !_hasFramebuffer;
     }
 
     private NetworkOperationResult PollDocument()

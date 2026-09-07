@@ -25,6 +25,7 @@ internal sealed class ManagedPhase51HtmlProof
     private readonly ManagedPageResourceOrchestrator _page;
 
     internal bool NegativeMimeControlPassed { get; private set; }
+    internal bool ResetReusePassed { get; private set; }
 
     internal ManagedPhase51HtmlProof(ManagedNetworkService service)
     {
@@ -102,6 +103,22 @@ internal sealed class ManagedPhase51HtmlProof
         }
         KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_POLL_LIMIT_FAILURE\r\n"u8);
         return false;
+    }
+
+    internal bool TryRunResetReuse()
+    {
+        ResetReusePassed = false;
+        if (!TryRun() || !NegativeMimeControlPassed)
+            return false;
+        if (_page.Reset() != NetworkOperationResult.Success ||
+            !_page.IsResetForReuse() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_RESET_STATE_ASSERTIONS=PASS terminal=cleared failure=cleared cancellation=cleared current_resource=cleared current_url=cleared source_cursor=0 stylesheet_index=0 rules=0 declarations=0 style_hash=invalid layout_hash=invalid paint_hash=invalid framebuffer_hash=invalid presentation_complete=0 network_ownership=released\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_RESET_REUSE_WRONG_MIME_PASS\r\n"u8))
+            return false;
+        if (!TryRun() || NegativeMimeControlPassed)
+            return false;
+        ResetReusePassed = true;
+        return KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_RESET_REUSE_PASS\r\n"u8);
     }
 
     /* This is an acceptance-only witness for the production MIME boundary.  It
