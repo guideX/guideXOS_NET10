@@ -12,7 +12,8 @@ public enum ManagedMimeClassification : byte
     JavaScript = 5,
     Xml = 6,
     Textual = 7,
-    Binary = 8
+    Binary = 8,
+    Png = 9
 }
 
 public enum ManagedContentTypeMetadataState : byte
@@ -325,7 +326,11 @@ public static class ManagedContentTypeParser
             EqualsAsciiIgnoreCase(type, "video"u8) ||
             EqualsAsciiIgnoreCase(type, "font"u8) ||
             EqualsAsciiIgnoreCase(type, "multipart"u8))
+        {
+            if (EqualsAsciiIgnoreCase(subtype, "png"u8))
+                return ManagedMimeClassification.Png;
             return ManagedMimeClassification.Binary;
+        }
         return ManagedMimeClassification.Unknown;
     }
 

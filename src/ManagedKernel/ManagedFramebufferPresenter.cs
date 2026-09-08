@@ -226,27 +226,71 @@ public unsafe sealed class ManagedFramebufferPresenter
                            ManagedFramebufferDestination destination,
                            int destinationX = 0, int destinationY = 0)
     {
+        uint[]? sourceStorage = source.BackingStorage;
+        if (sourceStorage == null)
+        {
+            ResetAttempt();
+            return Fail(ManagedFramebufferPresentationFailureReason.SourceFramebufferInvalid);
+        }
+        return TryPresentCore(sourceStorage, source.Offset, source.Width, source.Height,
+                              source.Stride, source.PixelFormat, in descriptor, destination,
+                              destinationX, destinationY);
+    }
+
+    public bool TryPresent(uint[] sourceStorage, int sourceOffset, int sourceWidth,
+                           int sourceHeight, int sourceStride,
+                           ManagedRasterPixelFormat sourcePixelFormat,
+                           in ManagedPhysicalFramebufferDescriptor descriptor,
+                           ManagedFramebufferDestination destination,
+                           int destinationX = 0, int destinationY = 0)
+    {
+        if (sourceStorage == null) return false;
+        return TryPresentCore(sourceStorage, sourceOffset, sourceWidth, sourceHeight,
+                              sourceStride, sourcePixelFormat, in descriptor, destination,
+                              destinationX, destinationY);
+    }
+
+    private bool TryPresentCore(uint[] sourceStorage, int sourceOffset, int sourceWidth,
+                                int sourceHeight, int sourceStride,
+                                ManagedRasterPixelFormat sourcePixelFormat,
+                                in ManagedPhysicalFramebufferDescriptor descriptor,
+                                ManagedFramebufferDestination destination,
+                                int destinationX, int destinationY)
+    {
         ResetAttempt();
-        if (!TryValidateSource(in source))
+        long requiredSource = (long)sourceOffset + (long)sourceStride * sourceHeight;
+        ulong validationBits =
+            (sourcePixelFormat == ManagedRasterPixelFormat.Argb8888 ? 1UL : 0UL) |
+            (sourceStorage != null ? 2UL : 0UL) |
+            (sourceWidth > 0 ? 4UL : 0UL) |
+            (sourceHeight > 0 ? 8UL : 0UL) |
+            (sourceStride >= sourceWidth ? 16UL : 0UL) |
+            (sourceOffset >= 0 ? 32UL : 0UL) |
+            (requiredSource > 0 ? 64UL : 0UL) |
+            (sourceStorage != null && requiredSource <= sourceStorage.Length ?
+                128UL : 0UL);
+        if (validationBits != 0xFFUL)
             return Fail(ManagedFramebufferPresentationFailureReason.SourceFramebufferInvalid);
         ManagedFramebufferPresentationFailureReason descriptorFailure;
         if (!TryValidateDescriptor(in descriptor, destination, out descriptorFailure))
             return Fail(descriptorFailure);
-        _lastSource = source;
+        _lastSource = new ManagedFramebuffer(sourceStorage!, sourceOffset, sourceWidth,
+                                              sourceHeight, sourceStride, sourcePixelFormat);
         _lastSourceValid = true;
-        if (!TryHashSource(in source, _sourceHashBefore))
+        if (!TryHashSource(sourceStorage!, sourceOffset, sourceWidth, sourceHeight,
+                          sourceStride, _sourceHashBefore))
             return Fail(ManagedFramebufferPresentationFailureReason.SourceFramebufferInvalid);
         _sourceHashCaptured = true;
 
-        long sourceRight = (long)source.Width;
-        long sourceBottom = (long)source.Height;
+        long sourceRight = (long)sourceWidth;
+        long sourceBottom = (long)sourceHeight;
         long physicalRight = (long)descriptor.Width - destinationX;
         long physicalBottom = (long)descriptor.Height - destinationY;
         long sourceX0 = Math.Max(0, -((long)destinationX));
         long sourceY0 = Math.Max(0, -((long)destinationY));
         long sourceX1 = Math.Min(sourceRight, physicalRight);
         long sourceY1 = Math.Min(sourceBottom, physicalBottom);
-        long sourcePixels = checked((long)source.Width * source.Height);
+        long sourcePixels = checked((long)sourceWidth * sourceHeight);
         long visiblePixels = sourceX1 > sourceX0 && sourceY1 > sourceY0
             ? checked((sourceX1 - sourceX0) * (sourceY1 - sourceY0)) : 0;
         _pixelsClipped = sourcePixels - visiblePixels;
@@ -269,7 +313,8 @@ public unsafe sealed class ManagedFramebufferPresenter
                 for (long column = sourceX0; column < sourceX1; ++column)
                 {
                     int sourceX = checked((int)column);
-                    if (!source.TryGetPixel(sourceX, sourceY, out uint argb))
+                    if (!TryGetPixel(sourceStorage!, sourceOffset, sourceWidth, sourceHeight,
+                                     sourceStride, sourceX, sourceY, out uint argb))
                         return Fail(ManagedFramebufferPresentationFailureReason.SourceFramebufferInvalid);
                     uint opaqueArgb = argb | 0xFF000000U;
                     uint packed = PackPixel(in descriptor, opaqueArgb);
@@ -288,7 +333,8 @@ public unsafe sealed class ManagedFramebufferPresenter
         if (!destinationHash.TryFinalize(_destinationHash))
             return Fail(ManagedFramebufferPresentationFailureReason.PresentationVerificationFailure);
         _state = ManagedFramebufferPresentationState.Complete;
-        if (!TryHashSource(in source, _sourceHashAfter))
+        if (!TryHashSource(sourceStorage!, sourceOffset, sourceWidth, sourceHeight,
+                           sourceStride, _sourceHashAfter))
             return Fail(ManagedFramebufferPresentationFailureReason.SourceFramebufferInvalid);
         _sourceHashUnchanged = Equal(_sourceHashBefore, _sourceHashAfter);
         if (!_sourceHashUnchanged)
@@ -333,8 +379,14 @@ public unsafe sealed class ManagedFramebufferPresenter
     private ManagedFramebuffer _lastSource;
     private bool _lastSourceValid;
 
-    private bool TryHashSourceFromLastFramebuffer(Span<byte> destination) =>
-        _lastSourceValid && TryHashSource(in _lastSource, destination);
+    private bool TryHashSourceFromLastFramebuffer(Span<byte> destination)
+    {
+        if (!_lastSourceValid) return false;
+        uint[]? sourceStorage = _lastSource.BackingStorage;
+        return sourceStorage != null &&
+               TryHashSource(sourceStorage, _lastSource.Offset, _lastSource.Width,
+                             _lastSource.Height, _lastSource.Stride, destination);
+    }
 
     private void UpdateTelemetry(bool destinationHashValid)
     {
@@ -348,16 +400,6 @@ public unsafe sealed class ManagedFramebufferPresenter
         if (!valid || destination.Length < source.Length) return false;
         source.AsSpan().CopyTo(destination);
         return true;
-    }
-
-    private static bool TryValidateSource(in ManagedFramebuffer source)
-    {
-        if (source.PixelFormat != ManagedRasterPixelFormat.Argb8888 ||
-            source.BackingStorage == null || source.Width <= 0 || source.Height <= 0 ||
-            source.Stride < source.Width || source.Offset < 0)
-            return false;
-        long required = (long)source.Offset + (long)source.Stride * source.Height;
-        return required > 0 && required <= source.BackingStorage.Length;
     }
 
     internal static bool TryValidateDescriptor(
@@ -483,16 +525,19 @@ public unsafe sealed class ManagedFramebufferPresenter
         return (scaled << shift) & mask;
     }
 
-    private static bool TryHashSource(in ManagedFramebuffer source, Span<byte> destination)
+    private static bool TryHashSource(uint[] sourceStorage, int sourceOffset,
+                                      int sourceWidth, int sourceHeight, int sourceStride,
+                                      Span<byte> destination)
     {
         ManagedSha256 hash = new();
         if (!hash.Append(SourceHashDomain)) return false;
         Span<byte> bytes = stackalloc byte[4];
-        for (int y = 0; y != source.Height; ++y)
+        for (int y = 0; y != sourceHeight; ++y)
         {
-            for (int x = 0; x != source.Width; ++x)
+            for (int x = 0; x != sourceWidth; ++x)
             {
-                if (!source.TryGetPixel(x, y, out uint pixel)) return false;
+                if (!TryGetPixel(sourceStorage, sourceOffset, sourceWidth, sourceHeight,
+                                 sourceStride, x, y, out uint pixel)) return false;
                 bytes[0] = (byte)(pixel >> 24);
                 bytes[1] = (byte)(pixel >> 16);
                 bytes[2] = (byte)(pixel >> 8);
@@ -501,6 +546,20 @@ public unsafe sealed class ManagedFramebufferPresenter
             }
         }
         return hash.TryFinalize(destination);
+    }
+
+    private static bool TryGetPixel(uint[] sourceStorage, int sourceOffset,
+                                    int sourceWidth, int sourceHeight, int sourceStride,
+                                    int x, int y, out uint pixel)
+    {
+        pixel = 0;
+        if (x < 0 || y < 0 || x >= sourceWidth || y >= sourceHeight ||
+            sourceStride <= 0 || x >= sourceStride)
+            return false;
+        long index = (long)sourceOffset + (long)y * sourceStride + x;
+        if (index < 0 || index >= sourceStorage.Length) return false;
+        pixel = sourceStorage[(int)index];
+        return true;
     }
 
     private static bool AppendArgb(ManagedSha256 hash, uint argb)

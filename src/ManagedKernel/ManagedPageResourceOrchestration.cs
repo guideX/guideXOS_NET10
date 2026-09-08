@@ -2,6 +2,11 @@ using System;
 
 namespace GuideXOS.Net10.ManagedKernel;
 
+internal interface IManagedPageTerminalProof
+{
+    bool TryComplete(in ManagedFramebuffer framebuffer);
+}
+
 /// <summary>
 /// Fixed-arena adapter which lets the text resource decoder feed one external
 /// stylesheet directly into the CSS parser.  It deliberately has no retained
@@ -97,7 +102,9 @@ public enum ManagedPageResourceState : byte
     Presenting = 8,
     Complete = 9,
     Cancelled = 10,
-    Failed = 11
+    Failed = 11,
+    DiscoveringImages = 12,
+    FetchingImage = 13
 }
 
 public enum ManagedPageFailureReason : byte
@@ -117,7 +124,15 @@ public enum ManagedPageFailureReason : byte
     PagePaintFailure = 12,
     PageRasterFailure = 13,
     PagePresentationFailure = 14,
-    DocumentFailure = 15
+    DocumentFailure = 15,
+    ImageLimitExceeded = 16,
+    ImageUrlInvalid = 17,
+    ImageSchemeRejected = 18,
+    ImageTransportFailure = 19,
+    ImageHttpFailure = 20,
+    ImageContentTypeRejected = 21,
+    ImagePngFailure = 22,
+    ImageStoreFailure = 23
 }
 
 public readonly struct ManagedPageResourceOptions
@@ -125,7 +140,11 @@ public readonly struct ManagedPageResourceOptions
     public ManagedPageResourceOptions(ManagedCssArenaOptions cssArenas,
                                       int externalStylesheetLimit = ManagedCssLimits.DefaultExternalStylesheetCapacity,
                                       int viewportWidth = 800,
-                                      int viewportHeight = 600)
+                                      int viewportHeight = 600,
+                                      int imageLimit = ManagedImageLimits.DefaultImageCapacity,
+                                      int maximumImageWidth = ManagedImageLimits.DefaultMaximumWidth,
+                                      int maximumImageHeight = ManagedImageLimits.DefaultMaximumHeight,
+                                      int imagePixelBudget = ManagedImageLimits.DefaultPixelBudget)
     {
         if (externalStylesheetLimit <= 0 ||
             externalStylesheetLimit > cssArenas.ExternalStylesheetCapacity)
@@ -134,10 +153,22 @@ public readonly struct ManagedPageResourceOptions
             throw new ArgumentOutOfRangeException(nameof(viewportWidth));
         if (viewportHeight < 0 || viewportHeight > ManagedLayoutLimits.MaximumCoordinate)
             throw new ArgumentOutOfRangeException(nameof(viewportHeight));
+        if (imageLimit <= 0 || imageLimit > ManagedImageLimits.MaximumImageCapacity)
+            throw new ArgumentOutOfRangeException(nameof(imageLimit));
+        if (maximumImageWidth <= 0 || maximumImageWidth > ManagedImageLimits.DefaultMaximumWidth)
+            throw new ArgumentOutOfRangeException(nameof(maximumImageWidth));
+        if (maximumImageHeight <= 0 || maximumImageHeight > ManagedImageLimits.DefaultMaximumHeight)
+            throw new ArgumentOutOfRangeException(nameof(maximumImageHeight));
+        if (imagePixelBudget <= 0 || imagePixelBudget > ManagedImageLimits.DefaultPixelBudget)
+            throw new ArgumentOutOfRangeException(nameof(imagePixelBudget));
         CssArenas = cssArenas;
         ExternalStylesheetLimit = externalStylesheetLimit;
         ViewportWidth = viewportWidth;
         ViewportHeight = viewportHeight;
+        ImageLimit = imageLimit;
+        MaximumImageWidth = maximumImageWidth;
+        MaximumImageHeight = maximumImageHeight;
+        ImagePixelBudget = imagePixelBudget;
     }
 
     public static ManagedPageResourceOptions Default =>
@@ -147,6 +178,10 @@ public readonly struct ManagedPageResourceOptions
     public int ExternalStylesheetLimit { get; }
     public int ViewportWidth { get; }
     public int ViewportHeight { get; }
+    public int ImageLimit { get; }
+    public int MaximumImageWidth { get; }
+    public int MaximumImageHeight { get; }
+    public int ImagePixelBudget { get; }
 }
 
 public readonly struct ManagedExternalStylesheetTelemetry
@@ -208,7 +243,8 @@ public readonly struct ManagedPageResourceTelemetry
     internal ManagedPageResourceTelemetry(int externalLimit, int encountered,
         int started, int loaded, int embedded, int alternate, int sourceCount,
         int currentSource, int activeRequest, int redirects, int encodedBytes,
-        int decodedBytes, int documentScalars, int stylesheetScalars)
+        int decodedBytes, int documentScalars, int stylesheetScalars,
+        int imageNodes, int imageRequests, int imagesLoaded, int imageCursor)
     {
         ExternalStylesheetLimit = externalLimit;
         ExternalStylesheetsEncountered = encountered;
@@ -224,6 +260,10 @@ public readonly struct ManagedPageResourceTelemetry
         ExternalDecodedBytes = decodedBytes;
         DocumentScalars = documentScalars;
         StylesheetScalars = stylesheetScalars;
+        ImageNodes = imageNodes;
+        ImageRequestsStarted = imageRequests;
+        ImagesLoaded = imagesLoaded;
+        ImageCursor = imageCursor;
     }
 
     public int ExternalStylesheetLimit { get; }
@@ -240,6 +280,10 @@ public readonly struct ManagedPageResourceTelemetry
     public int ExternalDecodedBytes { get; }
     public int DocumentScalars { get; }
     public int StylesheetScalars { get; }
+    public int ImageNodes { get; }
+    public int ImageRequestsStarted { get; }
+    public int ImagesLoaded { get; }
+    public int ImageCursor { get; }
 }
 
 internal sealed class ManagedExternalStylesheetRecord
@@ -268,6 +312,104 @@ internal sealed class ManagedExternalStylesheetRecord
             Scalars, RulesAdded, DeclarationsAdded, HasDigest ? Digest : null);
 }
 
+internal sealed class ManagedImageResourceRecord
+{
+    internal int Slot;
+    internal int SourceNodeIndex;
+    internal ManagedHttpsUrl RequestedUrl;
+    internal ManagedHttpsUrl FinalUrl;
+    internal int RedirectCount;
+    internal int StatusCode;
+    internal ManagedMimeClassification Mime;
+    internal ManagedHttpContentEncodingState ContentEncoding;
+    internal int WireBytes;
+    internal int EntityBytes;
+    internal int PngBytes;
+    internal int Width;
+    internal int Height;
+    internal int BitDepth;
+    internal int ColorType;
+    internal int IdatChunks;
+    internal int IdatCompressedBytes;
+    internal int InflatedBytes;
+    internal int DecodedPixels;
+    internal int FilterNone;
+    internal int FilterSub;
+    internal int FilterUp;
+    internal int FilterAverage;
+    internal int FilterPaeth;
+    internal readonly byte[] PngDigest = new byte[ManagedSha256.DigestSize];
+    internal readonly byte[] PixelDigest = new byte[ManagedSha256.DigestSize];
+    internal bool HasPngDigest;
+    internal bool HasPixelDigest;
+
+    internal ManagedImageResourceTelemetry Snapshot() =>
+        new(Slot, SourceNodeIndex, RequestedUrl, FinalUrl, RedirectCount, StatusCode,
+            Mime, ContentEncoding, WireBytes, EntityBytes, PngBytes, Width, Height,
+            BitDepth, ColorType, IdatChunks, IdatCompressedBytes, InflatedBytes,
+            DecodedPixels, FilterNone, FilterSub, FilterUp, FilterAverage, FilterPaeth,
+            HasPngDigest ? PngDigest : null, HasPixelDigest ? PixelDigest : null);
+}
+
+public readonly struct ManagedImageResourceTelemetry
+{
+    private readonly byte[]? _pngDigest;
+    private readonly byte[]? _pixelDigest;
+
+    internal ManagedImageResourceTelemetry(int slot, int sourceNodeIndex,
+        ManagedHttpsUrl requestedUrl, ManagedHttpsUrl finalUrl, int redirectCount,
+        int statusCode, ManagedMimeClassification mime,
+        ManagedHttpContentEncodingState contentEncoding, int wireBytes,
+        int entityBytes, int pngBytes, int width, int height, int bitDepth,
+        int colorType, int idatChunks, int idatCompressedBytes, int inflatedBytes,
+        int decodedPixels, int filterNone, int filterSub, int filterUp,
+        int filterAverage, int filterPaeth, byte[]? pngDigest, byte[]? pixelDigest)
+    {
+        Slot = slot; SourceNodeIndex = sourceNodeIndex; RequestedUrl = requestedUrl;
+        FinalUrl = finalUrl; RedirectCount = redirectCount; StatusCode = statusCode;
+        MimeClassification = mime; ContentEncoding = contentEncoding;
+        WireBytes = wireBytes; EntityBytes = entityBytes; PngBytes = pngBytes;
+        Width = width; Height = height; BitDepth = bitDepth; ColorType = colorType;
+        IdatChunks = idatChunks; IdatCompressedBytes = idatCompressedBytes;
+        InflatedBytes = inflatedBytes; DecodedPixels = decodedPixels;
+        FilterNone = filterNone; FilterSub = filterSub; FilterUp = filterUp;
+        FilterAverage = filterAverage; FilterPaeth = filterPaeth;
+        _pngDigest = pngDigest; _pixelDigest = pixelDigest;
+    }
+
+    public int Slot { get; }
+    public int SourceNodeIndex { get; }
+    public ManagedHttpsUrl RequestedUrl { get; }
+    public ManagedHttpsUrl FinalUrl { get; }
+    public int RedirectCount { get; }
+    public int StatusCode { get; }
+    public ManagedMimeClassification MimeClassification { get; }
+    public ManagedHttpContentEncodingState ContentEncoding { get; }
+    public int WireBytes { get; }
+    public int EntityBytes { get; }
+    public int PngBytes { get; }
+    public int Width { get; }
+    public int Height { get; }
+    public int BitDepth { get; }
+    public int ColorType { get; }
+    public int IdatChunks { get; }
+    public int IdatCompressedBytes { get; }
+    public int InflatedBytes { get; }
+    public int DecodedPixels { get; }
+    public int FilterNone { get; }
+    public int FilterSub { get; }
+    public int FilterUp { get; }
+    public int FilterAverage { get; }
+    public int FilterPaeth { get; }
+    public bool TryCopyPngDigest(Span<byte> destination) => Copy(_pngDigest, destination);
+    public bool TryCopyPixelDigest(Span<byte> destination) => Copy(_pixelDigest, destination);
+    private static bool Copy(byte[]? value, Span<byte> destination)
+    {
+        if (value == null || destination.Length < value.Length) return false;
+        value.AsSpan().CopyTo(destination); return true;
+    }
+}
+
 /// <summary>
 /// Cooperative page pipeline: HTML fetch, document-order style discovery,
 /// bounded external CSS fetch/decode/parse, cascade, layout, paint, raster,
@@ -278,15 +420,22 @@ public sealed class ManagedPageResourceOrchestrator
 {
     private readonly ManagedHtmlResourceRequest _documentResource;
     private readonly ManagedTextResourceRequest _stylesheetResource;
+    private readonly ManagedResourceRequest? _imageResource;
     private readonly ManagedHtmlTreeBuilder _tree;
     private readonly ManagedCssEngine _styles;
     private readonly ManagedCssStreamingParser _stylesheetParser;
     private readonly ManagedPageResourceOptions _options;
+    private readonly bool _phase52Markers;
+    private readonly IManagedPageTerminalProof? _terminalProof;
     private readonly ManagedExternalStylesheetRecord[] _externalTelemetry;
+    private readonly ManagedImageResourceRecord[] _imageTelemetry;
+    private readonly ManagedPageImageStore _images;
+    private readonly ManagedPngDecoder _imageDecoder;
     private readonly uint[] _attributeScratch = new uint[ManagedCssLimits.MaximumExternalStylesheetHrefLength];
     private readonly byte[] _hrefScratch = new byte[ManagedCssLimits.MaximumExternalStylesheetHrefLength];
     private readonly byte[] _resolvedUrlScratch = new byte[ManagedHttpsUrl.MaximumUrlLength];
     private readonly uint[] _typeScratch = new uint[ManagedTokenizerScratch.MaximumAttributeValueLength];
+    private readonly byte[] _typeScratchBytes = new byte[ManagedHttpLimits.MaximumContentTypeLength];
     private ManagedLayoutEngine? _layout;
     private ManagedPaintEngine? _paint;
     private ManagedSoftwareRasterizer? _rasterizer;
@@ -298,6 +447,7 @@ public sealed class ManagedPageResourceOrchestrator
     private ManagedHttpsUrl _documentFinalUrl;
     private ManagedHttpsUrl _currentResolvedUrl;
     private int _sourceCursor;
+    private int _imageCursor;
     private int _sourcesVisited;
     private int _externalEncountered;
     private int _externalStarted;
@@ -311,14 +461,24 @@ public sealed class ManagedPageResourceOrchestrator
     private int _currentDeclarations;
     private bool _activeExternalRequest;
     private bool _skipInitialAuthorReset;
+    private int _imageNodes;
+    private int _imageStarted;
+    private int _imagesLoaded;
+    private int _currentImageNode = -1;
+    private ManagedHttpsUrl _currentImageUrl;
+    private bool _activeImageRequest;
 
     public ManagedPageResourceOrchestrator(ManagedHtmlResourceRequest documentResource,
                                            ManagedTextResourceRequest stylesheetResource,
-                                           ManagedPageResourceOptions options)
+                                           ManagedPageResourceOptions options,
+                                           ManagedResourceRequest? imageResource = null)
     {
         _documentResource = documentResource ?? throw new ArgumentNullException(nameof(documentResource));
         _stylesheetResource = stylesheetResource ?? throw new ArgumentNullException(nameof(stylesheetResource));
+        _imageResource = imageResource;
         _options = options;
+        _phase52Markers = false;
+        _terminalProof = null;
         if (_documentResource.Protocol != ManagedResourceProtocol.Https ||
             _stylesheetResource.Protocol != ManagedResourceProtocol.Https ||
             !_documentResource.RequiresSuccessfulStatus)
@@ -326,11 +486,20 @@ public sealed class ManagedPageResourceOrchestrator
         if (_stylesheetResource.RequiredMime != ManagedMimeClassification.Css ||
             !_stylesheetResource.RequiresSuccessfulStatus)
             throw new ArgumentException("Stylesheet resource must require text/css and a successful HTTP status.");
+        if (_imageResource != null &&
+            (_imageResource.Protocol != ManagedResourceProtocol.Https ||
+             _imageResource.RequiredMime != ManagedMimeClassification.Png ||
+             !_imageResource.RequiresSuccessfulStatus))
+            throw new ArgumentException("Image resource must require image/png and a successful HTTP status.");
 
         _tree = new ManagedHtmlTreeBuilder();
         _styles = new ManagedCssEngine(_tree.Document, options.CssArenas);
         _stylesheetParser = new ManagedCssStreamingParser(_styles);
         _externalTelemetry = new ManagedExternalStylesheetRecord[options.ExternalStylesheetLimit];
+        _images = new ManagedPageImageStore(options.ImageLimit, options.ImagePixelBudget,
+                                            options.MaximumImageWidth, options.MaximumImageHeight);
+        _imageDecoder = new ManagedPngDecoder(_images);
+        _imageTelemetry = new ManagedImageResourceRecord[options.ImageLimit];
         _state = ManagedPageResourceState.Idle;
     }
 
@@ -338,27 +507,34 @@ public sealed class ManagedPageResourceOrchestrator
         ReadOnlySpan<byte> trustedRoot, in ManagedX509UtcTime validationTime,
         ManagedSecureRandom random, ManagedPageResourceOptions options,
         int maximumEntityLength = ManagedHttpLimits.MaximumStreamedBodyLength,
-        int maximumDecodedResourceLength = ManagedContentEncodingLimits.MaximumDecodedResourceLength)
+        int maximumDecodedResourceLength = ManagedContentEncodingLimits.MaximumDecodedResourceLength,
+        bool phase52Markers = false,
+        IManagedPageTerminalProof? terminalProof = null)
     {
         _options = options;
+        _phase52Markers = phase52Markers;
+        _terminalProof = terminalProof;
         _documentResource = new ManagedHtmlResourceRequest(service, trustedRoot,
             in validationTime, random, maximumEntityLength, false,
             maximumDecodedResourceLength, true);
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_DOCUMENT_RESOURCE_READY\r\n"u8);
         _stylesheetResource = new ManagedTextResourceRequest(service, trustedRoot,
             in validationTime, random, maximumEntityLength, false,
             maximumDecodedResourceLength, false, false,
             ManagedMimeClassification.Css, true);
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_STYLESHEET_RESOURCE_READY\r\n"u8);
+        _imageResource = new ManagedResourceRequest(service, trustedRoot, in validationTime,
+            random, maximumEntityLength, false, maximumDecodedResourceLength, true,
+            ManagedMimeClassification.Png);
         _tree = new ManagedHtmlTreeBuilder();
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_TREE_READY\r\n"u8);
         /* The guest proof uses a dedicated bounded CSS arena.  Keeping it
            private to this page avoids stale author rules from the stage-19
            diagnostic arena while DHCP/TLS and page orchestration are live. */
         _styles = new ManagedCssEngine(_tree.Document, options.CssArenas);
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_CSS_READY\r\n"u8);
         _stylesheetParser = new ManagedCssStreamingParser(_styles);
         _externalTelemetry = new ManagedExternalStylesheetRecord[options.ExternalStylesheetLimit];
+        _images = new ManagedPageImageStore(options.ImageLimit, options.ImagePixelBudget,
+                                            options.MaximumImageWidth, options.MaximumImageHeight);
+        _imageDecoder = new ManagedPngDecoder(_images);
+        _imageTelemetry = new ManagedImageResourceRecord[options.ImageLimit];
         _skipInitialAuthorReset = true;
         _state = ManagedPageResourceState.Idle;
     }
@@ -368,6 +544,10 @@ public sealed class ManagedPageResourceOrchestrator
     public ManagedCssParseFailureReason CssFailureReason => _cssFailureReason;
     public ManagedHtmlResourceRequest DocumentResource => _documentResource;
     public ManagedTextResourceRequest StylesheetResource => _stylesheetResource;
+    public ManagedResourceRequest? ImageResource => _imageResource;
+    public ManagedPageImageStore Images => _images;
+    public ManagedPngFailureReason ImagePngFailureReason => _imageDecoder.PngFailureReason;
+    public ManagedPngTelemetry ImagePngTelemetry => _imageDecoder.Telemetry;
     public ManagedHtmlDocument Document => _tree.Document;
     public ManagedCssEngine Styles => _styles;
     public ManagedLayoutEngine? Layout => _layout;
@@ -381,7 +561,8 @@ public sealed class ManagedPageResourceOrchestrator
         _externalLoaded, _embeddedParsed, _alternateIgnored, _sourcesVisited,
         _currentSourceNode, _activeRequest, ExternalRedirects(), ExternalEncodedBytes(),
         ExternalDecodedBytes(), _documentResource.Progress.Text.ScalarsDelivered,
-        _stylesheetParser.ScalarsProcessed);
+        _stylesheetParser.ScalarsProcessed, _imageNodes, _imageStarted,
+        _imagesLoaded, _imageCursor);
 
     public bool TryGetExternalStylesheetTelemetry(int index,
                                                    out ManagedExternalStylesheetTelemetry telemetry)
@@ -394,6 +575,15 @@ public sealed class ManagedPageResourceOrchestrator
         return true;
     }
 
+    public bool TryGetImageTelemetry(int index, out ManagedImageResourceTelemetry telemetry)
+    {
+        telemetry = default;
+        if (index < 0 || index >= _imageTelemetry.Length || _imageTelemetry[index] == null)
+            return false;
+        telemetry = _imageTelemetry[index].Snapshot();
+        return true;
+    }
+
     public NetworkOperationResult BeginGetUrl(ReadOnlySpan<byte> url)
     {
         if (_state != ManagedPageResourceState.Idle &&
@@ -403,15 +593,10 @@ public sealed class ManagedPageResourceOrchestrator
             return NetworkOperationResult.Busy;
         if (_state != ManagedPageResourceState.Idle && Reset() != NetworkOperationResult.Success)
             return NetworkOperationResult.Busy;
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_BEGIN_TREE_RESET\r\n"u8);
         _tree.Reset();
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_BEGIN_TREE_RESET_DONE\r\n"u8);
         if (_skipInitialAuthorReset) _skipInitialAuthorReset = false;
         else if (!_styles.BeginAuthorStyles()) return Fail(ManagedPageFailureReason.DocumentFailure);
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_BEGIN_STYLES_DONE\r\n"u8);
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_BEGIN_DOCUMENT\r\n"u8);
         NetworkOperationResult result = _documentResource.BeginGetUrl(url, _tree);
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_BEGIN_DOCUMENT_DONE\r\n"u8);
         if (result != NetworkOperationResult.Started)
             return Fail(ManagedPageFailureReason.DocumentFailure);
         ClearRunState();
@@ -427,8 +612,12 @@ public sealed class ManagedPageResourceOrchestrator
                 return PollDocument();
             case ManagedPageResourceState.DiscoveringSources:
                 return PollSource();
+            case ManagedPageResourceState.DiscoveringImages:
+                return PollImageDiscovery();
             case ManagedPageResourceState.FetchingExternalStylesheet:
                 return PollStylesheet();
+            case ManagedPageResourceState.FetchingImage:
+                return PollImage();
             case ManagedPageResourceState.Cascading:
                 return PollCascade();
             case ManagedPageResourceState.LayingOut:
@@ -436,6 +625,14 @@ public sealed class ManagedPageResourceOrchestrator
             case ManagedPageResourceState.Painting:
                 return PollPaint();
             case ManagedPageResourceState.Rasterizing:
+                /* If a caller observes the state byte one poll late after a
+                   completed NativeAOT render, never rasterize the same page
+                   a second time. */
+                if (_hasFramebuffer)
+                {
+                    _state = ManagedPageResourceState.Complete;
+                    return NetworkOperationResult.Success;
+                }
                 return PollRaster();
             case ManagedPageResourceState.Presenting:
                 _state = ManagedPageResourceState.Complete;
@@ -457,6 +654,7 @@ public sealed class ManagedPageResourceOrchestrator
             _state == ManagedPageResourceState.Failed)
             return NetworkOperationResult.Success;
         if (_activeExternalRequest) _stylesheetResource.Cancel();
+        if (_activeImageRequest) _imageResource?.Cancel();
         _documentResource.Cancel();
         _stylesheetParser.Cancel();
         _state = ManagedPageResourceState.Cancelled;
@@ -467,15 +665,23 @@ public sealed class ManagedPageResourceOrchestrator
     public NetworkOperationResult Reset()
     {
         if (_state == ManagedPageResourceState.FetchingDocument ||
-            _state == ManagedPageResourceState.FetchingExternalStylesheet)
+            _state == ManagedPageResourceState.FetchingExternalStylesheet ||
+            _state == ManagedPageResourceState.FetchingImage)
             return NetworkOperationResult.Busy;
         NetworkOperationResult document = _documentResource.Reset();
         if (document != NetworkOperationResult.Success) return document;
         NetworkOperationResult stylesheet = _stylesheetResource.Reset();
         if (stylesheet != NetworkOperationResult.Success) return stylesheet;
+        if (_imageResource != null)
+        {
+            NetworkOperationResult image = _imageResource.Reset();
+            if (image != NetworkOperationResult.Success) return image;
+        }
         _stylesheetParser.Reset();
         _tree.Reset();
         _styles.Reset();
+        _images.Reset();
+        _imageDecoder.Reset();
         _skipInitialAuthorReset = true;
         _layout = null;
         _paint = null;
@@ -532,6 +738,11 @@ public sealed class ManagedPageResourceOrchestrator
                telemetry.CurrentSourceNodeIndex == -1 &&
                telemetry.ActiveExternalRequestIndex == -1 &&
                telemetry.DocumentScalars == 0 && telemetry.StylesheetScalars == 0 &&
+               _imageCursor == 0 && _imageNodes == 0 && _imageStarted == 0 &&
+               _imagesLoaded == 0 && !_activeImageRequest &&
+               _images.Count == 0 && _imageDecoder.State == ManagedResourceConsumerState.Idle &&
+               (_imageResource == null || (_imageResource.State == ManagedResourceState.Idle &&
+                _imageResource.Progress.StatusCode == 0)) &&
                _layout == null && _paint == null && _rasterizer == null &&
                !_hasFramebuffer;
     }
@@ -552,7 +763,6 @@ public sealed class ManagedPageResourceOrchestrator
             return Fail(ManagedPageFailureReason.DocumentFailure);
         _documentFinalUrl = _documentResource.FinalUrl;
         if (!_documentFinalUrl.IsValid) return Fail(ManagedPageFailureReason.DocumentFailure);
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE51_DOCUMENT_COMPLETE\r\n"u8);
         _state = ManagedPageResourceState.DiscoveringSources;
         return NetworkOperationResult.Success;
     }
@@ -561,7 +771,8 @@ public sealed class ManagedPageResourceOrchestrator
     {
         if (_sourceCursor >= _tree.Document.NodeCount)
         {
-            _state = ManagedPageResourceState.Cascading;
+            _imageCursor = 0;
+            _state = ManagedPageResourceState.DiscoveringImages;
             return NetworkOperationResult.Success;
         }
         int nodeIndex = _sourceCursor++;
@@ -569,8 +780,6 @@ public sealed class ManagedPageResourceOrchestrator
         ++_sourcesVisited;
         if (!_styles.TryGetStyleSource(nodeIndex, out ManagedCssStyleSource source))
             return NetworkOperationResult.Success;
-        KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE51_SOURCE_NODE=0x"u8,
-                               (ulong)nodeIndex);
         if (source.Kind == ManagedCssStyleSourceKind.Embedded)
         {
             if (!_styles.TryParseEmbeddedStylesheet(source.Node))
@@ -615,14 +824,10 @@ public sealed class ManagedPageResourceOrchestrator
         _activeRequest = _nextRequestIndex++;
         _currentRules = _styles.RulesParsed;
         _currentDeclarations = _styles.DeclarationsParsed;
-        KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE51_EXTERNAL_REQUEST_STARTED=0x"u8,
-                               (ulong)_activeRequest);
         NetworkOperationResult begin = _stylesheetResource.BeginGetUrl(
             _resolvedUrlScratch.AsSpan(0, resolvedLength), _stylesheetParser);
         if (begin != NetworkOperationResult.Started)
             return MapStylesheetFailureOnBegin();
-        KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE51_EXTERNAL_BEGIN=0x"u8,
-                               (ulong)_activeRequest);
         ++_externalStarted;
         _stylesheetParser.Begin();
         if (_stylesheetParser.State == ManagedResourceConsumerState.Failed)
@@ -666,12 +871,145 @@ public sealed class ManagedPageResourceOrchestrator
         int slot = _externalLoaded;
         if (slot < _externalTelemetry.Length) _externalTelemetry[slot] = record;
         ++_externalLoaded;
-        KernelLog.WriteHexLine("GXOS_NET10:MANAGED_HTTPS_PHASE51_EXTERNAL_COMPLETE=0x"u8,
-                               (ulong)record.RequestIndex);
         _activeExternalRequest = false;
         _activeRequest = -1;
         _state = ManagedPageResourceState.DiscoveringSources;
         return NetworkOperationResult.Success;
+    }
+
+    private NetworkOperationResult PollImageDiscovery()
+    {
+        if (_imageCursor >= _tree.Document.NodeCount)
+        {
+            _state = ManagedPageResourceState.Cascading;
+            return NetworkOperationResult.Success;
+        }
+        int nodeIndex = _imageCursor++;
+        ManagedHtmlNodeHandle node = new(nodeIndex, _tree.Document.DocumentNode.Generation);
+        if (_tree.Document.GetNodeKind(node) != ManagedHtmlNodeKind.Element ||
+            _tree.Document.GetElementTag(node) != ManagedHtmlTag.Img)
+            return NetworkOperationResult.Success;
+        ++_imageNodes;
+        if (_imageNodes > _options.ImageLimit)
+            return Fail(ManagedPageFailureReason.ImageLimitExceeded);
+        if (!_tree.Document.TryFindAttribute(node, ManagedHtmlAttributeName.Src,
+                                             out ManagedHtmlAttributeView src) ||
+            !src.HasValue)
+            return NetworkOperationResult.Success;
+        if (!_tree.Document.TryCopyAttributeValue(node, src.Index, _attributeScratch,
+                                                   out int srcLength, out bool hasValue) ||
+            !hasValue || srcLength == 0)
+            return NetworkOperationResult.Success;
+        if (srcLength > _hrefScratch.Length) return Fail(ManagedPageFailureReason.ImageUrlInvalid);
+        for (int index = 0; index != srcLength; ++index)
+        {
+            uint scalar = _attributeScratch[index];
+            if (scalar > 0x7F) return Fail(ManagedPageFailureReason.ImageUrlInvalid);
+            _hrefScratch[index] = (byte)scalar;
+        }
+        if (!TryResolveImageUrl(_hrefScratch.AsSpan(0, srcLength),
+                                out _currentImageUrl,
+                                out ManagedHttpsUrlParseFailureReason urlFailure))
+            return Fail(urlFailure == ManagedHttpsUrlParseFailureReason.HttpsDowngrade ||
+                        urlFailure == ManagedHttpsUrlParseFailureReason.UnsupportedScheme ||
+                        urlFailure == ManagedHttpsUrlParseFailureReason.UnsupportedReference
+                            ? ManagedPageFailureReason.ImageSchemeRejected
+                            : ManagedPageFailureReason.ImageUrlInvalid);
+        if (_imageResource == null ||
+            !_currentImageUrl.TryCopyAbsoluteUrl(_resolvedUrlScratch, out int resolvedLength))
+            return Fail(ManagedPageFailureReason.ImageTransportFailure);
+        _currentImageNode = nodeIndex;
+        NetworkOperationResult begin = _imageResource.BeginGetUrl(
+            _resolvedUrlScratch.AsSpan(0, resolvedLength), _imageDecoder);
+        if (begin != NetworkOperationResult.Started)
+            return MapImageFailure();
+        /* BeginGetUrl resets the supplied consumer as part of the resource
+           contract.  Start the decoder after that reset so the first entity
+           byte enters its Receiving state and retains the source-node binding. */
+        _imageDecoder.Start(nodeIndex);
+        ++_imageStarted;
+        _activeImageRequest = true;
+        _state = ManagedPageResourceState.FetchingImage;
+        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE52_IMAGE_REQUEST_BEGIN\r\n"u8);
+        return begin;
+    }
+
+    private NetworkOperationResult PollImage()
+    {
+        if (_imageResource == null) return Fail(ManagedPageFailureReason.ImageTransportFailure);
+        NetworkOperationResult result = _imageResource.Poll();
+        if (_imageResource.State == ManagedResourceState.Failed ||
+            result == NetworkOperationResult.Failed)
+            return MapImageFailure();
+        if (_imageResource.State == ManagedResourceState.Cancelled)
+            return Fail(ManagedPageFailureReason.Cancelled);
+        if (_imageResource.State != ManagedResourceState.Completed)
+            return result;
+        if (!_imageDecoder.IsComplete)
+            return Fail(ManagedPageFailureReason.ImagePngFailure);
+        ManagedResourceProgressSnapshot progress = _imageResource.Progress;
+        ManagedImageResourceRecord record = new()
+        {
+            Slot = _imagesLoaded,
+            SourceNodeIndex = _currentImageNode,
+            RequestedUrl = _currentImageUrl,
+            FinalUrl = _imageResource.FinalUrl,
+            RedirectCount = _imageResource.RedirectCount,
+            StatusCode = progress.StatusCode,
+            Mime = ClassifyImageMime(_imageResource),
+            ContentEncoding = progress.ContentEncodingState,
+            WireBytes = progress.EncodedBytesReceived,
+            EntityBytes = progress.DecodedBytesProduced,
+            PngBytes = _imageDecoder.BytesProcessed,
+            Width = _imageDecoder.Width,
+            Height = _imageDecoder.Height,
+            BitDepth = _imageDecoder.BitDepth,
+            ColorType = _imageDecoder.ColorType,
+            IdatChunks = _imageDecoder.IdatChunkCount,
+            IdatCompressedBytes = _imageDecoder.IdatCompressedBytes,
+            InflatedBytes = _imageDecoder.InflatedBytes,
+            DecodedPixels = _imageDecoder.DecodedPixels,
+            FilterNone = _imageDecoder.FilterNone,
+            FilterSub = _imageDecoder.FilterSub,
+            FilterUp = _imageDecoder.FilterUp,
+            FilterAverage = _imageDecoder.FilterAverage,
+            FilterPaeth = _imageDecoder.FilterPaeth
+        };
+        record.HasPngDigest = _imageDecoder.TryCopyResourceDigest(record.PngDigest);
+        record.HasPixelDigest = _imageDecoder.TryCopyDecodedPixelDigest(record.PixelDigest);
+        if (_imagesLoaded < _imageTelemetry.Length) _imageTelemetry[_imagesLoaded] = record;
+        ++_imagesLoaded;
+        _activeImageRequest = false;
+        _currentImageNode = -1;
+        _state = ManagedPageResourceState.DiscoveringImages;
+        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_DECODE_PASS\r\n"u8);
+        return NetworkOperationResult.Success;
+    }
+
+    private NetworkOperationResult MapImageFailure()
+    {
+        if (_imageResource == null) return Fail(ManagedPageFailureReason.ImageTransportFailure);
+        switch (_imageResource.FailureReason)
+        {
+            case ManagedResourceFailureReason.UnsupportedMime:
+                return Fail(ManagedPageFailureReason.ImageContentTypeRejected);
+            case ManagedResourceFailureReason.HttpFailure:
+                return Fail(ManagedPageFailureReason.ImageHttpFailure);
+            case ManagedResourceFailureReason.ConsumerFailure:
+            case ManagedResourceFailureReason.DestinationFull:
+                return Fail(ManagedPageFailureReason.ImagePngFailure);
+            case ManagedResourceFailureReason.Cancelled:
+                return Fail(ManagedPageFailureReason.Cancelled);
+            default:
+                return Fail(ManagedPageFailureReason.ImageTransportFailure);
+        }
+    }
+
+    private ManagedMimeClassification ClassifyImageMime(ManagedResourceRequest resource)
+    {
+        if (!resource.TryCopyContentType(_typeScratchBytes, out int length))
+            return ManagedMimeClassification.Unknown;
+        return ManagedContentTypeParser.Parse(_typeScratchBytes.AsSpan(0, length)).Classification;
     }
 
     private NetworkOperationResult PollCascade()
@@ -687,7 +1025,7 @@ public sealed class ManagedPageResourceOrchestrator
         ManagedPhase48FontRegistry fonts = ManagedPhase48FontRegistry.Instance;
         fonts.ResetTelemetry();
         _layout = new ManagedLayoutEngine(_tree.Document, _styles,
-                                          ManagedLayoutArenaOptions.Default, fonts);
+                                          ManagedLayoutArenaOptions.Default, fonts, _images);
         if (!_layout.TryLayout(_options.ViewportWidth, _options.ViewportHeight))
             return Fail(ManagedPageFailureReason.PageLayoutFailure);
         _state = ManagedPageResourceState.Painting;
@@ -698,7 +1036,7 @@ public sealed class ManagedPageResourceOrchestrator
     {
         if (_layout == null) return Fail(ManagedPageFailureReason.PagePaintFailure);
         _paint = new ManagedPaintEngine(_layout, ManagedPaintArenaOptions.Default,
-                                        ManagedPhase48FontRegistry.Instance);
+                                        ManagedPhase48FontRegistry.Instance, _images);
         if (!_paint.TryGenerate(_options.ViewportWidth, _options.ViewportHeight))
             return Fail(ManagedPageFailureReason.PagePaintFailure);
         _state = ManagedPageResourceState.Rasterizing;
@@ -708,16 +1046,21 @@ public sealed class ManagedPageResourceOrchestrator
     private NetworkOperationResult PollRaster()
     {
         if (_paint == null) return Fail(ManagedPageFailureReason.PageRasterFailure);
+        _rasterizer = new ManagedSoftwareRasterizer();
         int pixels = checked(_options.ViewportWidth * _options.ViewportHeight);
+        GC.Collect(0);
         uint[] storage = new uint[pixels];
         _framebuffer = new ManagedFramebuffer(storage, _options.ViewportWidth,
                                               _options.ViewportHeight);
-        _rasterizer = new ManagedSoftwareRasterizer();
         if (!_rasterizer.TryRender(_paint, _framebuffer,
                                    ManagedPhase48FontRegistry.Instance))
             return Fail(ManagedPageFailureReason.PageRasterFailure);
         _hasFramebuffer = true;
-        _state = ManagedPageResourceState.Presenting;
+        _state = _phase52Markers ? ManagedPageResourceState.Complete
+                                 : ManagedPageResourceState.Presenting;
+        if (_phase52Markers && _terminalProof != null &&
+            !_terminalProof.TryComplete(in _framebuffer))
+            return Fail(ManagedPageFailureReason.PagePresentationFailure);
         return NetworkOperationResult.Success;
     }
 
@@ -748,6 +1091,15 @@ public sealed class ManagedPageResourceOrchestrator
     }
 
     private bool TryResolveStylesheetUrl(ReadOnlySpan<byte> reference,
+        out ManagedHttpsUrl resolved, out ManagedHttpsUrlParseFailureReason failure)
+    {
+        if (StartsWithAsciiIgnoreCase(reference, "https:"u8))
+            return ManagedHttpsUrl.TryParse(reference, out resolved, out failure);
+        return ManagedHttpsUrl.TryResolve(_documentFinalUrl, reference,
+                                          out resolved, out failure);
+    }
+
+    private bool TryResolveImageUrl(ReadOnlySpan<byte> reference,
         out ManagedHttpsUrl resolved, out ManagedHttpsUrlParseFailureReason failure)
     {
         if (StartsWithAsciiIgnoreCase(reference, "https:"u8))
@@ -799,6 +1151,7 @@ public sealed class ManagedPageResourceOrchestrator
     private NetworkOperationResult Fail(ManagedPageFailureReason reason)
     {
         if (_activeExternalRequest) _stylesheetResource.Cancel();
+        if (_activeImageRequest) _imageResource?.Cancel();
         _stylesheetParser.Cancel();
         _activeExternalRequest = false;
         _activeRequest = -1;
@@ -814,6 +1167,7 @@ public sealed class ManagedPageResourceOrchestrator
         for (int index = 0; index != _externalTelemetry.Length; ++index)
             _externalTelemetry[index] = null!;
         _sourceCursor = 0;
+        _imageCursor = 0;
         _sourcesVisited = 0;
         _externalEncountered = 0;
         _externalStarted = 0;
@@ -826,6 +1180,16 @@ public sealed class ManagedPageResourceOrchestrator
         _currentRules = 0;
         _currentDeclarations = 0;
         _activeExternalRequest = false;
+        _imageNodes = 0;
+        _imageStarted = 0;
+        _imagesLoaded = 0;
+        _currentImageNode = -1;
+        _currentImageUrl = default;
+        _activeImageRequest = false;
+        _images.Reset();
+        _imageDecoder.Reset();
+        for (int index = 0; index != _imageTelemetry.Length; ++index)
+            _imageTelemetry[index] = null!;
         _documentFinalUrl = default;
         _currentResolvedUrl = default;
         _failureReason = ManagedPageFailureReason.None;

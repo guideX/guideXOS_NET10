@@ -61,7 +61,9 @@ public enum ManagedResourceFailureReason : byte
     ZlibAdlerMismatch = 19,
     TruncatedCompressedStream = 20,
     DecodedResourceTooLarge = 21,
-    TrailingCompressedData = 22
+    TrailingCompressedData = 22,
+    UnsupportedMime = 23,
+    HttpFailure = 24
 }
 
 public interface IManagedResourceConsumer : IManagedHttpBodySink
@@ -628,6 +630,10 @@ public sealed class ManagedResourceRequest
     private ManagedContentEncodingDecoder? _decoder;
     private byte[]? _encodedDecoderStaging;
     private ManagedContentDecoderFailureReason _decoderFailureReason;
+    private readonly bool _requireSuccessfulStatus;
+    private readonly ManagedMimeClassification _requiredMime;
+    private readonly byte[] _contentTypeScratch = new byte[ManagedHttpLimits.MaximumContentTypeLength];
+    private bool _metadataValidated;
     private ManagedResourceState _state;
     private ManagedResourceFailureReason _failureReason;
     private ManagedResourceConsumerFailureReason _consumerFailureReason;
@@ -648,6 +654,16 @@ public sealed class ManagedResourceRequest
     public ManagedResourceRequest(ManagedNetworkService service,
                                   int maximumEntityLength,
                                   int maximumDecodedResourceLength)
+        : this(service, maximumEntityLength, maximumDecodedResourceLength, false,
+               ManagedMimeClassification.Unknown)
+    {
+    }
+
+    public ManagedResourceRequest(ManagedNetworkService service,
+                                  int maximumEntityLength,
+                                  int maximumDecodedResourceLength,
+                                  bool requireSuccessfulStatus,
+                                  ManagedMimeClassification requiredMime)
     {
         if (maximumEntityLength < 0 ||
             maximumEntityLength > ManagedHttpLimits.MaximumStreamedBodyLength)
@@ -656,6 +672,8 @@ public sealed class ManagedResourceRequest
         _protocol = ManagedResourceProtocol.Http;
         _maximumEntityLength = maximumEntityLength;
         _maximumDecodedResourceLength = maximumDecodedResourceLength;
+        _requireSuccessfulStatus = requireSuccessfulStatus;
+        _requiredMime = requiredMime;
         _http = new ManagedHttpClient(service, maximumEntityLength, false);
         _state = ManagedResourceState.Idle;
     }
@@ -675,6 +693,18 @@ public sealed class ManagedResourceRequest
                                   ManagedHttpsValidationTime validationTime,
                                   int maximumEntityLength,
                                   int maximumDecodedResourceLength)
+        : this(service, trustedRoot, validationTime, maximumEntityLength,
+               maximumDecodedResourceLength, false, ManagedMimeClassification.Unknown)
+    {
+    }
+
+    public ManagedResourceRequest(ManagedNetworkService service,
+                                  ReadOnlySpan<byte> trustedRoot,
+                                  ManagedHttpsValidationTime validationTime,
+                                  int maximumEntityLength,
+                                  int maximumDecodedResourceLength,
+                                  bool requireSuccessfulStatus,
+                                  ManagedMimeClassification requiredMime)
     {
         if (maximumEntityLength < 0 ||
             maximumEntityLength > ManagedHttpLimits.MaximumStreamedBodyLength)
@@ -683,6 +713,8 @@ public sealed class ManagedResourceRequest
         _protocol = ManagedResourceProtocol.Https;
         _maximumEntityLength = maximumEntityLength;
         _maximumDecodedResourceLength = maximumDecodedResourceLength;
+        _requireSuccessfulStatus = requireSuccessfulStatus;
+        _requiredMime = requiredMime;
         _https = new ManagedHttpsClient(service, trustedRoot, validationTime,
                                         maximumEntityLength);
         _state = ManagedResourceState.Idle;
@@ -696,7 +728,9 @@ public sealed class ManagedResourceRequest
                                         ManagedHttpLimits.MaximumStreamedBodyLength,
                                     bool compactTlsProfile = false,
                                     int maximumDecodedResourceLength =
-                                        ManagedContentEncodingLimits.MaximumDecodedResourceLength)
+                                        ManagedContentEncodingLimits.MaximumDecodedResourceLength,
+                                    bool requireSuccessfulStatus = false,
+                                    ManagedMimeClassification requiredMime = ManagedMimeClassification.Unknown)
     {
         if (maximumEntityLength < 0 ||
             maximumEntityLength > ManagedHttpLimits.MaximumStreamedBodyLength)
@@ -705,6 +739,8 @@ public sealed class ManagedResourceRequest
         _protocol = ManagedResourceProtocol.Https;
         _maximumEntityLength = maximumEntityLength;
         _maximumDecodedResourceLength = maximumDecodedResourceLength;
+        _requireSuccessfulStatus = requireSuccessfulStatus;
+        _requiredMime = requiredMime;
         _https = new ManagedHttpsClient(service, trustedRoot, in validationTime,
                                         random, maximumEntityLength,
                                         compactTlsProfile);
@@ -720,6 +756,8 @@ public sealed class ManagedResourceRequest
         ? _https!.RedirectCount : 0;
     public ManagedResourceConsumerFailureReason ConsumerFailureReason =>
         _consumerFailureReason;
+    public ManagedMimeClassification RequiredMime => _requiredMime;
+    public bool RequiresSuccessfulStatus => _requireSuccessfulStatus;
     public int MaximumEntityLength => _maximumEntityLength;
     public int MaximumDecodedResourceLength => _maximumDecodedResourceLength;
     public ManagedResourceProgressSnapshot Progress => CreateProgress();
@@ -821,6 +859,11 @@ public sealed class ManagedResourceRequest
             return NetworkOperationResult.Failed;
         if (_pauseRequested) return NetworkOperationResult.Success;
 
+        /* Validate final status and required MIME before draining a body that
+           arrived with the response headers.  This is especially important
+           for image consumers: a successful 200 text/html response must not
+           deliver even one byte to the PNG parser. */
+        if (!EnsureDecoder()) return NetworkOperationResult.Failed;
         if (_decoder != null)
         {
             if (!DriveDecoded()) return NetworkOperationResult.Failed;
@@ -925,6 +968,7 @@ public sealed class ManagedResourceRequest
         _failureReason = ManagedResourceFailureReason.None;
         _consumerFailureReason = ManagedResourceConsumerFailureReason.None;
         _decoderFailureReason = ManagedContentDecoderFailureReason.None;
+        _metadataValidated = false;
         _state = ManagedResourceState.Idle;
         return NetworkOperationResult.Success;
     }
@@ -977,6 +1021,7 @@ public sealed class ManagedResourceRequest
         _decoder = null;
         _encodedDecoderStaging = null;
         _decoderFailureReason = ManagedContentDecoderFailureReason.None;
+        _metadataValidated = false;
     }
 
     private void RecordBufferedBodyPeak()
@@ -1003,6 +1048,23 @@ public sealed class ManagedResourceRequest
         bool statusParsed = _protocol == ManagedResourceProtocol.Http
             ? _http!.StatusParsed : _https!.StatusParsed;
         if (!statusParsed || IsRedirectBody()) return true;
+        if (!_metadataValidated)
+        {
+            ManagedResourceProgressSnapshot progress = Progress;
+            if (_requireSuccessfulStatus &&
+                (progress.StatusCode < 200 || progress.StatusCode >= 300))
+                return FailDecoder(ManagedResourceFailureReason.HttpFailure,
+                    ManagedContentDecoderFailureReason.None);
+            if (_requiredMime != ManagedMimeClassification.Unknown)
+            {
+                if (progress.ContentTypeState != ManagedHttpContentTypeState.Available ||
+                    !TryCopyContentType(_contentTypeScratch, out int contentTypeLength) ||
+                    ManagedContentTypeParser.Parse(_contentTypeScratch.AsSpan(0, contentTypeLength)).Classification != _requiredMime)
+                    return FailDecoder(ManagedResourceFailureReason.UnsupportedMime,
+                        ManagedContentDecoderFailureReason.None);
+            }
+            _metadataValidated = true;
+        }
         ManagedHttpContentEncodingState encoding = _protocol == ManagedResourceProtocol.Http
             ? _http!.ContentEncodingState : _https!.ContentEncodingState;
         switch (encoding)

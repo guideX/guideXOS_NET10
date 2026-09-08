@@ -471,6 +471,7 @@ public sealed class ManagedLayoutEngine
     private readonly int[] _flowX;
     private readonly int[] _flowY;
     private readonly IManagedLayoutTextMetrics _metrics;
+    private readonly ManagedPageImageStore? _images;
     private readonly ManagedSha256 _hash = new();
     private readonly byte[] _layoutHash = new byte[ManagedSha256.DigestSize];
     private int _boxCount;
@@ -504,7 +505,8 @@ public sealed class ManagedLayoutEngine
 
     public ManagedLayoutEngine(ManagedHtmlDocument document, ManagedCssEngine styles,
                                ManagedLayoutArenaOptions options,
-                               IManagedLayoutTextMetrics? metrics = null)
+                               IManagedLayoutTextMetrics? metrics = null,
+                               ManagedPageImageStore? images = null)
     {
         _document = document ?? throw new ArgumentNullException(nameof(document));
         _styles = styles ?? throw new ArgumentNullException(nameof(styles));
@@ -518,11 +520,13 @@ public sealed class ManagedLayoutEngine
         _flowY = new int[options.BoxCapacity];
         TableColumnCapacity = options.TableColumnCapacity;
         _metrics = metrics ?? new ManagedDeterministicLayoutTextMetrics();
+        _images = images;
         Reset();
     }
 
     public ManagedHtmlDocument Document => _document;
     public ManagedCssEngine Styles => _styles;
+    public ManagedPageImageStore? ImageStore => _images;
     public ManagedLayoutFailureReason FailureReason => _failureReason;
     public bool IsLaidOut => _laidOut;
     public bool CanonicalHashAvailable => _hashAvailable;
@@ -1379,12 +1383,26 @@ public sealed class ManagedLayoutEngine
                                       ref int lineFirstFragment, ref int lineFragmentCount, ref bool lineHasContent)
     {
         ManagedComputedStyle style = StyleForBox(boxIndex);
-        int width = ResolveDimension(style.Width, contentWidth, 0, 32, out bool ok);
+        int intrinsicWidth = 32;
+        int intrinsicHeight = 24;
+        ManagedHtmlNodeHandle source = NodeHandle(_boxes[boxIndex].SourceNodeIndex);
+        if (_document.GetElementTag(source) == ManagedHtmlTag.Img && _images != null &&
+            _images.TryGetForSourceNode(_boxes[boxIndex].SourceNodeIndex, out ManagedImageHandle image) &&
+            _images.TryGetDescriptor(image, out ManagedPageImageDescriptor descriptor))
+        {
+            intrinsicWidth = descriptor.Width;
+            intrinsicHeight = descriptor.Height;
+        }
+        int width = ResolveDimension(style.Width, contentWidth, 0, intrinsicWidth, out bool ok);
         if (!ok) return Fail(ManagedLayoutFailureReason.GeometryOverflow);
-        int height = ResolveDimension(style.Height, -1, 0, 24, out ok);
+        int height = ResolveDimension(style.Height, -1, 0, intrinsicHeight, out ok);
         if (!ok) return Fail(ManagedLayoutFailureReason.GeometryOverflow);
-        if (style.Width.IsAuto) width = 32;
-        if (style.Height.IsAuto) height = 24;
+        if (style.Width.IsAuto && !style.Height.IsAuto && intrinsicHeight > 0)
+            width = Math.Max(1, (int)Math.Min(ManagedLayoutLimits.MaximumCoordinate,
+                (long)height * intrinsicWidth / intrinsicHeight));
+        if (style.Height.IsAuto && !style.Width.IsAuto && intrinsicWidth > 0)
+            height = Math.Max(1, (int)Math.Min(ManagedLayoutLimits.MaximumCoordinate,
+                (long)width * intrinsicHeight / intrinsicWidth));
         if (!EnsureLine(ownerBoxIndex, contentX, lineY, ref lineIndex, ref lineFirstFragment)) return false;
         lineHeight = Math.Max(lineHeight, height);
         ManagedLayoutTextFragment fragment = new(ManagedLayoutTextFragmentKind.Replaced,

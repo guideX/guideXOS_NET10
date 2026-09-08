@@ -10,7 +10,8 @@ public enum ManagedPaintCommandKind : byte
     FillRectangle = 2,
     BorderRectangle = 3,
     TextRun = 4,
-    ImagePlaceholder = 5
+    ImagePlaceholder = 5,
+    Image = 6
 }
 
 [Flags]
@@ -137,6 +138,8 @@ public readonly struct ManagedPaintCommand
         FontStyleValue = fontStyle;
         OpacityValue = opacity;
         ZIndexValue = zIndex;
+        ImageSlotValue = -1;
+        ImageGenerationValue = 0;
     }
 
     private readonly ManagedPaintCommandKind KindValue;
@@ -159,6 +162,8 @@ public readonly struct ManagedPaintCommand
     private readonly ManagedCssFontStyle FontStyleValue;
     private readonly int OpacityValue;
     private readonly int ZIndexValue;
+    private readonly int ImageSlotValue;
+    private readonly uint ImageGenerationValue;
 
     public ManagedPaintCommandKind Kind => KindValue;
     public byte ClipDepth => ClipDepthValue;
@@ -180,6 +185,33 @@ public readonly struct ManagedPaintCommand
     public ManagedCssFontStyle FontStyle => FontStyleValue;
     public int Opacity => OpacityValue;
     public int ZIndex => ZIndexValue;
+    public ManagedImageHandle ImageHandle => new(ImageSlotValue, ImageGenerationValue);
+
+    internal ManagedPaintCommand WithImageHandle(ManagedImageHandle handle)
+    {
+        return new ManagedPaintCommand(Kind, ClipDepth, Flags, SourceBoxIndex,
+            SourceNodeIndex, SourceOffset, SourceLength, LineIndex, BaselineY,
+            Rect, ClipRect, Color, BorderWidths, BorderStyle, FontId, FontSize,
+            FontWeight, FontStyle, Opacity, ZIndex, handle);
+    }
+
+    private ManagedPaintCommand(ManagedPaintCommandKind kind, byte clipDepth,
+                                ManagedPaintCommandFlags flags, int sourceBoxIndex,
+                                int sourceNodeIndex, int sourceOffset, int sourceLength,
+                                int lineIndex, int baselineY, ManagedLayoutRect rect,
+                                ManagedLayoutRect clipRect, uint color,
+                                ManagedLayoutEdges borderWidths,
+                                ManagedCssBorderStyle borderStyle,
+                                ManagedPaintFontId fontId, int fontSize, int fontWeight,
+                                ManagedCssFontStyle fontStyle, int opacity, int zIndex,
+                                ManagedImageHandle imageHandle)
+        : this(kind, clipDepth, flags, sourceBoxIndex, sourceNodeIndex, sourceOffset,
+               sourceLength, lineIndex, baselineY, rect, clipRect, color, borderWidths,
+               borderStyle, fontId, fontSize, fontWeight, fontStyle, opacity, zIndex)
+    {
+        ImageSlotValue = imageHandle.Slot;
+        ImageGenerationValue = imageHandle.Generation;
+    }
 }
 
 public readonly struct ManagedPaintTelemetry
@@ -196,6 +228,7 @@ public readonly struct ManagedPaintTelemetry
         BorderCommands = engine.BorderCommands;
         TextCommands = engine.TextCommands;
         ImagePlaceholderCommands = engine.ImagePlaceholderCommands;
+        ImageCommands = engine.ImageCommands;
         ClipPushes = engine.ClipPushes;
         ClipPops = engine.ClipPops;
         PeakClipDepth = engine.PeakClipDepth;
@@ -221,6 +254,7 @@ public readonly struct ManagedPaintTelemetry
     public int BorderCommands { get; }
     public int TextCommands { get; }
     public int ImagePlaceholderCommands { get; }
+    public int ImageCommands { get; }
     public int ClipPushes { get; }
     public int ClipPops { get; }
     public int PeakClipDepth { get; }
@@ -262,7 +296,8 @@ public static class ManagedPaintValidator
 {
     public static bool Validate(ReadOnlySpan<ManagedPaintCommand> commands,
                                 ManagedHtmlDocument document, ManagedLayoutEngine layout,
-                                out ManagedPaintValidationFailureReason reason)
+                                out ManagedPaintValidationFailureReason reason,
+                                ManagedPageImageStore? images = null)
     {
         reason = ManagedPaintValidationFailureReason.None;
         if (document == null || layout == null || !layout.IsLaidOut)
@@ -274,7 +309,7 @@ public static class ManagedPaintValidator
         for (int index = 0; index != commands.Length; ++index)
         {
             ManagedPaintCommand command = commands[index];
-            if ((byte)command.Kind > (byte)ManagedPaintCommandKind.ImagePlaceholder)
+            if ((byte)command.Kind > (byte)ManagedPaintCommandKind.Image)
                 return Fail(ManagedPaintValidationFailureReason.InvalidKind, out reason);
             if (!ValidRect(command.Rect))
                 return Fail(ManagedPaintValidationFailureReason.InvalidRectangle, out reason);
@@ -331,19 +366,29 @@ public static class ManagedPaintValidator
                     if (command.LineIndex < 0 || command.FontSize <= 0 || command.FontWeight <= 0)
                         return Fail(ManagedPaintValidationFailureReason.InvalidTextReference, out reason);
                 }
-                if (command.Kind == ManagedPaintCommandKind.ImagePlaceholder)
+                if (command.Kind == ManagedPaintCommandKind.ImagePlaceholder ||
+                    command.Kind == ManagedPaintCommandKind.Image)
                 {
                     if (command.SourceBoxIndex < 0 || command.SourceNodeIndex < 0 ||
                         sourceBox.Kind != ManagedLayoutBoxKind.Replaced ||
                         document.GetNodeKind(NodeHandle(document, command.SourceNodeIndex)) != ManagedHtmlNodeKind.Element ||
                         document.GetElementTag(NodeHandle(document, command.SourceNodeIndex)) != ManagedHtmlTag.Img)
                         return Fail(ManagedPaintValidationFailureReason.InvalidImageSource, out reason);
+                    if (command.Kind == ManagedPaintCommandKind.Image &&
+                        (!command.ImageHandle.IsValid || images == null ||
+                         !images.TryGetDescriptor(command.ImageHandle,
+                                                  out ManagedPageImageDescriptor descriptor) ||
+                         descriptor.SourceNodeIndex != command.SourceNodeIndex ||
+                         descriptor.Width <= 0 || descriptor.Height <= 0 ||
+                         descriptor.PixelCount != descriptor.Width * descriptor.Height))
+                        return Fail(ManagedPaintValidationFailureReason.InvalidImageSource, out reason);
                 }
             }
             if (command.Kind == ManagedPaintCommandKind.FillRectangle ||
                 command.Kind == ManagedPaintCommandKind.BorderRectangle ||
                 command.Kind == ManagedPaintCommandKind.TextRun ||
-                command.Kind == ManagedPaintCommandKind.ImagePlaceholder)
+                command.Kind == ManagedPaintCommandKind.ImagePlaceholder ||
+                command.Kind == ManagedPaintCommandKind.Image)
             {
                 if (command.SourceBoxIndex < 0) return Fail(ManagedPaintValidationFailureReason.InvalidSourceBox, out reason);
                 int bucket = command.ZIndex < 0 ? -1 : command.ZIndex > 0 ? 1 : 0;
@@ -406,6 +451,7 @@ public sealed class ManagedPaintEngine
     private readonly ManagedSha256 _hash = new();
     private readonly byte[] _paintHash = new byte[ManagedSha256.DigestSize];
     private readonly IManagedLayoutTextTypography? _typography;
+    private readonly ManagedPageImageStore? _images;
     private int _used;
     private int _peak;
     private int _activeClipPathCount;
@@ -423,6 +469,7 @@ public sealed class ManagedPaintEngine
     private int _borderCommands;
     private int _textCommands;
     private int _imagePlaceholderCommands;
+    private int _imageCommands;
     private int _clipPushes;
     private int _clipPops;
     private int _offscreenCommandsCulled;
@@ -449,11 +496,19 @@ public sealed class ManagedPaintEngine
 
     public ManagedPaintEngine(ManagedLayoutEngine layout, ManagedPaintArenaOptions options,
                               IManagedLayoutTextTypography? typography)
+        : this(layout, options, typography, layout?.ImageStore)
+    {
+    }
+
+    public ManagedPaintEngine(ManagedLayoutEngine layout, ManagedPaintArenaOptions options,
+                              IManagedLayoutTextTypography? typography,
+                              ManagedPageImageStore? images)
     {
         _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         _document = layout.Document;
         _styles = layout.Styles;
         _typography = typography;
+        _images = images;
         _commands = new ManagedPaintCommand[options.CommandCapacity];
         _clipStack = new ManagedLayoutRect[options.ClipDepthCapacity];
         _activeClipPath = new int[options.ClipDepthCapacity];
@@ -485,6 +540,7 @@ public sealed class ManagedPaintEngine
     public int BorderCommands => _borderCommands;
     public int TextCommands => _textCommands;
     public int ImagePlaceholderCommands => _imagePlaceholderCommands;
+    public int ImageCommands => _imageCommands;
     public int ClipPushes => _clipPushes;
     public int ClipPops => _clipPops;
     public int OffscreenCommandsCulled => _offscreenCommandsCulled;
@@ -498,6 +554,7 @@ public sealed class ManagedPaintEngine
     public int ScrollX => _scrollX;
     public int ScrollY => _scrollY;
     public ManagedPaintTelemetry Telemetry => new(this);
+    public ManagedPageImageStore? ImageStore => _images;
 
     public void Cancel() => _cancelRequested = true;
 
@@ -534,6 +591,7 @@ public sealed class ManagedPaintEngine
         _borderCommands = 0;
         _textCommands = 0;
         _imagePlaceholderCommands = 0;
+        _imageCommands = 0;
         _clipPushes = 0;
         _clipPops = 0;
         _offscreenCommandsCulled = 0;
@@ -629,7 +687,8 @@ public sealed class ManagedPaintEngine
             reason = ManagedPaintValidationFailureReason.NotGenerated;
             return false;
         }
-        return ManagedPaintValidator.Validate(_commands.AsSpan(0, _used), _document, _layout, out reason);
+        return ManagedPaintValidator.Validate(_commands.AsSpan(0, _used), _document, _layout,
+                                              out reason, _images);
     }
 
     private bool BuildOrder()
@@ -772,9 +831,13 @@ public sealed class ManagedPaintEngine
     {
         if (!TryTransform(boxIndex, sourceRect, out ManagedLayoutRect rect))
             return Fail(ManagedPaintFailureReason.GeometryOverflow);
-        return EmitPrimitive(boxIndex, sourceNodeIndex, ManagedPaintCommandKind.ImagePlaceholder,
+        ManagedImageHandle image = ManagedImageHandle.Invalid;
+        ManagedPaintCommandKind kind = ManagedPaintCommandKind.ImagePlaceholder;
+        if (_images != null && _images.TryGetForSourceNode(sourceNodeIndex, out image))
+            kind = ManagedPaintCommandKind.Image;
+        return EmitPrimitive(boxIndex, sourceNodeIndex, kind,
             rect, 0xFF808080U, new ManagedLayoutEdges(0, 0, 0, 0),
-            ManagedCssBorderStyle.None, style, 0, 0, -1, out _);
+            ManagedCssBorderStyle.None, style, 0, 0, -1, out _, null, 0, image);
     }
 
     private bool EmitPrimitive(int boxIndex, int sourceNodeIndex, ManagedPaintCommandKind kind,
@@ -782,7 +845,8 @@ public sealed class ManagedPaintEngine
                                ManagedCssBorderStyle borderStyle, ManagedComputedStyle style,
                                int sourceOffset, int sourceLength, int lineIndex,
                                out bool emitted, ManagedLayoutTextStyle? textStyle = null,
-                               int baseline = 0)
+                               int baseline = 0,
+                               ManagedImageHandle imageHandle = default)
     {
         emitted = false;
         if (!Intersects(rect, _clipStack[_clipDepth - 1]))
@@ -797,11 +861,11 @@ public sealed class ManagedPaintEngine
         ManagedLayoutRect clip = _clipStack[_clipDepth - 1];
         ManagedPaintCommandFlags flags = IsPositionedBox(boxIndex)
             ? ManagedPaintCommandFlags.Positioned : ManagedPaintCommandFlags.None;
-        ManagedPaintCommand command = new(kind, (byte)_clipDepth, flags, boxIndex,
+        ManagedPaintCommand command = new ManagedPaintCommand(kind, (byte)_clipDepth, flags, boxIndex,
             sourceNodeIndex, sourceOffset, sourceLength, lineIndex, baseline, rect, clip, color,
             border, borderStyle, ManagedPaintFontId.DefaultUi, actualTextStyle.FontSize,
             actualTextStyle.FontWeight, actualTextStyle.FontStyle, effectiveOpacity,
-            EffectiveZIndex(boxIndex));
+            EffectiveZIndex(boxIndex)).WithImageHandle(imageHandle);
         if (!Emit(command)) return false;
         emitted = true;
         switch (kind)
@@ -810,6 +874,7 @@ public sealed class ManagedPaintEngine
             case ManagedPaintCommandKind.BorderRectangle: ++_borderCommands; break;
             case ManagedPaintCommandKind.TextRun: ++_textCommands; break;
             case ManagedPaintCommandKind.ImagePlaceholder: ++_imagePlaceholderCommands; break;
+            case ManagedPaintCommandKind.Image: ++_imageCommands; break;
         }
         if (flags != ManagedPaintCommandFlags.None) ++_positionedCommands;
         return true;
@@ -951,6 +1016,7 @@ public sealed class ManagedPaintEngine
         _borderCommands = 0;
         _textCommands = 0;
         _imagePlaceholderCommands = 0;
+        _imageCommands = 0;
         _clipPushes = 0;
         _clipPops = 0;
         _offscreenCommandsCulled = 0;
@@ -1022,6 +1088,8 @@ public sealed class ManagedPaintEngine
             AppendUInt32((uint)command.FontStyle, scratch);
             AppendUInt32((uint)command.Opacity, scratch);
             AppendUInt32((uint)command.ZIndex, scratch);
+            AppendUInt32((uint)command.ImageHandle.Slot, scratch);
+            AppendUInt32(command.ImageHandle.Generation, scratch);
         }
         return _hash.TryFinalize(_paintHash) && (_hashAvailable = true);
     }

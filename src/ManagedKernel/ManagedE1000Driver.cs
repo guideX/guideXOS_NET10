@@ -47,6 +47,7 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase50ModeEnabled;
     private static bool s_phase51ModeEnabled;
     private static bool s_phase51ResetReuseModeEnabled;
+    private static bool s_phase52ModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -87,6 +88,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase51Passed;
     private bool _phase51NegativeMimeControlPassed;
     private bool _phase51ResetReusePassed;
+    private bool _phase52Passed;
     private uint _originalCommand;
     private uint _resultingCommand;
     private bool _pciCommandLive;
@@ -122,6 +124,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase50Requested;
     private bool _phase51Requested;
     private bool _phase51ResetReuseRequested;
+    private bool _phase52Requested;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -167,6 +170,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase51NegativeMimeControlPassed =>
         _phase51NegativeMimeControlPassed;
     internal bool Phase51ResetReusePassed => _phase51ResetReusePassed;
+    internal bool Phase52Passed => _phase52Passed;
 
     internal static void EnablePhase35Mode()
     {
@@ -258,6 +262,11 @@ internal sealed class ManagedE1000Driver
         s_phase51ResetReuseModeEnabled = true;
     }
 
+    internal static void EnablePhase52Mode()
+    {
+        s_phase52ModeEnabled = true;
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -297,6 +306,7 @@ internal sealed class ManagedE1000Driver
         _phase50Requested = s_phase50ModeEnabled;
         _phase51Requested = s_phase51ModeEnabled;
         _phase51ResetReuseRequested = s_phase51ResetReuseModeEnabled;
+        _phase52Requested = s_phase52ModeEnabled;
         return TryStartCore();
     }
 
@@ -411,7 +421,17 @@ internal sealed class ManagedE1000Driver
             Phase16MacLow = ((uint)mac2 << 24) | ((uint)mac3 << 16) |
                             ((uint)mac4 << 8) | mac5;
             _ethernet!.InitializeMac();
-            if (_phase51ResetReuseRequested)
+            if (_phase52Requested)
+            {
+                if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE52_STARTING\r\n"u8) ||
+                    !_ethernet.TryRunPhase52())
+                {
+                    KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE52_START_FAILED\r\n"u8);
+                    return AbortStart();
+                }
+                _phase52Passed = true;
+            }
+            else if (_phase51ResetReuseRequested)
             {
                 if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE51_RESET_REUSE_STARTING\r\n"u8) ||
                     !_ethernet.TryRunPhase51(resetReuse: true))
@@ -623,6 +643,7 @@ internal sealed class ManagedE1000Driver
         s_phase49ModeEnabled = false;
         s_phase50ModeEnabled = false;
         s_phase51ModeEnabled = false;
+        s_phase52ModeEnabled = false;
         bool safe = true;
         if (_ethernet != null)
         {
@@ -665,6 +686,7 @@ internal sealed class ManagedE1000Driver
         _claimHandle = 0;
         _nativeClaimHandle = 0;
         _state = ManagedE1000DriverState.Stopped;
+        KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED\r\n"u8);
         return false;
     }
 
@@ -672,7 +694,7 @@ internal sealed class ManagedE1000Driver
     {
         if (_state != ManagedE1000DriverState.Running) return false;
         _state = ManagedE1000DriverState.Stopping;
-        ManagedEthernetLayer? ethernet = (_phase35Requested || _phase39Requested || _phase40Requested || _phase41Requested || _phase42Requested || _phase43Requested || _phase43CapacityRequested || _phase44Requested || _phase44CapacityRequested || _phase45Requested || _phase45CapacityRequested || _phase46Requested || _phase46CapacityRequested || _phase48Requested || _phase49Requested || _phase50Requested || _phase51Requested || _phase34Requested || _phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
+        ManagedEthernetLayer? ethernet = (_phase35Requested || _phase39Requested || _phase40Requested || _phase41Requested || _phase42Requested || _phase43Requested || _phase43CapacityRequested || _phase44Requested || _phase44CapacityRequested || _phase45Requested || _phase45CapacityRequested || _phase46Requested || _phase46CapacityRequested || _phase48Requested || _phase49Requested || _phase50Requested || _phase51Requested || _phase51ResetReuseRequested || _phase52Requested || _phase34Requested || _phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
             ? ManagedNetworkServiceBackend.LiveEthernet ?? _ethernet
             : _ethernet;
         if (ethernet != null)
@@ -704,6 +726,7 @@ internal sealed class ManagedE1000Driver
             _phase51NegativeMimeControlPassed =
                 ethernet.Phase51NegativeMimeControlPassed;
             _phase51ResetReusePassed = ethernet.Phase51ResetReusePassed;
+            _phase52Passed = ethernet.Phase52Passed;
         }
         bool result = (ethernet == null || ethernet.TryStop()) &&
                       DisableEngines() && ReleaseDmaAndRestorePci();
@@ -837,9 +860,9 @@ internal sealed class ManagedE1000Driver
             !_phase45Requested && !_phase45CapacityRequested &&
             !_phase46Requested && !_phase46CapacityRequested && !_phase48Requested &&
             !_phase49Requested && !_phase50Requested && !_phase51Requested &&
-            !_phase51ResetReuseRequested &&
+            !_phase51ResetReuseRequested && !_phase52Requested &&
             !RunDmaCapacityNegativeTest()) return false;
-        if (!KernelLog.Write(_phase35Requested || _phase40Requested || _phase41Requested || _phase42Requested || _phase43Requested || _phase43CapacityRequested || _phase44Requested || _phase44CapacityRequested || _phase46Requested || _phase46CapacityRequested || _phase48Requested || _phase49Requested || _phase50Requested || _phase51Requested || _phase51ResetReuseRequested
+        if (!KernelLog.Write(_phase35Requested || _phase40Requested || _phase41Requested || _phase42Requested || _phase43Requested || _phase43CapacityRequested || _phase44Requested || _phase44CapacityRequested || _phase46Requested || _phase46CapacityRequested || _phase48Requested || _phase49Requested || _phase50Requested || _phase51Requested || _phase51ResetReuseRequested || _phase52Requested
                 ? "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_CONCURRENT_RNG\r\n"u8
                 : "GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_NEGATIVE_TESTS_OK\r\n"u8))
             return false;

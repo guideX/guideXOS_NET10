@@ -20,6 +20,7 @@
     <Compile Include="..\ManagedKernel\ManagedPaint.cs" Link="ManagedPaint.cs" />
     <Compile Include="..\ManagedKernel\ManagedSoftwareRasterizer.cs" Link="ManagedSoftwareRasterizer.cs" />
     <Compile Include="..\ManagedKernel\ManagedFramebufferPresenter.cs" Link="ManagedFramebufferPresenter.cs" />
+    <Compile Include="..\ManagedKernelPhase47HostTests\ManagedImageCompatibility.cs" Link="ManagedImageCompatibility.cs" />
     <Compile Include="..\ManagedKernel\ManagedPhase48Font.cs" Link="ManagedPhase48Font.cs" />
     <Compile Include="..\ManagedKernel\ManagedPhase48GeneratedFontData.g.cs" Link="ManagedPhase48GeneratedFontData.g.cs" />
   </ItemGroup>

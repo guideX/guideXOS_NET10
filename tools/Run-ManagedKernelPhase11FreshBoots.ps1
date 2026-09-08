@@ -45,6 +45,8 @@ param(
     [switch]$EnablePhase51Protocol,
     [switch]$EnablePhase51WrongMimeControl,
     [switch]$EnablePhase51ResetReuseControl,
+    [switch]$EnablePhase52Protocol,
+    [switch]$EnablePhase52BadPngCrcControl,
     [switch]$CaptureQemuScreen,
     [switch]$EnablePhase42MalformedControl,
     [switch]$EnableManagedKernelPhase35,
@@ -130,8 +132,18 @@ if (($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase5
     (!$EnablePhase15Rx -or $Phase15NetworkBackend -ne 'dgram')) {
     throw 'Phase 51 protocol controls require -EnablePhase15Rx -Phase15NetworkBackend dgram.'
 }
-if ($CaptureQemuScreen -and -not ($EnablePhase49Protocol -or $EnablePhase50Protocol -or $EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl)) {
-    throw '-CaptureQemuScreen requires a visible Phase 49/50/51 control.'
+if ($EnablePhase52Protocol -and
+    (!$EnablePhase15Rx -or $Phase15NetworkBackend -ne 'dgram')) {
+    throw '-EnablePhase52Protocol requires -EnablePhase15Rx -Phase15NetworkBackend dgram.'
+}
+if ($EnablePhase52BadPngCrcControl -and -not $EnablePhase52Protocol) {
+    throw '-EnablePhase52BadPngCrcControl requires -EnablePhase52Protocol.'
+}
+if ($EnablePhase52BadPngCrcControl -and $RunCount -ne 1) {
+    throw '-EnablePhase52BadPngCrcControl is a single fresh-boot negative control.'
+}
+if ($CaptureQemuScreen -and -not ($EnablePhase49Protocol -or $EnablePhase50Protocol -or $EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl -or $EnablePhase52Protocol)) {
+    throw '-CaptureQemuScreen requires a visible Phase 49/50/51/52 control.'
 }
 if ($EnablePhase42MalformedControl -and -not $EnablePhase42Protocol) {
     throw '-EnablePhase42MalformedControl requires -EnablePhase42Protocol.'
@@ -1552,6 +1564,100 @@ function New-Phase51BGzipBody11 {
     return Compress-Phase51Bytes11 ([Text.Encoding]::UTF8.GetBytes($css))
 }
 
+function Get-Phase52Crc32Byte11([uint32]$crc, [byte]$value) {
+    [uint64]$work = ([uint64]$crc) -bxor ([uint64]$value)
+    for ($bit = 0; $bit -lt 8; ++$bit) {
+        $work = if (($work -band 1) -ne 0) {
+            ([uint64]($work -shr 1)) -bxor [uint64]3988292384
+        } else {
+            [uint64]($work -shr 1)
+        }
+        $work = [uint64]($work -band [uint64]4294967295)
+    }
+    return [uint32]$work
+}
+
+function Write-Phase52U32([IO.Stream]$stream, [uint32]$value) {
+    $stream.WriteByte([byte](($value -shr 24) -band 0xFF)); $stream.WriteByte([byte](($value -shr 16) -band 0xFF))
+    $stream.WriteByte([byte](($value -shr 8) -band 0xFF)); $stream.WriteByte([byte]($value -band 0xFF))
+}
+
+function Write-Phase52Chunk([IO.Stream]$stream, [byte[]]$type, [byte[]]$data) {
+    Write-Phase52U32 $stream ([uint32]$data.Length)
+    $stream.Write($type, 0, $type.Length); if ($data.Length -ne 0) { $stream.Write($data, 0, $data.Length) }
+    [uint32]$crc = 4294967295
+    foreach ($value in $type) { $crc = Get-Phase52Crc32Byte11 $crc $value }
+    foreach ($value in $data) { $crc = Get-Phase52Crc32Byte11 $crc $value }
+    [uint32]$finalCrc = [uint32](([int64]$crc) -bxor [int64]4294967295)
+    Write-Phase52U32 $stream $finalCrc
+}
+
+function New-Phase52PngBody11 {
+    $width = 48; $height = 32; $bpp = 4; $rowBytes = $width * $bpp
+    $inflated = [Collections.Generic.List[byte]]::new()
+    [byte[]]$previous = New-Object byte[] $rowBytes
+    for ($y = 0; $y -lt $height; ++$y) {
+        [byte[]]$row = New-Object byte[] $rowBytes
+        for ($x = 0; $x -lt $width; ++$x) {
+            $offset = $x * 4; [byte]$r = 0; [byte]$g = 0; [byte]$b = 0; [byte]$a = 255
+            if ($y -lt 8) {
+                if ($x -lt 12) { $r = 255 } elseif ($x -lt 24) { $g = 255 } elseif ($x -lt 36) { $b = 255 } else { $r = 255; $g = 255; $b = 255 }
+            } elseif ($y -lt 16) {
+            } elseif ($y -lt 24) {
+                $r = 0x12; $g = 0x34; $b = 0x56
+            } elseif ($x -lt 24) {
+                $r = 255; $a = 128
+            } else {
+                $a = 0
+            }
+            $row[$offset] = $r; $row[$offset + 1] = $g; $row[$offset + 2] = $b; $row[$offset + 3] = $a
+        }
+        $filter = $y % 5; $inflated.Add([byte]$filter)
+        for ($index = 0; $index -lt $rowBytes; ++$index) {
+            $left = if ($index -ge $bpp) { $row[$index - $bpp] } else { 0 }
+            $up = $previous[$index]
+            $upLeft = if ($index -ge $bpp) { $previous[$index - $bpp] } else { 0 }
+            $predictor = switch ($filter) {
+                0 { 0 }; 1 { $left }; 2 { $up }; 3 { [math]::Floor(($left + $up) / 2) }
+                default {
+                    $p = $left + $up - $upLeft; $pa = [math]::Abs($p - $left); $pb = [math]::Abs($p - $up); $pc = [math]::Abs($p - $upLeft)
+                    if ($pa -le $pb -and $pa -le $pc) { $left } elseif ($pb -le $pc) { $up } else { $upLeft }
+                }
+            }
+            $inflated.Add([byte](($row[$index] - $predictor) -band 0xFF))
+        }
+        [Array]::Copy($row, $previous, $rowBytes)
+    }
+    $compressed = [IO.MemoryStream]::new(); $compressed.WriteByte(0x78); $compressed.WriteByte(0x9C)
+    $deflate = [IO.Compression.DeflateStream]::new($compressed, [IO.Compression.CompressionLevel]::Optimal, $true)
+    try { $deflate.Write($inflated.ToArray(), 0, $inflated.Count) } finally { $deflate.Dispose() }
+    [uint32]$a = 1; [uint32]$b = 0
+    foreach ($value in $inflated) { $a = ($a + $value) % 65521; $b = ($b + $a) % 65521 }
+    [uint32]$adler = [uint32](([uint64]$b * 65536UL) + [uint64]$a)
+    Write-Phase52U32 $compressed $adler
+    [byte[]]$zlib = $compressed.ToArray(); $compressed.Dispose()
+    $output = [IO.MemoryStream]::new(); $output.Write([byte[]](137,80,78,71,13,10,26,10), 0, 8)
+    $ihdr = New-Object byte[] 13; $ihdr[3] = 48; $ihdr[7] = 32; $ihdr[8] = 8; $ihdr[9] = 6
+    Write-Phase52Chunk $output ([Text.Encoding]::ASCII.GetBytes('IHDR')) $ihdr
+    $split = [math]::Max(1, [math]::Ceiling($zlib.Length / 3))
+    for ($offset = 0; $offset -lt $zlib.Length;) {
+        $count = [math]::Min($split, $zlib.Length - $offset)
+        Write-Phase52Chunk $output ([Text.Encoding]::ASCII.GetBytes('IDAT')) ([byte[]]$zlib[$offset..($offset + $count - 1)])
+        $offset += $count
+    }
+    Write-Phase52Chunk $output ([Text.Encoding]::ASCII.GetBytes('IEND')) ([byte[]]@())
+    try {
+        [byte[]]$result = $output.ToArray()
+        if ($EnablePhase52BadPngCrcControl) {
+            # Corrupt only the IEND CRC after the complete bounded fixture has
+            # been constructed.  The guest still receives image/png and all
+            # preceding PNG bytes, so the control exercises guest CRC failure.
+            $result[$result.Length - 1] = $result[$result.Length - 1] -bxor 1
+        }
+        return ,$result
+    } finally { $output.Dispose() }
+}
+
 function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
                               [int]$rxPort, [int]$timeoutSeconds,
                               [System.Diagnostics.Process]$process,
@@ -1571,6 +1677,8 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
                                [bool]$negativeControl,
                                [bool]$resourceProof = $false) {
     $deadline = Get-Phase11Deadline11 $timeoutSeconds
+    $phase52 = [bool]$EnablePhase52Protocol
+    $phase52BadPngCrc = [bool]$EnablePhase52BadPngCrcControl
     $phase51 = [bool]($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl)
     $phase51ResetReuse = [bool]$EnablePhase51ResetReuseControl
     $phase50 = [bool]$EnablePhase50Protocol
@@ -1588,8 +1696,8 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
     $phase42Malformed = [bool]$EnablePhase42MalformedControl
     $phase41 = [bool]$EnablePhase41Protocol
     $phase40 = [bool]$EnablePhase40Protocol
-    $compressedResource = $resourceProof -or $phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46 -or $phase48 -or $phase49 -or $phase50 -or $phase51
-    $phaseMarker = if ($phase51) { 'PHASE51' } elseif ($phase50) { 'PHASE50' } elseif ($phase49) { 'PHASE49' } elseif ($phase48) { 'PHASE48' } elseif ($phase46) { 'PHASE46' } elseif ($phase45) { 'PHASE45' } elseif ($phase44) { 'PHASE44' } elseif ($phase43) { 'PHASE43' } elseif ($phase42) { 'PHASE42' } elseif ($phase41) { 'PHASE41' } elseif ($phase40) { 'PHASE40' } elseif ($resourceProof) { 'PHASE39' } else { 'PHASE34' }
+    $compressedResource = $resourceProof -or $phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46 -or $phase48 -or $phase49 -or $phase50 -or $phase51 -or $phase52
+    $phaseMarker = if ($phase52) { 'PHASE52' } elseif ($phase51) { 'PHASE51' } elseif ($phase50) { 'PHASE50' } elseif ($phase49) { 'PHASE49' } elseif ($phase48) { 'PHASE48' } elseif ($phase46) { 'PHASE46' } elseif ($phase45) { 'PHASE45' } elseif ($phase44) { 'PHASE44' } elseif ($phase43) { 'PHASE43' } elseif ($phase42) { 'PHASE42' } elseif ($phase41) { 'PHASE41' } elseif ($phase40) { 'PHASE40' } elseif ($resourceProof) { 'PHASE39' } else { 'PHASE34' }
     $dnsQueryFrame = Receive-AnyDns20Frame $peerUdp $timeoutSeconds $hostname
     $dnsQueryPayload = Get-DnsPayload20 $dnsQueryFrame
     $expectedQuestion = New-Phase34DnsQuestion11 $hostname
@@ -1605,7 +1713,7 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
         '127.0.0.1', $rxPort) -eq $dnsResponseFrame.Length) `
         "Phase 34 DNS response send was short for $hostname."
     Write-Phase20Frame $injectionLog ('phase34_dns_response_{0}' -f $hop) $dnsResponseFrame
-    if (-not $phase51 -and -not $phase50 -and -not $phase49 -and -not $phase48 -and -not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
+    if (-not $phase52 -and -not $phase51 -and -not $phase50 -and -not $phase49 -and -not $phase48 -and -not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
         Wait-Marker11 ("GXOS_NET10:MANAGED_HTTPS_{0}_DNS_SUCCESS" -f $phaseMarker) $deadline `
             $process $stream $serialLog $text $receiveBuffer
     }
@@ -1630,7 +1738,7 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
         '127.0.0.1', $rxPort) -eq $synAckFrame.Length) `
         "Phase 34 SYNACK send was short for hop $hop."
     Write-Phase22Frame $injectionLog ('phase34_peer_synack_{0}' -f $hop) $synAckFrame
-    if (-not $phase51 -and -not $phase50 -and -not $phase49 -and -not $phase48 -and -not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
+    if (-not $phase52 -and -not $phase51 -and -not $phase50 -and -not $phase49 -and -not $phase48 -and -not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
         Wait-Marker11 ("GXOS_NET10:MANAGED_HTTPS_{0}_TCP_CONNECTED" -f $phaseMarker) $deadline `
             $process $stream $serialLog $text $receiveBuffer
     }
@@ -1748,7 +1856,7 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
         (0x6101 + $hop) $timeoutSeconds
     [uint32]$serverNext = $serverNext + $serverFinished.Length
 
-    if (-not $phase51 -and -not $phase50 -and -not $phase49 -and -not $phase48 -and -not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
+    if (-not $phase52 -and -not $phase51 -and -not $phase50 -and -not $phase49 -and -not $phase48 -and -not $phase46 -and -not $phase45 -and -not $phase44 -and -not $phase43 -and -not $phase42 -and -not $phase41) {
         Wait-Marker11 ("GXOS_NET10:MANAGED_HTTPS_{0}_HTTP_REQUEST_ENCRYPTED_SENT" -f $phaseMarker) `
             $deadline $process $stream $serialLog $text $receiveBuffer
     }
@@ -1769,7 +1877,24 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
     Send-Phase32PeerAck11 $peerUdp $rxPort $injectionLog $peerMac $guestMacLocal `
         $guestIp $hostIp $clientPort $serverPort $serverNext $clientNext (0x6102 + $hop)
 
-    if ($phase51) {
+    if ($phase52) {
+        if ($path -eq '/phase52/index.html') {
+            $encodedBody = [Text.Encoding]::UTF8.GetBytes('<html><head><link rel="stylesheet" href="/phase52/a.css"><style>.target{color:green}</style><link rel="stylesheet" href="b.css"></head><body><div id="target" class="target">guideXOS Managed Kernel Phase 52 caf&#233; &#8212; r&#233;sum&#233; &#169;</div><img id="hero" class="hero" src="/phase52/image.png"></body></html>')
+            $contentType = 'text/html; charset=utf-8'; $contentEncoding = ''
+        } elseif ($path -eq '/phase52/image.png') {
+            $encodedBody = New-Phase52PngBody11
+            $contentType = 'image/png'; $contentEncoding = ''
+        } elseif ($path -eq '/phase52/a.css') {
+            $encodedBody = Compress-Phase51Bytes11 ([Text.Encoding]::UTF8.GetBytes('.target { color: red; width: 96px; height: 54px; background-color: #112233; border-width: 2px; border-style: solid; border-color: #00FF00; } .hero { width: 96px; height: 64px; background-color: #204060; }'))
+            $contentType = 'text/css; charset=utf-8'; $contentEncoding = "Content-Encoding: gzip`r`n"
+        } else {
+            $encodedBody = Compress-Phase51Bytes11 ([Text.Encoding]::UTF8.GetBytes('.target { color: blue; width: 180px; height: 74px; padding: 8px; background-color: #123456; border-width: 3px; border-style: solid; border-color: white; }'))
+            $contentType = 'text/css; charset=utf-8'; $contentEncoding = "Content-Encoding: gzip`r`n"
+        }
+        $headerBytes = [Text.Encoding]::ASCII.GetBytes(("HTTP/1.1 200 OK`r`nContent-Length: {0}`r`nContent-Type: {1}`r`n{2}Connection: close`r`n`r`n" -f $encodedBody.Length, $contentType, $contentEncoding))
+        $responseBytes = New-Object byte[] ($headerBytes.Length + $encodedBody.Length)
+        $headerBytes.CopyTo($responseBytes, 0); $encodedBody.CopyTo($responseBytes, $headerBytes.Length)
+    } elseif ($phase51) {
         $encodedBody = if ($phase51ResetReuse) { if ($hop -eq 0 -or $hop -eq 2) { New-Phase51IndexBody11 } elseif ($hop -eq 1 -or $hop -eq 3) { New-Phase51AGzipBody11 } else { New-Phase51BGzipBody11 } } elseif ($hop -eq 0) { New-Phase51IndexBody11 } elseif ($hop -eq 1) { New-Phase51AGzipBody11 } else { New-Phase51BGzipBody11 }
         $headerBytes = [Text.Encoding]::ASCII.GetBytes(
             ("HTTP/1.1 200 OK`r`nContent-Length: {0}`r`nContent-Type: {1}`r`n{2}Connection: close`r`n`r`n" -f
@@ -1827,10 +1952,10 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
             ([byte[]]$keyBlock[16..31]) ([byte[]]$keyBlock[36..39])
         Send-Phase32ServerTcpData11 $peerUdp $rxPort $injectionLog $peerMac $guestMacLocal `
             $guestIp $hostIp $clientPort $serverPort $serverNext $clientNext $record `
-            (0x6200 + $hop * 0x100 + $responseChunk) $timeoutSeconds (-not $phase51) `
-            $(if ($phase51 -and $offset + $count -eq $responseBytes.Length) { 0x19 } else { 0x18 })
+            (0x6200 + $hop * 0x100 + $responseChunk) $timeoutSeconds (-not ($phase51 -or $phase52)) `
+            $(if (($phase51 -or $phase52) -and $offset + $count -eq $responseBytes.Length) { 0x19 } else { 0x18 })
         [uint32]$serverNext = $serverNext + $record.Length
-        if ($phase51 -and $offset + $count -eq $responseBytes.Length) {
+        if (($phase51 -or $phase52) -and $offset + $count -eq $responseBytes.Length) {
             [uint32]$serverNext = $serverNext + 1
         }
         if ($resourceProof) {
@@ -1845,7 +1970,7 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
         ++$responseSequence
         ++$responseChunk
     }
-    if ($phase51) {
+    if ($phase51 -or $phase52) {
         [uint32]$earlyFinNext = $clientNext + 1
         $earlyFinalAck = New-TcpSegment22 $serverPort $clientPort $serverNext $earlyFinNext 0x10 `
             $hostIp $guestIp ([byte[]]@()) $false
@@ -1884,7 +2009,25 @@ function Invoke-Phase34Hop11([Net.Sockets.UdpClient]$peerUdp,
             $process $stream $serialLog $text $receiveBuffer
     }
 
-    if ($phase51) {
+    if ($phase52 -and -not $phase52BadPngCrc -and $path -eq '/phase52/image.png') {
+        # The terminal image body has been authenticated and delivered.  The
+        # guest publishes the visual proof before the ordinary close exchange,
+        # so observe that proof here and let the outer runner stop this owned
+        # VM instead of waiting for a network event after the terminal result.
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_DECODE_PASS' $deadline `
+            $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE52_IMAGE_RASTER_PASS' $deadline `
+            $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE52_GOP_PRESENT_PASS' $deadline `
+            $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE52_VISIBLE_IMAGE_PASS' $deadline `
+            $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS' $deadline `
+            $process $stream $serialLog $text $receiveBuffer
+        return 'PASS_PHASE52'
+    }
+
+    if ($phase51 -or $phase52) {
         # The final response segment carries the peer FIN.  The compact fixture
         # therefore presents the authenticated body and EOF in one RX boundary.
         [uint32]$finNext = $clientNext + 1
@@ -2020,6 +2163,8 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
                                        [Net.Sockets.TcpClient]$screenMonitor = $null,
                                        [string]$screenPath = '') {
     $deadline = Get-Phase11Deadline11 $timeoutSeconds
+    $phase52 = [bool]$EnablePhase52Protocol
+    $phase52BadPngCrc = [bool]$EnablePhase52BadPngCrcControl
     $phase51 = [bool]($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl)
     $phase51ResetReuse = [bool]$EnablePhase51ResetReuseControl
     $phase50 = [bool]$EnablePhase50Protocol
@@ -2037,8 +2182,8 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
     $phase42Malformed = [bool]$EnablePhase42MalformedControl
     $phase41 = [bool]$EnablePhase41Protocol
     $phase40 = [bool]$EnablePhase40Protocol
-    $compressedResource = $resourceProof -or $phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46 -or $phase48 -or $phase49 -or $phase50 -or $phase51
-    $phaseMarker = if ($phase51) { 'PHASE51' } elseif ($phase50) { 'PHASE50' } elseif ($phase49) { 'PHASE49' } elseif ($phase48) { 'PHASE48' } elseif ($phase46) { 'PHASE46' } elseif ($phase45) { 'PHASE45' } elseif ($phase44) { 'PHASE44' } elseif ($phase43) { 'PHASE43' } elseif ($phase42) { 'PHASE42' } elseif ($phase41) { 'PHASE41' } elseif ($phase40) { 'PHASE40' } else { 'PHASE34' }
+    $compressedResource = $resourceProof -or $phase40 -or $phase41 -or $phase42 -or $phase43 -or $phase44 -or $phase45 -or $phase46 -or $phase48 -or $phase49 -or $phase50 -or $phase51 -or $phase52
+    $phaseMarker = if ($phase52) { 'PHASE52' } elseif ($phase51) { 'PHASE51' } elseif ($phase50) { 'PHASE50' } elseif ($phase49) { 'PHASE49' } elseif ($phase48) { 'PHASE48' } elseif ($phase46) { 'PHASE46' } elseif ($phase45) { 'PHASE45' } elseif ($phase44) { 'PHASE44' } elseif ($phase43) { 'PHASE43' } elseif ($phase42) { 'PHASE42' } elseif ($phase41) { 'PHASE41' } elseif ($phase40) { 'PHASE40' } else { 'PHASE34' }
     Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_DISCOVER_SENT' $deadline $process $stream $serialLog $text $receiveBuffer
     $discoverFrame = Receive-AnyPhase19Frame $peerUdp $timeoutSeconds 'Phase 34 DHCPDISCOVER'
     $discoverPayload = Get-DhcpPayload19 $discoverFrame
@@ -2081,9 +2226,10 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
     $hosts = @('www.example.com','www.example.com','www.example.com','other.example.com')
     $ports = @(443,443,443,8443)
     $paths = @('/phase34/start','/phase34/step2','/phase34/next','/phase34/final')
-    $hopCount = if ($phase51ResetReuse) { 5 } elseif ($phase51) { 3 } elseif ($compressedResource) { 1 } elseif ($negativeControl) { 2 } else { 4 }
+    $hopCount = if ($phase52) { 4 } elseif ($phase51ResetReuse) { 5 } elseif ($phase51) { 3 } elseif ($compressedResource) { 1 } elseif ($negativeControl) { 2 } else { 4 }
     if ($compressedResource) {
-        if ($phase51ResetReuse) { $hosts = @('www.example.com','www.example.com','www.example.com','www.example.com','www.example.com'); $ports = @(443,443,443,443,443); $paths = @('/phase51/index.html','/phase51/a.css','/phase51/index.html','/phase51/a.css','/phase51/b.css') }
+        if ($phase52) { $hosts = @('www.example.com','www.example.com','www.example.com','www.example.com'); $ports = @(443,443,443,443); $paths = @('/phase52/index.html','/phase52/a.css','/phase52/b.css','/phase52/image.png') }
+        elseif ($phase51ResetReuse) { $hosts = @('www.example.com','www.example.com','www.example.com','www.example.com','www.example.com'); $ports = @(443,443,443,443,443); $paths = @('/phase51/index.html','/phase51/a.css','/phase51/index.html','/phase51/a.css','/phase51/b.css') }
         elseif ($phase51) { $hosts = @('www.example.com','www.example.com','www.example.com'); $ports = @(443,443,443); $paths = @('/phase51/index.html','/phase51/a.css','/phase51/b.css') }
         elseif ($phase50) { $hosts = @('www.example.com'); $ports = @(443); $paths = @('/phase50/gzip') }
         elseif ($phase49) { $paths = @('/phase49/gzip') }
@@ -2102,6 +2248,9 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
             $guestMacBytes $hostMacBytes $guestIpBytes $hostIpBytes $hop $hosts[$hop] $ports[$hop] $paths[$hop] $negativeControl $resourceProof
         if ($EnablePhase51WrongMimeControl -and $hopResult -eq 'PASS_PHASE51_WRONG_MIME') {
             return 'PASS_PHASE51_WRONG_MIME'
+        }
+        if ($phase52 -and $hopResult -eq 'PASS_PHASE52') {
+            return 'PASS_PHASE52'
         }
         if ($negativeControl -and $hopResult -eq 'EXPECTED_FAILURE') {
             $transcript = $text.ToString()
@@ -2125,7 +2274,7 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
         if ($phase42Malformed -and $hopResult -eq 'NEGATIVE_PASS_PHASE42') {
             return 'NEGATIVE_PASS_PHASE42'
         }
-        if ($hop -lt $hopCount - 1 -and -not $phase51) {
+        if ($hop -lt $hopCount - 1 -and -not ($phase51 -or $phase52)) {
             Wait-Marker11 ('GXOS_NET10:MANAGED_HTTPS_PHASE34_REDIRECT_FOLLOWED=0x{0:X16}' -f ($hop + 1)) `
                 $deadline $process $stream $serialLog $text $receiveBuffer
         }
@@ -2146,7 +2295,23 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE43_CAPACITY_NEGATIVE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
         return 'NEGATIVE_PASS_PHASE43'
     }
-    if ($phase51ResetReuse) {
+    if ($phase52BadPngCrc) {
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE52_BAD_PNG_CRC_CONTROL_PASS' `
+            $deadline $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE52_START_FAILED' `
+            $deadline $process $stream $serialLog $text $receiveBuffer
+        return 'PASS_PHASE52_BAD_PNG_CRC'
+    } elseif ($phase52) {
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_DECODE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE52_IMAGE_RASTER_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE52_GOP_PRESENT_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+        Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE52_VISIBLE_IMAGE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+        if ($null -ne $screenMonitor -and -not [string]::IsNullOrEmpty($screenPath)) {
+            Request-QemuScreenDump11 $screenMonitor $process $injectionLog $screenPath $deadline
+        }
+        Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
+        return 'PASS_PHASE52'
+    } elseif ($phase51ResetReuse) {
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE51_RESOURCE_COMPLETE' $deadline $process $stream $serialLog $text $receiveBuffer
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE51_RESOURCE_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
         Wait-Marker11 'GXOS_NET10:MANAGED_HTTPS_PHASE51_GOP_PRESENT_PASS' $deadline $process $stream $serialLog $text $receiveBuffer
@@ -3007,7 +3172,7 @@ function Write-Phase18Frame([IO.StreamWriter]$log, [string]$name,
     $log.Flush()
 }
 
-Require11 ($RunCount -ge 3 -or $EnablePhase45CapacityControl -or $EnablePhase46CapacityControl -or $EnablePhase51ResetReuseControl) `
+Require11 ($RunCount -ge 3 -or $EnablePhase45CapacityControl -or $EnablePhase46CapacityControl -or $EnablePhase51ResetReuseControl -or $EnablePhase52BadPngCrcControl) `
     'Three fresh ManagedKernel Phase 11 boots are required unless running a single capacity negative control or the Phase 51 reset/reuse lifecycle proof.'
 Require11 ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
     'ManagedKernel EFI or payload is missing.'
@@ -3228,7 +3393,9 @@ try {
             Send-Serial11 $client $stream $process $injectionLog 'KEYBOARD_B_SENT' 0x45
             Start-Sleep -Milliseconds 50
             Send-Serial11 $client $stream $process $injectionLog 'KEYBOARD_B_SENT' 0x46
-            Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_DRAINED' $deadline $process $stream $logStream $text $buffer
+            if (-not $EnablePhase52Protocol) {
+                Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_DRAINED' $deadline $process $stream $logStream $text $buffer
+            }
             Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS' $deadline $process $stream $logStream $text $buffer
             if (-not [string]::IsNullOrEmpty($PostPhase11Marker)) {
                 Wait-Marker11 $PostPhase11Marker $deadline $process $stream $logStream $text $buffer
@@ -3246,7 +3413,7 @@ try {
                     'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
                 Require11 $macMatch.Success 'Phase 15 did not publish the runtime e1000 MAC.'
                 $destinationMac = ($macMatch.Groups[1].Value + $macMatch.Groups[2].Value)
-                $injectOutput = if ($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl -or $EnablePhase50Protocol -or $EnablePhase48Protocol -or $EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol) {
+                $injectOutput = if ($EnablePhase52Protocol -or $EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl -or $EnablePhase50Protocol -or $EnablePhase48Protocol -or $EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol) {
                     @(Send-Phase15DgramFrame11 $peerUdp $rxPort $destinationMac `
                         '127.0.0.1' $false $false $false $false $false $false $false $false $false $true)
                 } elseif ($EnablePhase33Protocol) {
@@ -3291,7 +3458,7 @@ try {
                 } elseif ($Phase15AcceptEitherOutcome) {
                     $phase15Outcome = Wait-Phase15Outcome11 `
                         $deadline $process $stream $logStream $text $buffer
-                } elseif ($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl -or $EnablePhase50Protocol -or $EnablePhase49Protocol -or $EnablePhase48Protocol -or $EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol -or $EnablePhase33Protocol -or $EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol -or $EnablePhase18Protocol -or $EnablePhase17Protocol -or
+                } elseif ($EnablePhase52Protocol -or $EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl -or $EnablePhase50Protocol -or $EnablePhase49Protocol -or $EnablePhase48Protocol -or $EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol -or $EnablePhase33Protocol -or $EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol -or $EnablePhase18Protocol -or $EnablePhase17Protocol -or
                           $EnablePhase16Protocol) {
                     Wait-Marker11 'GXOS_NET10:MANAGED_E1000_RX_COMPLETE' `
                         $deadline $process $stream $logStream $text $buffer
@@ -3300,12 +3467,106 @@ try {
                     $guestMacBytes = New-MacBytes16 $destinationMac
                     $broadcastMac = [byte[]](0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
                     $hostMacBytes = [byte[]](0x02, 0x15, 0, 0, 0, 2)
-                    $guestIpBytes = if ($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl -or $EnablePhase50Protocol -or $EnablePhase49Protocol -or $EnablePhase48Protocol -or $EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol -or $EnablePhase33Protocol -or $EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol) {
+                    $guestIpBytes = if ($EnablePhase52Protocol -or $EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl -or $EnablePhase50Protocol -or $EnablePhase49Protocol -or $EnablePhase48Protocol -or $EnablePhase46Protocol -or $EnablePhase46CapacityControl -or $EnablePhase45Protocol -or $EnablePhase45CapacityControl -or $EnablePhase44Protocol -or $EnablePhase44CapacityControl -or $EnablePhase43Protocol -or $EnablePhase42Protocol -or $EnablePhase41Protocol -or $EnablePhase40Protocol -or $EnablePhase39Protocol -or $EnablePhase34Protocol -or $EnablePhase33Protocol -or $EnablePhase32Protocol -or $EnablePhase23Protocol -or $EnablePhase22Protocol -or $EnablePhase21Protocol -or $EnablePhase20Protocol -or $EnablePhase19Protocol) {
                         [byte[]](10, 15, 0, 42)
                     } else { [byte[]](10, 15, 0, 1) }
                     $hostIpBytes = [byte[]](10, 15, 0, 2)
                     $broadcastIpBytes = [byte[]](255, 255, 255, 255)
-                    if ($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl) {
+                    if ($EnablePhase52Protocol) {
+                        $phase15Outcome = Invoke-Phase34HttpsExchange11 `
+                            $peerUdp $rxPort $TimeoutSeconds $process $stream `
+                            $logStream $text $buffer $injectionLog `
+                            $guestMacBytes $hostMacBytes $guestIpBytes $hostIpBytes `
+                            $false $false $monitor $screenPath
+                        if ($CaptureQemuScreen -and $phase15Outcome -eq 'PASS_PHASE52') {
+                            Request-QemuScreenDump11 $monitor $process $injectionLog $screenPath $deadline
+                        }
+                        if ($phase15Outcome -eq 'PASS_PHASE52') {
+                            # Phase 52 is terminal for this fresh boot.  Stop
+                            # the owned VM here, before the generic Phase 15
+                            # bookkeeping can wait for post-proof traffic.
+                            Stop-OwnedQemu11 $process
+                            $finalText = $text.ToString()
+                            $phase52Markers = @(
+                                'GXOS_NET10:MANAGED_KERNEL_PHASE52_MODE_SELECTED',
+                                'GXOS_NET10:MANAGED_KERNEL_PHASE52_STARTING',
+                                'GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_HEADER_PASS',
+                                'GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_DECODE_PASS',
+                                'GXOS_NET10:MANAGED_HTTPS_PHASE52_IMAGE_RASTER_PASS',
+                                'GXOS_NET10:MANAGED_HTTPS_PHASE52_GOP_PRESENT_PASS',
+                                'GXOS_NET10:MANAGED_HTTPS_PHASE52_VISIBLE_IMAGE_PASS',
+                                'GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS')
+                            foreach ($marker in $phase52Markers) {
+                                Require11 $finalText.Contains($marker) "Boot $sequence missing marker: $marker"
+                            }
+                            Require11 (!$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
+                                !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
+                                !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
+                                "Boot $sequence reported an unexpected machine fault."
+                            if ($CaptureQemuScreen) {
+                                Require11 (Test-Path -LiteralPath $screenPath) `
+                                    "Boot $sequence did not produce the requested QEMU screen capture."
+                            }
+                            Require11 ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedHash) `
+                                "ManagedKernel payload hash changed on boot $sequence."
+                            Require11 (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS')).Count -eq 1) `
+                                'Phase 11 pass marker count was not one.'
+                            if ($null -ne $injectionLog) { $injectionLog.Dispose(); $injectionLog = $null }
+                            if ($null -ne $logStream) { $logStream.Dispose(); $logStream = $null }
+                            if ($null -ne $stream) { $stream.Dispose(); $stream = $null }
+                            if ($null -ne $client) { $client.Dispose(); $client = $null }
+                            if ($null -ne $peerUdp) { $peerUdp.Dispose(); $peerUdp = $null }
+                            if ($null -ne $monitor) { $monitor.Dispose(); $monitor = $null }
+                            if ($null -ne $timeline) { $timeline.Dispose(); $timeline = $null }
+                            $serialHash = (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant()
+                            $injectionHash = (Get-FileHash -LiteralPath $injections -Algorithm SHA256).Hash.ToUpperInvariant()
+                            $timelineHash = (Get-FileHash -LiteralPath $timelinePath -Algorithm SHA256).Hash.ToUpperInvariant()
+                            Write-Output ("MANAGED_KERNEL_PHASE11_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} timeline_sha256={5} serial={6}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $timelineHash, $serial)
+                            continue
+                        }
+                        if ($phase15Outcome -eq 'PASS_PHASE52_BAD_PNG_CRC') {
+                            Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED' `
+                                $deadline $process $stream $logStream $text $buffer
+                            Stop-OwnedQemu11 $process
+                            $finalText = $text.ToString()
+                            $badCrcMarkers = @(
+                                'GXOS_NET10:MANAGED_KERNEL_PHASE52_MODE_SELECTED',
+                                'GXOS_NET10:MANAGED_KERNEL_PHASE52_STARTING',
+                                'GXOS_NET10:MANAGED_HTTPS_PHASE52_BAD_PNG_CRC_REASON=0x0000000000000005',
+                                'GXOS_NET10:MANAGED_HTTPS_PHASE52_BAD_PNG_CRC_IMAGE_SLOT_COUNT=0x0000000000000000',
+                                'GXOS_NET10:MANAGED_HTTPS_PHASE52_BAD_PNG_CRC_CONTROL_PASS',
+                                'GXOS_NET10:MANAGED_KERNEL_PHASE52_START_FAILED',
+                                'GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED')
+                            foreach ($marker in $badCrcMarkers) {
+                                Require11 $finalText.Contains($marker) "Boot $sequence missing marker: $marker"
+                            }
+                            Require11 (!$finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_DECODE_PASS') -and
+                                !$finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_IMAGE_RASTER_PASS') -and
+                                !$finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_GOP_PRESENT_PASS') -and
+                                !$finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_VISIBLE_IMAGE_PASS') -and
+                                !$finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS') -and
+                                !$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
+                                !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
+                                !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
+                                "Boot $sequence reported an unexpected bad-CRC result."
+                            Require11 ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedHash) `
+                                "ManagedKernel payload hash changed on boot $sequence."
+                            Require11 (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS')).Count -eq 1) `
+                                'Phase 11 pass marker count was not one.'
+                            if ($null -ne $injectionLog) { $injectionLog.Dispose(); $injectionLog = $null }
+                            if ($null -ne $logStream) { $logStream.Dispose(); $logStream = $null }
+                            if ($null -ne $stream) { $stream.Dispose(); $stream = $null }
+                            if ($null -ne $client) { $client.Dispose(); $client = $null }
+                            if ($null -ne $peerUdp) { $peerUdp.Dispose(); $peerUdp = $null }
+                            if ($null -ne $monitor) { $monitor.Dispose(); $monitor = $null }
+                            if ($null -ne $timeline) { $timeline.Dispose(); $timeline = $null }
+                            $serialHash = (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant()
+                            $injectionHash = (Get-FileHash -LiteralPath $injections -Algorithm SHA256).Hash.ToUpperInvariant()
+                            $timelineHash = (Get-FileHash -LiteralPath $timelinePath -Algorithm SHA256).Hash.ToUpperInvariant()
+                            Write-Output ("MANAGED_KERNEL_PHASE11_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} timeline_sha256={5} serial={6}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $timelineHash, $serial)
+                            continue
+                        }
+                    } elseif ($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl) {
                         $phase15Outcome = Invoke-Phase34HttpsExchange11 `
                             $peerUdp $rxPort $TimeoutSeconds $process $stream `
                             $logStream $text $buffer $injectionLog `
@@ -4296,7 +4557,7 @@ try {
                         Wait-Marker11 'GXOS_NET10:MANAGED_DHCP_BOUND' `
                             $deadline $process $stream $logStream $text $buffer
                     }
-                    if (-not $EnablePhase51Protocol -and -not $EnablePhase51WrongMimeControl -and -not $EnablePhase51ResetReuseControl -and -not $EnablePhase50Protocol -and -not $EnablePhase49Protocol -and -not $EnablePhase48Protocol -and -not $EnablePhase46Protocol -and -not $EnablePhase46CapacityControl -and -not $EnablePhase45Protocol -and -not $EnablePhase45CapacityControl -and -not $EnablePhase44Protocol -and -not $EnablePhase44CapacityControl -and -not $EnablePhase43Protocol -and -not $EnablePhase42Protocol -and -not $EnablePhase41Protocol -and -not $EnablePhase40Protocol -and -not $EnablePhase39Protocol -and -not $EnablePhase34Protocol -and -not $EnablePhase33Protocol -and -not $EnablePhase32Protocol -and -not $EnablePhase23Protocol -and -not $EnablePhase22Protocol -and -not $EnablePhase20Protocol -and -not $EnablePhase21Protocol) {
+                    if (-not $EnablePhase52Protocol -and -not $EnablePhase52BadPngCrcControl -and -not $EnablePhase51Protocol -and -not $EnablePhase51WrongMimeControl -and -not $EnablePhase51ResetReuseControl -and -not $EnablePhase50Protocol -and -not $EnablePhase49Protocol -and -not $EnablePhase48Protocol -and -not $EnablePhase46Protocol -and -not $EnablePhase46CapacityControl -and -not $EnablePhase45Protocol -and -not $EnablePhase45CapacityControl -and -not $EnablePhase44Protocol -and -not $EnablePhase44CapacityControl -and -not $EnablePhase43Protocol -and -not $EnablePhase42Protocol -and -not $EnablePhase41Protocol -and -not $EnablePhase40Protocol -and -not $EnablePhase39Protocol -and -not $EnablePhase34Protocol -and -not $EnablePhase33Protocol -and -not $EnablePhase32Protocol -and -not $EnablePhase23Protocol -and -not $EnablePhase22Protocol -and -not $EnablePhase20Protocol -and -not $EnablePhase21Protocol) {
                     $zeroMac = [byte[]](0, 0, 0, 0, 0, 0)
                     $guestRequest = New-Phase16ArpFrame11 `
                         $broadcastMac $guestMacBytes 1 $guestIpBytes $zeroMac $hostIpBytes
@@ -4340,7 +4601,10 @@ try {
                     Wait-Marker11 'GXOS_NET10:MANAGED_ARP_RESPONDER_PASS' `
                         $deadline $process $stream $logStream $text $buffer
                     }
-                    if ($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl) {
+                    if ($EnablePhase52Protocol -or $EnablePhase52BadPngCrcControl) {
+                        # Phase 52 completes its terminal resource proof in the
+                        # HTTPS helper above and has no later Phase 15 traffic.
+                    } elseif ($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl) {
                         # Phase 51 completed its multi-resource page proof and
                         # screen capture in the resource helper above.
                     } elseif ($EnablePhase50Protocol) {
@@ -4749,8 +5013,10 @@ try {
                                 $deadline $process $stream $logStream $text $buffer
                             $phase15Outcome = 'PASS_PHASE17'
                         }
-                        Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' `
-                            $deadline $process $stream $logStream $text $buffer
+                        if (-not $EnablePhase52Protocol) {
+                            Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' `
+                                $deadline $process $stream $logStream $text $buffer
+                        }
                     }
                     else {
                         Wait-Marker11 'MANAGED_KERNEL_PHASE16_PASS' `
@@ -4774,6 +5040,12 @@ try {
                     $deadline $process $stream $logStream $text $buffer
                 Stop-OwnedQemu11 $process
                 Pump-Serial11 $stream $logStream $text $buffer
+            } elseif ($EnablePhase52Protocol) {
+                # Phase 52 is a terminal visual proof and intentionally leaves
+                # the guest alive after publishing its result.  Stop only this
+                # run's owned QEMU so the serial transcript can be drained and
+                # the fresh-boot harness can advance to the next run.
+                Stop-OwnedQemu11 $process
             } else {
                 Pump-Serial11 $stream $logStream $text $buffer
             }
@@ -4857,6 +5129,44 @@ try {
                         !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
                         !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
                 "Boot $sequence reported an unexpected Phase 46 paint capacity-control result."
+        } elseif ($EnablePhase52BadPngCrcControl) {
+            Require11 ($phase15Outcome -eq 'PASS_PHASE52_BAD_PNG_CRC') `
+                "Boot $sequence did not complete the Phase 52 bad-CRC negative control: $phase15Outcome."
+            Require11 ($finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE52_MODE_SELECTED') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE52_STARTING') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_BAD_PNG_CRC_REASON=0x0000000000000005') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_BAD_PNG_CRC_IMAGE_SLOT_COUNT=0x0000000000000000') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_BAD_PNG_CRC_CONTROL_PASS') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE52_START_FAILED') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED') -and
+                        !$finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_DECODE_PASS') -and
+                        !$finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_IMAGE_RASTER_PASS') -and
+                        !$finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_GOP_PRESENT_PASS') -and
+                        !$finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_VISIBLE_IMAGE_PASS') -and
+                        !$finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS') -and
+                        !$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
+                        !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
+                        !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
+                "Boot $sequence reported an unexpected Phase 52 bad-CRC result."
+        } elseif ($EnablePhase52Protocol) {
+            Require11 ($phase15Outcome -eq 'PASS_PHASE52') `
+                "Boot $sequence did not complete the Phase 52 external PNG image proof: $phase15Outcome."
+            Require11 ($finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE52_MODE_SELECTED') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE52_STARTING') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_HEADER_PASS') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_DECODE_PASS') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_IMAGE_RASTER_PASS') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_GOP_PRESENT_PASS') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_HTTPS_PHASE52_VISIBLE_IMAGE_PASS') -and
+                        $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS') -and
+                        !$finalText.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
+                        !$finalText.Contains('GXOS_NET10:PAGE_FAULT_') -and
+                        !$finalText.Contains('GXOS_NET10:UNEXPECTED_IMPORT_CALL:')) `
+                "Boot $sequence reported an unexpected Phase 52 external PNG image result."
+            if ($CaptureQemuScreen) {
+                Require11 (Test-Path -LiteralPath $screenPath) `
+                    "Boot $sequence did not produce the requested QEMU screen capture."
+            }
         } elseif ($EnablePhase51ResetReuseControl) {
             Require11 ($phase15Outcome -eq 'PASS_PHASE51_RESET_REUSE') "Boot $sequence did not complete the Phase 51 reset/reuse proof: $phase15Outcome."
             Require11 $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_PHASE51_RESET_REUSE_MODE_SELECTED') "Boot $sequence missed the reset/reuse mode marker."

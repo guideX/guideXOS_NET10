@@ -8,7 +8,7 @@ public enum ManagedRasterPixelFormat : byte
     Argb8888 = 0
 }
 
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[StructLayout(LayoutKind.Sequential)]
 public readonly struct ManagedFramebuffer
 {
     public ManagedFramebuffer(uint[] backingStorage, int width, int height)
@@ -115,6 +115,7 @@ public enum ManagedRasterFailureReason : byte
     GlyphSourceFailure = 9,
     Cancelled = 10,
     InvalidState = 11
+    ,InvalidImageSource = 12
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -394,6 +395,7 @@ public readonly struct ManagedRasterTelemetry
         BorderCommands = rasterizer.BorderCommands;
         TextCommands = rasterizer.TextCommands;
         ImagePlaceholderCommands = rasterizer.ImagePlaceholderCommands;
+        ImageCommands = rasterizer.ImageCommands;
         ClipPushes = rasterizer.ClipPushes;
         ClipPops = rasterizer.ClipPops;
         PeakClipDepth = rasterizer.PeakClipDepth;
@@ -426,6 +428,7 @@ public readonly struct ManagedRasterTelemetry
     public int BorderCommands { get; }
     public int TextCommands { get; }
     public int ImagePlaceholderCommands { get; }
+    public int ImageCommands { get; }
     public int ClipPushes { get; }
     public int ClipPops { get; }
     public int PeakClipDepth { get; }
@@ -473,6 +476,7 @@ public sealed class ManagedSoftwareRasterizer
     private int _borderCommands;
     private int _textCommands;
     private int _imagePlaceholderCommands;
+    private int _imageCommands;
     private int _clipPushes;
     private int _clipPops;
     private int _glyphRequests;
@@ -520,6 +524,7 @@ public sealed class ManagedSoftwareRasterizer
     public int BorderCommands => _borderCommands;
     public int TextCommands => _textCommands;
     public int ImagePlaceholderCommands => _imagePlaceholderCommands;
+    public int ImageCommands => _imageCommands;
     public int ClipPushes => _clipPushes;
     public int ClipPops => _clipPops;
     public int PeakClipDepth => _peakClipDepth;
@@ -573,6 +578,7 @@ public sealed class ManagedSoftwareRasterizer
         _borderCommands = 0;
         _textCommands = 0;
         _imagePlaceholderCommands = 0;
+        _imageCommands = 0;
         _clipPushes = 0;
         _clipPops = 0;
         _glyphRequests = 0;
@@ -673,7 +679,7 @@ public sealed class ManagedSoftwareRasterizer
         else
         {
             valid = ManagedPaintValidator.Validate(commands, document, layout,
-                                                   out validationFailure);
+                                                   out validationFailure, null);
         }
         if (!valid)
             return Fail(MapValidationFailure(validationFailure));
@@ -690,13 +696,14 @@ public sealed class ManagedSoftwareRasterizer
         if (options.Clear && !ClearFramebuffer(options.ClearColor)) return false;
 
         int commandCount = paint?.CommandsEmitted ?? commands.Length;
+        ManagedPageImageStore? images = paint?.ImageStore;
         for (int index = 0; index != commandCount; ++index)
         {
             _currentCommandIndex = index;
             if (ShouldCancel()) return Fail(ManagedRasterFailureReason.Cancelled);
             if (!TryReadCommand(commands, paint, index, out ManagedPaintCommand command))
                 return Fail(ManagedRasterFailureReason.InvalidDisplayList);
-            if (!ExecuteCommand(command, document, glyphSource)) return false;
+            if (!ExecuteCommand(command, document, glyphSource, images)) return false;
             ++_commandsProcessed;
         }
         if (_clipDepth != 0) return Fail(ManagedRasterFailureReason.InvalidDisplayList);
@@ -721,6 +728,7 @@ public sealed class ManagedSoftwareRasterizer
         _borderCommands = 0;
         _textCommands = 0;
         _imagePlaceholderCommands = 0;
+        _imageCommands = 0;
         _clipPushes = 0;
         _clipPops = 0;
         _glyphRequests = 0;
@@ -794,6 +802,7 @@ public sealed class ManagedSoftwareRasterizer
                 case ManagedPaintCommandKind.BorderRectangle:
                 case ManagedPaintCommandKind.TextRun:
                 case ManagedPaintCommandKind.ImagePlaceholder:
+                case ManagedPaintCommandKind.Image:
                     if (command.ClipDepth != depth)
                     {
                         failure = ManagedRasterFailureReason.InvalidDisplayList;
@@ -894,7 +903,8 @@ public sealed class ManagedSoftwareRasterizer
     }
 
     private bool ExecuteCommand(ManagedPaintCommand command, ManagedHtmlDocument document,
-                                IManagedRasterGlyphSource glyphSource)
+                                IManagedRasterGlyphSource glyphSource,
+                                ManagedPageImageStore? images)
     {
         switch (command.Kind)
         {
@@ -918,9 +928,12 @@ public sealed class ManagedSoftwareRasterizer
             case ManagedPaintCommandKind.TextRun:
                 ++_textCommands;
                 return Text(command, document, glyphSource);
-            case ManagedPaintCommandKind.ImagePlaceholder:
-                ++_imagePlaceholderCommands;
-                return Image(command.Rect, command.ClipRect);
+                case ManagedPaintCommandKind.ImagePlaceholder:
+                    ++_imagePlaceholderCommands;
+                    return Image(command.Rect, command.ClipRect);
+                case ManagedPaintCommandKind.Image:
+                    ++_imageCommands;
+                    return ResolvedImage(command, images);
             default:
                 return Fail(ManagedRasterFailureReason.InvalidPaintCommand);
         }
@@ -1004,6 +1017,36 @@ public sealed class ManagedSoftwareRasterizer
                     diagonal ? 0xFFFFFFFFU :
                     (((localX / 4 + localY / 4) & 1) == 0 ? 0xFFB0B0B0U : 0xFF707070U);
                 if (!BlendPixel(x, y, color, PixelKind.Image)) return false;
+            }
+        }
+        return true;
+    }
+
+    private bool ResolvedImage(ManagedPaintCommand command, ManagedPageImageStore? images)
+    {
+        if (images == null || !images.TryGetDescriptor(command.ImageHandle,
+                                                        out ManagedPageImageDescriptor descriptor) ||
+            descriptor.SourceNodeIndex != command.SourceNodeIndex)
+            return Fail(ManagedRasterFailureReason.InvalidImageSource);
+        if (!TryGetBounds(command.Rect, command.ClipRect, out int left, out int top,
+                          out int right, out int bottom))
+        {
+            ++_fullyOffscreenPrimitives;
+            return true;
+        }
+        for (int y = top; y != bottom; ++y)
+        {
+            if (ShouldCancel()) return Fail(ManagedRasterFailureReason.Cancelled);
+            for (int x = left; x != right; ++x)
+            {
+                int localX = (int)((long)x - command.Rect.X);
+                int localY = (int)((long)y - command.Rect.Y);
+                int sourceX = (int)((long)localX * descriptor.Width / command.Rect.Width);
+                int sourceY = (int)((long)localY * descriptor.Height / command.Rect.Height);
+                if (!images.TryReadPixel(command.ImageHandle, sourceX, sourceY, out uint pixel))
+                    return Fail(ManagedRasterFailureReason.InvalidImageSource);
+                pixel = ApplyOpacity(pixel, command.Opacity);
+                if (!BlendPixel(x, y, pixel, PixelKind.Image)) return false;
             }
         }
         return true;
@@ -1150,6 +1193,12 @@ public sealed class ManagedSoftwareRasterizer
 
     private static int RoundDiv(long numerator, long denominator) =>
         denominator <= 0 ? 0 : (int)((numerator + denominator / 2) / denominator);
+
+    private static uint ApplyOpacity(uint color, int opacity)
+    {
+        uint alpha = ((color >> 24) * (uint)Math.Clamp(opacity, 0, 10_000)) / 10_000U;
+        return (alpha << 24) | (color & 0x00FFFFFFU);
+    }
 
     private static bool Contains(ManagedLayoutRect rect, int x, int y) =>
         rect.Width > 0 && rect.Height > 0 && x >= rect.X && y >= rect.Y &&
