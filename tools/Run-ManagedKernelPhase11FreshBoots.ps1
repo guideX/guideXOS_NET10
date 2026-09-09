@@ -1645,7 +1645,7 @@ function New-Phase52PngBody11 {
     try { $deflate.Write($inflated.ToArray(), 0, $inflated.Count) } finally { $deflate.Dispose() }
     [uint32]$a = 1; [uint32]$b = 0
     foreach ($value in $inflated) { $a = ($a + $value) % 65521; $b = ($b + $a) % 65521 }
-    [uint32]$adler = [uint32](([uint64]$b * 65536UL) + [uint64]$a)
+    [uint32]$adler = [uint32](([uint64]$b * [uint64]65536) + [uint64]$a)
     Write-Phase52U32 $compressed $adler
     [byte[]]$zlib = $compressed.ToArray(); $compressed.Dispose()
     $output = [IO.MemoryStream]::new(); $output.Write([byte[]](137,80,78,71,13,10,26,10), 0, 8)
@@ -3363,13 +3363,6 @@ try {
             '-serial', 'none', '-device', 'isa-serial,chardev=serial0,iobase=0x3f8,irq=4,wakeup=on',
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
             '-display', $(if ($CaptureQemuScreen) { 'gtk' } else { 'none' }), '-no-reboot', '-no-shutdown')
-        if ($EnablePhase53Protocol -or $EnablePhase53BadPngCrcControl) {
-            # Phase 53's managed HTTPS proof needs the same deterministic
-            # hardware entropy capability used by the accepted NativeAOT
-            # resource proofs.  QEMU's default qemu64 CPU omits RDRAND;
-            # max exposes it without changing the guest protocol.
-            $arguments += @('-cpu', 'max')
-        }
         if ($EnablePhase15Rx) {
             if (-not $Phase15KeepDefaultNic -and
                 $Phase15NetworkBackend -eq 'dgram') {

@@ -390,12 +390,8 @@ internal sealed class ManagedE1000Driver
         _state = ManagedE1000DriverState.Initialized;
         if (!SubmitProofFrame() || !PollTxCompletion()) return AbortStart();
         _state = ManagedE1000DriverState.Running;
-        bool gcSurvival = RunGcSurvival();
-        if (!gcSurvival && !_phase53Requested) return AbortStart();
-        if (!gcSurvival && !KernelLog.Write(
-                "GXOS_NET10:MANAGED_KERNEL_PHASE53_GC_SURVIVAL_COMPATIBILITY_PATH\r\n"u8))
-            return AbortStart();
-        if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE15_GC_SURVIVAL_PASSED\r\n"u8) ||
+        if (!RunGcSurvival() ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE15_GC_SURVIVAL_PASSED\r\n"u8) ||
             !ArmRxForExternalFrame() ||
             !KernelLog.Write("GXOS_NET10:MANAGED_E1000_RX_CONFIGURED\r\n"u8) ||
             !WriteRxStateSnapshot(

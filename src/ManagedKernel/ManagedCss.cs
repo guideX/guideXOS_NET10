@@ -371,7 +371,7 @@ public static class ManagedCssLimits
     public const int MaximumSelectorsPerRule = 8;
     public const int MaximumSelectorNameLength = 64;
     public const int MaximumSelectorLength = 256;
-    public const int MaximumValueLength = ManagedHttpsUrl.MaximumUrlLength;
+    public const int MaximumValueLength = 512;
     public const int MaximumDeclarationsPerRule = 64;
     public const int MaximumStylesheetCapacity = 64;
     public const int MaximumRuleCapacity = 2048;
@@ -812,7 +812,7 @@ public sealed class ManagedCssEngine
         _inline = new ManagedCssInlineRecord[options.ComputedStyleCapacity];
         _external = new ManagedCssExternalStylesheetRecord[options.ExternalStylesheetCapacity];
         _imageReferences = new ManagedCssImageReferenceRecord[options.CssImageReferenceCapacity];
-        _imageReferenceUrls = new byte[checked(options.CssImageReferenceCapacity * ManagedHttpsUrl.MaximumUrlLength)];
+        _imageReferenceUrls = new byte[checked(options.CssImageReferenceCapacity * ManagedCssLimits.MaximumValueLength)];
         _computed = new ManagedComputedStyle[options.ComputedStyleCapacity];
         _matchedRules = new int[options.ComputedStyleCapacity];
         _winners = new ManagedCssCascadeCandidate[(int)ManagedCssProperty.Count];
@@ -2146,7 +2146,7 @@ public sealed class ManagedCssEngine
             position++;
         }
         while (position < raw.Length && IsCssWhitespace(raw[position])) ++position;
-        if (position != raw.Length || end - start > ManagedHttpsUrl.MaximumUrlLength)
+        if (position != raw.Length || end - start > ManagedCssLimits.MaximumValueLength)
             return false;
         if (_imageReferenceCount == _imageReferences.Length ||
             end - start > _imageReferenceUrls.Length - _imageReferenceUrlUsed)
