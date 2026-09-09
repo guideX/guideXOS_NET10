@@ -307,7 +307,7 @@ internal unsafe sealed class ManagedDeviceInventory
     {
         if (_destroyed || !TryGetDevice(0, out ManagedDevice first)) return false;
         if (ManagedKernelContract.HostServicesInstalled &&
-            !ManagedKernelContract.TryQueryMonotonicTime(out _))
+            !ManagedKernelContract.TryQueryOptionalMonotonicTime(out _))
         {
             return false;
         }

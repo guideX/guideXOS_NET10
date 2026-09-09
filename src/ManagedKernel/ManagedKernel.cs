@@ -888,6 +888,7 @@ internal static unsafe class ManagedKernelContract
     private static int s_phase51Mode;
     private static int s_phase51ResetReuseMode;
     private static int s_phase52Mode;
+    private static int s_phase53Mode;
     private static int s_framebufferInstalled;
     private static GxManagedKernelFramebufferV1 s_framebuffer;
     private static ManagedE1000Driver? s_phase14Driver;
@@ -1528,6 +1529,20 @@ internal static unsafe class ManagedKernelContract
                result.FrequencyHz != 0 &&
                (result.Flags & ~MonotonicTimeKnownFlags) == 0 &&
                result.Reserved == 0;
+    }
+
+    /* Monotonic time is an optional host service.  The boot/start contract
+       validates it when advertised; later portability proofs must preserve
+       that same optionality instead of turning its absence into a failure. */
+    internal static bool TryQueryOptionalMonotonicTime(
+        out GxManagedKernelMonotonicTimeV1 result)
+    {
+        if ((s_hostCapabilities & GxManagedKernelHostServicesV1.CapabilityMonotonicTime) == 0)
+        {
+            result = default;
+            return true;
+        }
+        return TryQueryMonotonicTime(out result);
     }
 
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelStart")]
@@ -2739,6 +2754,21 @@ internal static unsafe class ManagedKernelContract
             ManagedE1000Driver.EnablePhase52Mode();
             return ManagedOk;
         }
+        if (stage == 22)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_dmaServicesInstalled == 0 || !FramebufferInstalled ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            if (!ManagedVirtioRngKernelProof.TryStartPhase35Provider() ||
+                !ManagedHtmlResourceRequest.PrimeNativeKernelTokenizer() ||
+                !ManagedCssEngine.PrimeNativeKernelArenas())
+                return InvalidState;
+            s_phase53Mode = 1;
+            ManagedE1000Driver.EnablePhase53Mode();
+            return ManagedOk;
+        }
         if (stage == 1)
         {
             if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
@@ -2752,7 +2782,7 @@ internal static unsafe class ManagedKernelContract
                  s_phase46Mode == 0 && s_phase46CapacityMode == 0 &&
                  s_phase48Mode == 0 && s_phase49Mode == 0 && s_phase50Mode == 0 &&
                  s_phase51Mode == 0 && s_phase51ResetReuseMode == 0 &&
-                 s_phase52Mode == 0 &&
+                 s_phase52Mode == 0 && s_phase53Mode == 0 &&
                  ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0))
                 return InvalidState;
             ManagedE1000Driver? candidate = ManagedE1000Driver.TryCreate();
@@ -2796,6 +2826,7 @@ internal static unsafe class ManagedKernelContract
             s_phase51Mode = 0;
             s_phase51ResetReuseMode = 0;
             s_phase52Mode = 0;
+            s_phase53Mode = 0;
             bool rxProof = s_phase14Driver.RxProofReceived;
             bool phase15RxProof = s_phase14Driver.RxPhase15Received;
             bool phase16Proof = s_phase14Driver.Phase16Passed;
@@ -2824,6 +2855,7 @@ internal static unsafe class ManagedKernelContract
             bool phase51Proof = s_phase14Driver.Phase51Passed;
             bool phase51ResetReuseProof = s_phase14Driver.Phase51ResetReusePassed;
             bool phase52Proof = s_phase14Driver.Phase52Passed;
+            bool phase53Proof = s_phase14Driver.Phase53Passed;
             s_phase14TeardownRun = 1;
             if (!KernelLog.Write(rxProof
                     ? "PHASE 14 FIRST MANAGED PCI DRIVER COMPLETE — DMA TX/RX PROVEN\r\n"u8
@@ -2886,7 +2918,9 @@ internal static unsafe class ManagedKernelContract
                 (phase51ResetReuseProof &&
                  !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE51_RESET_REUSE_PASS\r\n"u8)) ||
                 (phase52Proof &&
-                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS\r\n"u8)))
+                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS\r\n"u8)) ||
+                (phase53Proof &&
+                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE53_PASS\r\n"u8)))
                 return InvalidState;
             s_phase14Driver = null;
             return ManagedOk;
@@ -3126,7 +3160,7 @@ internal static unsafe class ManagedKernelContract
             return InvalidState;
         }
 
-        if (!ManagedKernelContract.TryQueryMonotonicTime(out _) ||
+        if (!ManagedKernelContract.TryQueryOptionalMonotonicTime(out _) ||
             !KernelMemory.TryAllocate(1, 0, out KernelMemoryRegion runtimeRegion))
         {
             registry.Destroy();
@@ -3606,7 +3640,7 @@ internal static unsafe class KernelMemory
         Fill(in first, 0x31);
         if (!Verify(in first, 0x31)) return false;
         if (!TryWrongReleases(in first)) return false;
-        if (!ManagedKernelContract.TryQueryMonotonicTime(out _)) return false;
+        if (!ManagedKernelContract.TryQueryOptionalMonotonicTime(out _)) return false;
         gcActivity = new byte[4096];
         gcActivity[0] = 0x5A;
         GC.Collect();

@@ -181,7 +181,7 @@ internal static unsafe class KernelArenaProof
         if (!KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_ARENA_GROWTH_OK\r\n"u8) ||
             !KernelLog.Write(
                 "GXOS_NET10:MANAGED_KERNEL_ARENA_RUNTIME_SURVIVAL_BEGIN\r\n"u8) ||
-            !ManagedKernelContract.TryQueryMonotonicTime(out _))
+            !ManagedKernelContract.TryQueryOptionalMonotonicTime(out _))
         {
             return false;
         }

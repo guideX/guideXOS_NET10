@@ -714,7 +714,7 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_config_read_service(
         offset, width, result_address, result_capacity);
 }
 
-#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE40) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE41) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE42) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE48) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE49) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE50) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE51) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE51_RESET_REUSE) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE52)
+#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE40) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE41) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE42) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE48) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE49) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE50) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE51) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE51_RESET_REUSE) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE52) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE53)
 #define GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS 2U
 #else
 #define GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS 1U
@@ -783,7 +783,7 @@ static uint32_t GX_MANAGED_KERNEL_MS_ABI managed_kernel_pci_command_rmw_service(
         for (slot_index = 0; slot_index != GX_MANAGED_KERNEL_PCI_COMMAND_SLOTS;
              ++slot_index) {
             if (g_managed_kernel_pci_command_slots[slot_index].live != 0) {
-#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE40) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE41) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE42) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE48) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE49) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE50) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE51) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE51_RESET_REUSE) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE52)
+#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE35) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE39) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE40) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE41) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE42) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE43_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE44_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE45_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE46_CAPACITY) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE48) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE49) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE50) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE51) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE51_RESET_REUSE) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE52) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE53)
                 if (g_managed_kernel_pci_command_slots[slot_index].resource_id ==
                     resource_id) return GX_MANAGED_INVALID_STATE;
 #else
@@ -1753,6 +1753,7 @@ static uint32_t EFIAPI managed_kernel_host_log_utf8(
 }
 
 #ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE25_STANDALONE
+#ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE53
 static uint32_t EFIAPI managed_kernel_host_query_monotonic_time(
     uint32_t requested_abi_version, uintptr_t output_address,
     uintptr_t output_capacity)
@@ -1785,6 +1786,7 @@ static uint32_t EFIAPI managed_kernel_host_query_monotonic_time(
     ++g_managed_kernel_host_time_calls;
     return GX_MANAGED_OK;
 }
+#endif
 #endif
 
 static uint32_t EFIAPI managed_kernel_memory_allocate_pages(
@@ -12598,12 +12600,14 @@ static void managed_kernel_host_services_make_valid(void)
     g_managed_kernel_host_services.LogUtf8Address =
         (uint64_t)(uintptr_t)managed_kernel_host_log_utf8;
 #ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE25_STANDALONE
+#ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE53
     if (gxos_perf_is_initialized()) {
         g_managed_kernel_host_services.Capabilities |=
             GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME;
         g_managed_kernel_host_services.MonotonicTimeAddress =
             (uint64_t)(uintptr_t)managed_kernel_host_query_monotonic_time;
     }
+#endif
 #endif
 }
 
@@ -13959,6 +13963,11 @@ static void managed_kernel_phase14_driver(
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase52-mode");
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE52_MODE_SELECTED\r\n");
 #endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE53
+    status = run_phase14(22U);
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase53-mode");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE53_MODE_SELECTED\r\n");
+#endif
     status = run_phase14(1U);
     if (status != GX_MANAGED_OK || run_phase14(1U) != GX_MANAGED_INVALID_STATE ||
         run_phase14(2U) != GX_MANAGED_OK ||
@@ -14452,7 +14461,7 @@ static int managed_kernel_interrupt_wait_for_optional_burst(
             __asm__ volatile ("pause" : : : "memory");
         }
     }
-#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE52)
+#if defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE52) || defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE53)
     /* Phase 52 does not depend on the optional post-input serial burst.  The
        bounded network proof starts after the mandatory driver/RX controls;
        retain the legacy burst requirement for every earlier phase. */

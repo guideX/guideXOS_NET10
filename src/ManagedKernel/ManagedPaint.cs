@@ -11,7 +11,8 @@ public enum ManagedPaintCommandKind : byte
     BorderRectangle = 3,
     TextRun = 4,
     ImagePlaceholder = 5,
-    Image = 6
+    Image = 6,
+    BackgroundImage = 7
 }
 
 [Flags]
@@ -116,7 +117,8 @@ public readonly struct ManagedPaintCommand
                                ManagedLayoutEdges borderWidths,
                                ManagedCssBorderStyle borderStyle,
                                ManagedPaintFontId fontId, int fontSize, int fontWeight,
-                               ManagedCssFontStyle fontStyle, int opacity, int zIndex)
+                               ManagedCssFontStyle fontStyle, int opacity, int zIndex,
+                               ManagedCssBackgroundRepeat backgroundRepeat = ManagedCssBackgroundRepeat.NoRepeat)
     {
         KindValue = kind;
         ClipDepthValue = clipDepth;
@@ -138,6 +140,7 @@ public readonly struct ManagedPaintCommand
         FontStyleValue = fontStyle;
         OpacityValue = opacity;
         ZIndexValue = zIndex;
+        BackgroundRepeatValue = backgroundRepeat;
         ImageSlotValue = -1;
         ImageGenerationValue = 0;
     }
@@ -162,6 +165,7 @@ public readonly struct ManagedPaintCommand
     private readonly ManagedCssFontStyle FontStyleValue;
     private readonly int OpacityValue;
     private readonly int ZIndexValue;
+    private readonly ManagedCssBackgroundRepeat BackgroundRepeatValue;
     private readonly int ImageSlotValue;
     private readonly uint ImageGenerationValue;
 
@@ -186,13 +190,14 @@ public readonly struct ManagedPaintCommand
     public int Opacity => OpacityValue;
     public int ZIndex => ZIndexValue;
     public ManagedImageHandle ImageHandle => new(ImageSlotValue, ImageGenerationValue);
+    public ManagedCssBackgroundRepeat BackgroundRepeat => BackgroundRepeatValue;
 
     internal ManagedPaintCommand WithImageHandle(ManagedImageHandle handle)
     {
         return new ManagedPaintCommand(Kind, ClipDepth, Flags, SourceBoxIndex,
             SourceNodeIndex, SourceOffset, SourceLength, LineIndex, BaselineY,
             Rect, ClipRect, Color, BorderWidths, BorderStyle, FontId, FontSize,
-            FontWeight, FontStyle, Opacity, ZIndex, handle);
+            FontWeight, FontStyle, Opacity, ZIndex, handle, BackgroundRepeat);
     }
 
     private ManagedPaintCommand(ManagedPaintCommandKind kind, byte clipDepth,
@@ -204,13 +209,15 @@ public readonly struct ManagedPaintCommand
                                 ManagedCssBorderStyle borderStyle,
                                 ManagedPaintFontId fontId, int fontSize, int fontWeight,
                                 ManagedCssFontStyle fontStyle, int opacity, int zIndex,
-                                ManagedImageHandle imageHandle)
+                                ManagedImageHandle imageHandle,
+                                ManagedCssBackgroundRepeat backgroundRepeat = ManagedCssBackgroundRepeat.NoRepeat)
         : this(kind, clipDepth, flags, sourceBoxIndex, sourceNodeIndex, sourceOffset,
                sourceLength, lineIndex, baselineY, rect, clipRect, color, borderWidths,
                borderStyle, fontId, fontSize, fontWeight, fontStyle, opacity, zIndex)
     {
         ImageSlotValue = imageHandle.Slot;
         ImageGenerationValue = imageHandle.Generation;
+        BackgroundRepeatValue = backgroundRepeat;
     }
 }
 
@@ -229,6 +236,7 @@ public readonly struct ManagedPaintTelemetry
         TextCommands = engine.TextCommands;
         ImagePlaceholderCommands = engine.ImagePlaceholderCommands;
         ImageCommands = engine.ImageCommands;
+        BackgroundImageCommands = engine.BackgroundImageCommands;
         ClipPushes = engine.ClipPushes;
         ClipPops = engine.ClipPops;
         PeakClipDepth = engine.PeakClipDepth;
@@ -255,6 +263,7 @@ public readonly struct ManagedPaintTelemetry
     public int TextCommands { get; }
     public int ImagePlaceholderCommands { get; }
     public int ImageCommands { get; }
+    public int BackgroundImageCommands { get; }
     public int ClipPushes { get; }
     public int ClipPops { get; }
     public int PeakClipDepth { get; }
@@ -309,7 +318,7 @@ public static class ManagedPaintValidator
         for (int index = 0; index != commands.Length; ++index)
         {
             ManagedPaintCommand command = commands[index];
-            if ((byte)command.Kind > (byte)ManagedPaintCommandKind.Image)
+            if ((byte)command.Kind > (byte)ManagedPaintCommandKind.BackgroundImage)
                 return Fail(ManagedPaintValidationFailureReason.InvalidKind, out reason);
             if (!ValidRect(command.Rect))
                 return Fail(ManagedPaintValidationFailureReason.InvalidRectangle, out reason);
@@ -383,12 +392,22 @@ public static class ManagedPaintValidator
                          descriptor.PixelCount != descriptor.Width * descriptor.Height))
                         return Fail(ManagedPaintValidationFailureReason.InvalidImageSource, out reason);
                 }
+                if (command.Kind == ManagedPaintCommandKind.BackgroundImage)
+                {
+                    if (command.SourceBoxIndex < 0 || command.SourceNodeIndex < 0 ||
+                        document.GetNodeKind(NodeHandle(document, command.SourceNodeIndex)) != ManagedHtmlNodeKind.Element ||
+                        !command.ImageHandle.IsValid || images == null ||
+                        !images.TryGetDescriptor(command.ImageHandle, out ManagedPageImageDescriptor backgroundDescriptor) ||
+                        backgroundDescriptor.Width <= 0 || backgroundDescriptor.Height <= 0)
+                        return Fail(ManagedPaintValidationFailureReason.InvalidImageSource, out reason);
+                }
             }
             if (command.Kind == ManagedPaintCommandKind.FillRectangle ||
                 command.Kind == ManagedPaintCommandKind.BorderRectangle ||
                 command.Kind == ManagedPaintCommandKind.TextRun ||
                 command.Kind == ManagedPaintCommandKind.ImagePlaceholder ||
-                command.Kind == ManagedPaintCommandKind.Image)
+                command.Kind == ManagedPaintCommandKind.Image ||
+                command.Kind == ManagedPaintCommandKind.BackgroundImage)
             {
                 if (command.SourceBoxIndex < 0) return Fail(ManagedPaintValidationFailureReason.InvalidSourceBox, out reason);
                 int bucket = command.ZIndex < 0 ? -1 : command.ZIndex > 0 ? 1 : 0;
@@ -470,6 +489,7 @@ public sealed class ManagedPaintEngine
     private int _textCommands;
     private int _imagePlaceholderCommands;
     private int _imageCommands;
+    private int _backgroundImageCommands;
     private int _clipPushes;
     private int _clipPops;
     private int _offscreenCommandsCulled;
@@ -541,6 +561,7 @@ public sealed class ManagedPaintEngine
     public int TextCommands => _textCommands;
     public int ImagePlaceholderCommands => _imagePlaceholderCommands;
     public int ImageCommands => _imageCommands;
+    public int BackgroundImageCommands => _backgroundImageCommands;
     public int ClipPushes => _clipPushes;
     public int ClipPops => _clipPops;
     public int OffscreenCommandsCulled => _offscreenCommandsCulled;
@@ -592,6 +613,7 @@ public sealed class ManagedPaintEngine
         _textCommands = 0;
         _imagePlaceholderCommands = 0;
         _imageCommands = 0;
+        _backgroundImageCommands = 0;
         _clipPushes = 0;
         _clipPops = 0;
         _offscreenCommandsCulled = 0;
@@ -784,16 +806,27 @@ public sealed class ManagedPaintEngine
 
     private bool PaintBackground(int boxIndex, ManagedLayoutBox box, ManagedComputedStyle style)
     {
-        if ((style.BackgroundColor & 0xFF000000U) == 0)
+        if ((style.BackgroundColor & 0xFF000000U) != 0)
         {
-            ++_transparentBackgroundsSkipped;
-            return true;
+            if (!TryTransform(boxIndex, box.BorderBox, out ManagedLayoutRect rect))
+                return Fail(ManagedPaintFailureReason.GeometryOverflow);
+            if (!EmitPrimitive(boxIndex, box.SourceNodeIndex, ManagedPaintCommandKind.FillRectangle,
+                rect, style.BackgroundColor, new ManagedLayoutEdges(0, 0, 0, 0), ManagedCssBorderStyle.None,
+                style, 0, 0, -1, out _)) return false;
         }
-        if (!TryTransform(boxIndex, box.BorderBox, out ManagedLayoutRect rect))
-            return Fail(ManagedPaintFailureReason.GeometryOverflow);
-        return EmitPrimitive(boxIndex, box.SourceNodeIndex, ManagedPaintCommandKind.FillRectangle,
-            rect, style.BackgroundColor, new ManagedLayoutEdges(0, 0, 0, 0), ManagedCssBorderStyle.None,
-            style, 0, 0, -1, out _);
+        else ++_transparentBackgroundsSkipped;
+        if (style.BackgroundImageKind == ManagedCssBackgroundImageKind.Resolved &&
+            style.BackgroundImageHandle.IsValid)
+        {
+            if (!TryTransform(boxIndex, box.PaddingBox, out ManagedLayoutRect imageRect))
+                return Fail(ManagedPaintFailureReason.GeometryOverflow);
+            return EmitPrimitive(boxIndex, box.SourceNodeIndex,
+                ManagedPaintCommandKind.BackgroundImage, imageRect, 0,
+                new ManagedLayoutEdges(0, 0, 0, 0), ManagedCssBorderStyle.None,
+                style, 0, 0, -1, out _, null, 0, style.BackgroundImageHandle,
+                style.BackgroundRepeat);
+        }
+        return true;
     }
 
     private bool PaintBorder(int boxIndex, ManagedLayoutBox box, ManagedComputedStyle style)
@@ -846,7 +879,8 @@ public sealed class ManagedPaintEngine
                                int sourceOffset, int sourceLength, int lineIndex,
                                out bool emitted, ManagedLayoutTextStyle? textStyle = null,
                                int baseline = 0,
-                               ManagedImageHandle imageHandle = default)
+                               ManagedImageHandle imageHandle = default,
+                               ManagedCssBackgroundRepeat backgroundRepeat = ManagedCssBackgroundRepeat.NoRepeat)
     {
         emitted = false;
         if (!Intersects(rect, _clipStack[_clipDepth - 1]))
@@ -865,7 +899,7 @@ public sealed class ManagedPaintEngine
             sourceNodeIndex, sourceOffset, sourceLength, lineIndex, baseline, rect, clip, color,
             border, borderStyle, ManagedPaintFontId.DefaultUi, actualTextStyle.FontSize,
             actualTextStyle.FontWeight, actualTextStyle.FontStyle, effectiveOpacity,
-            EffectiveZIndex(boxIndex)).WithImageHandle(imageHandle);
+            EffectiveZIndex(boxIndex), backgroundRepeat).WithImageHandle(imageHandle);
         if (!Emit(command)) return false;
         emitted = true;
         switch (kind)
@@ -875,6 +909,7 @@ public sealed class ManagedPaintEngine
             case ManagedPaintCommandKind.TextRun: ++_textCommands; break;
             case ManagedPaintCommandKind.ImagePlaceholder: ++_imagePlaceholderCommands; break;
             case ManagedPaintCommandKind.Image: ++_imageCommands; break;
+            case ManagedPaintCommandKind.BackgroundImage: ++_backgroundImageCommands; break;
         }
         if (flags != ManagedPaintCommandFlags.None) ++_positionedCommands;
         return true;
@@ -1017,6 +1052,7 @@ public sealed class ManagedPaintEngine
         _textCommands = 0;
         _imagePlaceholderCommands = 0;
         _imageCommands = 0;
+        _backgroundImageCommands = 0;
         _clipPushes = 0;
         _clipPops = 0;
         _offscreenCommandsCulled = 0;

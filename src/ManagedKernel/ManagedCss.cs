@@ -9,6 +9,62 @@ public enum ManagedCssSourceKind : byte
     Inline = 2
 }
 
+public enum ManagedCssImageReferenceOrigin : byte
+{
+    Inline = 1,
+    EmbeddedStylesheet = 2,
+    ExternalStylesheet = 3
+}
+
+public enum ManagedCssBackgroundImageKind : byte
+{
+    None = 0,
+    Unresolved = 1,
+    Resolved = 2
+}
+
+public enum ManagedCssBackgroundRepeat : byte
+{
+    Repeat = 0,
+    NoRepeat = 1
+}
+
+/// <summary>Compact CSS image reference backed by the engine's fixed URL arena.</summary>
+public readonly struct ManagedCssImageReference
+{
+    private readonly ManagedCssEngine? _owner;
+    private readonly int _offset;
+
+    internal ManagedCssImageReference(ManagedCssEngine owner, int index,
+                                      ManagedCssImageReferenceOrigin origin,
+                                      int stylesheetIndex, int sourceNodeIndex,
+                                      int offset, int length)
+    {
+        _owner = owner;
+        Index = index;
+        Origin = origin;
+        StylesheetIndex = stylesheetIndex;
+        SourceNodeIndex = sourceNodeIndex;
+        _offset = offset;
+        UrlLength = length;
+    }
+
+    public int Index { get; }
+    public ManagedCssImageReferenceOrigin Origin { get; }
+    public int StylesheetIndex { get; }
+    public int SourceNodeIndex { get; }
+    public int UrlLength { get; }
+
+    public bool TryCopyUrl(Span<byte> destination, out int length)
+    {
+        length = 0;
+        if (_owner == null || destination.Length < UrlLength) return false;
+        _owner.CopyCssImageUrl(_offset, UrlLength, destination);
+        length = UrlLength;
+        return true;
+    }
+}
+
 public enum ManagedCssStyleSourceKind : byte
 {
     None = 0,
@@ -55,7 +111,8 @@ public enum ManagedCssParseFailureReason : byte
     InvalidDocument = 9,
     Cancelled = 10,
     ComputedStyleCapacityExceeded = 11,
-    StyleTraversalFailure = 12
+    StyleTraversalFailure = 12,
+    CssImageReferenceCapacityExceeded = 13
 }
 
 public enum ManagedCssDisplay : byte
@@ -172,7 +229,9 @@ public enum ManagedCssProperty : byte
     OverflowY = 33,
     Opacity = 34,
     ZIndex = 35,
-    Count = 36
+    BackgroundImage = 36,
+    BackgroundRepeat = 37,
+    Count = 38
 }
 
 public enum ManagedCssKeyword : ushort
@@ -242,11 +301,12 @@ public readonly struct ManagedCssArenaOptions
         int selectorStepCapacity,
         int declarationCapacity,
         int computedStyleCapacity = ManagedCssLimits.DefaultComputedStyleCapacity,
-        int externalStylesheetCapacity = ManagedCssLimits.DefaultExternalStylesheetCapacity)
+        int externalStylesheetCapacity = ManagedCssLimits.DefaultExternalStylesheetCapacity,
+        int cssImageReferenceCapacity = ManagedCssLimits.DefaultCssImageReferenceCapacity)
     {
         Validate(stylesheetCapacity, ruleCapacity, selectorCapacity,
                  selectorStepCapacity, declarationCapacity, computedStyleCapacity,
-                 externalStylesheetCapacity);
+                 externalStylesheetCapacity, cssImageReferenceCapacity);
         StylesheetCapacity = stylesheetCapacity;
         RuleCapacity = ruleCapacity;
         SelectorCapacity = selectorCapacity;
@@ -254,6 +314,7 @@ public readonly struct ManagedCssArenaOptions
         DeclarationCapacity = declarationCapacity;
         ComputedStyleCapacity = computedStyleCapacity;
         ExternalStylesheetCapacity = externalStylesheetCapacity;
+        CssImageReferenceCapacity = cssImageReferenceCapacity;
     }
 
     public static ManagedCssArenaOptions Default => new(
@@ -271,11 +332,13 @@ public readonly struct ManagedCssArenaOptions
     public int DeclarationCapacity { get; }
     public int ComputedStyleCapacity { get; }
     public int ExternalStylesheetCapacity { get; }
+    public int CssImageReferenceCapacity { get; }
 
     private static void Validate(int stylesheetCapacity, int ruleCapacity,
                                  int selectorCapacity, int selectorStepCapacity,
                                  int declarationCapacity, int computedStyleCapacity,
-                                 int externalStylesheetCapacity)
+                                 int externalStylesheetCapacity,
+                                 int cssImageReferenceCapacity)
     {
         if (stylesheetCapacity <= 0 || stylesheetCapacity > ManagedCssLimits.MaximumStylesheetCapacity ||
             ruleCapacity <= 0 || ruleCapacity > ManagedCssLimits.MaximumRuleCapacity ||
@@ -283,7 +346,8 @@ public readonly struct ManagedCssArenaOptions
             selectorStepCapacity <= 0 || selectorStepCapacity > ManagedCssLimits.MaximumSelectorStepCapacity ||
             declarationCapacity <= 0 || declarationCapacity > ManagedCssLimits.MaximumDeclarationCapacity ||
             computedStyleCapacity <= 0 || computedStyleCapacity > ManagedCssLimits.MaximumComputedStyleCapacity ||
-            externalStylesheetCapacity <= 0 || externalStylesheetCapacity > ManagedCssLimits.MaximumExternalStylesheetCapacity)
+            externalStylesheetCapacity <= 0 || externalStylesheetCapacity > ManagedCssLimits.MaximumExternalStylesheetCapacity ||
+            cssImageReferenceCapacity <= 0 || cssImageReferenceCapacity > ManagedCssLimits.MaximumCssImageReferenceCapacity)
             throw new ArgumentOutOfRangeException(nameof(ruleCapacity));
     }
 }
@@ -299,6 +363,7 @@ public static class ManagedCssLimits
     public const int DefaultDeclarationCapacity = 1024;
     public const int DefaultComputedStyleCapacity = 1024;
     public const int DefaultExternalStylesheetCapacity = 4;
+    public const int DefaultCssImageReferenceCapacity = 8;
     public const int SelectorNameCapacity = 16_384;
     public const int MaximumSelectorSteps = 8;
     public const int MaximumClassesPerStep = 8;
@@ -306,7 +371,7 @@ public static class ManagedCssLimits
     public const int MaximumSelectorsPerRule = 8;
     public const int MaximumSelectorNameLength = 64;
     public const int MaximumSelectorLength = 256;
-    public const int MaximumValueLength = 256;
+    public const int MaximumValueLength = ManagedHttpsUrl.MaximumUrlLength;
     public const int MaximumDeclarationsPerRule = 64;
     public const int MaximumStylesheetCapacity = 64;
     public const int MaximumRuleCapacity = 2048;
@@ -315,6 +380,7 @@ public static class ManagedCssLimits
     public const int MaximumDeclarationCapacity = 16_384;
     public const int MaximumComputedStyleCapacity = 4096;
     public const int MaximumExternalStylesheetCapacity = 16;
+    public const int MaximumCssImageReferenceCapacity = 8;
     public const int MaximumStreamingRuleScalars = 16_384;
     public const int MaximumExternalStylesheetHrefLength = 512;
 }
@@ -431,6 +497,10 @@ public struct ManagedComputedStyle
     internal int OpacityValue;
     internal int ZIndexValue;
     internal bool ZIndexAutoValue;
+    internal ManagedCssBackgroundImageKind BackgroundImageKindValue;
+    internal int BackgroundImageReferenceIndexValue;
+    internal ManagedImageHandle BackgroundImageHandleValue;
+    internal ManagedCssBackgroundRepeat BackgroundRepeatValue;
 
     public ulong SpecifiedProperties => SpecifiedMask;
     public ulong InheritedProperties => InheritedMask;
@@ -472,6 +542,10 @@ public struct ManagedComputedStyle
     public int Opacity => OpacityValue;
     public int ZIndex => ZIndexValue;
     public bool ZIndexIsAuto => ZIndexAutoValue;
+    public ManagedCssBackgroundImageKind BackgroundImageKind => BackgroundImageKindValue;
+    public int BackgroundImageReferenceIndex => BackgroundImageReferenceIndexValue;
+    public ManagedImageHandle BackgroundImageHandle => BackgroundImageHandleValue;
+    public ManagedCssBackgroundRepeat BackgroundRepeat => BackgroundRepeatValue;
 }
 
 internal enum ManagedCssValueKind : byte
@@ -480,7 +554,8 @@ internal enum ManagedCssValueKind : byte
     Keyword = 1,
     Number = 2,
     Length = 3,
-    Color = 4
+    Color = 4,
+    BackgroundImage = 5
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -491,6 +566,7 @@ internal struct ManagedCssValue
     internal ManagedCssLengthUnit Unit;
     internal int Number;
     internal uint Color;
+    internal int ResourceReferenceIndex;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -588,6 +664,16 @@ internal struct ManagedCssExternalStylesheetRecord
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct ManagedCssImageReferenceRecord
+{
+    internal ManagedCssImageReferenceOrigin Origin;
+    internal int StylesheetIndex;
+    internal int SourceNodeIndex;
+    internal int UrlOffset;
+    internal int UrlLength;
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
 internal struct ManagedCssCascadeCandidate
 {
     internal byte Present;
@@ -627,11 +713,14 @@ public sealed class ManagedCssEngine
     private readonly ManagedCssDeclarationRecord[] _declarations;
     private readonly ManagedCssInlineRecord[] _inline;
     private readonly ManagedCssExternalStylesheetRecord[] _external;
+    private readonly ManagedCssImageReferenceRecord[] _imageReferences;
+    private readonly byte[] _imageReferenceUrls;
     private readonly ManagedComputedStyle[] _computed;
     private readonly int[] _matchedRules;
     private readonly byte[] _selectorNames = new byte[ManagedCssLimits.SelectorNameCapacity];
     private readonly byte[] _selectorScratch = new byte[ManagedCssLimits.MaximumSelectorLength];
     private readonly byte[] _valueScratch = new byte[ManagedCssLimits.MaximumValueLength];
+    private readonly byte[] _rawValueScratch = new byte[ManagedCssLimits.MaximumValueLength];
     private readonly ManagedCssCascadeCandidate[] _winners;
     private readonly ManagedCssMatchState[] _matchStates;
     private readonly int[] _matchVisited;
@@ -659,6 +748,8 @@ public sealed class ManagedCssEngine
     private int _attributeSelectorCount;
     private int _declarationCount;
     private int _externalCount;
+    private int _imageReferenceCount;
+    private int _imageReferenceUrlUsed;
     private int _streamStylesheetIndex;
     private int _streamRuleLength;
     private int _streamBraceDepth;
@@ -668,6 +759,8 @@ public sealed class ManagedCssEngine
     private bool _streamPendingSlash;
     private bool _streamActive;
     private int _streamScalarsConsumed;
+    private int _activeStylesheetIndex = -1;
+    private int _activeInlineSourceNode = -1;
     private int _nameUsed;
     private int _sourceOrder;
     private int _matchGeneration;
@@ -718,6 +811,8 @@ public sealed class ManagedCssEngine
         _declarations = new ManagedCssDeclarationRecord[options.DeclarationCapacity];
         _inline = new ManagedCssInlineRecord[options.ComputedStyleCapacity];
         _external = new ManagedCssExternalStylesheetRecord[options.ExternalStylesheetCapacity];
+        _imageReferences = new ManagedCssImageReferenceRecord[options.CssImageReferenceCapacity];
+        _imageReferenceUrls = new byte[checked(options.CssImageReferenceCapacity * ManagedHttpsUrl.MaximumUrlLength)];
         _computed = new ManagedComputedStyle[options.ComputedStyleCapacity];
         _matchedRules = new int[options.ComputedStyleCapacity];
         _winners = new ManagedCssCascadeCandidate[(int)ManagedCssProperty.Count];
@@ -768,6 +863,8 @@ public sealed class ManagedCssEngine
     public int DeclarationCapacity => _declarations.Length;
     public int ComputedStyleCapacity => _computed.Length;
     public int ExternalStylesheetCapacity => _external.Length;
+    public int CssImageReferenceCapacity => _imageReferences.Length;
+    public int CssImageReferencesEncountered => _imageReferenceCount;
     public int StylesheetsParsed => _stylesheetCount;
     public int RulesParsed => _ruleCount;
     public int SelectorsParsed => _selectorCount;
@@ -822,6 +919,8 @@ public sealed class ManagedCssEngine
         _attributeSelectorCount = 0;
         _declarationCount = 0;
         _externalCount = 0;
+        _imageReferenceCount = 0;
+        _imageReferenceUrlUsed = 0;
         _streamStylesheetIndex = -1;
         _streamRuleLength = 0;
         _streamBraceDepth = 0;
@@ -831,6 +930,8 @@ public sealed class ManagedCssEngine
         _streamPendingSlash = false;
         _streamActive = false;
         _streamScalarsConsumed = 0;
+        _activeStylesheetIndex = -1;
+        _activeInlineSourceNode = -1;
         _nameUsed = 0;
         _sourceOrder = 0;
         _matchGeneration = 0;
@@ -870,6 +971,8 @@ public sealed class ManagedCssEngine
         _declarations.AsSpan().Clear();
         _inline.AsSpan().Clear();
         _external.AsSpan().Clear();
+        _imageReferences.AsSpan().Clear();
+        _imageReferenceUrls.AsSpan().Clear();
         _computed.AsSpan().Clear();
         _matchedRules.AsSpan().Clear();
         _selectorNames.AsSpan().Clear();
@@ -901,6 +1004,7 @@ public sealed class ManagedCssEngine
             return false;
         if (!BeginStylesheet(-1)) return false;
         _streamStylesheetIndex = _stylesheetCount - 1;
+        _activeStylesheetIndex = _streamStylesheetIndex;
         _streamRuleLength = 0;
         _streamBraceDepth = 0;
         _streamSawOpenBrace = false;
@@ -976,6 +1080,7 @@ public sealed class ManagedCssEngine
             _document.GetElementTag(style) != ManagedHtmlTag.Style)
             return false;
         if (!BeginStylesheet(style.Index)) return false;
+        _activeStylesheetIndex = _stylesheetCount - 1;
         ManagedCssInput input = ManagedCssInput.FromTextChildren(_document, style);
         return ParseStylesheet(ref input, _stylesheetCount - 1) &&
                _failureReason == ManagedCssParseFailureReason.None;
@@ -997,6 +1102,36 @@ public sealed class ManagedCssEngine
         _styled = true;
         return ComputeStyleHash();
     }
+
+    public int CssImageReferenceCount => _imageReferenceCount;
+
+    public bool TryGetCssImageReference(int index, out ManagedCssImageReference reference)
+    {
+        reference = default;
+        if (index < 0 || index >= _imageReferenceCount) return false;
+        ManagedCssImageReferenceRecord record = _imageReferences[index];
+        reference = new ManagedCssImageReference(this, index, record.Origin,
+            record.StylesheetIndex, record.SourceNodeIndex,
+            record.UrlOffset, record.UrlLength);
+        return true;
+    }
+
+    public bool TrySetBackgroundImageHandle(ManagedHtmlNodeHandle element,
+                                             ManagedImageHandle handle)
+    {
+        if (!_document.IsValid(element) || element.Index >= _computed.Length ||
+            !_styled || !handle.IsValid ||
+            _computed[element.Index].BackgroundImageKindValue !=
+                ManagedCssBackgroundImageKind.Unresolved)
+            return false;
+        _computed[element.Index].BackgroundImageHandleValue = handle;
+        _computed[element.Index].BackgroundImageKindValue =
+            ManagedCssBackgroundImageKind.Resolved;
+        return true;
+    }
+
+    internal void CopyCssImageUrl(int offset, int length, Span<byte> destination) =>
+        _imageReferenceUrls.AsSpan(offset, length).CopyTo(destination);
 
     /// <summary>
     /// Reads one style source descriptor without constructing a node list.
@@ -1140,6 +1275,8 @@ public sealed class ManagedCssEngine
             }
             ManagedCssInput input = ManagedCssInput.FromAttribute(_document, node, styleAttribute.Index);
             int declarationStart = _declarationCount;
+            _activeStylesheetIndex = -1;
+            _activeInlineSourceNode = node.Index;
             if (!ParseDeclarations(ref input, false, out _)) return false;
             int count = _declarationCount - declarationStart;
             _inline[node.Index] = new ManagedCssInlineRecord
@@ -1149,6 +1286,7 @@ public sealed class ManagedCssEngine
             };
             if (count != 0) ++_inlineStylesParsed;
         }
+        _activeInlineSourceNode = -1;
         return true;
     }
 
@@ -1159,7 +1297,9 @@ public sealed class ManagedCssEngine
             _failureReason = ManagedCssParseFailureReason.StylesheetCapacityExceeded;
             return false;
         }
-        _stylesheets[_stylesheetCount++] = new ManagedCssStylesheetRecord
+        int stylesheetIndex = _stylesheetCount++;
+        _activeStylesheetIndex = stylesheetIndex;
+        _stylesheets[stylesheetIndex] = new ManagedCssStylesheetRecord
         {
             RootNodeIndex = rootNodeIndex,
             FirstRule = _ruleCount,
@@ -1388,7 +1528,10 @@ public sealed class ManagedCssEngine
                     bool terminated = input.SkipComment();
                     if (!terminated) break;
                     if (valueLength != 0 && valueLength < _valueScratch.Length)
+                    {
                         _valueScratch[valueLength++] = (byte)' ';
+                        _rawValueScratch[valueLength - 1] = (byte)' ';
+                    }
                     continue;
                 }
                 if (scalar > 0x7F)
@@ -1397,7 +1540,10 @@ public sealed class ManagedCssEngine
                     continue;
                 }
                 if (valueLength < _valueScratch.Length)
+                {
+                    _rawValueScratch[valueLength] = (byte)scalar;
                     _valueScratch[valueLength++] = ToLowerAscii((byte)scalar);
+                }
                 else
                     _valueTooLongCount = SaturatingIncrement(_valueTooLongCount);
             }
@@ -1409,6 +1555,8 @@ public sealed class ManagedCssEngine
             }
             TrimRange(_valueScratch, valueLength, out int valueStart, out int valueEnd);
             bool important = RemoveImportant(_valueScratch, ref valueStart, ref valueEnd);
+            TrimRange(_rawValueScratch, valueLength, out int rawValueStart, out int rawValueEnd);
+            RemoveImportant(_rawValueScratch, ref rawValueStart, ref rawValueEnd);
             if (propertyTooLong)
             {
                 ++_declarationsSkipped;
@@ -1425,6 +1573,7 @@ public sealed class ManagedCssEngine
                     ++_unknownProperties;
             }
             else if (TryAppendProperty(property, _valueScratch.AsSpan(valueStart, valueEnd - valueStart),
+                                       _rawValueScratch.AsSpan(rawValueStart, rawValueEnd - rawValueStart),
                                        important, ref ruleDeclarations))
             {
                 if (important) ++_importantDeclarations;
@@ -1449,7 +1598,8 @@ public sealed class ManagedCssEngine
     }
 
     private bool TryAppendProperty(ManagedCssProperty property, ReadOnlySpan<byte> value,
-                                   bool important, ref int ruleDeclarations)
+                                   ReadOnlySpan<byte> rawValue, bool important,
+                                   ref int ruleDeclarations)
     {
         if (property == ManagedCssProperty.MarginTop || property == ManagedCssProperty.MarginRight ||
             property == ManagedCssProperty.MarginBottom || property == ManagedCssProperty.MarginLeft ||
@@ -1485,8 +1635,11 @@ public sealed class ManagedCssEngine
             }
             return true;
         }
-        ManagedCssValue parsed;
-        if (!TryParseValue(property, value, out parsed)) return false;
+        ManagedCssValue parsed = default;
+        if (property == ManagedCssProperty.BackgroundImage &&
+            !TryParseBackgroundImage(value, rawValue, out parsed)) return false;
+        if (property != ManagedCssProperty.BackgroundImage &&
+            !TryParseValue(property, value, out parsed)) return false;
         return AppendDeclaration(property, parsed, important, ref ruleDeclarations);
     }
 
@@ -1941,6 +2094,102 @@ public sealed class ManagedCssEngine
         property == ManagedCssProperty.TextAlign || property == ManagedCssProperty.Visibility ||
         property == ManagedCssProperty.WhiteSpace;
 
+    private bool TryParseBackgroundImage(ReadOnlySpan<byte> lower,
+                                         ReadOnlySpan<byte> raw,
+                                         out ManagedCssValue parsed)
+    {
+        parsed = default;
+        if (lower.SequenceEqual("none"u8))
+        {
+            parsed = Keyword(ManagedCssKeyword.None);
+            return true;
+        }
+        int position = 0;
+        if (lower.Length < 3 || ToLowerAscii(lower[0]) != 'u' ||
+            ToLowerAscii(lower[1]) != 'r' || ToLowerAscii(lower[2]) != 'l')
+            return false;
+        position = 3;
+        while (position < lower.Length && IsCssWhitespace(lower[position])) ++position;
+        if (position == lower.Length || lower[position++] != '(') return false;
+        while (position < raw.Length && IsCssWhitespace(raw[position])) ++position;
+        if (position == raw.Length) return false;
+
+        int start;
+        int end;
+        byte quote = raw[position];
+        if (quote == '\'' || quote == '"')
+        {
+            start = ++position;
+            while (position < raw.Length && raw[position] != quote)
+            {
+                if (!IsSafeCssUrlByte(raw[position])) return false;
+                ++position;
+            }
+            end = position;
+            if (position == raw.Length || end == start) return false;
+            ++position;
+            while (position < raw.Length && IsCssWhitespace(raw[position])) ++position;
+            if (position == raw.Length || raw[position++] != ')') return false;
+        }
+        else
+        {
+            start = position;
+            while (position < raw.Length && raw[position] != ')')
+            {
+                if (!IsSafeCssUrlByte(raw[position]) || raw[position] == '(' ||
+                    raw[position] == '\'' || raw[position] == '"') return false;
+                ++position;
+            }
+            end = position;
+            while (end > start && IsCssWhitespace(raw[end - 1])) --end;
+            if (position == raw.Length || end == start) return false;
+            position++;
+        }
+        while (position < raw.Length && IsCssWhitespace(raw[position])) ++position;
+        if (position != raw.Length || end - start > ManagedHttpsUrl.MaximumUrlLength)
+            return false;
+        if (_imageReferenceCount == _imageReferences.Length ||
+            end - start > _imageReferenceUrls.Length - _imageReferenceUrlUsed)
+        {
+            _failureReason = ManagedCssParseFailureReason.CssImageReferenceCapacityExceeded;
+            return false;
+        }
+        ManagedCssImageReferenceOrigin origin;
+        int sourceNode = -1;
+        if (_activeStylesheetIndex < 0)
+        {
+            origin = ManagedCssImageReferenceOrigin.Inline;
+            sourceNode = _activeInlineSourceNode;
+        }
+        else
+        {
+            origin = _stylesheets[_activeStylesheetIndex].RootNodeIndex >= 0
+                ? ManagedCssImageReferenceOrigin.EmbeddedStylesheet
+                : ManagedCssImageReferenceOrigin.ExternalStylesheet;
+        }
+        int offset = _imageReferenceUrlUsed;
+        raw[start..end].CopyTo(_imageReferenceUrls.AsSpan(offset));
+        _imageReferences[_imageReferenceCount] = new ManagedCssImageReferenceRecord
+        {
+            Origin = origin,
+            StylesheetIndex = _activeStylesheetIndex,
+            SourceNodeIndex = sourceNode,
+            UrlOffset = offset,
+            UrlLength = end - start
+        };
+        parsed = new ManagedCssValue
+        {
+            Kind = ManagedCssValueKind.BackgroundImage,
+            ResourceReferenceIndex = _imageReferenceCount
+        };
+        ++_imageReferenceCount;
+        _imageReferenceUrlUsed += end - start;
+        return true;
+    }
+
+    private static bool IsSafeCssUrlByte(byte value) =>
+        value >= 0x20 && value != 0x7F && value != '\\';
+
     private static void CopyProperty(ref ManagedComputedStyle target,
                                      ManagedCssProperty property,
                                      ManagedComputedStyle source)
@@ -1954,6 +2203,14 @@ public sealed class ManagedCssEngine
             case ManagedCssProperty.TextAlign: target.TextAlignValue = source.TextAlignValue; break;
             case ManagedCssProperty.Visibility: target.VisibilityValue = source.VisibilityValue; break;
             case ManagedCssProperty.WhiteSpace: target.WhiteSpaceValue = source.WhiteSpaceValue; break;
+            case ManagedCssProperty.BackgroundImage:
+                target.BackgroundImageKindValue = source.BackgroundImageKindValue;
+                target.BackgroundImageReferenceIndexValue = source.BackgroundImageReferenceIndexValue;
+                target.BackgroundImageHandleValue = source.BackgroundImageHandleValue;
+                break;
+            case ManagedCssProperty.BackgroundRepeat:
+                target.BackgroundRepeatValue = source.BackgroundRepeatValue;
+                break;
         }
     }
 
@@ -1977,6 +2234,25 @@ public sealed class ManagedCssEngine
             case ManagedCssProperty.Visibility: style.VisibilityValue = VisibilityFromValue(value); break;
             case ManagedCssProperty.Color: if (value.Kind == ManagedCssValueKind.Color) style.ColorValue = value.Color; break;
             case ManagedCssProperty.BackgroundColor: if (value.Kind == ManagedCssValueKind.Color) style.BackgroundColorValue = value.Color; break;
+            case ManagedCssProperty.BackgroundImage:
+                if (value.Kind == ManagedCssValueKind.BackgroundImage)
+                {
+                    style.BackgroundImageKindValue = ManagedCssBackgroundImageKind.Unresolved;
+                    style.BackgroundImageReferenceIndexValue = value.ResourceReferenceIndex;
+                    style.BackgroundImageHandleValue = ManagedImageHandle.Invalid;
+                }
+                else if (value.Kind == ManagedCssValueKind.Keyword &&
+                         value.Keyword == ManagedCssKeyword.None)
+                {
+                    style.BackgroundImageKindValue = ManagedCssBackgroundImageKind.None;
+                    style.BackgroundImageReferenceIndexValue = -1;
+                    style.BackgroundImageHandleValue = ManagedImageHandle.Invalid;
+                }
+                break;
+            case ManagedCssProperty.BackgroundRepeat:
+                style.BackgroundRepeatValue = value.Keyword == ManagedCssKeyword.None
+                    ? ManagedCssBackgroundRepeat.NoRepeat : ManagedCssBackgroundRepeat.Repeat;
+                break;
             case ManagedCssProperty.FontSize: style.FontSizeValue = LengthFromValue(value); break;
             case ManagedCssProperty.FontWeight: style.FontWeightValue = NumberFromValue(value, 400); break;
             case ManagedCssProperty.FontStyle: style.FontStyleValue = value.Keyword == ManagedCssKeyword.Italic ? ManagedCssFontStyle.Italic : ManagedCssFontStyle.Normal; break;
@@ -2022,6 +2298,10 @@ public sealed class ManagedCssEngine
         style.VisibilityValue = ManagedCssVisibility.Visible;
         style.ColorValue = 0xFF000000U;
         style.BackgroundColorValue = 0;
+        style.BackgroundImageKindValue = ManagedCssBackgroundImageKind.None;
+        style.BackgroundImageReferenceIndexValue = -1;
+        style.BackgroundImageHandleValue = ManagedImageHandle.Invalid;
+        style.BackgroundRepeatValue = ManagedCssBackgroundRepeat.Repeat;
         style.FontSizeValue = new ManagedCssLength(1600, ManagedCssLengthUnit.Px);
         style.FontWeightValue = 400;
         style.FontStyleValue = ManagedCssFontStyle.Normal;
@@ -2067,6 +2347,14 @@ public sealed class ManagedCssEngine
             case ManagedCssProperty.Visibility: style.VisibilityValue = initial.VisibilityValue; break;
             case ManagedCssProperty.Color: style.ColorValue = initial.ColorValue; break;
             case ManagedCssProperty.BackgroundColor: style.BackgroundColorValue = initial.BackgroundColorValue; break;
+            case ManagedCssProperty.BackgroundImage:
+                style.BackgroundImageKindValue = ManagedCssBackgroundImageKind.None;
+                style.BackgroundImageReferenceIndexValue = -1;
+                style.BackgroundImageHandleValue = ManagedImageHandle.Invalid;
+                break;
+            case ManagedCssProperty.BackgroundRepeat:
+                style.BackgroundRepeatValue = initial.BackgroundRepeatValue;
+                break;
             case ManagedCssProperty.FontSize: style.FontSizeValue = initial.FontSizeValue; break;
             case ManagedCssProperty.FontWeight: style.FontWeightValue = initial.FontWeightValue; break;
             case ManagedCssProperty.FontStyle: style.FontStyleValue = initial.FontStyleValue; break;
@@ -2266,6 +2554,9 @@ public sealed class ManagedCssEngine
             AppendHashUInt32((uint)style.VisibilityValue, bytes);
             AppendHashUInt32(style.ColorValue, bytes);
             AppendHashUInt32(style.BackgroundColorValue, bytes);
+            AppendHashUInt32((uint)style.BackgroundImageKindValue, bytes);
+            AppendHashUInt32((uint)(style.BackgroundImageReferenceIndexValue + 1), bytes);
+            AppendHashUInt32((uint)style.BackgroundRepeatValue, bytes);
             AppendHashLength(style.FontSizeValue, bytes);
             AppendHashUInt32((uint)style.FontWeightValue, bytes);
             AppendHashUInt32((uint)style.FontStyleValue, bytes);
@@ -2363,6 +2654,8 @@ public sealed class ManagedCssEngine
         if (name.SequenceEqual("overflow-y"u8)) return ManagedCssProperty.OverflowY;
         if (name.SequenceEqual("opacity"u8)) return ManagedCssProperty.Opacity;
         if (name.SequenceEqual("z-index"u8)) return ManagedCssProperty.ZIndex;
+        if (name.SequenceEqual("background-image"u8)) return ManagedCssProperty.BackgroundImage;
+        if (name.SequenceEqual("background-repeat"u8)) return ManagedCssProperty.BackgroundRepeat;
         return ManagedCssProperty.Count;
     }
 
@@ -2444,6 +2737,14 @@ public sealed class ManagedCssEngine
             case ManagedCssProperty.ZIndex:
                 if (value.SequenceEqual("auto"u8)) { parsed = Keyword(ManagedCssKeyword.Auto); return true; }
                 if (TryParseInteger(value, out int zIndex)) { parsed = Number(zIndex); return true; }
+                return false;
+            case ManagedCssProperty.BackgroundImage:
+                return TryParseBackgroundImage(value, value, out parsed);
+            case ManagedCssProperty.BackgroundRepeat:
+                if (value.SequenceEqual("repeat"u8))
+                { parsed = Keyword(ManagedCssKeyword.Normal); return true; }
+                if (value.SequenceEqual("no-repeat"u8))
+                { parsed = Keyword(ManagedCssKeyword.None); return true; }
                 return false;
             default:
                 if (TryParseLength(value, false, out ManagedCssLength length)) { parsed = LengthValue(length); return true; }

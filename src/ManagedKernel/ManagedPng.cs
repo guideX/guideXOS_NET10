@@ -10,6 +10,7 @@ public static class ManagedImageLimits
     public const int DefaultMaximumHeight = 256;
     public const int DefaultPixelBudget = 65_536;
     public const int MaximumChunkLength = ManagedHttpLimits.MaximumStreamedBodyLength;
+    public const int MaximumSourceAliasesPerImage = 8;
 }
 
 public readonly struct ManagedImageHandle : IEquatable<ManagedImageHandle>
@@ -83,6 +84,8 @@ public sealed class ManagedPageImageStore
     private readonly ManagedPageImageRecord[] _records;
     private readonly uint[] _pixels;
     private readonly byte[] _decodedHashes;
+    private readonly int[] _sourceAliases;
+    private readonly byte[] _sourceAliasCounts;
     private readonly int _maximumWidth;
     private readonly int _maximumHeight;
     private uint _generation;
@@ -105,6 +108,8 @@ public sealed class ManagedPageImageStore
         _records = new ManagedPageImageRecord[imageCapacity];
         _pixels = new uint[pixelBudget];
         _decodedHashes = new byte[imageCapacity * ManagedSha256.DigestSize];
+        _sourceAliases = new int[checked(imageCapacity * ManagedImageLimits.MaximumSourceAliasesPerImage)];
+        _sourceAliasCounts = new byte[imageCapacity];
         PixelBudget = pixelBudget;
         _maximumWidth = maximumWidth;
         _maximumHeight = maximumHeight;
@@ -126,6 +131,8 @@ public sealed class ManagedPageImageStore
         _records.AsSpan().Clear();
         _pixels.AsSpan().Clear();
         _decodedHashes.AsSpan().Clear();
+        _sourceAliases.AsSpan().Fill(-1);
+        _sourceAliasCounts.AsSpan().Clear();
         ++_generation;
         if (_generation == 0) _generation = 1;
         _count = 0;
@@ -206,13 +213,27 @@ public sealed class ManagedPageImageStore
         {
             ManagedPageImageRecord record = _records[slot];
             if (record.State == ManagedImageState.Complete &&
-                record.SourceNodeIndex == sourceNodeIndex)
+                (record.SourceNodeIndex == sourceNodeIndex || HasSourceAlias(slot, sourceNodeIndex)))
             {
                 handle = new ManagedImageHandle(slot, _generation);
                 return true;
             }
         }
         return false;
+    }
+
+    public bool TryAssociateSourceNode(ManagedImageHandle handle, int sourceNodeIndex)
+    {
+        if (!TryGetRecord(handle, out int slot, out ManagedPageImageRecord record) ||
+            record.State != ManagedImageState.Complete || sourceNodeIndex < 0)
+            return false;
+        if (record.SourceNodeIndex == sourceNodeIndex || HasSourceAlias(slot, sourceNodeIndex))
+            return true;
+        int count = _sourceAliasCounts[slot];
+        if (count == ManagedImageLimits.MaximumSourceAliasesPerImage) return false;
+        _sourceAliases[slot * ManagedImageLimits.MaximumSourceAliasesPerImage + count] = sourceNodeIndex;
+        _sourceAliasCounts[slot] = (byte)(count + 1);
+        return true;
     }
 
     public bool TryReadPixel(ManagedImageHandle handle, int x, int y, out uint pixel)
@@ -256,6 +277,15 @@ public sealed class ManagedPageImageStore
             return false;
         record = _records[slot];
         return true;
+    }
+
+    private bool HasSourceAlias(int slot, int sourceNodeIndex)
+    {
+        int count = _sourceAliasCounts[slot];
+        int offset = slot * ManagedImageLimits.MaximumSourceAliasesPerImage;
+        for (int index = 0; index != count; ++index)
+            if (_sourceAliases[offset + index] == sourceNodeIndex) return true;
+        return false;
     }
 }
 

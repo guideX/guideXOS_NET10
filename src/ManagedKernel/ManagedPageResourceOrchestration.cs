@@ -132,7 +132,14 @@ public enum ManagedPageFailureReason : byte
     ImageHttpFailure = 20,
     ImageContentTypeRejected = 21,
     ImagePngFailure = 22,
-    ImageStoreFailure = 23
+    ImageStoreFailure = 23,
+    CssImageReferenceLimitExceeded = 24,
+    CssImageUrlInvalid = 25,
+    CssImageSchemeRejected = 26,
+    CssImageResourceFailure = 27,
+    CssImageContentTypeRejected = 28,
+    CssImageDecodeFailure = 29,
+    CssImageCapacityExceeded = 30
 }
 
 public readonly struct ManagedPageResourceOptions
@@ -316,6 +323,8 @@ internal sealed class ManagedImageResourceRecord
 {
     internal int Slot;
     internal int SourceNodeIndex;
+    internal bool IsCssImage;
+    internal int CssReferenceIndex;
     internal ManagedHttpsUrl RequestedUrl;
     internal ManagedHttpsUrl FinalUrl;
     internal int RedirectCount;
@@ -429,6 +438,7 @@ public sealed class ManagedPageResourceOrchestrator
     private readonly IManagedPageTerminalProof? _terminalProof;
     private readonly ManagedExternalStylesheetRecord[] _externalTelemetry;
     private readonly ManagedImageResourceRecord[] _imageTelemetry;
+    private readonly ManagedHttpsUrl[] _stylesheetBases;
     private readonly ManagedPageImageStore _images;
     private readonly ManagedPngDecoder _imageDecoder;
     private readonly uint[] _attributeScratch = new uint[ManagedCssLimits.MaximumExternalStylesheetHrefLength];
@@ -448,6 +458,7 @@ public sealed class ManagedPageResourceOrchestrator
     private ManagedHttpsUrl _currentResolvedUrl;
     private int _sourceCursor;
     private int _imageCursor;
+    private int _cssImageCursor;
     private int _sourcesVisited;
     private int _externalEncountered;
     private int _externalStarted;
@@ -467,6 +478,12 @@ public sealed class ManagedPageResourceOrchestrator
     private int _currentImageNode = -1;
     private ManagedHttpsUrl _currentImageUrl;
     private bool _activeImageRequest;
+    private bool _currentCssImage;
+    private int _currentCssImageReference = -1;
+    private int _currentExternalStylesheetIndex = -1;
+    private int _cssImageFetches;
+    private int _cssImageDeduplicated;
+    private int _cssImageWinningReferences;
 
     public ManagedPageResourceOrchestrator(ManagedHtmlResourceRequest documentResource,
                                            ManagedTextResourceRequest stylesheetResource,
@@ -500,6 +517,7 @@ public sealed class ManagedPageResourceOrchestrator
                                             options.MaximumImageWidth, options.MaximumImageHeight);
         _imageDecoder = new ManagedPngDecoder(_images);
         _imageTelemetry = new ManagedImageResourceRecord[options.ImageLimit];
+        _stylesheetBases = new ManagedHttpsUrl[options.CssArenas.StylesheetCapacity];
         _state = ManagedPageResourceState.Idle;
     }
 
@@ -535,6 +553,7 @@ public sealed class ManagedPageResourceOrchestrator
                                             options.MaximumImageWidth, options.MaximumImageHeight);
         _imageDecoder = new ManagedPngDecoder(_images);
         _imageTelemetry = new ManagedImageResourceRecord[options.ImageLimit];
+        _stylesheetBases = new ManagedHttpsUrl[options.CssArenas.StylesheetCapacity];
         _skipInitialAuthorReset = true;
         _state = ManagedPageResourceState.Idle;
     }
@@ -546,6 +565,10 @@ public sealed class ManagedPageResourceOrchestrator
     public ManagedTextResourceRequest StylesheetResource => _stylesheetResource;
     public ManagedResourceRequest? ImageResource => _imageResource;
     public ManagedPageImageStore Images => _images;
+    public int CssImageReferencesEncountered => _styles.CssImageReferenceCount;
+    public int CssImageWinningReferences => _cssImageWinningReferences;
+    public int CssImageFetches => _cssImageFetches;
+    public int CssImageDeduplicated => _cssImageDeduplicated;
     public ManagedPngFailureReason ImagePngFailureReason => _imageDecoder.PngFailureReason;
     public ManagedPngTelemetry ImagePngTelemetry => _imageDecoder.Telemetry;
     public ManagedHtmlDocument Document => _tree.Document;
@@ -771,8 +794,7 @@ public sealed class ManagedPageResourceOrchestrator
     {
         if (_sourceCursor >= _tree.Document.NodeCount)
         {
-            _imageCursor = 0;
-            _state = ManagedPageResourceState.DiscoveringImages;
+            _state = ManagedPageResourceState.Cascading;
             return NetworkOperationResult.Success;
         }
         int nodeIndex = _sourceCursor++;
@@ -784,6 +806,9 @@ public sealed class ManagedPageResourceOrchestrator
         {
             if (!_styles.TryParseEmbeddedStylesheet(source.Node))
                 return FailCss(ManagedPageFailureReason.PageCascadeFailure);
+            int stylesheetIndex = _styles.StylesheetsParsed - 1;
+            if (stylesheetIndex >= 0 && stylesheetIndex < _stylesheetBases.Length)
+                _stylesheetBases[stylesheetIndex] = _documentFinalUrl;
             ++_embeddedParsed;
             return NetworkOperationResult.Success;
         }
@@ -822,6 +847,7 @@ public sealed class ManagedPageResourceOrchestrator
         if (!_currentResolvedUrl.TryCopyAbsoluteUrl(_resolvedUrlScratch, out int resolvedLength))
             return Fail(ManagedPageFailureReason.ExternalStylesheetUrlInvalid);
         _activeRequest = _nextRequestIndex++;
+        _currentExternalStylesheetIndex = _styles.StylesheetsParsed;
         _currentRules = _styles.RulesParsed;
         _currentDeclarations = _styles.DeclarationsParsed;
         NetworkOperationResult begin = _stylesheetResource.BeginGetUrl(
@@ -855,6 +881,9 @@ public sealed class ManagedPageResourceOrchestrator
         record.NodeIndex = _currentSourceNode;
         record.RequestedUrl = _currentResolvedUrl;
         record.FinalUrl = _stylesheetResource.FinalUrl;
+        if (_currentExternalStylesheetIndex >= 0 &&
+            _currentExternalStylesheetIndex < _stylesheetBases.Length)
+            _stylesheetBases[_currentExternalStylesheetIndex] = record.FinalUrl;
         record.RedirectCount = _stylesheetResource.RedirectCount;
         ManagedTextProgressSnapshot progress = _stylesheetResource.Progress;
         record.StatusCode = progress.StatusCode;
@@ -880,10 +909,7 @@ public sealed class ManagedPageResourceOrchestrator
     private NetworkOperationResult PollImageDiscovery()
     {
         if (_imageCursor >= _tree.Document.NodeCount)
-        {
-            _state = ManagedPageResourceState.Cascading;
-            return NetworkOperationResult.Success;
-        }
+            return PollCssImageDiscovery();
         int nodeIndex = _imageCursor++;
         ManagedHtmlNodeHandle node = new(nodeIndex, _tree.Document.DocumentNode.Generation);
         if (_tree.Document.GetNodeKind(node) != ManagedHtmlNodeKind.Element ||
@@ -915,10 +941,20 @@ public sealed class ManagedPageResourceOrchestrator
                         urlFailure == ManagedHttpsUrlParseFailureReason.UnsupportedReference
                             ? ManagedPageFailureReason.ImageSchemeRejected
                             : ManagedPageFailureReason.ImageUrlInvalid);
+        if (TryFindLoadedImage(_currentImageUrl, out ManagedImageHandle existing))
+        {
+            if (!_images.TryAssociateSourceNode(existing, nodeIndex))
+                return Fail(ManagedPageFailureReason.ImageStoreFailure);
+            return NetworkOperationResult.Success;
+        }
+        if (_images.Count >= _options.ImageLimit)
+            return Fail(ManagedPageFailureReason.ImageLimitExceeded);
         if (_imageResource == null ||
             !_currentImageUrl.TryCopyAbsoluteUrl(_resolvedUrlScratch, out int resolvedLength))
             return Fail(ManagedPageFailureReason.ImageTransportFailure);
         _currentImageNode = nodeIndex;
+        _currentCssImage = false;
+        _currentCssImageReference = -1;
         NetworkOperationResult begin = _imageResource.BeginGetUrl(
             _resolvedUrlScratch.AsSpan(0, resolvedLength), _imageDecoder);
         if (begin != NetworkOperationResult.Started)
@@ -931,6 +967,69 @@ public sealed class ManagedPageResourceOrchestrator
         _activeImageRequest = true;
         _state = ManagedPageResourceState.FetchingImage;
         KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE52_IMAGE_REQUEST_BEGIN\r\n"u8);
+        return begin;
+    }
+
+    private NetworkOperationResult PollCssImageDiscovery()
+    {
+        if (_cssImageCursor >= _tree.Document.NodeCount)
+        {
+            _state = ManagedPageResourceState.LayingOut;
+            return NetworkOperationResult.Success;
+        }
+        int nodeIndex = _cssImageCursor++;
+        ManagedHtmlNodeHandle node = new(nodeIndex, _tree.Document.DocumentNode.Generation);
+        if (_tree.Document.GetNodeKind(node) != ManagedHtmlNodeKind.Element ||
+            !_styles.TryGetComputedStyle(node, out ManagedComputedStyle style) ||
+            style.BackgroundImageKind != ManagedCssBackgroundImageKind.Unresolved)
+            return NetworkOperationResult.Success;
+        ++_cssImageWinningReferences;
+        if (!_styles.TryGetCssImageReference(style.BackgroundImageReferenceIndex,
+                                             out ManagedCssImageReference reference) ||
+            !reference.TryCopyUrl(_hrefScratch, out int urlLength))
+            return Fail(ManagedPageFailureReason.CssImageUrlInvalid);
+        ManagedHttpsUrl baseUrl = _documentFinalUrl;
+        if (reference.Origin != ManagedCssImageReferenceOrigin.Inline)
+        {
+            if (reference.StylesheetIndex < 0 ||
+                reference.StylesheetIndex >= _stylesheetBases.Length ||
+                !_stylesheetBases[reference.StylesheetIndex].IsValid)
+                return Fail(ManagedPageFailureReason.CssImageUrlInvalid);
+            baseUrl = _stylesheetBases[reference.StylesheetIndex];
+        }
+        if (!TryResolveImageUrl(baseUrl, _hrefScratch.AsSpan(0, urlLength),
+                                out _currentImageUrl,
+                                out ManagedHttpsUrlParseFailureReason urlFailure))
+            return Fail(urlFailure == ManagedHttpsUrlParseFailureReason.HttpsDowngrade ||
+                        urlFailure == ManagedHttpsUrlParseFailureReason.UnsupportedScheme ||
+                        urlFailure == ManagedHttpsUrlParseFailureReason.UnsupportedReference
+                            ? ManagedPageFailureReason.CssImageSchemeRejected
+                            : ManagedPageFailureReason.CssImageUrlInvalid);
+        if (TryFindLoadedImage(_currentImageUrl, out ManagedImageHandle existing))
+        {
+            if (!_styles.TrySetBackgroundImageHandle(node, existing))
+                return Fail(ManagedPageFailureReason.CssImageResourceFailure);
+            ++_cssImageDeduplicated;
+            return NetworkOperationResult.Success;
+        }
+        if (_images.Count >= _options.ImageLimit)
+            return Fail(ManagedPageFailureReason.CssImageCapacityExceeded);
+        if (_imageResource == null ||
+            !_currentImageUrl.TryCopyAbsoluteUrl(_resolvedUrlScratch, out int resolvedLength))
+            return Fail(ManagedPageFailureReason.CssImageResourceFailure);
+        _currentImageNode = nodeIndex;
+        _currentCssImage = true;
+        _currentCssImageReference = reference.Index;
+        NetworkOperationResult begin = _imageResource.BeginGetUrl(
+            _resolvedUrlScratch.AsSpan(0, resolvedLength), _imageDecoder);
+        if (begin != NetworkOperationResult.Started)
+            return MapImageFailure();
+        _imageDecoder.Start(nodeIndex);
+        ++_imageStarted;
+        ++_cssImageFetches;
+        _activeImageRequest = true;
+        _state = ManagedPageResourceState.FetchingImage;
+        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE53_CSS_IMAGE_REQUEST_BEGIN\r\n"u8);
         return begin;
     }
 
@@ -977,18 +1076,46 @@ public sealed class ManagedPageResourceOrchestrator
         };
         record.HasPngDigest = _imageDecoder.TryCopyResourceDigest(record.PngDigest);
         record.HasPixelDigest = _imageDecoder.TryCopyDecodedPixelDigest(record.PixelDigest);
+        record.IsCssImage = _currentCssImage;
+        record.CssReferenceIndex = _currentCssImageReference;
         if (_imagesLoaded < _imageTelemetry.Length) _imageTelemetry[_imagesLoaded] = record;
         ++_imagesLoaded;
+        ManagedImageHandle completedHandle = new(record.Slot, _images.Generation);
+        if (_currentCssImage &&
+            !_styles.TrySetBackgroundImageHandle(
+                new ManagedHtmlNodeHandle(_currentImageNode,
+                                          _tree.Document.DocumentNode.Generation),
+                completedHandle))
+            return Fail(ManagedPageFailureReason.CssImageResourceFailure);
         _activeImageRequest = false;
         _currentImageNode = -1;
         _state = ManagedPageResourceState.DiscoveringImages;
-        KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_DECODE_PASS\r\n"u8);
+        KernelLog.Write(_currentCssImage
+            ? "GXOS_NET10:MANAGED_HTTPS_PHASE53_CSS_IMAGE_DECODE_PASS\r\n"u8
+            : "GXOS_NET10:MANAGED_HTTPS_PHASE52_PNG_DECODE_PASS\r\n"u8);
         return NetworkOperationResult.Success;
     }
 
     private NetworkOperationResult MapImageFailure()
     {
         if (_imageResource == null) return Fail(ManagedPageFailureReason.ImageTransportFailure);
+        if (_currentCssImage)
+        {
+            switch (_imageResource.FailureReason)
+            {
+                case ManagedResourceFailureReason.UnsupportedMime:
+                    return Fail(ManagedPageFailureReason.CssImageContentTypeRejected);
+                case ManagedResourceFailureReason.HttpFailure:
+                    return Fail(ManagedPageFailureReason.CssImageResourceFailure);
+                case ManagedResourceFailureReason.ConsumerFailure:
+                case ManagedResourceFailureReason.DestinationFull:
+                    return Fail(ManagedPageFailureReason.CssImageDecodeFailure);
+                case ManagedResourceFailureReason.Cancelled:
+                    return Fail(ManagedPageFailureReason.Cancelled);
+                default:
+                    return Fail(ManagedPageFailureReason.CssImageResourceFailure);
+            }
+        }
         switch (_imageResource.FailureReason)
         {
             case ManagedResourceFailureReason.UnsupportedMime:
@@ -1005,6 +1132,20 @@ public sealed class ManagedPageResourceOrchestrator
         }
     }
 
+    private bool TryFindLoadedImage(in ManagedHttpsUrl requestedUrl,
+                                    out ManagedImageHandle handle)
+    {
+        handle = ManagedImageHandle.Invalid;
+        for (int index = 0; index != _imagesLoaded; ++index)
+        {
+            ManagedImageResourceRecord? record = _imageTelemetry[index];
+            if (record == null || !record.RequestedUrl.Equals(requestedUrl)) continue;
+            handle = new ManagedImageHandle(record.Slot, _images.Generation);
+            return _images.TryGetDescriptor(handle, out _);
+        }
+        return false;
+    }
+
     private ManagedMimeClassification ClassifyImageMime(ManagedResourceRequest resource)
     {
         if (!resource.TryCopyContentType(_typeScratchBytes, out int length))
@@ -1016,7 +1157,9 @@ public sealed class ManagedPageResourceOrchestrator
     {
         if (!_styles.CompleteAuthorStyles())
             return FailCss(ManagedPageFailureReason.PageCascadeFailure);
-        _state = ManagedPageResourceState.LayingOut;
+        _imageCursor = 0;
+        _cssImageCursor = 0;
+        _state = ManagedPageResourceState.DiscoveringImages;
         return NetworkOperationResult.Success;
     }
 
@@ -1101,10 +1244,15 @@ public sealed class ManagedPageResourceOrchestrator
 
     private bool TryResolveImageUrl(ReadOnlySpan<byte> reference,
         out ManagedHttpsUrl resolved, out ManagedHttpsUrlParseFailureReason failure)
+        => TryResolveImageUrl(_documentFinalUrl, reference, out resolved, out failure);
+
+    private bool TryResolveImageUrl(in ManagedHttpsUrl baseUrl,
+        ReadOnlySpan<byte> reference, out ManagedHttpsUrl resolved,
+        out ManagedHttpsUrlParseFailureReason failure)
     {
         if (StartsWithAsciiIgnoreCase(reference, "https:"u8))
             return ManagedHttpsUrl.TryParse(reference, out resolved, out failure);
-        return ManagedHttpsUrl.TryResolve(_documentFinalUrl, reference,
+        return ManagedHttpsUrl.TryResolve(baseUrl, reference,
                                           out resolved, out failure);
     }
 
@@ -1145,6 +1293,8 @@ public sealed class ManagedPageResourceOrchestrator
     private NetworkOperationResult FailCss(ManagedPageFailureReason reason)
     {
         _cssFailureReason = _styles.FailureReason;
+        if (_styles.FailureReason == ManagedCssParseFailureReason.CssImageReferenceCapacityExceeded)
+            reason = ManagedPageFailureReason.CssImageReferenceLimitExceeded;
         return Fail(reason);
     }
 
@@ -1168,6 +1318,7 @@ public sealed class ManagedPageResourceOrchestrator
             _externalTelemetry[index] = null!;
         _sourceCursor = 0;
         _imageCursor = 0;
+        _cssImageCursor = 0;
         _sourcesVisited = 0;
         _externalEncountered = 0;
         _externalStarted = 0;
@@ -1186,6 +1337,13 @@ public sealed class ManagedPageResourceOrchestrator
         _currentImageNode = -1;
         _currentImageUrl = default;
         _activeImageRequest = false;
+        _currentCssImage = false;
+        _currentCssImageReference = -1;
+        _currentExternalStylesheetIndex = -1;
+        _cssImageFetches = 0;
+        _cssImageDeduplicated = 0;
+        _cssImageWinningReferences = 0;
+        _stylesheetBases.AsSpan().Clear();
         _images.Reset();
         _imageDecoder.Reset();
         for (int index = 0; index != _imageTelemetry.Length; ++index)

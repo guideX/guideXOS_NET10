@@ -632,7 +632,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
             bool live = false;
             bool valid = s_phase11State == 2 && activeKeyboard.MakeCount == 1 &&
                          activeKeyboard.LastMakeScancode == 0x1E &&
-                         ManagedKernelContract.TryQueryMonotonicTime(out _) &&
+                         ManagedKernelContract.TryQueryOptionalMonotonicTime(out _) &&
                          activeKeyboard.TryRunRuntimeArenaProof() &&
                          KernelMemory.TryAllocate(1, 0, out region);
             live = true;
@@ -760,7 +760,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
             return ManagedKernelContract.InvalidState;
         }
 
-        if (!ManagedKernelContract.TryQueryMonotonicTime(out _) ||
+        if (!ManagedKernelContract.TryQueryOptionalMonotonicTime(out _) ||
             !KernelMemory.TryAllocate(1, 0, out runtimeRegion))
         {
             Cleanup(driver);
@@ -911,7 +911,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
             bool valid = s_phase9State == 2 && driver.ReceiveCount == 1 &&
                          ManagedKernelContract.TryInvokeHostLog(
                              "GXOS_NET10:MANAGED_KERNEL_PHASE9_RUNTIME_ACTIVITY\r\n"u8) &&
-                         ManagedKernelContract.TryQueryMonotonicTime(out _) &&
+                         ManagedKernelContract.TryQueryOptionalMonotonicTime(out _) &&
                          driver.TryRunReceiveRuntimeArenaProof() &&
                          KernelMemory.TryAllocate(1, 0, out region);
             if (!valid) return ManagedKernelContract.InvalidState;
@@ -1089,7 +1089,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
                          worker.State == ManagedDriverWorkerState.Running &&
                          ManagedKernelContract.TryInvokeHostLog(
                              "GXOS_NET10:MANAGED_KERNEL_PHASE10_RUNTIME_ACTIVITY\r\n"u8) &&
-                         ManagedKernelContract.TryQueryMonotonicTime(out _) &&
+                         ManagedKernelContract.TryQueryOptionalMonotonicTime(out _) &&
                          driver.TryRunReceiveRuntimeArenaProof() &&
                          KernelMemory.TryAllocate(1, 0, out region);
             if (!valid) return ManagedKernelContract.InvalidState;

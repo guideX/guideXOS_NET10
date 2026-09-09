@@ -803,6 +803,7 @@ public sealed class ManagedSoftwareRasterizer
                 case ManagedPaintCommandKind.TextRun:
                 case ManagedPaintCommandKind.ImagePlaceholder:
                 case ManagedPaintCommandKind.Image:
+                case ManagedPaintCommandKind.BackgroundImage:
                     if (command.ClipDepth != depth)
                     {
                         failure = ManagedRasterFailureReason.InvalidDisplayList;
@@ -934,6 +935,9 @@ public sealed class ManagedSoftwareRasterizer
                 case ManagedPaintCommandKind.Image:
                     ++_imageCommands;
                     return ResolvedImage(command, images);
+                case ManagedPaintCommandKind.BackgroundImage:
+                    ++_imageCommands;
+                    return ResolvedBackgroundImage(command, images);
             default:
                 return Fail(ManagedRasterFailureReason.InvalidPaintCommand);
         }
@@ -1043,6 +1047,44 @@ public sealed class ManagedSoftwareRasterizer
                 int localY = (int)((long)y - command.Rect.Y);
                 int sourceX = (int)((long)localX * descriptor.Width / command.Rect.Width);
                 int sourceY = (int)((long)localY * descriptor.Height / command.Rect.Height);
+                if (!images.TryReadPixel(command.ImageHandle, sourceX, sourceY, out uint pixel))
+                    return Fail(ManagedRasterFailureReason.InvalidImageSource);
+                pixel = ApplyOpacity(pixel, command.Opacity);
+                if (!BlendPixel(x, y, pixel, PixelKind.Image)) return false;
+            }
+        }
+        return true;
+    }
+
+    private bool ResolvedBackgroundImage(ManagedPaintCommand command,
+                                         ManagedPageImageStore? images)
+    {
+        if (images == null || !images.TryGetDescriptor(command.ImageHandle,
+                                                       out ManagedPageImageDescriptor descriptor) ||
+            descriptor.Width <= 0 || descriptor.Height <= 0)
+            return Fail(ManagedRasterFailureReason.InvalidImageSource);
+        if (!TryGetBounds(command.Rect, command.ClipRect, out int left, out int top,
+                          out int right, out int bottom))
+        {
+            ++_fullyOffscreenPrimitives;
+            return true;
+        }
+        int width = descriptor.Width;
+        int height = descriptor.Height;
+        for (int y = top; y != bottom; ++y)
+        {
+            if (ShouldCancel()) return Fail(ManagedRasterFailureReason.Cancelled);
+            for (int x = left; x != right; ++x)
+            {
+                long dx = (long)x - command.Rect.X;
+                long dy = (long)y - command.Rect.Y;
+                if (dx < 0 || dy < 0) continue;
+                if (command.BackgroundRepeat == ManagedCssBackgroundRepeat.NoRepeat &&
+                    (dx >= width || dy >= height)) continue;
+                int sourceX = command.BackgroundRepeat == ManagedCssBackgroundRepeat.NoRepeat
+                    ? (int)dx : (int)(dx % width);
+                int sourceY = command.BackgroundRepeat == ManagedCssBackgroundRepeat.NoRepeat
+                    ? (int)dy : (int)(dy % height);
                 if (!images.TryReadPixel(command.ImageHandle, sourceX, sourceY, out uint pixel))
                     return Fail(ManagedRasterFailureReason.InvalidImageSource);
                 pixel = ApplyOpacity(pixel, command.Opacity);
