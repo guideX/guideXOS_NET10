@@ -270,6 +270,60 @@ The focused next regression is a minimal GC-only managed-kernel boot with
 bounded allocation-pressure and gen0/full-collection variants; it remains
 open because the current Phase 15 driver path faults before `RX_READY`.
 
+## Phase 53D mark-queue provenance
+
+The exact historical payload was booted under QEMU with a temporary host-only
+GDB stub. The stub was removed after the diagnostic boots; it did not alter the
+guest image, VM bridge, allocator, page tables, or packet path. The image base
+varied between boots (`0x4C15000`, `0x4C17000`, and `0x4C24000`), but the
+RVA-based evidence was stable.
+
+The first successful entry breakpoint at
+`mark_object_simple1` resolved the faulting object as a mark-ring item. Its
+return address was `image+0x171011`, immediately after the direct call at
+`image+0x17100C`. Static disassembly of that caller shows the queue semantics:
+the field value is loaded from `(%rbx)` into `R9`, the previous ring item is
+rotated into `R8`, and the previous item is then passed as both `RCX` and `RDX`
+to `mark_object_simple1`. Therefore the faulting `R15` object was not produced
+by the frontier slot that later faulted while scanning it.
+
+The mark-ring insertion was then caught at `image+0x17A865`, immediately after
+the root-promotion callback had loaded the value from its source slot. The live
+registers were:
+
+```text
+RDX = 0x400002405C20       ; value inserted into the mark ring
+RCX = 0x0000000007E63B40   ; local promotion/root slot
+R11 = 0x000000000509FFB0   ; ring base
+RAX = 0x000000000000000E   ; ring index
+```
+
+The preceding callback path is in the image function at `RVA=0x160E40`. It
+loads `RBX=[RCX]` from source slot `0x0000000007E64878`, writes that value to
+its local slot `[RSP+0x40] = 0x0000000007E63B40`, and calls the root-promotion
+helper at `RVA=0x17A840`; that helper stores `RDX` into the mark ring at
+`RVA=0x17A865`. The callback was reached through the runtime import thunk at
+`RVA=0x1515E0` (return address `image+0x1515E6`). This closes the native
+mark-queue origin chain as:
+
+```text
+source root slot 0x7E64878
+  -> GC promotion callback RVA 0x160E40
+  -> local promotion slot 0x7E63B40
+  -> mark ring slot (base 0x509FFB0, index 0xE)
+  -> mark_object_simple1(RCX=RDX=0x400002405C20)
+  -> frontier read RBX=0x400002431000
+```
+
+The source slot already contained `0x400002405C20` when the promotion
+callback loaded it. A final source-slot watchpoint boot was not creditable:
+that diagnostic boot stopped at the pre-GC serial RX timeout before reaching
+the callback. Accordingly, the exact upstream managed/native writer of
+`0x7E64878` is still unresolved. No arbitrary mapping, commitment, object
+relocation, GC bypass, or allocator workaround is justified by this evidence.
+The phase remains **Outcome B**, with the remaining closure item being the
+writer/root that populated the source slot.
+
 ## Build and current evidence
 
 The repository pins SDK `10.0.302`; this host uses the installed fallback SDK
