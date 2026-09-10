@@ -324,6 +324,85 @@ relocation, GC bypass, or allocator workaround is justified by this evidence.
 The phase remains **Outcome B**, with the remaining closure item being the
 writer/root that populated the source slot.
 
+## Phase 53E source-slot owner and writer investigation
+
+Phase 53E used external QEMU/GDB only against the exact historical payload
+(`E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388`,
+4,790,272 bytes) and the exact Gate4 -4 image. No source, loader, GC, E1000,
+or runner change was made. The bounded captures are preserved under
+`artifacts/phase53e-writer-run-1` through `artifacts/phase53e-writer-run-20`.
+
+The address is not image data, Gate4 static storage, a GC native heap entry,
+a handle entry, a mark-ring entry, or a managed allocation. It is a writable,
+non-executable stack word in the Gate4 boot/main stack. The loader computes
+that stack as `[0x0000000007E63000, 0x0000000007F63000)`, and the slot is in
+page `0x0000000007E64000`. The loader's paging proof reported an identity
+mapping for sampled address/physical address `0x0000000007E64730` with 2 MiB
+page size; the slot is consequently identity-backed in that preexisting
+mapping. No new mapping or commitment was involved.
+
+The bounded neighboring-word snapshots show ordinary stack-frame reuse, not
+a named global or standalone root table. In the target callback capture the
+window included:
+
+```text
+0x7E64840: 0x00000000052AB798  0x0000000004C22030
+0x7E64850: 0x0000400002400070  0x0000000004C71E0E
+0x7E64860: 0x0000000000000001  0x0000000007E648C0
+0x7E64870: 0x00000000000080F7  0x0000400002405C20
+0x7E64880: 0x0000000007E64940  0x0000000000000000
+```
+
+At the exact Phase 15 `GC.Collect` call in a separate staged capture, the
+same stack word held `0x00000000001AF7A0`; adjacent words held other stack
+values and valid-looking arena candidates. This run-to-run change is why the
+slot is classified as a **stack root/root-location supplied by NativeAOT
+stack enumeration**, not as a stable managed field. No PDB-backed managed
+method/local identity was available for this historical stripped payload.
+
+The promotion helper is confirmed at image `RVA=0x160E40`. Its entry loads
+`RBX=[RCX]`, where `RCX=0x0000000007E64878` in the target capture, copies that
+value into its local `[RSP+0x40]` slot (observed local promotion slot
+`0x0000000007E63B40` in the previously captured chain), and calls the
+root-promotion helper at `RVA=0x17A840`; the mark-ring store remains at
+`RVA=0x17A865`. The target callback supplied `R8=0`, so the observed flags
+are the exact-root case: no interior-pointer or pinned-root bit was present.
+The callback therefore consumed the source as an exact stack reference, not
+as an interior pointer or handle.
+
+The most useful new capture was run 15. A conditional hardware breakpoint on
+the promotion helper stopped at runtime `RIP=0x0000000004D84E40` with image
+base `0x0000000004C24000`, `RCX=0x0000000007E64878`, and the slot already
+equal to `0x0000400002405C20`. This independently reproduces the known
+source → local promotion → mark-ring value. It also shows that the helper's
+first earlier invocation was unrelated (`RCX=0x0000000004C15010`), so an
+unconditional helper breakpoint is not a writer proof.
+
+The staged run 18 stopped immediately before the exact Phase 15 collection at
+`RVA=0x61A4A` and read `0x7E64878=0x00000000001AF7A0`; a full-width write
+watchpoint armed for the collection saw no transition to
+`0x0000400002405C20` before the known fault. Runs 11–12 captured the slot's
+ordinary writes, including the prologue `push %rbx` at runtime
+`0x0000000004C77982` (the exact runtime address captured in run 11), which
+reused the slot for `0x0000400002404740` as a callee-save stack spill. That
+is a proven stack writer for a non-target value, not proof that it produced
+the bad candidate.
+Full-width conditional watchpoints from reset and staged at the collection
+boundary did not capture a CPU store producing the exact candidate. Thus the
+first write, final pre-GC write, writer function/instruction, source register,
+and one-predecessor value origin remain unresolved.
+
+The evidence now materially narrows the defect: the GC sees an exact stack
+root at `0x7E64878`, and the bad value is already present when the promotion
+helper consumes it, but the bounded writer captures do not prove whether it
+was introduced by an earlier stack-frame spill, an earlier lifecycle callback,
+or a NativeAOT GCInfo/root-location mismatch. The slot is not proven to be a
+managed local, static field, handle, interior pointer, or valid object. The
+candidate's header/MethodTable remains invalid and its downstream frontier
+page remains correctly absent. No production correction is justified because
+the exact producer is still unproven. Outcome remains **B**; Phase 54 is not
+safe.
+
 ## Build and current evidence
 
 The repository pins SDK `10.0.302`; this host uses the installed fallback SDK
