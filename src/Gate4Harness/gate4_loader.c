@@ -4201,6 +4201,164 @@ __attribute__((unused)) static void run_performance_diagnostics(EFI_BOOT_SERVICE
 #endif
 }
 
+/* The Phase 53C fault can occur after the initial managed-entry call has
+   returned, while a later managed-kernel export is executing.  Keep the
+   range predicate declared here so the fault path can safely inspect only
+   image, stack, and committed arena bytes. */
+static int nativeaot_gc_readable_range(uint64_t address, uint64_t bytes);
+
+static int fault_read_u64(uint64_t address, uint64_t *value)
+{
+    if (value == 0 || !nativeaot_gc_readable_range(address, sizeof(*value))) {
+        return 0;
+    }
+    *value = *(const uint64_t *)(uintptr_t)address;
+    return 1;
+}
+
+static int fault_read_u32(uint64_t address, uint32_t *value)
+{
+    if (value == 0 || !nativeaot_gc_readable_range(address, sizeof(*value))) {
+        return 0;
+    }
+    *value = *(const uint32_t *)(uintptr_t)address;
+    return 1;
+}
+
+static void emit_fault_register(const char *name, uint64_t value)
+{
+    serial_text("GXOS_NET10:FAULT_");
+    serial_text(name);
+    serial_text("=0x");
+    serial_field_hex("", value);
+    serial_text("\r\n");
+}
+
+static void emit_fault_gc_provenance(const GXOS_X64_TRAP_FRAME *frame)
+{
+    uint64_t object = frame->r15;
+    uint64_t slot = frame->rbx;
+    uint64_t object_header;
+    uint64_t method_table;
+    uint32_t method_table_flags;
+    uint32_t method_table_base_size;
+    uint64_t array_length;
+    uint64_t descriptor_series_count;
+    uint64_t descriptor_first;
+    uint64_t descriptor_second;
+    uint64_t scan_start;
+    uint64_t scan_end;
+    uint64_t object_offset;
+    uint64_t slot_offset;
+    uint64_t predecessor_base = 0;
+    uint64_t predecessor_bytes = 0;
+    uint32_t commitment_index;
+    int method_table_in_image;
+    int method_table_in_arena;
+    int slot_is_commitment_frontier = 0;
+
+    serial_text("GXOS_NET10:FAULT_GC_PROVENANCE_BEGIN\r\n");
+    emit_fault_register("REG_RAX", frame->rax);
+    emit_fault_register("REG_RBX", frame->rbx);
+    emit_fault_register("REG_RCX", frame->rcx);
+    emit_fault_register("REG_RDX", frame->rdx);
+    emit_fault_register("REG_RSI", frame->rsi);
+    emit_fault_register("REG_RDI", frame->rdi);
+    emit_fault_register("REG_RBP", frame->rbp);
+    emit_fault_register("REG_R8", frame->r8);
+    emit_fault_register("REG_R9", frame->r9);
+    emit_fault_register("REG_R10", frame->r10);
+    emit_fault_register("REG_R11", frame->r11);
+    emit_fault_register("REG_R12", frame->r12);
+    emit_fault_register("REG_R13", frame->r13);
+    emit_fault_register("REG_R14", frame->r14);
+    emit_fault_register("REG_R15", frame->r15);
+    emit_fault_register("GC_OBJECT", object);
+    emit_fault_register("GC_SLOT", slot);
+    for (commitment_index = 0;
+         commitment_index != GXOS_VM_MAX_COMMITMENTS;
+         ++commitment_index) {
+        const GXOS_VM_COMMITMENT *commitment =
+            &g_memory_virtual_arena.commitments[commitment_index];
+        if (commitment->live && commitment->base <= UINT64_MAX -
+                commitment->bytes && commitment->base + commitment->bytes ==
+                slot) {
+            predecessor_base = commitment->base;
+            predecessor_bytes = commitment->bytes;
+            slot_is_commitment_frontier = 1;
+            break;
+        }
+    }
+    serial_text("GXOS_NET10:FAULT_GC_SLOT_IS_COMMITMENT_FRONTIER=");
+    serial_text(slot_is_commitment_frontier ? "1\r\n" : "0\r\n");
+    if (slot_is_commitment_frontier) {
+        emit_fault_register("GC_PREDECESSOR_COMMITMENT_BASE", predecessor_base);
+        emit_fault_register("GC_PREDECESSOR_COMMITMENT_BYTES", predecessor_bytes);
+    }
+    if (slot >= object) {
+        object_offset = slot - object;
+        emit_fault_register("GC_SLOT_OBJECT_OFFSET", object_offset);
+    }
+    if (!fault_read_u64(object, &object_header)) {
+        serial_text("GXOS_NET10:FAULT_GC_OBJECT_HEADER_READABLE=0\r\n");
+        serial_text("GXOS_NET10:FAULT_GC_PROVENANCE_END\r\n");
+        return;
+    }
+    method_table = object_header & ~((uint64_t)7U);
+    emit_fault_register("GC_OBJECT_HEADER", object_header);
+    emit_fault_register("GC_METHOD_TABLE", method_table);
+    method_table_in_image = g_managed_image_base != 0 &&
+        g_managed_image_size >= 8U && method_table >= g_managed_image_base &&
+        method_table <= g_managed_image_base + g_managed_image_size - 8U;
+    method_table_in_arena = g_memory_virtual_arena.valid &&
+        gxos_vm_arena_contains(&g_memory_virtual_arena, method_table, 8U);
+    serial_text("GXOS_NET10:FAULT_GC_METHOD_TABLE_IN_IMAGE=");
+    serial_text(method_table_in_image ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:FAULT_GC_METHOD_TABLE_IN_VIRTUAL_ARENA=");
+    serial_text(method_table_in_arena ? "1\r\n" : "0\r\n");
+    if (!method_table_in_image || method_table < 0x18U ||
+        !fault_read_u32(method_table, &method_table_flags) ||
+        !fault_read_u32(method_table + 4U, &method_table_base_size) ||
+        !fault_read_u64(method_table - 0x18U, &descriptor_first) ||
+        !fault_read_u64(method_table - 0x10U, &descriptor_second) ||
+        !fault_read_u64(method_table - 0x08U, &descriptor_series_count)) {
+        serial_text("GXOS_NET10:FAULT_GC_METHOD_TABLE_VALID=0\r\n");
+        serial_text("GXOS_NET10:FAULT_GC_PROVENANCE_END\r\n");
+        return;
+    }
+    emit_fault_register("GC_METHOD_TABLE_VALID", 1U);
+    emit_fault_register("GC_METHOD_TABLE_FLAGS", method_table_flags);
+    emit_fault_register("GC_METHOD_TABLE_BASE_SIZE", method_table_base_size);
+    emit_fault_register("GC_DESCRIPTOR_SERIES_COUNT", descriptor_series_count);
+    emit_fault_register("GC_DESCRIPTOR_FIRST", descriptor_first);
+    emit_fault_register("GC_DESCRIPTOR_SECOND", descriptor_second);
+    if (fault_read_u64(object + 8U, &array_length)) {
+        emit_fault_register("GC_OBJECT_WORD_AT_8", array_length);
+    }
+    if (object > UINT64_MAX - descriptor_second ||
+        object + descriptor_second > UINT64_MAX - descriptor_first ||
+        object + descriptor_second + descriptor_first > UINT64_MAX -
+            method_table_base_size) {
+        serial_text("GXOS_NET10:FAULT_GC_SCAN_GEOMETRY_OVERFLOW=1\r\n");
+        serial_text("GXOS_NET10:FAULT_GC_PROVENANCE_END\r\n");
+        return;
+    }
+    scan_start = object + descriptor_second;
+    scan_end = scan_start + descriptor_first + method_table_base_size;
+    emit_fault_register("GC_SCAN_START", scan_start);
+    emit_fault_register("GC_SCAN_END", scan_end);
+    if (slot >= scan_start) {
+        slot_offset = slot - scan_start;
+        emit_fault_register("GC_SLOT_SCAN_OFFSET", slot_offset);
+    }
+    serial_text("GXOS_NET10:FAULT_GC_SLOT_IS_SCAN_END=");
+    serial_text(slot == scan_end ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:FAULT_GC_SLOT_READABLE=");
+    serial_text(nativeaot_gc_readable_range(slot, sizeof(uint64_t)) ?
+                    "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:FAULT_GC_PROVENANCE_END\r\n");
+}
+
 static void fault_handler(const GXOS_X64_TRAP_FRAME *frame)
 {
 #ifdef GXOS_ENABLE_CRT_INITTERM
@@ -4215,7 +4373,7 @@ static void fault_handler(const GXOS_X64_TRAP_FRAME *frame)
     if (g_phase < PHASE_BEFORE_MANAGED_CALL || g_phase >= PHASE_AFTER_SECURITY_COOKIE_INIT) serial_text("GXOS_NET10:FAULT_BEFORE_MANAGED\r\n");
     else if (g_phase == PHASE_IN_MANAGED || g_phase == PHASE_BEFORE_MANAGED_CALL) serial_text("GXOS_NET10:FAULT_IN_MANAGED\r\n");
     else serial_text("GXOS_NET10:FAULT_AFTER_MANAGED_RETURN\r\n");
-    serial_field_u32("GXOS_NET10:FAULT_VECTOR=0x", (uint32_t)frame->vector);
+    serial_field_hex("GXOS_NET10:FAULT_VECTOR=0x", frame->vector);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:FAULT_ERROR=0x", frame->error_code);
     serial_text("\r\n");
@@ -4225,6 +4383,7 @@ static void fault_handler(const GXOS_X64_TRAP_FRAME *frame)
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:FAULT_CR2=0x", frame->cr2);
     serial_text("\r\n");
+    emit_fault_gc_provenance(frame);
     serial_field_hex("GXOS_NET10:FAULT_IMAGE_BASE=0x", g_managed_image_base);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:FAULT_MANAGED_TARGET=0x", g_managed_target);
@@ -4735,7 +4894,7 @@ static void install_fault_handlers(void)
     }
 }
 
-static void restore_fault_handlers(void)
+__attribute__((unused)) static void restore_fault_handlers(void)
 {
     write_idtr(&g_saved_idtr);
 }
@@ -13968,6 +14127,11 @@ static void managed_kernel_phase14_driver(
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase53-mode");
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE53_MODE_SELECTED\r\n");
 #endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE53
+    /* Keep the earlier managed-entry and serial-worker lifecycle on the
+       firmware IDT.  Capture faults only at the Phase 53C driver/GC boundary. */
+    install_fault_handlers();
+#endif
     status = run_phase14(1U);
     if (status != GX_MANAGED_OK || run_phase14(1U) != GX_MANAGED_INVALID_STATE ||
         run_phase14(2U) != GX_MANAGED_OK ||
@@ -13976,6 +14140,9 @@ static void managed_kernel_phase14_driver(
         serial_text("\r\n");
         fail("managed-kernel-phase14-driver-proof");
     }
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE53
+    restore_fault_handlers();
+#endif
     serial_text("GXOS_NET10:MANAGED_KERNEL_PHASE14_SEQUENCE_COMPLETE\r\n");
 }
 

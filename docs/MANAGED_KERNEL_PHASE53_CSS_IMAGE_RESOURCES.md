@@ -48,7 +48,7 @@ painting remains later in the display-list order.
 
 The supported CSS URL grammar is ASCII-case-insensitive `url(...)`, with
 quoted or unquoted URLs, bounded whitespace, and a non-empty URL no longer
-than `ManagedHttpsUrl.MaximumUrlLength`. Controls, escapes, gradients, multiple
+than `ManagedCssLimits.MaximumValueLength` (512 bytes). Controls, escapes, gradients, multiple
 layers, shorthand, `background-size`, and arbitrary positioning are rejected
 or ignored as unsupported declarations. Reference-table overflow, URL/scheme
 failure, MIME failure, transport failure, PNG decode failure, and shared-store
@@ -105,15 +105,64 @@ MANAGED_KERNEL_PHASE15_GC_PROBE_RETURNED
 MANAGED_KERNEL_PHASE15_GC_ROOTS_LIVE
 ```
 
-No `MANAGED_E1000_RX_READY` marker follows. With the Phase 53 runner's
-temporary `-cpu max` perturbation the post-GC conjunction returned false
-(driver status `0x7`) after the roots witness. With that speculative CPU
-change removed, the same Phase 53 path faulted inside the collection: vector
-`0x0E`, `RIP=0x4D91090`, `CR2=0x400002431000`, image base `0x4C17000`
-(`RVA=0x17A090`). `CR2` is in the managed virtual-heap range, not the E1000
-MMIO or DMA ranges. The available PDB evidence identifies the native image
-but does not resolve a closer method symbol. This is allocation/layout
-sensitivity at the NativeAOT GC boundary, not evidence of a CSS or PNG defect.
+No `MANAGED_E1000_RX_READY` marker follows. The temporary `-cpu max`
+experiment was removed; the exact historical reproduction uses the default
+QEMU CPU plus virtio-rng. With the boundary-scoped Gate4 diagnostic handler,
+payload `E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388`
+(4,790,272 bytes) faulted after `MANAGED_KERNEL_PHASE15_GC_PROBE_BEGIN`:
+
+```text
+FAULT_VECTOR=0x000000000000000E
+FAULT_ERROR=0x0000000000000000
+FAULT_RIP=0x0000000004D91090
+FAULT_CR2=0x0000400002431000
+FAULT_REG_RBX=0x0000400002431000
+FAULT_REG_R15=0x0000400002405C20
+FAULT_GC_OBJECT=0x0000400002405C20
+FAULT_GC_SLOT=0x0000400002431000
+FAULT_GC_SLOT_OBJECT_OFFSET=0x000000000002B3E0
+FAULT_GC_SLOT_IS_COMMITMENT_FRONTIER=1
+FAULT_GC_PREDECESSOR_COMMITMENT_BASE=0x0000400002430000
+FAULT_GC_PREDECESSOR_COMMITMENT_BYTES=0x0000000000001000
+FAULT_GC_OBJECT_HEADER=0x0000400002405E99
+FAULT_GC_METHOD_TABLE=0x0000400002405E98
+FAULT_GC_METHOD_TABLE_IN_IMAGE=0
+FAULT_GC_METHOD_TABLE_IN_VIRTUAL_ARENA=1
+FAULT_GC_METHOD_TABLE_VALID=0
+```
+
+The linked NativeAOT PDB and disassembly resolve `RVA=0x17A090` to
+`WKS::gc_heap::mark_object_simple1(unsigned char *, unsigned char *) + 0x180`,
+whose exact instruction is `mov r9,QWORD PTR [rbx]`. The PDB's register
+locations identify `R15` as the `oo` object parameter and `RBX` as the local
+`ppslot` field-slot address. Thus `0x400002431000` is the invalid slot address
+being read, not a successfully loaded managed reference. The fault occurs
+before the following `queue_mark` path can consume a field value.
+
+The object header is already invalid at this boundary: its masked MethodTable
+value is inside the managed arena and outside the loaded image, so no EEType or
+GC descriptor can be resolved from this object without guessing. This is
+stronger than a generic “GC candidate” label, but it does not identify the
+managed producer/root that corrupted the object header.
+
+The in-guest page walk found the target PTE absent. The immediate predecessor
+ledger page is `[0x400002430000, 0x400002431000)`; the aggregate GC PAL call
+that created the surrounding run was `VirtualAlloc(0x400002421000, 0x10000)`,
+whose exclusive end is exactly `0x400002431000`. No VirtualAlloc call
+requested the candidate, and no decommit/release preceded the fault. The
+candidate lies inside the live managed reservation but outside committed/mapped
+pages. This is a genuine frontier observation, not an arbitrary mapping or an
+allocator correction.
+
+The clean current payload (`9B72B8B939789C69D6937FB4933DBA0EE267EA03B463ECC8019562D7B2C64F18`)
+was also run with the same boundary harness. It selected Phase 53 and reached
+E1000 TX completion, then faulted earlier in the same GC scan at
+`RVA=0x17A159`, instruction `mov ecx,DWORD PTR [r10]`, with
+`r10=0xF2000000000529B8` (noncanonical), `RBX=oo+0x80`, and `CR2=0`. It
+reported the same invalid `oo` header/arena MethodTable shape. This current
+payload result is not substituted for the requested `0x400002431000` candidate;
+it corroborates an earlier invalid-object/reference state in the NativeAOT GC
+walk, not a CSS/PNG or E1000 MMIO access.
 
 The known-good Phase 52 payload and Gate4 EFI were also run through the
 current runner. That control stopped earlier at
@@ -139,7 +188,7 @@ the required deterministic screenshots. Phase 54 must not begin.
 
 ## Phase 53B GC-survival closure
 
-The exact diagnostic payload used for all Phase 53B fault conclusions was
+The exact diagnostic payload used for the Phase 53B fault conclusions was
 `E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388`,
 4,790,272 bytes. Its preferred image base is `0x180000000`; the failing
 guest load bases varied, but the RVA remained `0x17A090`. DIA/PDB and
@@ -154,7 +203,9 @@ mov r9,QWORD PTR [rbx]
 The clean fault context was vector `0x0E`, page-fault error code `0`, CPL 0,
 supervisor read, not-present, not a write, and not an instruction fetch. The
 faulting register was `RBX=CR2=0x400002431000`; this is therefore a GC mark
-read of the candidate object address itself, not a driver MMIO or DMA access.
+read of the candidate field-slot address, not a successfully loaded candidate
+object and not a driver MMIO or DMA access. The object parameter was
+`R15=0x400002405C20`, with the slot `0x2B3E0` bytes from that object.
 
 The in-guest page walk used the active `CR3=0x4C0D000` and found:
 
@@ -189,10 +240,11 @@ buffers are native-authoritative allocations, so the managed wrappers do not
 carry movable managed-array addresses into the device. `GC.KeepAlive` extends
 wrapper reachability through the call site but does not pin memory. No native
 DMA pointer crosses the collection as a pointer into a movable managed object.
-The observed invalid candidate address is consequently an H1-style invalid
-GC reference/GC state observation, not proof that a valid GC page was omitted
-by the VM bridge. The exact producer of that invalid reference is not yet
-identified, so no runtime or allocator correction is justified.
+The observed invalid slot/frontier and invalid object header are consequently
+an H1-style invalid GC reference/GC state observation, not proof that a valid
+GC page was omitted by the VM bridge. The exact producer/root of that object
+header/reference state is not yet identified, so no runtime or allocator
+correction is justified.
 
 `START_BLOCKED=0x6` is independently mapped to the first
 `TryQueryMonotonicTime` validation in `ManagedKernelContract.Start`; it is a
@@ -211,8 +263,9 @@ fetch, image, or browser behavior; it restores compilation of the existing
 host-project boundaries and is unrelated to the GC page fault.
 
 No GC bypass, fake survival marker, page-fault recovery, relaxed DMA address
-comparison, or E1000 packet-semantic change was retained. Temporary page-table
-and VM-ledger witnesses were removed after the exact evidence was captured.
+comparison, or E1000 packet-semantic change was retained. The Gate4 change is a
+bounded, read-only fault-time provenance reporter and boundary-scoped IDT
+installation; it does not map, commit, decommit, or recover the candidate page.
 The focused next regression is a minimal GC-only managed-kernel boot with
 bounded allocation-pressure and gen0/full-collection variants; it remains
 open because the current Phase 15 driver path faults before `RX_READY`.
@@ -233,8 +286,13 @@ and reported Phase 47=955, Phase 48=698, Phase 49=694, Phase 50=683,
 Phase 51=1083, Phase 52=651, and Phase 53=540, for an aggregate of 5304
 cases. QEMU 11.0.0 is installed
 and repository-owned QEMU cleanup was confirmed after the diagnostic runs.
-The exact Phase 53 Gate4 image reached E1000 TX completion but failed in the
-existing post-TX GC-survival probe before `MANAGED_E1000_RX_READY`. A
+The final provenance Gate4 EFI used SHA-256
+`FF145440ED33BEB723020E954B99A09BC3043C20AA3C16F15B6DC83806E9AB9C`.
+The historical-payload serial transcript is
+`artifacts/phase53c-provenance-run-12/runs/run-1/serial.log` with SHA-256
+`81CF47107EE19FB442D5BA78C09DF8C8B755A30D1C4C79073981093B21115B48`.
+The clean current-payload transcript reached the same driver boundary but
+faulted at the earlier `RVA=0x17A159` invalid-reference dereference. A
 separate compatibility bypass was removed rather than accepted, and the
 runner layout perturbation was removed.
 
