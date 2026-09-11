@@ -403,6 +403,80 @@ page remains correctly absent. No production correction is justified because
 the exact producer is still unproven. Outcome remains **B**; Phase 54 is not
 safe.
 
+## Phase 53F GCInfo and frame provenance
+
+Phase 53F corrected the earlier tentative interpretation of the absolute
+address `0x0000000007E64878`. The exact historical NativeAOT payload and its
+matching PDB were decoded without rebuilding:
+
+```text
+DLL SHA-256: E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388
+PDB SHA-256: 7270B65498976A8B531E04758C91E1A627E4A916508DB5FC411E9FB4CA8FCA9C
+Method:      RunGcSurvival, RVA 0x619DC, code length 0x148
+GCInfo:      xdata RVA 0x4602B8, blob RVA 0x4602C5, 15 bytes
+Blob SHA-256: A467DA8C4D7851C0A2C608C56FD2F98244D768C82DEE301AABA15713BC1DB3F4
+Blob:        20 0D E0 DC 98 13 E9 58 C4 9E 13 0D 15 F2 00
+```
+
+The record is a valid NativeAOT AMD64 v1 slim GCInfo record. Its six safe
+points are `0x37`, `0x73`, `0x91`, `0xC7`, `0x111`, and `0x13D`. It has one
+tracked register slot, register number 3 (`RBX`), with exact-reference flags,
+and one separate untracked stack slot at `GC_SP_REL + 0x28` with the interior
+flag. Direct liveness keeps `RBX` live at the first four safe points and dead
+at the last two. The call to `RhCollect` is at method offset `0x6E`; its
+return address is the `0x73` safe point. The record therefore proves that
+`RunGcSurvival` exposes a live tracked `RBX` root at the collection return
+safe point. It does not prove that the absolute address supplied to the
+promotion helper is a normal `[RSP+0x8]` local in that method.
+
+The relevant native ABI is also settled. The PDB identifies
+`WKS::GCHeap::Promote(Object**, ScanContext*, unsigned int)` at RVA
+`0x160E40`. On AMD64, NativeAOT's GCInfo decoder returns the address of the
+`RegDisplay` register field for a tracked register slot (`pRD->pRbx`), while
+an untracked stack slot is computed from the active register-display stack
+pointer. At the promotion entry, `RCX` is consequently a pointer to the
+root-location word and `R8` carries the promotion flags. The captured
+`RCX=0x0000000007E64878, R8=0` hit is the tracked-register path; it is not
+evidence that `0x7E64878` is the untracked interior slot.
+
+The exact `RunGcSurvival` prologue is:
+
+```text
+push rdi; push rsi; push rbx; sub rsp, 0x40
+```
+
+At the healthy pre-collection stop, the method's current `RSP` was
+`0x0000000007E64870`. Its saved `RBX` was therefore at
+`[RSP+0x40] = 0x0000000007E648B0`, with the return address at
+`[RSP+0x58] = 0x0000000007E648C8`. The method contains no access to
+`[RSP+0x8]`; its observed stack accesses are at `+0x28`, `+0x30`, and
+`+0x38`. The word at `0x7E64878` held `0x1AF7A0` in that healthy capture and
+is therefore an unrelated/reused word in that frame, not the proven saved
+`RBX` location.
+
+The callback capture cannot currently recover a trustworthy managed owner.
+Its immediate GDB stack return value was runtime address `0x4D745E6`, which
+maps at that boot's image base to RVA `0x1515E6`, one byte before the end of
+the seven-byte `PalSleep` import thunk. That is not a valid normal call-return
+boundary. The custom `RtlVirtualUnwind` bridge in
+`src/Gate4Harness/gate4_loader.c` was audited against the exact
+`RunGcSurvival` unwind record: it maps the AMD64 register numbers correctly,
+applies the three pushes and the `0x40` allocation, then reads the return
+address from the post-unwind stack pointer. This makes the known managed
+prologue internally consistent, but does not turn the malformed callback
+context into a proven owner/context chain.
+
+Accordingly, Phase 53F **supersedes the earlier tentative `[RSP+0x8]`
+wording**. The exact GCInfo producer and safe point are proven; the absolute
+callback root-location address's owning `RegDisplay`/managed frame and the
+upstream context bridge that supplied it remain unresolved. The diagnostic
+launch attempts under `artifacts/phase53f-frame-capture-*` are negative
+instrumentation records only: they did not reach a creditable same-boot
+three-stop capture and are not acceptance evidence. No root-range filter,
+GC bypass, VM mapping change, allocator workaround, or production runtime
+correction was made. The result remains **Outcome B**, no focused regression
+is justified, and Phase 54 remains unsafe.
+
 ## Build and current evidence
 
 The repository pins SDK `10.0.302`; this host uses the installed fallback SDK
@@ -443,3 +517,96 @@ positioning, cover/contain sizing, SVG/JPEG/GIF/WebP, masks, cursor images,
 and HTTP caching. A later phase can add broader CSS image grammar only after a
 separate bounded representation, cancellation policy, and visual proof are
 specified.
+
+## Phase 53G RegDisplay ownership and RBX-root provenance
+
+Phase 53G started from the uncommitted Phase 53F worktree at
+`2bb3e9c5caa42f7ac446c3de09550c3f85b302da`. The Phase 53F documentation
+change was preserved. No production/runtime source change, commit, push,
+reset, checkout, stash, or cleanup operation was made.
+
+The first capture used the historical diagnostic DLL and matching PDB from
+`artifacts/phase53a-diagnostic-build` (DLL SHA-256
+`E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388`, PDB
+SHA-256 `7270B65498976A8B531E04758C91E1A627E4A916508DB5FC411E9FB4CA8FCA9C`).
+The relocation-correct GDB attempt under
+`artifacts/phase53g-capture-2` observed IMAGE_BASE `0x501F000`, installed
+`RunGcSurvival`, `GC.Collect`, return, and `Promote` breakpoints, and did not
+reach `RunGcSurvival`. Its generated status string was corrected in
+`capture-status-correction.txt`: the original classifier matched its own
+`GDB_NO_BAD_CALLBACK_HIT` marker, so that run is **no callback captured**, not
+a new callback hit.
+
+A clean control used the clean Phase 53C gate payload
+(`9B72B8B939789C69D6937FB4933DBA0EE267EA03B463ECC8019562D7B2C64F18`,
+4,789,760 bytes) and the same actual-image-base procedure. Static
+disassembly confirmed the clean payload retains `RunGcSurvival` at RVA
+`0x619DC`; its `GC.Collect` call is at method offset `0x48` rather than the
+diagnostic payload's `0x6E`. The control observed IMAGE_BASE `0x5012000`,
+installed runtime breakpoints at `0x50739DC`, `0x5073A24`, `0x5073A29`, and
+`0x5172E40`, but did not reach the managed method within the bounded run.
+It is preserved under `artifacts/phase53g-clean-control-1` as a negative
+reachability record, not callback evidence.
+
+The creditable historical callback evidence remains the Phase 53E run-15
+capture. At `WKS::GCHeap::Promote(Object**, ScanContext*, unsigned int)`
+(image RVA `0x160E40`, runtime PC `0x4D84E40` at image base `0x4C24000`),
+GDB recorded:
+
+```text
+RSP = 0x0000000007E63B38
+RCX = 0x0000000007E64878   ; callback Object** / root-location address
+RDX = 0x0000000007E64470   ; ScanContext*
+R8  = 0x0000000000000000   ; exact, non-interior, non-pinned flags
+RBX = 0x0000000007E63C40   ; incoming callback-frame RBX
+*RCX = 0x0000400002405C20  ; bad candidate
+```
+
+This proves the callback consumed the stack word at `0x7E64878`, and the
+historical native helper then copied it into its local promotion slot and the
+mark ring. It does **not** prove that this word is the `RunGcSurvival` saved
+RBX slot. The Phase 53F GCInfo decode proves only that the tracked root is
+NativeAOT register slot 3 (`RBX`), so NativeAOT's tracked-register enumeration
+semantics make `RCX` the `pRD->pRbx` root-location pointer for this callback.
+The physical address of the containing `RegDisplay`, and therefore the exact
+storage object owning that field, was not captured. `pRD->pRbx == RCX` is
+true as the GCInfo/callback ABI relation; the address of `pRD` itself remains
+unknown.
+
+The callback's immediate stack return was `0x4D745E6`, image RVA `0x1515E6`,
+which is inside the historical seven-byte `PalSleep` import thunk rather than
+at a valid normal call-return boundary. The backtrace repeated the callback
+and did not identify a trustworthy `EnumGcRefs` caller or a managed PC. Thus
+the exact active enumeration, owner method, safe point used by that
+enumeration, caller/callee frame, and upstream writer of `0x400002405C20`
+remain unresolved. The known `RunGcSurvival` frame remains a plausible
+tracked-RBX producer because its decoded GCInfo has RBX live at the
+`0x73` post-`GC.Collect` safe point, but the callback capture does not prove
+that it owns this `RegDisplay`.
+
+Static lifetime analysis found the historical `RunGcSurvival` prologue
+(`push rdi; push rsi; push rbx; sub rsp,0x40`), the saved-RBX location
+`[RSP+0x40]`, the return-address location `[RSP+0x58]`, and no method access
+at `[RSP+0x8]`. The bad source word is a reused Gate4 stack word, not a
+proven C# local, static, handle, or managed allocation. No exact writer of
+the candidate was found: the observed `push rbx` stack spill writes a
+different value, and the bounded conditional watchpoints did not catch a
+store of `0x400002405C20` before the failing collection.
+
+The guideXOS unwind audit found correct AMD64 register-number mapping
+(`register 3 -> context.rbx`), the expected nonvolatile restores, stack
+advancement, and return-PC load in
+`src/Gate4Harness/gate4_loader.c`. `GXOS_CONTEXT_COMPAT` has the expected
+Windows AMD64 offsets and size in `src/Gate4Harness/exception_context.h`.
+That is a consistency result, not proof that the malformed callback context
+was constructed correctly; no dangling `RegDisplay` pointer or specific
+transition-frame defect was proven.
+
+No causal defect is established, so no repair is justified. The result is
+**Outcome B — provenance substantially advanced, repair not justified**.
+The tracked-RBX interpretation and callback argument are established, but
+the exact `RegDisplay` owner, active managed frame/PC, and candidate writer
+are not. Phase 54 remains unsafe. The next narrow step is a same-boot
+capture that stops at `EnumGcRefs`/RegDisplay construction and records the
+RegDisplay address, `pRbx`, managed PC, SP, unwind-before/after state, and
+the exact callback call site before investigating any writer.
