@@ -6408,6 +6408,36 @@ typedef struct {
     uint32_t unwind_data;
 } GXOS_NATIVEAOT_RUNTIME_FUNCTION;
 
+/* The Windows AMD64 KNONVOLATILE_CONTEXT_POINTERS layout used by
+ * CoffNativeCodeManager::UnwindStackFrame.  The x64 ABI places the 16
+ * floating-register pointer slots first and the 16 integer-register pointer
+ * slots second.  RtlVirtualUnwind updates the integer homes when an unwind
+ * operation finds a callee-saved register spill; REGDISPLAY is rebuilt from
+ * those homes after the call. */
+typedef struct {
+    void *floating_context[16];
+    uint64_t *integer_context[16];
+} GXOS_KNONVOLATILE_CONTEXT_POINTERS;
+
+static uint64_t **nativeaot_unwind_context_pointer(
+    void *context_pointers, uint32_t register_number)
+{
+    GXOS_KNONVOLATILE_CONTEXT_POINTERS *pointers =
+        (GXOS_KNONVOLATILE_CONTEXT_POINTERS *)context_pointers;
+    if (pointers == 0) return 0;
+    switch (register_number) {
+    case 3: return &pointers->integer_context[3];
+    case 5: return &pointers->integer_context[5];
+    case 6: return &pointers->integer_context[6];
+    case 7: return &pointers->integer_context[7];
+    case 12: return &pointers->integer_context[12];
+    case 13: return &pointers->integer_context[13];
+    case 14: return &pointers->integer_context[14];
+    case 15: return &pointers->integer_context[15];
+    default: return 0;
+    }
+}
+
 static uint64_t *nativeaot_unwind_register(GXOS_CONTEXT_COMPAT *context,
                                            uint32_t register_number)
 {
@@ -6551,7 +6581,6 @@ static uint32_t EFIAPI platform_rtl_virtual_unwind(
     uint64_t code_bytes;
 
     (void)handler_type;
-    (void)context_pointers;
     ++g_nativeaot_gc_virtual_unwind_calls;
     g_nativeaot_gc_last_unwind_context = (uint64_t)(uintptr_t)context_record;
     g_nativeaot_gc_last_unwind_context_rsp = 0;
@@ -6600,6 +6629,7 @@ static uint32_t EFIAPI platform_rtl_virtual_unwind(
         uint32_t slots = 1;
         uint64_t value;
         uint64_t *register_value;
+        uint64_t **register_pointer;
         uint64_t address;
 
         if (operation == 1U) {
@@ -6626,10 +6656,16 @@ static uint32_t EFIAPI platform_rtl_virtual_unwind(
             register_value = nativeaot_unwind_register(context_record,
                                                        operation_info);
             if (register_value == 0) goto unwind_failure;
+            address = context_record->rsp;
             if (!nativeaot_gc_read_stack_u64(&context_record->rsp, &value)) {
                 goto unwind_failure;
             }
             *register_value = value;
+            register_pointer = nativeaot_unwind_context_pointer(
+                context_pointers, operation_info);
+            if (register_pointer != 0) {
+                *register_pointer = (uint64_t *)(uintptr_t)address;
+            }
             break;
         case 1: /* UWOP_ALLOC_LARGE */
             if (operation_info == 0) {
@@ -6672,6 +6708,11 @@ static uint32_t EFIAPI platform_rtl_virtual_unwind(
                 goto unwind_failure;
             }
             *register_value = *(const uint64_t *)(uintptr_t)address;
+            register_pointer = nativeaot_unwind_context_pointer(
+                context_pointers, operation_info);
+            if (register_pointer != 0) {
+                *register_pointer = (uint64_t *)(uintptr_t)address;
+            }
             break;
         case 5: /* UWOP_SAVE_NONVOL_FAR */
             register_value = nativeaot_unwind_register(context_record,
@@ -6685,6 +6726,11 @@ static uint32_t EFIAPI platform_rtl_virtual_unwind(
                 goto unwind_failure;
             }
             *register_value = *(const uint64_t *)(uintptr_t)address;
+            register_pointer = nativeaot_unwind_context_pointer(
+                context_pointers, operation_info);
+            if (register_pointer != 0) {
+                *register_pointer = (uint64_t *)(uintptr_t)address;
+            }
             break;
         case 8: /* UWOP_SAVE_XMM128 */
             break;

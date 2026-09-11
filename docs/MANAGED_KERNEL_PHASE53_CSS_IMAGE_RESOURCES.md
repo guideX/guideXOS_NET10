@@ -610,3 +610,177 @@ are not. Phase 54 remains unsafe. The next narrow step is a same-boot
 capture that stops at `EnumGcRefs`/RegDisplay construction and records the
 RegDisplay address, `pRbx`, managed PC, SP, unwind-before/after state, and
 the exact callback call site before investigating any writer.
+
+## Phase 53G forensic completion: RegDisplay ownership and RBX-root provenance
+
+The repository state at the start of this continuation differed from the
+state described by the Phase 53F handoff. The actual branch was
+`nativeaot-managed-kernel-integration` at committed HEAD
+`6d476f1293b06067f8492609913fa0f131ae0f5c` (`....`), tracking
+`origin/nativeaot-managed-kernel-integration` at 0/0 ahead/behind. The
+expected `2bb3e9c5caa42f7ac446c3de09550c3f85b302da` was its parent. The
+worktree was clean: the expected uncommitted Phase 53F documentation change
+had already been committed in the preliminary Phase 53G commit. That
+commit, the Phase 53F correction, and all ignored evidence directories were
+preserved. No reset, checkout, restore, stash, clean, rebase, commit, push,
+or PR was performed during this continuation.
+
+The historical payload remained the decisive artifact:
+
+```text
+DLL: artifacts/phase53a-diagnostic-build/publish/gxos-managed-kernel.dll
+Size: 4,790,272 bytes
+SHA-256: E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388
+PDB SHA-256: 7270B65498976A8B531E04758C91E1A627E4A916508DB5FC411E9FB4CA8FCA9C
+```
+
+### Exact callback path
+
+The strongest same-boot ownership capture is
+`artifacts/phase53g-capture-13`, using the historical DLL and the known
+Phase 53 E1000 topology. Its IMAGE_BASE was `0x5011000`. The captured chain
+was:
+
+```text
+GC stack walk
+  -> CoffNativeCodeManager::EnumGcRefs
+       image RVA 0x14DD20, MethodInfo 0x7E642F8
+       safePointAddress / managed PC 0x505EE29
+       REGDISPLAY 0x7E641C0
+       REGDISPLAY->pRbx = 0x7E64878
+  -> TGcInfoDecoder::ReportSlotToGC
+       image RVA 0x1504E0, exact indirect callback call at RVA 0x1505E0
+       pRD remains in R9 on the exact-register path
+  -> WKS::GCHeap::Promote
+       image RVA 0x160E40, runtime PC 0x5171E40
+       RCX = 0x7E64878
+```
+
+The callback arguments from that run were `RCX=0x7E64878`,
+`RDX=0x7E64470`, and `R8=0`. The callback root word was
+`*RCX=0x400002405BD8`. The historical bad run
+`artifacts/phase53e-writer-run-15` used the same payload and the same logical
+`ReportSlotToGC` call return RVA, with `R9=0x7E641C0` newly captured, but its
+root word was `0x400002405C20` and its callback PC was `0x4D84E40` at
+IMAGE_BASE `0x4C24000`. Because those are different boots, the absolute stack
+addresses are not equated by address reuse; capture 13 proves the active
+owner for the reproduced `pRbx` path, while the historical bad hit does not
+contain a same-stop `EnumGcRefs` owner record.
+
+The owner PC in the creditable ownership capture is not
+`ManagedE1000Driver.RunGcSurvival`. PDB/runtime-function correlation resolves
+it to `ManagedCssEngine___ctor_1`, method RVA `0x4DB18`, method offset
+`0x311`, with runtime-function range `0x4DB18–0x4DF78`. Its unwind data is
+RVA `0x45E438`; the associated GCInfo blob begins at RVA `0x45E44D` and has
+SHA-256
+`DFE13F6914CBE31CB72925FF9011DFB8AB85DBABC74E0C14AEF9D303B0BB2D05`.
+The safe-point address actually passed to `EnumGcRefs` is therefore the
+constructor's `base+0x4DE29` (`0x505EE29` in capture 13), not
+`RunGcSurvival+0x73`.
+
+`pRD->pRbx == RCX` is proven: the AMD64 `REGDISPLAY` layout places `pRbx` at
+offset `0x18`, and capture 13 printed both `pRD=0x7E641C0` and
+`pRbx=0x7E64878`; the callback printed `RCX=0x7E64878`. The root is therefore
+the address of the tracked RBX register home, not the address of an
+untracked interior stack slot. `pRD` is an explicit register-display buffer
+owned by the stack-walk invocation; the callback-frame CPU `RBX` was a
+different value (`0x7E63C40` in the historical bad stop). The physical root
+location was not a live CPU register and was not a PAL context pointer.
+
+The constructor prologue is:
+
+```text
+push r15; push r14; push r13; push rdi; push rsi; push rbp; push rbx;
+sub rsp, 0x20; mov rbx, rcx
+```
+
+At `pRD->SP=0x7E648C0`, the direct saved-RBX home is `0x7E648E0`; the
+constructor's RBX means its managed `this` receiver. The observed root home
+`0x7E64878` is not that save slot. The earlier `RunGcSurvival` association
+came from the separate decoded GCInfo record showing a live tracked RBX at
+that method's `0x73` return safe point and from reused absolute stack
+addresses. That was not sufficient to establish frame identity and is
+superseded by this direct `EnumGcRefs` capture.
+
+### Proven bridge defect and attempted narrow repair
+
+The PDB type record for the historical payload's AMD64
+`_KNONVOLATILE_CONTEXT_POINTERS` is 256 bytes: `FloatingContext[16]` occupies
+offsets `0x00–0x7F`, `IntegerContext[16]` begins at `0x80`, and `Rbx` is the
+integer-register entry at offset `0x98`. NativeAOT's
+`CoffNativeCodeManager::UnwindStackFrame` initializes those homes from the
+REGDISPLAY, passes the structure to `RtlVirtualUnwind`, and then rebuilds the
+REGDISPLAY homes from the returned structure. This is the contract described
+by the NativeAOT source and its REGDISPLAY definition.
+
+The guideXOS `platform_rtl_virtual_unwind` bridge previously ignored its
+`context_pointers` argument. It updated the copied register values and SP/IP,
+but discarded the saved-register home addresses. Consequently, after a
+specific unwind, the NativeAOT caller could retain a stale `pRD->pRbx` such
+as `0x7E64878` instead of the current frame's direct saved-RBX home
+`0x7E648E0`. That is the causal invariant defect: a stale/reused stack word
+was exposed as the tracked RBX root. It is not a GC range-policy problem,
+not a malformed RunGcSurvival GCInfo record, and not a proven
+safe-point-minus-one error.
+
+After that invariant was established, the narrow source change in
+`src/Gate4Harness/gate4_loader.c` was kept for review. It models the 256-byte
+AMD64 context-pointer layout and records the stack address for every handled
+`UWOP_PUSH_NONVOL`, `UWOP_SAVE_NONVOL`, and `UWOP_SAVE_NONVOL_FAR` operation.
+The corrected-gate trace shows the intended effect: enumerated frames now
+receive direct saved-register homes such as `0x7E64758`, rather than the
+pre-repair stale home. The earlier provisional eight-pointer model was
+discarded; it wrote the wrong part of the Windows structure and did not
+change `pRD->pRbx`.
+
+The exact CPU instruction that originally wrote
+`0x400002405C20` was not captured. Conditional write-watchpoint runs did not
+observe a store of that value before the failing collection. A normal
+`push rbx` stack spill was observed, but it wrote a different value. The
+candidate is therefore proven to have been consumed from a stale root home,
+but its one-predecessor writer remains unresolved.
+
+### Validation boundary
+
+The historical payload was not rebuilt. The corrected Gate4 harness was
+rebuilt with the repository build script using the installed fallback
+toolchain: requested SDK `10.0.302` was unavailable; actual SDK `10.0.401`,
+MSBuild `18.9.11.42413`, MinGW GCC `15.2.0`, and LLVM `22.1.8` were used.
+The corrected harness is 662,162 bytes with SHA-256
+`770C78B808E3C1BCC0305A2A62F4FE430577214FBA94DE61DA9CF8559537E252`.
+
+The direct host regressions passed:
+
+```text
+Phase 48: 698
+Phase 49: 694
+Phase 50: 683
+Phase 51: 1083
+Phase 52: 651
+Phase 53: 540
+```
+
+Three fresh corrected-harness QEMU attempts were preserved under
+`artifacts/phase53g-capture-24`, `-25`, and `-26`. Their relocation-correct
+IMAGE_BASE values were respectively `0x5010000`, `0x501F000`, and
+`0x5012000`. All three reached the same earlier pre-keyboard failure:
+`#UD` at `RIP=0xB0000`, before the E1000 Phase 15 GC-survival path. None is a
+successful post-fix acceptance boot. The historical decisive capture used
+OVMF code SHA-256
+`33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A` and
+the capture-13 variable-store SHA-256
+`115872CEAF965BAD1EAEF46017F2464D2191AB2AE8CB397CA08F28EC1E621EE9`.
+
+The corrected bridge's root-home effect is proven, but the full E1000,
+GC-survival, three-boot, resource/PNG, framebuffer, and CSS mapped-pixel
+acceptance sequence is not. The exact writer of the historical candidate and
+the cause of the new pre-target `#UD` boundary remain limitations. No root
+filter, GC bypass, object pinning, callback suppression, or other masking
+workaround was added.
+
+**Outcome: B — provenance substantially advanced; Phase 54 remains blocked.**
+The exact `pRD`, `pRbx`, callback equality, active native enumeration path,
+managed owner for the reproduced path, and causal register-home invariant
+are now established. The historical bad hit still lacks a same-stop owner
+record, the candidate writer is unresolved, and the evidence-backed bridge
+repair is not yet acceptance-validated. Phase 54 is not safe.
