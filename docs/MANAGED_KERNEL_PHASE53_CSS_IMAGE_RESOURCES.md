@@ -1180,3 +1180,254 @@ The defect proven here is that this normal operation was applied to the live
 managed worker source range. The phase therefore ends with the same
 disposition as Phase 53H: the managed-heap/object-relocation investigation
 must continue under a separately scoped phase, and Phase 54 remains unsafe.
+
+### Phase 53J — Allocator Boundary Forensics at the Live Worker SetFree
+
+Phase 53J did not start Phase 54. It is a continuation of the Phase 53I
+forensic investigation and leaves the managed-kernel production sources
+unchanged. The objective was to identify the earliest observable heap-state
+decision that supplied a live `ManagedDriverWorker` address to
+`WKS::CObjectHeader::SetFree`, while preserving the normal collector and
+relocation paths.
+
+#### Capture identity and method
+
+The authoritative capture is the ignored
+`artifacts/phase53j-setfree-capture-8` directory. It completed with
+`TARGETED_SEQUENCE_CAPTURED` on QEMU `11.0.0`, `tcg,thread=single`, CPU 0,
+using the exact Phase 53G corrected-gate NativeAOT payload and matching PDB.
+The payload SHA-256 is
+`E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388`, its
+size is `4,790,272` bytes, the relocated image base is `0x5012000`, and the
+OVMF code SHA-256 is
+`33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`.
+The per-run copied OVMF variable store SHA-256 is
+`13C1F20F38CF2DAFC98FDF04C8BBB0E0D65290A7B859CA65E78A65F758BEC370`.
+
+The tracked reproducer is
+`tools/Run-Phase53JSetFreeCapture.ps1`. It starts the existing QEMU/GDB
+topology, watches the managed static root, records worker entry and fields,
+breaks `garbage_collect`, `mark_phase`, `plan_phase`,
+`relocate_survivors`, `compact_phase`, and `compact_plug`, and stops at the
+exact `SetFree` entry and the exact `memcopy` instructions that read the
+source `+0x8` slot and write the destination `+0x8` slot. It does not alter
+the payload or runtime and does not patch `SetFree`.
+
+#### Worker identity, layout, and GC descriptor
+
+The managed source and matching CodeView type record identify the object as
+`GuideXOS.Net10.ManagedKernel.ManagedDriverWorker`, allocated by
+`ManagedSerialDriver.RunDriverWorker` through
+`new ManagedDriverWorker(dispatcher, driver)`. On capture 8 its old address
+was `0x400005000e50`, its EEType was `0x5687e68`, and its fields were:
+
+```text
++0x00 EEType             0x0000000005687e68
++0x08 _dispatcher        0x0000400005000d78
++0x10 _serialDriver      0x00004000024019c0
++0x18 _keyboardDriver    0x0000000000000000
++0x20 _state             0x0000000000000002
++0x24 _dispatchBatches   0x0000000000000000
++0x28 _managedDispatches 0x0000000000000000
++0x2c _delivered         0x0000000000000000
++0x30 _rejected          0x0000000000000000
+```
+
+The CodeView record gives the managed object size as `0x38` bytes. The live
+EEType bytes decode the NativeAOT `MethodTable` header as flags
+`0x51000000` and base size `0x40`; the `0x40` is the aligned allocation
+size, while the last declared field ends at `+0x34` in the `0x38`-byte type
+record. The matching descriptor window is:
+
+```text
+0x5687e50 : 0xffffffffffffffd8  (series size = -0x28)
+0x5687e58 : 0x0000000000000008  (series start = +0x08)
+0x5687e60 : 0x0000000000000001  (number of series = 1)
+0x5687e68 : 0x0000004051000000  (flags = 0x51000000, base size = 0x40)
+```
+
+Using the NativeAOT/CoreCLR GC descriptor layout, one series with
+`startoffset=0x8`, `series_size=-0x28`, and `object_size=0x40` describes
+`(-0x28 + 0x40) / 8 = 3` reference slots: `+0x8`, `+0x10`, and `+0x18`.
+Those are exactly `_dispatcher`, `_serialDriver`, and `_keyboardDriver`;
+the descriptor therefore corroborates the source/type-field classification
+and does not itself show a missing or extra reference slot. The descriptor
+interpretation follows the runtime `CGCDesc` series encoding documented in
+`src/coreclr/gc/gcdesc.h`.
+
+#### Strong-root and liveness proof
+
+The managed static field `ManagedSerialDriver.s_driverWorker` has diagnostic
+static base `0x400000000898` and root storage cell `0x4000000008c0`. Event 1
+recorded the root publication as `0x400005000e50`. Event 2 then entered the
+worker with the same receiver, and the worker's `_dispatcher` and
+`_serialDriver` slots still held valid managed references. The worker was
+also executed immediately before the collection: the dispatch call used
+`RBX=0x400005000e50`, `RCX=0x400005000d78`, and
+`RDX=0x4000024019c0`.
+
+This establishes a strong static root and an actually live object at the
+old address before the damaging free-block operation. It is stronger than
+an untriggered root watch or a presumed type layout: the root slot, worker
+receiver, EEType, three reference slots, and managed dispatch path were all
+observed in the same boot.
+
+#### Exact damaging call and immediate caller
+
+With image base `0x5012000`, the matching PDB gives
+`WKS::CObjectHeader::SetFree` RVA `0x1617b0`, so the exact entry was
+`0x51737b0`. Event 4 stopped there with:
+
+```text
+this/RCX       0x400005000e50
+RDX total size  0x198
+RDX - 0x18     0x180
+free end       0x400005000fe8
+RIP            0x51737b0
+return         0x5184e9a
+call site      0x5184e95
+RBX            0x400005000e50
+R8             0x1
+CPU            0
+```
+
+The return address `0x5184e9a` is the instruction after the direct call at
+`0x5184e95`. The caller is therefore unambiguously
+`WKS::gc_heap::fix_allocation_context`, RVA `0x172e20`, whose PDB-verified
+call-site sequence is:
+
+```text
+0x5184e88: sub %rbx,%rcx
+0x5184e8b: lea 0x18(%rcx),%r15
+0x5184e8f: mov %rbx,%rcx
+0x5184e92: mov %r15,%rdx
+0x5184e95: call 0x51737b0 <CObjectHeader::SetFree>
+```
+
+The logical allocator adapter above this function is
+`WKS::GCHeap::FixAllocContext`, RVA `0x15f420`; its no-extra-context branch
+tail-jumps to `fix_allocation_context`. The native unwind at the SetFree
+stop cannot name that parent reliably because the adapter is a tail jump and
+the generated frame has nonstandard saved-register homes. The independent
+direct-call map contains only that adapter tail jump and the direct
+`soh_try_fit` call at RVA `0x185dab`; the live stop occurred during the
+`garbage_collect` path, so the exact physical return chain above the tail
+jump is recorded as an unwind limitation, not guessed.
+
+#### What SetFree did, and what it did not do
+
+The exact `SetFree` body is ordinary free-block canonicalization:
+
+```text
+mov  rax,[free-object-EEType-cell]
+mov  rbx,rcx
+mov  [rcx],rax             ; write free-object EEType
+lea  rax,[rdx-0x18]
+mov  [rcx+0x08],rax        ; write free payload size
+...
+clear [rcx+0x10] when payload is nonzero
+set  [rcx+0x18] to 1 when total size is at least 0x30
+```
+
+Event 4's pre-image was still the worker image, including
+`[oldWorker+0x8] = 0x400005000d78`. Event 5 observed the free-object EEType
+write, and event 6 observed `[oldWorker+0x8] = 0x180` with the free-object
+EEType at `[oldWorker+0x0]`. `SetFree` performed exactly the stores its
+arguments request; it did not inspect or decide managed liveness, roots,
+marks, forwarding records, or object boundaries. The violated precondition
+was therefore upstream of `SetFree`.
+
+#### Earliest wrong allocator boundary
+
+The same stop captured the allocator context at `0x5010038`:
+
+```text
+alloc_context + 0x00  alloc_ptr   = 0x400005000e50
+alloc_context + 0x08  alloc_limit = 0x400005000fd0
+alloc_context + 0x10              = 0x1d8a8
+alloc_context + 0x18              = 0x1130
+```
+
+`fix_allocation_context` computed `alloc_limit - alloc_ptr = 0x180`, added
+the `0x18` allocator/header adjustment, and passed `0x198` to `SetFree`.
+Consequently the collector treated `[0x400005000e50,
+0x400005000fe8)` as a free range even though the rooted worker begins at
+`0x400005000e50` and its aligned live allocation extends through at least
+`0x400005000e90` (`0x40` bytes). The first wrong heap-state decision that
+can be proven from this run is thus the allocator-context boundary itself:
+`alloc_ptr` was a live object start instead of the first byte after the last
+live object in the allocation area.
+
+The preceding `soh_try_fit` disassembly explains the normal control flow:
+`soh_try_fit` calls `a_fit_segment_end_p`; when that fit check fails it calls
+`fix_allocation_context` with the current allocation context. The capture
+does not contain a write watch on `alloc_context+0x0`, so it does not prove
+which earlier store or collector subphase first put the worker address into
+that context. It does prove the first invalid state at the boundary where
+the collector consumed it. No narrower producer claim is made.
+
+The violated invariant is:
+
+```text
+For a live allocation context, alloc_ptr must be the first free address
+after the last live allocation, alloc_ptr <= alloc_limit, and the range
+[alloc_ptr, alloc_limit) must not overlap any live object or its header.
+```
+
+In this capture the context instead had `alloc_ptr == oldWorker`, while the
+static root and just-executed managed receiver proved `oldWorker` live. That
+is the precise invariant violation to repair in a future, separately scoped
+collector investigation.
+
+#### Mark, plan, relocation, and source/destination ordering
+
+The event order in the authoritative log is:
+
+```text
+1  root publication:       root -> 0x400005000e50
+2  worker entry/dispatch:  old worker and valid references
+   garbage_collect         entered with arg 2
+3  fix_allocation_context: ptr=oldWorker, limit=0x400005000fd0
+4  SetFree entry:          oldWorker, total=0x198, payload=0x180
+5  SetFree header store
+6  SetFree payload store:  oldWorker+0x8 = 0x180
+   gc1, mark_phase, plan_phase
+7  root relocation:        root -> 0x400004c00118
+   relocate_survivors, compact_phase, compact_plug
+17 memcopy outer range:    dest=0x400004c00038, src=0x400005000d70, size=0x270
+18 source read boundary:   src=oldWorker, dest=0x400004c00118
+19 destination write:      dest+0x8 = source+0x8 = 0x180
+```
+
+The root relocation happened before the targeted copy, but it did not repair
+the source. The outer `memcopy` range contains the worker at offset `0xe0`:
+`0x400005000d70 + 0xe0 = 0x400005000e50` and
+`0x400004c00038 + 0xe0 = 0x400004c00118`. At event 18 the destination header
+was inspected before the source `+0x8` read; at event 19 the exact following
+instruction had loaded the already-corrupt source value and stored that same
+value into the destination. The logged `remaining=0x170` is the outer-copy
+remaining length after earlier bytes, not the worker object size.
+
+Therefore the causal ordering is `bad allocator context -> SetFree(source)
+-> source corruption -> relocation copy -> root update/publication of the
+corrupt destination`. The later `relocate_address` root write is not the
+cause, and the relocation copy is not the first corruption.
+
+#### Disposition
+
+The fresh capture closes the prior Phase 53I uncertainty about the exact
+EEType descriptor and immediate `SetFree` caller, but it does not identify
+the earlier writer or collector decision that made the allocation context
+stale. A collector patch, source workaround, worker pin, dispatch
+suppression, GC disablement, compaction disablement, leaked region, or
+hard-coded address would all bypass rather than repair the proven invariant.
+No such change was made.
+
+Because no causal repair was justified, the requested three corrected QEMU
+boots and post-repair host regressions were not claimed or run under Phase
+53J. Existing Phase 53H/53I baselines remain historical and are not silently
+reclassified. CSS/image acceptance remains blocked behind this managed-heap
+defect, and Phase 54 remains unsafe.
+
+**Outcome: C — the first invalid allocator boundary is proven, but its
+upstream producer is not yet isolated; no repair is justified.**
