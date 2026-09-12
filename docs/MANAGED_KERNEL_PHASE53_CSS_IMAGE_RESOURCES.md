@@ -1060,3 +1060,123 @@ However, corrected GC relocation exposes malformed managed worker state before
 the target constructor-owner capture and before full Phase 52/53 acceptance.
 Phase 54 is unsafe. The recommended next phase is a separately scoped
 NativeAOT managed-heap/object-relocation investigation; it is not Phase 54.
+
+### Phase 53I — Managed Heap Relocation and Worker Object Integrity
+
+Phase 53I was a forensic continuation of Phase 53H only. Phase 54 was not
+started. The branch was `nativeaot-managed-kernel-integration` at
+`860c8a5b943e9a6c01bd226530760523e6047cdb` (`origin` ahead/behind counts
+`1/0`; raw `@{upstream}...HEAD` count was `0 1`), and the worktree was clean
+before the investigation. No production
+source fix was made in this phase.
+
+The first observed managed-object integrity violation is now localized. The
+worker was valid at the old address `0x400005000e50` before the GC relocation
+sequence: its `+0x8` field held the dispatcher `0x400005000d78`, and the
+static worker root was `0x4000000008c0`. The first bad write to that live
+object was in the GC free-block path, not in the root update and not in the
+relocation copy:
+
+```text
+source worker       0x400005000e50
+source dispatcher   0x400005000e58
+SetFree size        0x198
+post-write +0       free-object EEType (run-dependent: 0x54a0b80/0x5490b80)
+post-write +0x8     0x180
+destination worker  0x400004c00118
+root slot           0x4000000008c0
+```
+
+The object is `GuideXOS.Net10.ManagedKernel.ManagedDriverWorker`, allocated
+by `ManagedSerialDriver.RunDriverWorker` through
+`new ManagedDriverWorker(dispatcher, driver)`. Its NativeAOT layout is
+consistent with a `0x38`-byte, pointer-aligned object: EEType at `+0x0`,
+managed references `_dispatcher`, `_serialDriver`, and `_keyboardDriver` at
+`+0x8`, `+0x10`, and `+0x18`, followed by scalar state/counters at `+0x20`,
+`+0x24`, `+0x28`, `+0x2c`, and `+0x30`. Therefore `+0x8` is the managed
+`_dispatcher` reference, not an EEType field, scalar, padding, or function
+pointer. The expected object base/total size is `0x38` (56 bytes). The exact
+emitted EEType GC-descriptor address, series encoding, and pointer count were
+not decoded from this capture; the field classification above is proven by
+the managed source and generated field access paths, but no descriptor defect
+is claimed.
+
+The complete root chain proven here is the managed static field
+`ManagedSerialDriver.s_driverWorker` in the runtime static region. Its
+storage cell is `0x4000000008c0` (static-base diagnostic `0x400000000898`).
+Before relocation it contained `0x400005000e50`; after
+`WKS::gc_heap::relocate_address` it contained `0x400004c00118`. The source
+worker's reachable references before the bad write were dispatcher
+`0x400005000d78`, serial driver `0x4000024019c0`, and keyboard driver null;
+the post-copy destination retained the serial reference but had the free
+object header and free-block value at `+0x8`. Allocation timestamp, precise
+region-generation label, and forwarding-record encoding were not exposed by
+the bounded capture.
+
+The decisive watch stop was the source `+0x8` write at runtime PC
+`0x51807d3` in the source-field run. The preceding instruction sequence
+computes the free-block payload size and the store at `0x51807cf` writes it
+to `oldWorker+0x8`; the PDB maps this code to
+`WKS::CObjectHeader::SetFree`, RVA `0x161770`. The same stop showed
+`RBX=RCX=0x400005000e50`, `RDX=0x198`, and `RAX=0x180`. The preceding source
+header watch in `phase53i-relocation-watch-1` captured the corresponding
+free-object method-table write. Thus the first captured violation is the
+GC classifying/marking the live worker range as a free block and applying
+the normal free-object image to it.
+
+The later events are consistent with that source corruption rather than its
+cause. `WKS::memcopy` at RVA `0x17D360` copied the already-corrupt source
+header and `+0x8` value to `0x400004c00118`; the destination watch showed the
+source and destination addresses and then `WATCH_RELOCATION_COPY_COMPLETE`.
+`WKS::gc_heap::relocate_address` at RVA `0x182660` subsequently updated the
+static root from the old worker to `0x400004c00118`. The root update was
+observed, but it published a destination that already contained the free
+object image. Managed dispatch then read `+0x8 == 0x180` as the dispatcher
+reference and reached the previously documented invalid indirect call.
+The managed path is `ManagedDriverWorker.Dispatch` to
+`ManagedInterruptDispatcher.TryDispatchBatch`. In the failing historical
+capture, the second worker entry loaded `RCX=0x180` where a dispatcher
+receiver should have been; the later call site was image `+ RVA 0x7D648`
+(`0x509C648` for image base `0x501F000`) with `call *%rbx` and `RBX=0`.
+The capture proves the corrupted receiver/field transition and the null
+target, but did not isolate a single pre-call instruction that loaded zero
+into `RBX`; the call-target scratch area was already zero by the breakpoint.
+That remaining dataflow detail is not needed to identify the earlier
+`SetFree` violation and was not used to justify a null-dispatch patch.
+
+The PDB/RVA cross-checks for the relevant native paths are:
+
+| observed operation | PDB symbol | RVA |
+| --- | --- | ---: |
+| source object overwritten as free block | `WKS::CObjectHeader::SetFree` | `0x161770` |
+| source image copied to destination | `WKS::memcopy` | `0x17D360` |
+| static root relocated | `WKS::gc_heap::relocate_address` | `0x182660` |
+| source free-block search caller | `WKS::gc_heap::find_first_valid_region` | `0x171F80` |
+| destination compaction caller | `WKS::gc_heap::compact_plug` | `0x16BCE0` |
+
+The targeted `Promote` hook did not emit a static-root callback in
+`phase53i-static-root-promote-1`. That is a limitation of that hook's
+coverage, not evidence that the static field was unrooted: the static slot's
+old-to-new relocation write was independently observed. The remaining
+unresolved question is upstream of `SetFree`: why the collector's region,
+plug, mark-root, or object-boundary state allowed this live NativeAOT worker
+range to enter the free-block path. The captures do not prove which of those
+invariants failed, so no collector rewrite or workaround is justified.
+
+The ignored evidence directories are:
+
+* `artifacts/phase53i-relocation-watch-1` — initial source/destination/root
+  watchpoints; the run was interrupted after the useful stops were captured.
+* `artifacts/phase53i-source-field-watch-1` — completed source-field watch,
+  exact `SetFree` stop, relocation copy completion, and payload/firmware
+  identity.
+* `artifacts/phase53i-static-root-promote-1` — completed targeted static-root
+  promotion hook run and its coverage limitation.
+
+The upstream CoreCLR contract used for interpretation is that `SetFree` marks
+a free block with the free-object method table and records the free payload
+size; it is normal when the collector has already identified an unused range.
+The defect proven here is that this normal operation was applied to the live
+managed worker source range. The phase therefore ends with the same
+disposition as Phase 53H: the managed-heap/object-relocation investigation
+must continue under a separately scoped phase, and Phase 54 remains unsafe.
