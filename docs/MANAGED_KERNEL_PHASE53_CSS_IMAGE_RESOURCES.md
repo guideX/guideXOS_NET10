@@ -784,3 +784,279 @@ managed owner for the reproduced path, and causal register-home invariant
 are now established. The historical bad hit still lacks a same-stop owner
 record, the candidate writer is unresolved, and the evidence-backed bridge
 repair is not yet acceptance-validated. Phase 54 is not safe.
+
+## Phase 53H — Corrected Unwind Bridge #UD Root Cause and Same-Boot GC Closure
+
+### Starting state and scope
+
+The handoff expected HEAD `6d476f1293b06067f8492609913fa0f131ae0f5c`, but the
+actual starting HEAD was `63b7b462d92ab6d872955f2ac92535214c94dac6`, whose
+literal commit subject is `...`. The expected
+commit was an ancestor of the actual HEAD. The branch was
+`nativeaot-managed-kernel-integration`, tracking
+`origin/nativeaot-managed-kernel-integration` at 0/0. The worktree was clean:
+the Phase 53G documentation and Gate4 source changes were already committed
+in the actual HEAD. No reset, checkout, restore, clean, stash, rebase, push,
+PR, or destructive Git operation was performed. No QEMU or GDB process was
+live at the start or end of the investigation; the only diagnostic processes
+stopped during the phase were launched for this repository's evidence runs.
+
+The historical managed payload was preserved unchanged:
+
+```text
+size = 4,790,272
+SHA-256 = E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388
+```
+
+The Phase 53G corrected Gate4 EFI was also preserved unchanged:
+
+```text
+size = 662,162
+SHA-256 = 770C78B808E3C1BCC0305A2A62F4FE430577214FBA94DE61DA9CF8559537E252
+```
+
+The Phase 53H ABI-hardening rebuild is separate evidence and has size
+665,536 with SHA-256
+`86AD54FC34B110E36482736365ED3C9EE3BE97CCDAB8EFA4415259D4936E69FC`.
+
+### #UD characterization
+
+The strongest full-state capture is
+`artifacts/phase53h-ud-capture-6`, with the corrected bridge and historical
+payload. CPU 0 (APIC ID 0) reached exception vector 6, with no error code:
+
+```text
+RIP    = 0x00000000000B0000
+RSP    = 0x0000000004E68D68
+RBP    = 0x0000000004E68DA0
+RAX    = 0x0000000000000000
+RBX    = 0x0000000000000000
+RCX    = 0x0000000000000000
+RDX    = 0x0000000000000000
+RSI    = 0x0000000004E68EE0
+RDI    = 0x0000000004E68ED8
+R8     = 0x0000000000000000
+R9     = 0x0000000004E68E00
+R10    = 0x0000000004E62030
+R11    = 0x0000000004E68D70
+R12    = 0x0000000000000000
+R13    = 0x0000000000000000
+R14    = 0x5757000000000007
+R15    = 0x0000000004E68ED8
+CR0    = 0x0000000080010033
+CR2    = 0x0000000000000000
+CR3    = 0x000000000500B000
+CR4    = 0x0000000000000668
+EFER   = 0x0000000000000D00
+CS     = 0x0038
+SS     = 0x0030
+RFLAGS = 0x0000000000000046  (GDB pre-instruction state)
+```
+
+The firmware exception frame records `RFLAGS=0x10046` after entry; its saved
+frame at `0x4E68D38` is `RIP=0xB0000, CS=0x38, RFLAGS=0x10046,
+RSP=0x4E68D68, SS=0x30`. The exception handler is vector 6 at
+`0x006F5FE3C`; vector 14 has a separate handler at `0x006F5FECC`, but no page
+fault occurred. The instruction bytes at `0xB0000` were 32 bytes of `FF`.
+The `FF FF` stream is not a valid intended payload instruction; the observed
+invalid opcode is therefore a consequence of executing device bytes.
+
+The page walk was valid and executable. `CR3=0x500B000` leads through
+`PML4E=0x7C02023`, `PDPTE=0x7C04023`, and PDE `0xE3` at `0x7C04000`. That PDE
+is a present, writable, supervisor 2-MiB identity mapping with NX clear, so
+VA `0xB0000` translates to physical `0xB0000`. QEMU's memory tree identifies
+`0x000A0000–0x000AFFFF` as `vga.vram` and
+`0x000B0000–0x000BFFFF` as `vga-lowmem` I/O. QEMU physical reads returned
+`FF`, proving that this is VGA low-memory I/O, not executable guest RAM,
+firmware, poison, or an unmapped translation.
+
+### Control-flow source
+
+The transfer did not jump directly to `0xB0000`. The corrected trace in
+`artifacts/phase53h-gc-capture-2` records:
+
+```text
+previous RIP       = image + 0x7D648 = 0x509C648
+instruction        = call *%rbx
+RBX target         = 0x0
+saved return RIP   = image + 0x7D64A = 0x509C64A
+```
+
+The next stop, `NULL_TARGET_PREEXEC`, is at `RIP=0` with the valid return
+address still at the top of the stack. Since page zero is also identity
+mapped, control executed sequential low-memory bytes rather than taking a
+page fault, eventually reaching the VGA window at `0xB0000`. The vector-6
+handler then dispatches normally. This rules out `ret`, exception return,
+interrupt return, unwinder continuation, and a corrupted return address.
+
+The first call on the same path had `RBX=0x103720` and returned normally. The
+second call had `RBX=0`, `RCX=0`, and `RDX=0`. Immediately beforehand,
+`ManagedDriverWorker.Dispatch` had received relocated worker object
+`0x400004C00118`; its field at `+0x8` was `0x180`, rather than the valid
+dispatcher `0x400005000D78`. That malformed object state caused the dispatch
+path to obtain a null drain target. The exact store of the zero drain pointer
+was not separately captured; its origin is nevertheless downstream of the
+malformed post-GC object, not the call/return stack.
+
+The static worker slot at `0x4000000008C0` was watched in
+`artifacts/phase53h-gc-watch-1`. It changed from
+`0x400005000E50` to `0x400004C00118` in a runtime relocation-style write with
+`RAX=new`, `RDX=old`, `RBX=old`, and `RCX=destination slot`. The reported
+watchpoint PC was not an instruction boundary under QEMU/GDB, so it is not
+assigned a guessed mnemonic. It does establish that the static root update
+was a GC/runtime relocation write. Historical A/B evidence kept the old
+worker and its valid fields in place after the same collection.
+
+The first semantically important corrected-vs-historical divergence is thus
+after the first normal worker dispatch, during the collection/relocation
+boundary: corrected execution updates the managed static graph and later
+observes a malformed relocated worker; historical execution does not relocate
+that graph and reaches the original worker path. The divergence is not a
+context-pointer buffer overwrite: the valid call return address remains
+intact, and no surrounding output-buffer overwrite was observed.
+
+### ABI and unwind audit
+
+The historical payload PDB record, the MinGW `winnt.h` declaration, and the
+NativeAOT/Native Runtime unwind implementation agree on the AMD64 structure:
+
+```text
+GXOS_KNONVOLATILE_CONTEXT_POINTERS
+  sizeof                         = 0x100 (256)
+  alignment                      = 8
+  FloatingContext[16]            = offset 0x00, 16 pointer slots
+  IntegerContext[16]             = offset 0x80, 16 pointer slots
+  IntegerContext[3] / RBX home   = offset 0x98
+  IntegerContext[15] / R15 home  = offset 0xF8
+```
+
+The floating entries are pointers to SIMD homes, not inline `M128A` values;
+the integer entries are pointers to the RAX-through-R15 homes. There is no
+union or padding discrepancy in the linked toolchain's declaration. Phase
+53H added `_Static_assert` checks for 64-bit pointer width, 8-byte alignment,
+the two array offsets, total size, RBX offset, and R15 offset in
+`src/Gate4Harness/gate4_loader.c`. The ABI rebuild passed those assertions.
+
+The external Windows contract is:
+
+```c
+PEXCEPTION_ROUTINE RtlVirtualUnwind(
+    DWORD HandlerType, DWORD64 ImageBase, DWORD64 ControlPc,
+    PRUNTIME_FUNCTION FunctionEntry, PCONTEXT ContextRecord,
+    PVOID *HandlerData, PDWORD64 EstablisherFrame,
+    PKNONVOLATILE_CONTEXT_POINTERS ContextPointers);
+```
+
+The local replacement now declares a pointer-sized `void *` return and uses
+the same eight arguments with `EFIAPI` (`ms_abi` on AMD64). The corrected
+NativeAOT call-site disassembly passes the first four arguments in RCX/RDX/R8/R9
+and the remaining four through the Windows shadow-space stack area. GDB
+bridge-entry captures agree: `RDX=image base`, `R8=control PC`, `R9=function
+entry`, followed by context, handler-data, establisher-frame, and context
+pointers on the stack. The call-site ignores the return value, so the old
+`uint32_t` spelling did not explain the observed crash, but it was not an
+exact declaration of the pointer-return ABI and is now corrected.
+
+The Phase 53G register-home behavior remains architecturally correct. The
+NativeAOT unwind contract initializes every nonvolatile home from the incoming
+REGDISPLAY, lets the unwind operation replace only homes for reported saves,
+and copies all returned homes back into REGDISPLAY. The bridge does that for
+`UWOP_PUSH_NONVOL`, `UWOP_SAVE_NONVOL`, and `UWOP_SAVE_NONVOL_FAR`; it retains
+incoming homes when no new save is reported. The context-pointer output is
+written only within its 0x100-byte structure. No evidence shows a structure
+overwrite, bad stack alignment, wrong argument ordering, dangling context
+pointer, or pointer lifetime escaping the unwind call.
+
+### Same-boot corrected GC evidence
+
+The corrected capture reached the original managed GC walk before the later
+worker failure. In `artifacts/phase53h-gc-capture-2`, one same-stop callback
+record is:
+
+```text
+IMAGE_BASE       = 0x501F000
+Promote RIP      = 0x517FE40
+RCX              = 0x0000000007E64748
+RDX              = 0x0000000007E643F0
+R8               = 0x0000000000000000
+R9               = 0x0000000007E64140   (REGDISPLAY)
+REGDISPLAY       = 0x0000000007E64140
+pRD->pRbx        = 0x0000000007E64748
+*pRD->pRbx       = 0x40000280F470
+candidate        = 0x40000280F470
+pRD->SP          = 0x0000000007E64790
+pRD->IP          = 0x00000000050AE679
+```
+
+Thus `Promote RCX == pRD->pRbx` in the same stop, and the home was derived
+from `REGDISPLAY + 0x18`, not from the recurring stale address
+`0x7E64878`. This callback is not the previously identified
+`ManagedCssEngine___ctor_1` owner frame, so it is not misreported as closure
+of that exact constructor capture. The target historical owner remains
+`frame PC=0x505EE29`, `frame SP=0x7E648C0`, method RVA `0x4DB18`, method
+offset `0x311`, with GCInfo legitimately tracking RBX. The corrected run
+stopped at the independent worker/object defect before producing a same-stop
+capture for that exact constructor receiver.
+
+The corrected capture did produce the runtime survival markers
+`MANAGED_KERNEL_DRIVER_WORKER_RUNTIME_SURVIVAL_OK` and
+`MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_OK` before the second dispatch.
+It did not reach `SERIAL_RX_AFTER_RUNTIME_OK`, the full E1000 continuation, or
+the later CSS/image feature markers. Therefore the register-home correction is
+validated on a real same-stop callback, but exact constructor-owner receiver
+validity and end-to-end stale-root closure remain blocked by the independent
+post-GC object defect.
+
+The historical value `0x400002405C20` is still not assigned a writer. The
+evidence supports the narrower conclusion that it was ordinary reused stack
+content exposed only because the old bridge retained a stale RBX home; no GC
+contract required that location to contain a valid object. Finding that writer
+is not necessary to establish the Phase 53G defect. It would matter only if a
+later investigation links it to the separate relocated-object corruption.
+
+### Validation and disposition
+
+The historical A/B bridge reached the original worker path after collection;
+the corrected bridge reached GC, updated the static graph, and then failed at
+the null indirect call described above. The corrected bridge is therefore not
+reverted, masked, or filtered. The ABI assertions and pointer-return spelling
+are the only Phase 53H production-source changes; no repair of the independent
+NativeAOT managed-heap/object-state defect was justified from this evidence.
+
+The installed toolchain was .NET SDK `10.0.401`, MSBuild `18.9.11.42413`,
+GCC `15.2.0`, binutils `2.46.0.20260210`, LLVM `22.1.8`, and QEMU `11.0.0`.
+The pinned SDK `10.0.302` remained unavailable, so `dotnet run` remained
+blocked by repository SDK selection and was not called a host-test failure.
+The existing direct host results remain Phase 48 `698`, Phase 49 `694`, Phase
+50 `683`, Phase 51 `1083`, Phase 52 `651`, and Phase 53 `540`; the Gate4
+bridge-only change does not alter those host vectors.
+
+Three independent Phase 53G corrected-harness boots
+(`artifacts/phase53g-capture-24`, `-25`, `-26`) all reproduced `#UD` at
+`0xB0000`, so corrected successful boots remain `0/3`. The Phase 53H ABI
+rebuild was separately compiled as `artifacts/phase53h-abi-gate`; its
+diagnostic replay was stopped before payload execution after a control stall
+and is not counted as an acceptance boot. OVMF code SHA-256 was
+`33090CC07675BA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`; the
+representative corrected capture variable store SHA-256 was
+`319EEA06415AD81F655F6EDE7410C0EFACB294B525919011D81CA3468D7BD067`.
+
+CSS URL resolution, HTTP/HTTPS fetch, PNG SHA/decode/pixel proof, image
+placement, layout interaction, framebuffer proof, screenshot proof, and
+mapped-pixel proof were not accepted in this phase. No repository-owned
+QEMU/GDB process remains. The evidence directories created for Phase 53H are
+the ignored `artifacts/phase53h-ud-capture-1..13`,
+`phase53h-gc-capture-1..5`, `phase53h-gc-watch-1`,
+`phase53h-ab-historical`, `phase53h-ab-historical-2`,
+`phase53h-ab-historical-3`, `phase53h-abi-gate`, and
+`phase53h-abi-replay-1`.
+
+**Outcome: E — corrected bridge exposes an independent prerequisite defect.**
+
+The `#UD` cause is proven as control flow through a null indirect call into
+identity-mapped VGA low-memory bytes. The Phase 53G context-pointer repair is
+architecturally valid and its same-stop REGDISPLAY equality is reproduced.
+However, corrected GC relocation exposes malformed managed worker state before
+the target constructor-owner capture and before full Phase 52/53 acceptance.
+Phase 54 is unsafe. The recommended next phase is a separately scoped
+NativeAOT managed-heap/object-relocation investigation; it is not Phase 54.

@@ -6419,6 +6419,37 @@ typedef struct {
     uint64_t *integer_context[16];
 } GXOS_KNONVOLATILE_CONTEXT_POINTERS;
 
+/* Keep this local replacement tied to the Windows AMD64 ABI rather than to
+ * an assumed total size.  The NativeAOT call site passes this as an output
+ * buffer to RtlVirtualUnwind, whose declaration is:
+ *
+ *   PEXCEPTION_ROUTINE RtlVirtualUnwind(
+ *       DWORD, DWORD64, DWORD64, PRUNTIME_FUNCTION, PCONTEXT,
+ *       PVOID *, PDWORD64, PKNONVOLATILE_CONTEXT_POINTERS);
+ *
+ * Both arrays contain pointers.  IntegerContext[0..15] correspond to
+ * RAX..R15, so RBX is entry 3 and begins at offset 0x98. */
+_Static_assert(sizeof(void *) == 8,
+               "NativeAOT AMD64 unwind pointers must be 64-bit");
+_Static_assert(sizeof(uint64_t *) == 8,
+               "NativeAOT AMD64 integer homes must be 64-bit pointers");
+_Static_assert(_Alignof(GXOS_KNONVOLATILE_CONTEXT_POINTERS) == 8,
+               "KNONVOLATILE_CONTEXT_POINTERS must be 8-byte aligned");
+_Static_assert(offsetof(GXOS_KNONVOLATILE_CONTEXT_POINTERS,
+                        floating_context) == 0x00,
+               "floating context array offset changed");
+_Static_assert(offsetof(GXOS_KNONVOLATILE_CONTEXT_POINTERS,
+                        integer_context) == 0x80,
+               "integer context array offset changed");
+_Static_assert(sizeof(GXOS_KNONVOLATILE_CONTEXT_POINTERS) == 0x100,
+               "KNONVOLATILE_CONTEXT_POINTERS size changed");
+_Static_assert(offsetof(GXOS_KNONVOLATILE_CONTEXT_POINTERS,
+                        integer_context) + 3 * sizeof(uint64_t *) == 0x98,
+               "RBX home offset changed");
+_Static_assert(offsetof(GXOS_KNONVOLATILE_CONTEXT_POINTERS,
+                        integer_context) + 15 * sizeof(uint64_t *) == 0xF8,
+               "R15 home offset changed");
+
 static uint64_t **nativeaot_unwind_context_pointer(
     void *context_pointers, uint32_t register_number)
 {
@@ -6557,7 +6588,7 @@ static int nativeaot_gc_read_stack_u64(uint64_t *stack_pointer,
     return 1;
 }
 
-static uint32_t EFIAPI platform_rtl_virtual_unwind(
+static void * EFIAPI platform_rtl_virtual_unwind(
     uint32_t handler_type,
     uint64_t image_base,
     uint64_t control_pc,
