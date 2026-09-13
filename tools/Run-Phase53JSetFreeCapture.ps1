@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
-    [string]$OutputDirectory = 'artifacts\phase53j-setfree-capture-1'
+    [string]$OutputDirectory = 'artifacts\phase53j-setfree-capture-1',
+    [switch]$TraceAllocatorContext,
+    [switch]$TraceTlsAllocatorContext,
+    [switch]$TraceAllocatorWrites,
+    [UInt64]$AllocatorContextAddress = 0
 )
 
 Set-StrictMode -Version Latest
@@ -187,6 +191,11 @@ try {
     $destination = [uint64]0x400004C00118
     $runtimeGlobalBase = $imageBase + 0x486D00
     $freeEeType = $imageBase + 0x484E08
+    $getCurrentThreadAllocContextReturn = $imageBase + 0x15309F
+    $allocEntry = $imageBase + 0x15E260
+    $allocPtrStoreAfter = $imageBase + 0x15E34B
+    $earlyAllocatorContextA = $imageBase - 0x1FC8
+    $earlyAllocatorContextB = $imageBase - 0x2FC8
 
     $gdbText = @'
 set pagination off
@@ -205,6 +214,11 @@ set $soh_count = 0
 set $last_phase = 0
 set $setfree_count = 0
 target remote 127.0.0.1:__GDB_PORT__
+
+__TLS_ALLOCATOR_CONTEXT_WATCH__
+__EARLY_CONTEXT_WATCH__
+
+__ALLOCATOR_WRITE_TRACE__
 
 watch *(unsigned long long*)0x4000000008c0
 commands
@@ -258,25 +272,7 @@ commands
   set $target_ctx = $r8
   printf "EVENT=%u SOH_TRY_FIT_TARGET ctx=%p worker=%p gen=%d request=%p alloc_ptr=%p alloc_limit=%p field10=%p field18=%p\n",$event,$target_ctx,$worker,$ecx,$rdx,$r8 == 0 ? 0 : *(unsigned long long*)$r8,*(unsigned long long*)($r8+8),*(unsigned long long*)($r8+0x10),*(unsigned long long*)($r8+0x18)
   x/16gx $r8
-  if $context_watch_set == 0
-   set $context_watch_set = 1
-   watch *(unsigned long long*)$target_ctx
-   commands
-    silent
-    set $event = $event + 1
-    printf "EVENT=%u ALLOC_CONTEXT_PTR_WRITE ctx=%p pc=%p ptr_now=%p limit_now=%p field10=%p field18=%p\n",$event,$target_ctx,$pc,*(unsigned long long*)$target_ctx,*(unsigned long long*)($target_ctx+8),*(unsigned long long*)($target_ctx+0x10),*(unsigned long long*)($target_ctx+0x18)
-    bt 12
-    continue
-   end
-   watch *(unsigned long long*)($target_ctx+8)
-   commands
-    silent
-    set $event = $event + 1
-    printf "EVENT=%u ALLOC_CONTEXT_LIMIT_WRITE ctx=%p pc=%p ptr_now=%p limit_now=%p field10=%p field18=%p\n",$event,$target_ctx,$pc,*(unsigned long long*)$target_ctx,*(unsigned long long*)($target_ctx+8),*(unsigned long long*)($target_ctx+0x10),*(unsigned long long*)($target_ctx+0x18)
-    bt 12
-    continue
-   end
-  end
+   __TARGET_CONTEXT_WATCH__
  end
  continue
 end
@@ -563,6 +559,177 @@ detach
 quit
 '@
 
+    $earlyContextAddressTextA = '0x{0:X}' -f $earlyAllocatorContextA
+    $earlyContextAddressTextB = '0x{0:X}' -f $earlyAllocatorContextB
+    if ($TraceTlsAllocatorContext) {
+        $tlsAllocatorContextWatch = @'
+break *0x__GET_ALLOC_CONTEXT_RETURN__
+commands
+ silent
+ if $context_watch_set == 0
+  set $context_watch_set = 1
+  set $target_ctx = $rax
+  set $early_context_ptr_prev = *(unsigned long long*)$target_ctx
+  set $early_context_limit_prev = *(unsigned long long*)($target_ctx+8)
+  printf "EVENT=%u GET_CURRENT_THREAD_ALLOC_CONTEXT_RETURN pc=%p ctx=%p ptr=%p limit=%p field10=%p field18=%p\n",$event,$pc,$target_ctx,*(unsigned long long*)$target_ctx,*(unsigned long long*)($target_ctx+8),*(unsigned long long*)($target_ctx+0x10),*(unsigned long long*)($target_ctx+0x18)
+  watch *(unsigned long long*)$target_ctx
+  commands
+   silent
+   set $event = $event + 1
+   printf "EVENT=%u TLS_ALLOC_CONTEXT_PTR_WRITE ctx=%p pc=%p old_ptr=%p new_ptr=%p limit=%p field10=%p field18=%p\n",$event,$target_ctx,$pc,$early_context_ptr_prev,*(unsigned long long*)$target_ctx,*(unsigned long long*)($target_ctx+8),*(unsigned long long*)($target_ctx+0x10),*(unsigned long long*)($target_ctx+0x18)
+   x/8i $pc-16
+   printf "REGS rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p rbp=%p rsp=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\n",$rax,$rbx,$rcx,$rdx,$rsi,$rdi,$rbp,$rsp,$r8,$r9,$r10,$r11,$r12,$r13,$r14,$r15
+   bt 20
+   set $early_context_ptr_prev = *(unsigned long long*)$target_ctx
+   continue
+  end
+  watch *(unsigned long long*)($target_ctx+8)
+  commands
+   silent
+   set $event = $event + 1
+   printf "EVENT=%u TLS_ALLOC_CONTEXT_LIMIT_WRITE ctx=%p pc=%p ptr=%p old_limit=%p new_limit=%p field10=%p field18=%p\n",$event,$target_ctx,$pc,*(unsigned long long*)$target_ctx,$early_context_limit_prev,*(unsigned long long*)($target_ctx+8),*(unsigned long long*)($target_ctx+0x10),*(unsigned long long*)($target_ctx+0x18)
+   x/8i $pc-16
+   printf "REGS rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p rbp=%p rsp=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\n",$rax,$rbx,$rcx,$rdx,$rsi,$rdi,$rbp,$rsp,$r8,$r9,$r10,$r11,$r12,$r13,$r14,$r15
+   bt 20
+   set $early_context_limit_prev = *(unsigned long long*)($target_ctx+8)
+   continue
+  end
+ end
+ continue
+end
+'@
+        $targetContextWatch = '# TLS-derived allocator-context watchpoints are already active'
+    } else {
+        $tlsAllocatorContextWatch = '# no TLS-derived allocator-context watchpoints'
+    }
+    if ($TraceAllocatorContext -and !$TraceTlsAllocatorContext) {
+        if ($AllocatorContextAddress -ne 0) {
+            $earlyContextAddressText = '0x{0:X}' -f $AllocatorContextAddress
+            $earlyContextWatch = @'
+set $early_context_override_prev = *(unsigned long long*)__EARLY_CONTEXT_OVERRIDE__
+watch *(unsigned long long*)__EARLY_CONTEXT_OVERRIDE__
+commands
+ silent
+ set $event = $event + 1
+ printf "EVENT=%u EARLY_ALLOC_CONTEXT_PTR_WRITE candidate=OVERRIDE ctx=%p pc=%p old_ptr=%p new_ptr=%p limit=%p field10=%p field18=%p\n",$event,__EARLY_CONTEXT_OVERRIDE__,$pc,$early_context_override_prev,*(unsigned long long*)__EARLY_CONTEXT_OVERRIDE__,*(unsigned long long*)(__EARLY_CONTEXT_OVERRIDE__+8),*(unsigned long long*)(__EARLY_CONTEXT_OVERRIDE__+0x10),*(unsigned long long*)(__EARLY_CONTEXT_OVERRIDE__+0x18)
+ x/8i $pc-16
+ printf "REGS rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p rbp=%p rsp=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\n",$rax,$rbx,$rcx,$rdx,$rsi,$rdi,$rbp,$rsp,$r8,$r9,$r10,$r11,$r12,$r13,$r14,$r15
+ bt 20
+ set $early_context_override_prev = *(unsigned long long*)__EARLY_CONTEXT_OVERRIDE__
+ continue
+end
+'@
+            $earlyContextWatch = $earlyContextWatch.Replace('__EARLY_CONTEXT_OVERRIDE__', $earlyContextAddressText)
+        } else {
+            $earlyContextWatch = @'
+set $early_context_a_prev = *(unsigned long long*)__EARLY_CONTEXT_A__
+watch *(unsigned long long*)__EARLY_CONTEXT_A__
+commands
+ silent
+ set $event = $event + 1
+ printf "EVENT=%u EARLY_ALLOC_CONTEXT_PTR_WRITE candidate=A ctx=%p pc=%p old_ptr=%p new_ptr=%p limit=%p field10=%p field18=%p\n",$event,__EARLY_CONTEXT_A__,$pc,$early_context_a_prev,*(unsigned long long*)__EARLY_CONTEXT_A__,*(unsigned long long*)(__EARLY_CONTEXT_A__+8),*(unsigned long long*)(__EARLY_CONTEXT_A__+0x10),*(unsigned long long*)(__EARLY_CONTEXT_A__+0x18)
+ x/8i $pc-16
+ printf "REGS rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p rbp=%p rsp=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\n",$rax,$rbx,$rcx,$rdx,$rsi,$rdi,$rbp,$rsp,$r8,$r9,$r10,$r11,$r12,$r13,$r14,$r15
+ bt 20
+ set $early_context_a_prev = *(unsigned long long*)__EARLY_CONTEXT_A__
+ continue
+end
+set $early_context_b_prev = *(unsigned long long*)__EARLY_CONTEXT_B__
+watch *(unsigned long long*)__EARLY_CONTEXT_B__
+commands
+ silent
+ set $event = $event + 1
+ printf "EVENT=%u EARLY_ALLOC_CONTEXT_PTR_WRITE candidate=B ctx=%p pc=%p old_ptr=%p new_ptr=%p limit=%p field10=%p field18=%p\n",$event,__EARLY_CONTEXT_B__,$pc,$early_context_b_prev,*(unsigned long long*)__EARLY_CONTEXT_B__,*(unsigned long long*)(__EARLY_CONTEXT_B__+8),*(unsigned long long*)(__EARLY_CONTEXT_B__+0x10),*(unsigned long long*)(__EARLY_CONTEXT_B__+0x18)
+ x/8i $pc-16
+ printf "REGS rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p rbp=%p rsp=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\n",$rax,$rbx,$rcx,$rdx,$rsi,$rdi,$rbp,$rsp,$r8,$r9,$r10,$r11,$r12,$r13,$r14,$r15
+ bt 20
+ set $early_context_b_prev = *(unsigned long long*)__EARLY_CONTEXT_B__
+ continue
+end
+'@
+            $earlyContextWatch = $earlyContextWatch.Replace('__EARLY_CONTEXT_A__', $earlyContextAddressTextA).Replace('__EARLY_CONTEXT_B__', $earlyContextAddressTextB)
+        }
+    $targetContextWatch = '# early allocator-context watchpoints are already active'
+    } else {
+        $earlyContextWatch = '# Phase 53J default: no early allocator-context watchpoints'
+        if (!$TraceTlsAllocatorContext) {
+            $targetContextWatch = @'
+   if $context_watch_set == 0
+    set $context_watch_set = 1
+    watch *(unsigned long long*)$target_ctx
+    commands
+     silent
+     set $event = $event + 1
+     printf "EVENT=%u ALLOC_CONTEXT_PTR_WRITE ctx=%p pc=%p ptr_now=%p limit_now=%p field10=%p field18=%p\n",$event,$target_ctx,$pc,*(unsigned long long*)$target_ctx,*(unsigned long long*)($target_ctx+8),*(unsigned long long*)($target_ctx+0x10),*(unsigned long long*)($target_ctx+0x18)
+     bt 12
+     continue
+    end
+    watch *(unsigned long long*)($target_ctx+8)
+    commands
+     silent
+     set $event = $event + 1
+     printf "EVENT=%u ALLOC_CONTEXT_LIMIT_WRITE ctx=%p pc=%p ptr_now=%p limit_now=%p field10=%p field18=%p\n",$event,$target_ctx,$pc,*(unsigned long long*)$target_ctx,*(unsigned long long*)($target_ctx+8),*(unsigned long long*)($target_ctx+0x10),*(unsigned long long*)($target_ctx+0x18)
+     bt 12
+     continue
+    end
+   end
+'@
+        }
+    }
+
+    if ($TraceAllocatorWrites) {
+        $allocatorWriteTrace = @'
+break *0x__ALLOC_ENTRY__
+commands
+ silent
+ if $r8 <= 0x100
+  printf "ALLOC_ENTRY rcx_heap=%p ctx=%p request=%p flags=%p ptr=%p limit=%p\n",$rcx,$rdx,$r8,$r9,*(unsigned long long*)$rdx,*(unsigned long long*)($rdx+8)
+  bt 12
+ end
+ continue
+end
+
+break *0x__ALLOC_PTR_STORE_AFTER__
+commands
+ silent
+ if $r15 <= 0x100
+  set $event = $event + 1
+  printf "EVENT=%u ALLOC_PTR_STORE_AFTER pc=%p ctx=%p old_ptr=%p new_ptr=%p limit=%p request=%p flags=%p\n",$event,$pc,$rdx,$rbx,$rax,*(unsigned long long*)($rdx+8),$r15,$rbp
+  x/12gx $rdx
+  bt 20
+ end
+ continue
+end
+'@
+        $allocatorWriteTrace = $allocatorWriteTrace.Replace('__ALLOC_ENTRY__', ('{0:X}' -f $allocEntry)).Replace('__ALLOC_PTR_STORE_AFTER__', ('{0:X}' -f $allocPtrStoreAfter))
+    } else {
+        $allocatorWriteTrace = '# allocator write tracing disabled'
+    }
+    if (!$TraceAllocatorContext -and !$TraceTlsAllocatorContext) {
+        $earlyContextWatch = '# Phase 53J default: no early allocator-context watchpoints'
+        $targetContextWatch = @'
+   if $context_watch_set == 0
+    set $context_watch_set = 1
+    watch *(unsigned long long*)$target_ctx
+    commands
+     silent
+     set $event = $event + 1
+     printf "EVENT=%u ALLOC_CONTEXT_PTR_WRITE ctx=%p pc=%p ptr_now=%p limit_now=%p field10=%p field18=%p\n",$event,$target_ctx,$pc,*(unsigned long long*)$target_ctx,*(unsigned long long*)($target_ctx+8),*(unsigned long long*)($target_ctx+0x10),*(unsigned long long*)($target_ctx+0x18)
+     bt 12
+     continue
+    end
+    watch *(unsigned long long*)($target_ctx+8)
+    commands
+     silent
+     set $event = $event + 1
+     printf "EVENT=%u ALLOC_CONTEXT_LIMIT_WRITE ctx=%p pc=%p ptr_now=%p limit_now=%p field10=%p field18=%p\n",$event,$target_ctx,$pc,*(unsigned long long*)$target_ctx,*(unsigned long long*)($target_ctx+8),*(unsigned long long*)($target_ctx+0x10),*(unsigned long long*)($target_ctx+0x18)
+     bt 12
+     continue
+    end
+   end
+'@
+    }
+
     foreach ($item in @(
         @('__GDB_PORT__', $gdbPort),
         @('__WORKER_ENTRY__', $workerEntry),
@@ -598,9 +765,22 @@ quit
         @('__GC_RETURN__', $gcReturn),
         @('__WORKER_CALL__', $workerCall),
         @('__FREE_EETYPE__', $freeEeType),
-        @('__RUNTIME_GLOBAL_BASE__', $runtimeGlobalBase)
+        @('__RUNTIME_GLOBAL_BASE__', $runtimeGlobalBase),
+        @('__TLS_ALLOCATOR_CONTEXT_WATCH__', $tlsAllocatorContextWatch),
+        @('__EARLY_CONTEXT_WATCH__', $earlyContextWatch),
+        @('__ALLOCATOR_WRITE_TRACE__', $allocatorWriteTrace),
+        @('__TARGET_CONTEXT_WATCH__', $targetContextWatch),
+        # The TLS block itself contains this placeholder, so replace it after
+        # inserting the block into the generated GDB script.
+        @('__GET_ALLOC_CONTEXT_RETURN__', $getCurrentThreadAllocContextReturn)
     )) {
-        $replacement = if ($item[0] -eq '__GDB_PORT__') { [string][int]$item[1] } else { ('{0:X}' -f [uint64]$item[1]) }
+        $replacement = if ($item[0] -eq '__GDB_PORT__') {
+            [string][int]$item[1]
+        } elseif ($item[1] -is [string]) {
+            [string]$item[1]
+        } else {
+            '{0:X}' -f [uint64]$item[1]
+        }
         $gdbText = $gdbText.Replace($item[0], $replacement)
     }
     [IO.File]::WriteAllText($gdbScriptPath, $gdbText, [Text.Encoding]::ASCII)
@@ -613,6 +793,15 @@ quit
         ('SOH_TRY_FIT=0x{0:X} RVA=0x185B80' -f $sohTryFit),
         ('MEMCOPY=0x{0:X} RVA=0x17D3A0' -f $memcopy),
         ('RELOCATE_ADDRESS=0x{0:X} RVA=0x1826A0' -f $relocateAddress),
+        ('TRACE_ALLOCATOR_CONTEXT={0}' -f $TraceAllocatorContext.IsPresent),
+        ('TRACE_TLS_ALLOCATOR_CONTEXT={0}' -f $TraceTlsAllocatorContext.IsPresent),
+        ('TRACE_ALLOCATOR_WRITES={0}' -f $TraceAllocatorWrites.IsPresent),
+        ('GET_CURRENT_THREAD_ALLOC_CONTEXT_RETURN=0x{0:X} RVA=0x15309F' -f $getCurrentThreadAllocContextReturn),
+        ('ALLOC_ENTRY=0x{0:X} RVA=0x15E260' -f $allocEntry),
+        ('ALLOC_PTR_STORE_AFTER=0x{0:X} RVA=0x15E34B' -f $allocPtrStoreAfter),
+        ('ALLOCATOR_CONTEXT_OVERRIDE=0x{0:X}' -f $AllocatorContextAddress),
+        ('EARLY_ALLOCATOR_CONTEXT_A=0x{0:X} (image_base-0x1FC8)' -f $earlyAllocatorContextA),
+        ('EARLY_ALLOCATOR_CONTEXT_B=0x{0:X} (image_base-0x2FC8)' -f $earlyAllocatorContextB),
         ('ROOT_SLOT=0x{0:X}' -f $rootSlot),
         ('DESTINATION=0x{0:X}' -f $destination)
     ) -Encoding ascii

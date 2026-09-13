@@ -1431,3 +1431,422 @@ defect, and Phase 54 remains unsafe.
 
 **Outcome: C — the first invalid allocator boundary is proven, but its
 upstream producer is not yet isolated; no repair is justified.**
+
+## Phase 53K — allocator-boundary provenance
+
+Phase 53J established the first invalid consumer state but did not identify
+the writer that supplied the boundary. Phase 53K continued from that exact
+state using the matching NativeAOT payload and PDB. The authoritative
+provenance capture is `artifacts/phase53k-allocator-context-capture-8`:
+
+```text
+payload SHA-256  E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388
+image base       0x501f000
+allocator ctx    0x501d038
+old worker       0x400005000e50
+worker EEType    0x5694e68
+```
+
+The capture used the same OVMF code as the Phase 53J evidence and reached
+`TARGETED_SEQUENCE_COMPLETE`. The earlier K captures remain useful negative
+evidence: fixed candidate addresses did not identify the live context across
+boots, the public `GetCurrentThreadAllocContext` return was not reached on
+the failing path, and the ordinary `GCHeap::Alloc` store probe did not see
+the decisive transition.
+
+### Context ownership and semantic layout
+
+The relevant state is not a guideXOS allocator field. It is the current
+thread's NativeAOT runtime allocation context. The PDB type information gives
+`gc_alloc_context` as:
+
+```text
++0x00  alloc_ptr
++0x08  alloc_limit
++0x10  alloc_bytes
++0x18  alloc_bytes_uoh
+```
+
+The context is embedded in the NativeAOT thread-local allocation block. The
+preceding word at `context-0x08` is the combined limit used by the fast
+allocator path. `GCToEEInterface::GetAllocContext`, RVA `0x153080`, reads
+that TLS block directly. The public `GetCurrentThreadAllocContext` wrapper
+was watchpointed in capture 6 but did not execute before the failure; the
+failing path therefore uses an inlined equivalent TLS read.
+
+The allocator invariant remains the one established in Phase 53J:
+
+```text
+alloc_ptr is the first free address after the last live allocation;
+alloc_ptr <= alloc_limit; and [alloc_ptr, alloc_limit) does not overlap
+any live object or object header.
+```
+
+### Last known-good and first provably invalid states
+
+Immediately before the decisive transition, event 1346 advanced the same
+context from `0x400005000c58` to `0x400005000d78`, with
+`alloc_limit = 0x400005000fd0`. The preceding object type and the allocator
+range were not yet shown to overlap the worker. This is the last captured
+allocator state that is good under the allocator's own boundary semantics.
+
+Event 1347 then advanced `alloc_ptr` from `0x400005000d78` to the worker's
+address `0x400005000e50`, leaving the same limit. Event 1348 published that
+address into the strong static root `0x4000000008c0`, and event 1349 entered
+the object with:
+
+```text
+[worker+0x00] = 0x5694e68
+[worker+0x08] = 0x400005000d78
+[worker+0x10] = 0x4000024019c0
+```
+
+The first state that can be proved invalid, rather than merely unusual, is
+event 1350: `FixAllocContext` consumed `alloc_ptr == 0x400005000e50` while
+the same address was a rooted, live worker. It computed the free payload as
+`0x180` and passed total size `0x198` to `SetFree`. The capture does not
+timestamp the worker header's own initialization between events 1347 and
+1348, so event 1347 is the earliest boundary transition and event 1350 is
+the first complete proof of the violated live-range invariant.
+
+### Exact producer instruction
+
+The event-1347 hardware watchpoint stopped after the store at the `ret` at
+`0x5167a58`. The exact writer is the preceding instruction at
+`0x5167a54`, image-relative RVA `0x148a54`:
+
+```text
+RhpNewFast, RVA 0x148a20, parent AllocFast.asm.obj
+
+0x180148a46: sub    r9,rax
+0x180148a49: cmp    r8,r9
+0x180148a4e: add    r8,rax
+0x180148a51: mov    [rax],rcx
+0x180148a54: mov    [rdx+0x08],r8       ; alloc_ptr = new boundary
+0x180148a58: ret
+```
+
+At the decisive stop, the registers were:
+
+```text
+RDX = 0x501d030       ; allocator context - 0x08
+RAX = 0x400005000d78  ; previous alloc_ptr
+R8  = 0x400005000e50  ; new alloc_ptr / worker address
+RCX = 0x5696950       ; type being allocated by this fast-path call
+```
+
+This is a matching-binary/native-symbol result, not a source-address
+guess. DIA maps RVA `0x148a54` to `RhpNewFast`; its parent is the runtime
+`AllocFast.asm.obj`. The subsequent root publication stopped at
+`0x5167c83`, RVA `0x148c83`, in the write-barrier routine
+`RhpAssignRefAVLocation` (RVA `0x148c80`), writing the worker address into
+`ManagedSerialDriver.s_driverWorker` storage.
+
+The decisive store is therefore a normal NativeAOT allocation-fast-path
+update. It is not a store performed by `SetFree`, by relocation, or by the
+managed worker code itself. The event's `RCX` type value is also different
+from the worker EEType, so this capture does not by itself prove that the
+fast-path call allocated or initialized the worker object. No later
+`alloc_ptr` transition from the worker start to the end of its `0x40`-byte
+allocation was captured before root publication.
+
+### Provenance chain and remaining ambiguity
+
+The strongest evidence-backed chain is:
+
+```text
+TLS-owned gc_alloc_context
+  -> RhpNewFast [context+0] = 0x400005000e50 (event 1347, RVA 0x148a54)
+  -> s_driverWorker root = 0x400005000e50 (event 1348)
+  -> valid worker entry/dispatch (event 1349)
+  -> FixAllocContext consumes ptr == worker (event 1350)
+  -> SetFree treats the worker range as free (event 1351 and stores)
+  -> relocation copies the corrupted source value (events 1355 onward)
+  -> managed dispatch later observes the damaged worker
+```
+
+This proves who last wrote the boundary value and proves the downstream
+causal path. It does not yet prove which operation initialized the worker
+header at `0x400005000e50`, which allocator context owned that initialization,
+or why that object's live lifetime was not followed by a corresponding
+`alloc_ptr` advance. The observed fast-path write may be the correct boundary
+after a preceding allocation, with the ownership/range disagreement arising
+from an unobserved worker-creation path, a separate context, or another
+runtime transition. Those are unresolved hypotheses, not conclusions.
+
+Consequently, no guideXOS-local repair is justified. Changing the worker,
+GC policy, `SetFree`, relocation, or the fast-path allocator would either
+mask the consumer or alter a NativeAOT runtime contract without a demonstrated
+producer invariant violation. The exact remaining forensic question is:
+
+```text
+Which instruction wrote the ManagedDriverWorker header and reference fields
+at 0x400005000e50, under which allocator context, and why was that context
+not advanced past the worker before s_driverWorker was published?
+```
+
+K diagnostic changes are confined to the removable options in
+`tools/Run-Phase53JSetFreeCapture.ps1`. Captures 9 and 10 were not used as
+evidence: the optional worker-header probe changed debugger command flow and
+detached before the target sequence. No production allocator, GC, image,
+CSS, or managed-kernel behavior was changed.
+
+**Outcome: C — boundary provenance narrowed to the NativeAOT TLS fast-path
+store, but the causal producer/ownership transition that made the live worker
+overlap that boundary remains unresolved; no repair is justified.**
+
+## Phase 53L — ManagedDriverWorker allocation provenance
+
+Phase 53L worked backward from the known live address
+`0x400005000e50`. It used the matching Phase 53 payload and PDB without a
+rebuild. The payload SHA-256 was
+`E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388` and the
+PDB SHA-256 was
+`7270B65498976A8B531E04758C91E1A627E4A916508DB5FC411E9FB4CA8FCA9C`.
+Because QEMU relocates the image, the capture derived runtime addresses from
+the serial `IMAGE_BASE` marker. At the Phase 53K base `0x501f000`, the worker
+EEType RVA `0x675e68` resolves to `0x5694e68`.
+
+### EEType and object-layout facts
+
+The matching CodeView type record is
+`gxos_managed_kernel_GuideXOS_Net10_ManagedKernel_ManagedDriverWorker`, which
+is `GuideXOS.Net10.ManagedKernel.ManagedDriverWorker` in the managed source.
+The type record has `sizeof 56` (`0x38`) and the following fields:
+
+```text
++0x00  NativeAOT object header / EEType
++0x08  _dispatcher       reference
++0x10  _serialDriver     reference
++0x18  _keyboardDriver   reference
++0x20  _state            uint32
++0x24  _dispatchBatches  uint32
++0x28  _managedDispatches uint32
++0x2c  _delivered        uint32
++0x30  _rejected         uint32
+```
+
+The live EEType header at `0x5694e68` decodes as flags `0x51000000` and
+NativeAOT base size `0x40`. The descriptor immediately preceding it is:
+
+```text
+0x5694e50 : 0xffffffffffffffd8  (descriptor series size = -0x28)
+0x5694e58 : 0x0000000000000008  (descriptor series start = +0x08)
+0x5694e60 : 0x0000000000000001  (descriptor series count = 1)
+0x5694e68 : 0x0000004051000000  (flags = 0x51000000, base size = 0x40)
+```
+
+The authoritative descriptor bytes captured for this EEType are the
+relocation-independent series values `series_size = -0x28`,
+`series_start = +0x08`, and `series_count = 1`. Together with object size
+`0x40`, they describe three eight-byte reference slots at `+0x08`, `+0x10`,
+and `+0x18`. They exactly match the three reference fields above. The
+allocation is eight-byte aligned, with no evidence of a runtime-owned prefix
+before the address returned by `RhpNewFast`: the returned address is the
+header address itself.
+
+The descriptor window is the one recorded in the Phase 53J analysis and
+repeated in the live capture. The decisive layout invariants are:
+
+```text
+worker base:              0x400005000e50
+managed type size:        0x38
+NativeAOT allocation size: 0x40
+alignment:                0x8
+expected post-allocation: 0x400005000e90
+```
+
+### Exact worker birth and publication
+
+The authoritative birth log is
+`artifacts/phase53l-worker-allocation-capture-7/gdb.stdout.log`. It used the
+historical relocated base `0x501f000`, so the runtime EEType was exactly
+`0x5694e68`. Captures 4, 5, 7, and 8 independently reached the same complete
+birth sequence; captures 7 and 8 also reproduced the later target-side
+failure, but did not reach the Phase 53K consumer breakpoint.
+
+The generated method is
+`ManagedSerialDriverSubsystem__RunDriverWorker`, whose matching disassembly
+contains this sequence at RVA `0xf8449` onward:
+
+```text
+RVA 0xf8449  lea  rcx,[rip+...]        ; &EEType at image+0x675e68
+RVA 0xf8450  call RhpNewFast
+RVA 0xf8455  mov  rbp,rax              ; returned worker base
+RVA 0xf8458  ...                       ; _dispatcher write-barrier call
+RVA 0xf8464  ...                       ; _serialDriver write-barrier call
+RVA 0xf8472  mov  [rbp+0x18],0         ; _keyboardDriver
+RVA 0xf8476  mov  [rbp+0x20],0         ; Created
+RVA 0xf8480  call RhpAssignRefAVLocation ; publish s_driverWorker
+RVA 0xf8489  mov  [rcx+0x20],2         ; Running, inlined Start()
+```
+
+The constructor symbol exists in the PDB, but this call site does not call
+the standalone constructor symbol. Constructor field initialization and
+`Start()` are inlined into `RunDriverWorker`; the source-level operation is
+`ManagedSerialDriver.cs:985`, `new ManagedDriverWorker(dispatcher, driver)`,
+followed by the assignment to `s_driverWorker`.
+
+The exact allocation helper and its relevant instructions are:
+
+```text
+RhpNewFast RVA 0x148a20
+RVA 0x148a51  mov [rax],rcx       ; first header/EEType write
+RVA 0x148a54  mov [rdx+0x08],r8   ; commit new alloc_ptr
+RVA 0x148a58  ret                 ; return object base in RAX
+```
+
+The capture’s event sequence was:
+
+| Event | Thread/TLS and context | Pointer state | Meaning |
+|---|---|---|---|
+| 1 | managed-driver scheduler worker stack `RSP=0x4e65e98`; `RDX=0x4e5f030` | EEType `0x5694e68` | `RhpNewFast` entry, return address `0x5117455` |
+| 2 | TLS block `0x4e5f000`; `gc_alloc_context=0x4e5f038`; `GS=0x4e61000`; TLS index 0 | before `0x400005000e50`, limit `0x400005000fd0`, expected after `0x400005000e90` | allocator context and size `0x40` captured |
+| 3 | same context and worker stack | header at worker base was nil, then `0x5694e68` | first worker-header writer at runtime PC `0x5167a51`, RVA `0x148a51` |
+| 4 | same context | new pointer `0x400005000e90` | exact boundary commit at runtime PC `0x5167a54`, RVA `0x148a54` |
+| 5 | same context | after `0x400005000e90`, limit unchanged | returned worker base `0x400005000e50`; expected pointer matched |
+| 6 | same context, managed return site | pointer `0x400005000e90` | returned to `RunDriverWorker` at RVA `0xf8455` |
+| 7–8 | same context | pointer `0x400005000e90` | constructor fields and Created state initialized |
+| 9–11 | same context | pointer `0x400005000e90` | publication call site RVA `0xf8480`, helper store RVA `0x148c80`, after-store RVA `0x148c83` |
+| 12 | same context | pointer `0x400005000e90` | `Start()` completed its Running state write after publication |
+
+The exact publication destination was
+`0x4000000008c0`, the `s_driverWorker` GC-static storage cell. The helper’s
+first instruction is `mov [rcx],rdx` at RVA `0x148c80`; the captured value was
+`0x400005000e50`, and the after-store observation showed the same value in the
+root. No GC was observed between allocation, initialization, and publication.
+At publication, the owning worker context already had a valid post-allocation
+pointer, so the worker birth itself satisfies the NativeAOT bump-pointer
+invariant.
+
+### Allocating thread and context ownership
+
+The allocating execution is the scheduler-created managed driver worker, not
+the boot/main loader execution. The native source creates that thread
+suspended and resumes it in
+`src/Gate4Harness/managed_kernel_driver_worker.c:150-153`; its
+`worker_entry()` invokes the managed entry at lines 41–53. The GDB call chain
+at allocation is the same worker stack (`0x4e65...`) and the same private
+TLS block (`0x4e5f000`). This is stronger than assigning ownership from an
+incidental stack alone: the native worker-entry source, generated managed
+call site, TLS base, GS base, and call stack agree.
+
+The original worker allocation context in the birth capture was
+`0x4e5f038`. Its `context-0x08` combined limit was `0x400005000fd0`, its
+`alloc_ptr` was `0x400005000e50` before allocation, and its `alloc_limit` was
+`0x400005000fd0`. After `RhpNewFast`, its `alloc_ptr` was
+`0x400005000e90`; `alloc_limit` remained `0x400005000fd0`.
+
+The context is not the Phase 53K context address `0x501d038`. That K address
+was observed on a different stack during a prior non-worker allocation and was
+later passed to the consumer while the managed worker stack was active. The
+addresses are not treated as equal merely because their low offsets are the
+same.
+
+### Context lineage and the first proven disagreement
+
+The following table combines facts from the Phase 53L birth capture with the
+already-authoritative Phase 53K capture. Event numbers are local to their
+respective capture; this is not presented as one uninterrupted GDB event
+stream.
+
+| Evidence event | Thread/TLS identity | Context | `alloc_ptr` | `alloc_limit` | Meaning |
+|---|---|---:|---:|---:|---|
+| L worker allocation before | worker stack `0x4e65...`, TLS `0x4e5f000`, `GS=0x4e61000` | `0x4e5f038` | `0x400005000e50` | `0x400005000fd0` | worker allocation begins at the returned object base |
+| L worker allocation after | same worker/TLS | `0x4e5f038` | `0x400005000e90` | `0x400005000fd0` | correct `+0x40` advance |
+| L publication | same worker/TLS | `0x4e5f038` | `0x400005000e90` | `0x400005000fd0` | root publication occurs after the valid advance |
+| K event 1346 | main/loader stack `RSP=0x7e64628` | `0x501d038` | `0x400005000d78` | `0x400005000fd0` | last known-good K state |
+| K event 1347 | main/loader stack `RSP=0x7e64728` | `0x501d038` | `0x400005000e50` | `0x400005000fd0` | a different `RhpNewFast` operation, EEType `0x5696950`, advances the non-worker context to the worker address |
+| K event 1348–1349 | managed worker stack `0x4e65...` | root `0x4000000008c0` | — | — | worker address is published and dispatched as a live object |
+| K event 1350 | worker stack around `0x4e65a58` | `0x501d038` passed in `RDI` | `0x400005000e50` | `0x400005000fd0` | `FixAllocContext` reaches the known invalid boundary |
+
+Phase 53L therefore disproves Case 1: the worker allocation did advance its
+own context from `0x...0e50` to `0x...0e90`. It also disproves the Phase 53K
+assumption that the K event-1347 `RhpNewFast` call was necessarily the worker
+allocation: that call used EEType `0x5696950`, ran on the main/loader stack,
+and advanced context `0x501d038` from `0x...0d78` to `0x...0e50`.
+
+There is a concrete ownership mechanism that explains the two observations.
+Before the managed worker is run, `gate4_loader.c:14833-14843` reads the
+initialized main TLS block and calls
+`gxos_managed_kernel_driver_worker_configure_nativeaot_tls`. That helper
+zeroes the worker TLS vector and block, then copies the entire 4-KiB source
+block byte-for-byte at `managed_kernel_driver_worker.c:173-197`. The copied
+block includes the mutable NativeAOT allocator words at the offsets that
+become `context-0x08`, `alloc_ptr`, and `alloc_limit`.
+
+The evidence-backed inference is that the main/loader context can retain the
+`0x...0e50` boundary while the private worker copy starts at the same boundary
+and correctly advances to `0x...0e90`. The later K consumer then receives the
+main/loader context `0x501d038` while executing on the worker stack. That is a
+duplicated or mismatched allocation-context ownership state, not a failure of
+the worker’s own `RhpNewFast` update. It is consistent with the explicit TLS
+block clone and with every captured address, stack, and pointer value.
+
+This remains an inference rather than a complete single-boot proof. No Phase
+53L capture simultaneously logged the TLS-block copy instruction, the source
+context value at the copy, the worker-context value immediately after the
+copy, and the later `FixAllocContext` selection. The low-perturbation captures
+7 and 8 reached the worker birth and publication but hit the existing target
+`#UD` path before the pre-`SetFree` breakpoint. Capture 6 recorded subsequent
+writes to the worker’s original context (`0x...0e90 → 0x...16a8`, back to
+`0x...0e90`, then `0x...0e90 → 0x...0ea8` and a refill to `0x...16c0`) before
+the bounded run was stopped; it never showed that context returning to
+`0x...0e50`.
+
+Thus the first state that is directly proven to violate the live-range
+invariant remains K event 1350: the context actually consumed by
+`FixAllocContext` has `alloc_ptr == 0x400005000e50` while that address is a
+rooted, initialized, dispatched `ManagedDriverWorker`. The earliest likely
+ownership disagreement is the mutable-TLS-context clone, but the exact
+instruction that later selects or restores `0x501d038` is still unresolved.
+
+### Adjacent allocation evidence
+
+No post-worker neighboring object was captured in the focused Phase 53L
+trace. The adjacent K evidence is limited to the immediately preceding
+main-context fast-path allocation: it advanced `0x400005000d78` to
+`0x400005000e50` by `0xd8` bytes before worker stage 1. Because the worker
+birth used a different TLS context in the L capture, that observation is
+useful for explaining the shared boundary but is not claimed as a same-context
+adjacent-object proof.
+
+### Diagnostic tooling and validation
+
+Phase 53L added the focused diagnostic driver
+`tools/Run-Phase53LWorkerAllocationCapture.ps1`. It validates the exact
+payload/PDB hashes, derives the relocated EEType address from RVA `0x675e68`,
+breaks the worker-specific `RhpNewFast` path and generated call site, records
+the header and boundary instructions, captures TLS/GS/context state, records
+the root publication, and optionally watches the original context after
+publication. It also has a narrowly scoped pre-`SetFree` comparison and
+classifies partial timeouts separately from completed runtime outcomes. It
+does not change the payload or runtime behavior.
+
+Capture 1 was a debugger-script address-formatting failure; capture 2 rejected
+an unexpected relocation base; capture 3 reached the birth path but stopped
+on a GDB formatting error. These are tooling failures, not runtime evidence.
+Capture 4 completed allocation/publication, capture 5 completed the same path
+with the first lineage instrumentation, and capture 7 completed the path at
+the historical relocated address. Captures 6 and 8 are preserved as
+incomplete diagnostic runs: capture 6 recorded lineage writes before bounded
+operator termination, while capture 8 reached the target `#UD` before the
+pre-`SetFree` correlation. The capture summaries and raw GDB/QEMU logs remain
+under the ignored `artifacts/phase53l-worker-allocation-capture-*` directories.
+
+The PowerShell script parsed successfully after the final diagnostic changes.
+No production source, allocator policy, GC policy, object layout, worker
+lifetime, relocation path, CSS/image-resource behavior, or serial-driver
+semantics were changed. No rebuild, post-repair boot, or unrelated regression
+run was performed because the repair threshold was not reached.
+
+### Phase 53L result
+
+The exact worker allocation, header writer, size, context, post-allocation
+pointer, worker execution identity, and root publication are now proven. The
+worker itself was allocated correctly. The later Phase 53K boundary belongs to
+a different context identity, and the full context-selection/ownership
+transition between those observations remains incomplete.
+
+**Outcome: C — worker allocation isolated, but context-transition provenance
+remains incomplete; no production repair is justified.**
