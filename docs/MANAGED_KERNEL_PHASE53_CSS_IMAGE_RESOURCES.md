@@ -2184,3 +2184,529 @@ The smallest remaining question is:
 **Phase 53M outcome: B — exact context-handoff defect proven; repair belongs
 outside the current guideXOS allocator layer. No production repair is
 justified.**
+
+## Phase 53N — NativeAOT foreign/custom-thread attachment contract
+
+Status: forensic/design-only. No production repair, allocator change, rebuild,
+commit, or push was made in this phase.
+
+### Principal outcome
+
+**Outcome E — NativeAOT's attachment contract is materially narrowed, but the
+runtime detach/unregister lifecycle for a guideXOS scheduler TCB remains
+unresolved.**
+
+The exact reverse-P/Invoke entry path is established. A fresh scheduler TLS
+environment can enter an `[UnmanagedCallersOnly]` export through the generated
+NativeAOT thunk, which takes the slow attachment path when the runtime state is
+unknown. That path is not what the Phase 53M driver worker currently uses: its
+full initialized-TLS copy sets the worker state to an already-attached-looking
+value, so the thunk's fast path skips `ThreadStore::AttachCurrentThread`.
+
+The existing scheduler callback/GC probe proves the bounded entry and live-GC
+behavior of a fresh worker. It does not prove that the runtime ThreadStore
+entry is detached before `gxos_scheduler_collect` frees the worker TLS block.
+The current scheduler reclamation path has no call to
+`RuntimeThreadShutdown`, `ThreadStore::DetachCurrentThread`, or an equivalent
+runtime-owned fiber-destruction callback. That is a critical lifecycle gap;
+therefore the Phase 53N repair threshold is not met.
+
+### Version and evidence discipline
+
+The contract audit used the exact source tag selected by the Phase 53M
+analysis: NativeAOT/runtime **v10.0.11**, commit
+`79d0c463f1b55624c874a11585f7e47731e8d675`, inspected in an external temporary
+clone. The repository's reproducible build record identifies the historical
+artifact toolchain as SDK `10.0.302`, runtime/NativeAOT pack/ILCompiler
+`10.0.10`; the repository pins SDK `10.0.302` with roll-forward disabled in
+`global.json`. The one-patch-level artifact/source uncertainty is recorded
+explicitly; runtime `main` or a newer branch was not substituted.
+
+The primary versioned sources are the [NativeAOT thread store](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/threadstore.cpp),
+[thread TLS accessors](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/threadstore.inl),
+[thread implementation](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/thread.cpp),
+[thread inline transition logic](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/thread.inl),
+[GC-to-EE bridge](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/gcenv.ee.cpp),
+[GC allocation context](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/gc/gcinterface.h),
+[Windows PAL thread/FLS hooks](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/windows/PalMinWin.cpp),
+[Windows PAL stack bounds](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/windows/PalCommon.cpp),
+and [runtime thread shutdown](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/startup.cpp).
+
+Facts below are labeled as one of:
+
+* **Runtime fact** — directly defined by v10.0.11 source.
+* **Repository fact** — directly present in guideXOS source, diagnostics, or
+  preserved artifacts.
+* **Inference** — a conclusion joining those facts; it is not a new runtime
+  API claim.
+* **Proposal** — deferred Phase 53O design, not an implementation.
+
+### NativeAOT threading contract
+
+#### Runtime thread representation
+
+**Runtime fact:** v10.0.11 declares a platform-thread-local
+`RuntimeThreadLocals tls_CurrentThread`. `ThreadStore::RawGetCurrentThread()`
+returns the address of that TLS storage cast to `Thread*`. The NativeAOT
+`Thread` is therefore not a separately allocated opaque record created by the
+guideXOS scheduler; its runtime-local storage is the current thread's TLS
+object.
+
+`RuntimeThreadLocals` contains, among other fields:
+
+* an EE allocation context and the embedded GC allocation context;
+* `m_ThreadStateFlags` (`TSF_Unknown`, `TSF_Attached`, or `TSF_Detached` plus
+  other state flags);
+* current, deferred, and cached P/Invoke transition frames;
+* the ThreadStore next pointer;
+* exception state and thread-static storage/root lists;
+* GC frame registrations;
+* stack low/high bounds;
+* OS thread handle and OS thread ID; and
+* runtime interruption/stress-log state where enabled.
+
+The address of a worker TLS block can consequently produce a pointer-shaped
+`Thread*`, but that pointer is only a valid managed thread after runtime
+construction, state initialization, ThreadStore registration, and platform
+attachment have completed.
+
+#### ThreadStore registration
+
+**Runtime fact:** `ThreadStore::AttachCurrentThread(bool)` obtains the current
+TLS `Thread*`, rejects a detached thread, returns immediately if the state is
+already initialized, calls `PalAttachThread`, calls `Thread::Construct`, sets
+`TSF_Attached`, and pushes the `Thread*` into the runtime ThreadStore list.
+`Thread::Construct` sets the initial transition-frame markers, obtains the OS
+thread ID and handle, and obtains maximum stack bounds. The allocation context
+is expected to be zero from static TLS initialization; `Construct` deliberately
+does not manufacture a copied allocation context.
+
+The corresponding `ThreadStore::Iterator` walks the runtime ThreadStore list,
+not the guideXOS scheduler's `GXOS_SCHEDULER_TCB` array. `GcEnumAllocContexts`
+enumerates that list and passes each `Thread`'s own EE/GC allocation context to
+the GC. Changing GS or the TLS vector alone does not insert a new record into
+that list.
+
+#### Foreign/native attachment through reverse P/Invoke
+
+**Runtime fact:** the v10.0.11 generated unmanaged-to-managed path is:
+
+```text
+generated UnmanagedCallersOnly export thunk
+  -> RhpReversePInvoke(ReversePInvokeFrame*)
+  -> InlineTryFastReversePInvoke
+       -> if TSF_Attached and preemptive: save frame, enter cooperative mode
+       -> otherwise slow path
+  -> RhpReversePInvokeAttachOrTrapThread2
+  -> Thread::ReversePInvokeAttachOrTrapThread
+  -> optional EnsureRuntimeInitialized
+  -> ThreadStore::AttachCurrentThread()
+  -> save prior transition state and enter cooperative mode
+  -> managed body
+  -> RhpReversePInvokeReturn
+  -> restore the saved transition frame/state
+```
+
+The slow path is selected by `TSF_Attached` being absent. A copied block with
+`TSF_Attached` present suppresses the attach operation; it is not a supported
+registration handoff. Ordinary reverse-P/Invoke return is a transition return,
+not a detach operation.
+
+**Repository fact:** `GxManagedKernelRunDriverWorker` is an
+`[UnmanagedCallersOnly]` export and is invoked through the generated export
+address. The current native wrapper supplies the Microsoft x64 ABI and calls
+the export directly; it does not call a runtime attach helper itself.
+
+**Repository fact:** the separate `NativeAotEventWait` scheduler callback probe
+creates a fresh zeroed scheduler TLS block and calls `ManagedCallback` through
+the same style of generated thunk. Its diagnostics observe the worker state
+changing from zero to the attached/preemptive sentinel, distinct FLS, managed
+allocation, GC, and root survival while that worker remains live. This is the
+existing evidence for the entry path, not evidence that the later scheduler
+reclamation performs NativeAOT detach.
+
+#### Runtime-created thread entry
+
+**Runtime fact:** v10.0.11 also has the internal `RhThreadEntryPoint`, returned
+by the exported `RhGetThreadEntryPointAddress`. It calls
+`ThreadStore::AttachCurrentThread()` before invoking the managed class-library
+thread entrypoint, sets a deferred transition frame, and manages preemptive
+mode around that entrypoint. This is the runtime's OS-thread creation path; it
+is not a general scheduler-TCB registration API and is not used by the current
+guideXOS worker.
+
+#### Allocation-context initialization
+
+**Runtime fact:** `gc_alloc_context` starts with `alloc_ptr`, `alloc_limit`,
+allocation counters, reserved GC fields, and allocation count zero. The EE
+`ee_alloc_context` wraps it with `combined_limit`. Each attached runtime
+`Thread` owns one such context; the GC enumerates all active contexts from
+ThreadStore. `GcEnumAllocContexts` permits the GC callback to zero the pointer
+and limit pair and then keeps `combined_limit` consistent; it is not an API for
+transferring ownership between threads.
+
+**Inference:** a fresh worker context must be created by the runtime's fresh
+TLS/attach path. Copying main's nonzero pair is not a handoff, and zeroing only
+that pair would still leave the other per-thread state unresolved.
+
+#### Stack bounds and GC state
+
+**Runtime fact:** `Thread::Construct` calls `PalGetMaximumStackBounds`. On the
+v10.0.11 Windows PAL this uses `VirtualQuery` for the low allocation base and
+the current TEB's `StackBase` for the high bound. The ThreadStore and GC use
+these bounds with the transition frame to walk a thread's managed stack.
+
+**Repository fact:** guideXOS creates a private committed worker stack,
+registers it with its own VM stack ledger, writes synthetic TEB low/high values,
+and switches RSP and GS in `gxos_scheduler_context_switch`. That proves the
+guideXOS scheduler stack contract. It does not, by itself, prove that the
+runtime `Thread` has been constructed with those bounds or that the runtime's
+GC suspend/stack-walk machinery can safely coordinate with every saved green
+stack.
+
+**Runtime fact:** cooperative mode is represented by a null current transition
+frame; preemptive mode is represented by the saved/top-of-stack transition
+state. Reverse-P/Invoke must enter cooperative mode for managed execution and
+restore the prior preemptive state on return. A worker that starts with copied
+transition-frame pointers can be in an invalid mode and can alias another
+thread's frame state.
+
+#### GC suspension and root enumeration
+
+**Runtime fact:** `GcScanRoots` iterates ThreadStore entries, skips only GC
+special threads, scans thread-static roots, and walks each `Thread`'s managed
+stack using its transition frame and stack bounds. `GcEnumAllocContexts` also
+iterates ThreadStore entries. NativeAOT GC suspension uses the ThreadStore and
+platform thread state; it is not driven by the guideXOS runnable queue.
+
+**Inference:** a worker with only a scheduler TCB, private GS, and private RSP
+is not automatically GC-visible. It must be a correctly attached ThreadStore
+entry with valid runtime stack/transition state, or the NativeAOT port must
+explicitly integrate the scheduler's saved green stacks and suspension model.
+
+#### Detach and runtime shutdown
+
+**Runtime fact:** `ThreadStore::DetachCurrentThread()` removes the current
+`Thread*` from ThreadStore, calls `Thread::Detach`, fixes/releases its
+allocation context, marks it detached, and then calls `Thread::Destroy`. On
+Windows, the NativeAOT PAL allocates an FLS slot with `FiberDetachCallback`;
+that callback calls `RuntimeThreadShutdown`, which calls
+`ThreadStore::DetachCurrentThread` when the home fiber is destroyed.
+`PalAttachThread` associates the current runtime `Thread*` with the current
+fiber and explicitly fail-fasts if another runtime thread is attached to the
+same fiber.
+
+**Repository fact:** guideXOS virtualizes FLS values through per-TCB arrays,
+but `gxos_scheduler_create_suspended_thread`/`maybe_reclaim_thread` only
+create, terminate, unregister the scheduler stack, free the synthetic
+GS/vector/TLS/TEB pages, release the scheduler object, and clear the TCB. The
+current path does not invoke `RuntimeThreadShutdown`, a runtime detach export,
+or a per-TCB `FiberDetachCallback` equivalent before freeing worker TLS.
+
+**Conclusion:** generated thunk return and scheduler TCB reclamation are not
+the same lifecycle event. Detach/unregister is the unresolved Phase 53N
+requirement.
+
+### NativeAOT TLS block layout
+
+The 0x1000-byte value is an image-specific TLS block, not a documented
+standalone “thread object” ABI. In the Phase 53 payload, the generated
+`tls_CurrentThread` storage begins at payload block `+0x30`; this agrees with
+the observed transition state at `+0x78` and the Phase 53M context at `+0x38`.
+The payload-relative map below distinguishes the loader's historical labels
+from the runtime field names:
+
+| Payload block offset | Runtime/source meaning in this payload | Ownership and clone status |
+| --- | --- | --- |
+| `+0x00..+0x2F` | PE TLS template/image-specific TLS storage preceding `tls_CurrentThread` | Template bytes may be initialized from the image; runtime-written values are not generally cloneable |
+| `+0x30` | `ee_alloc_context.combined_limit`; loader diagnostics call this `TLS_ALLOC_LIMIT` | Runtime/GC-owned; must be fresh and consistent with the worker context |
+| `+0x38` | `gc_alloc_context.alloc_ptr`, the first field of the embedded GC context | Per-thread and mutable; must be fresh |
+| `+0x40` | `gc_alloc_context.alloc_limit` | Per-thread and mutable; must be fresh |
+| `+0x48..+0x68` | allocation counters, GC-reserved fields, and allocation count in the embedded x64 context | Per-thread/GC-owned; must not be copied as live state |
+| `+0x70` | `m_ThreadStateFlags` for this payload layout | Must begin as `TSF_Unknown` for reverse-P/Invoke attach, then be runtime-set |
+| `+0x78` | `m_pTransitionFrame` for this payload layout | Must be constructed by the runtime; copied pointer is invalid/aliased |
+| following runtime fields | deferred/cached transition frames, ThreadStore next link, exception state, thread statics, GC frame registrations, stack bounds, OS handle/ID, and optional runtime fields | Must be zeroed/constructed or runtime-populated per field; never copied wholesale |
+| outside `tls_CurrentThread` | guideXOS scheduler FLS arrays, COM state, TCB identity, stack metadata, and synthetic GS/TEB bookkeeping | Scheduler-owned; separate from NativeAOT ThreadStore ownership |
+
+The `+0x30`/`+0x38` pair emitted by current loader diagnostics is therefore a
+payload-layout observation. In the v10.0.11 source, `combined_limit` is an EE
+wrapper field and the actual `gc_alloc_context` begins at the payload's
+`+0x38`; the actual `alloc_limit` is the second pointer in that context at
+`+0x40`. The source context used by Phase 53M was correctly identified as
+`TLS+0x38`, with the pair read at `context` and `context+8`.
+
+**Conclusion:** full initialized-TLS cloning is unsupported. It copies not
+only the live allocation range, but also attachment flags, transition-frame
+state, ThreadStore linkage, exception/thread-static/GC registration pointers,
+stack and OS identity, and other runtime-owned fields. “Copy then zero the
+allocation context” is not an established repair.
+
+### Current guideXOS worker lifecycle
+
+The actual Phase 53M driver path is:
+
+```text
+initialize_nativeaot_tls(image, boot services)
+  -> allocate raw main GS/vector/TLS/TEB pages
+  -> zero pages and copy only the PE TLS template
+  -> install TLS vector and synthetic TEB stack bounds
+  -> activate main GS
+  -> call NativeAOT process entry once
+  -> scheduler adopts the main GS/vector/TLS/TEB as boot TCB identity 1
+
+gxos_managed_kernel_driver_worker_initialize
+  -> create scheduler event
+  -> gxos_scheduler_create_suspended_thread
+       -> allocate 16 KiB private stack and canary page
+       -> allocate zeroed private GS/vector/TLS/TEB pages
+       -> write vector/TEB/GS scheduler fields
+       -> assign scheduler identity 5 in the authoritative capture
+  -> resume the scheduler TCB
+
+gate4_loader.c Phase 9 setup
+  -> read the payload TLS index
+  -> pass g_tls_block and 0x1000 to
+     gxos_managed_kernel_driver_worker_configure_nativeaot_tls
+  -> zero worker vector and worker block
+  -> copy the entire initialized main TLS block byte-by-byte
+  -> install worker block in the worker TLS vector
+
+first scheduler activation
+  -> scheduler context switch saves/restores registers, RSP, flags, FP state,
+     XMM state, and GS base
+  -> worker entry sets scheduler sentinels
+  -> worker calls GxManagedKernelRunDriverWorker through the generated thunk
+  -> managed worker allocates/publishes/dispatches
+  -> worker waits, wakes, yields, or terminates through scheduler APIs
+
+stop/reclaim
+  -> signal worker event and pump scheduler until TCB is terminated
+  -> close handle and collect scheduler objects
+  -> unregister scheduler stack VM region
+  -> free scheduler stack/canary/GS/vector/TLS/TEB pages
+  -> clear scheduler TCB
+```
+
+The worker helper and call site are in
+[managed_kernel_driver_worker.c](../src/Gate4Harness/managed_kernel_driver_worker.c)
+and [gate4_loader.c](../src/Gate4Harness/gate4_loader.c). The scheduler's
+environment creation, boot adoption, context switch, and reclamation are in
+[scheduler_foundation.c](../src/Gate4Harness/scheduler_foundation.c),
+[scheduler_foundation.h](../src/Gate4Harness/scheduler_foundation.h), and
+[scheduler_context.S](../src/Gate4Harness/scheduler_context.S).
+
+### Contract mismatch matrix
+
+| Requirement | v10.0.11 expected path | Current guideXOS path | Status |
+| --- | --- | --- | --- |
+| Unique runtime Thread | `tls_CurrentThread` is fresh per attached execution context | Worker receives a byte-for-byte copy of main runtime-local state | **FAIL** |
+| ThreadStore registration | `ThreadStore::AttachCurrentThread` pushes the constructed Thread | No worker-side call; copied `TSF_Attached` suppresses slow attach | **FAIL** |
+| Fresh allocation context | zero TLS initialization, then runtime/GC owns one context | main nonzero `gc_alloc_context` copied into worker | **FAIL; M3 reproduced** |
+| Combined allocation limit | runtime keeps `combined_limit` aligned with the worker context | main wrapper field copied with main context | **FAIL/unproven** |
+| TLS template | copy image TLS template, then runtime-populate thread state | main initialized runtime block copied after startup | **FAIL** |
+| Thread flags | begin `TSF_Unknown`; runtime sets `TSF_Attached` | worker inherits main attachment flags | **FAIL** |
+| Transition frame/mode | runtime saves frame and enters cooperative mode; return restores it | worker inherits main transition pointers and mode | **FAIL/unproven** |
+| ThreadStore link | runtime owns a valid list link | worker may contain copied main link but is not inserted | **FAIL/dangerous alias** |
+| Exception state | fresh per-thread state | copied pointers/state | **FAIL/unproven** |
+| Thread statics/GC registrations | runtime constructs and registers worker-specific state | copied runtime pointers; no worker registration proof | **FAIL/unproven** |
+| OS thread identity/handle | `Construct` obtains current OS identity/handle | copied main fields; scheduler identity is separate | **FAIL** |
+| Stack bounds | `PalGetMaximumStackBounds` initializes runtime Thread bounds | scheduler writes synthetic TEB and owns separate stack ledger | **PARTIAL; runtime use unproven** |
+| GS/TLS activation | PAL/runtime current TLS points to the attached Thread | scheduler switches GS/vector manually | **PARTIAL** |
+| FLS | runtime PAL associates current fiber and invokes detach callback | guideXOS virtualizes values per TCB | **PARTIAL; detach missing** |
+| GC allocation enumeration | GC walks ThreadStore entries | main selected; worker entry not proven in current driver path | **FAIL** |
+| GC root scanning | ThreadStore entry, valid transition frame, stack bounds | worker stack is scheduler-visible but not runtime-registered | **FAIL for current driver worker** |
+| GC suspension | runtime PAL/thread-store suspension protocol | scheduler queue/context switch protocol | **UNPROVEN** |
+| Managed entry | generated reverse-P/Invoke thunk | same generated export thunk | **PASS for entry mechanism** |
+| Runtime initialization | attach slow path may ensure initialization | process startup is called once before worker | **PASS for existing startup prerequisite** |
+| Detach/unregister | FLS/fiber callback -> `RuntimeThreadShutdown` -> ThreadStore detach | TCB reclaim frees TLS without runtime detach | **FAIL; critical unresolved issue** |
+| Allocator ownership | one active context per registered runtime Thread | cloned main and worker contexts can claim same range | **FAIL; Phase 53M M3** |
+
+### Main and worker identity mapping
+
+| guideXOS context | Scheduler state | GS / TLS facts | NativeAOT Thread / ThreadStore conclusion |
+| --- | --- | --- | --- |
+| Main TCB, identity 1 | boot/current; adopted after NativeAOT startup | `initialize_nativeaot_tls` creates the raw environment; scheduler adopts `g_gs_area`, `g_tls_vector`, `g_tls_block`, and main TEB | `RawGetCurrentThread()` points into main TLS; main context is the record selected by Phase 53M `GcEnumAllocContexts` and is GC-visible |
+| Driver worker TCB, identity 5 | private stack; scheduler current during the Phase 53M failure | private GS/vector/TLS/TEB, then full initialized main block clone; worker context advances independently | a pointer-shaped copied `Thread` storage exists, but no distinct valid ThreadStore registration is proven; source semantics say the copied attached flag bypasses the attach path |
+| Callback-probe worker, representative identity 5 | fresh scheduler TCB, no TLS copy | private zeroed TLS; generated callback thunk changes runtime state from unknown to attached/preemptive sentinel | entry-time attachment is established by the exact thunk/source path and bounded GC proof; post-TCB-reclaim runtime detach is not established |
+
+Consequently, the answer for the current **driver** worker is:
+
+1. It has a distinct guideXOS TCB, stack, GS base, TLS vector, TLS block, FLS
+   storage, and scheduler identity.
+2. It does not currently have a proven distinct valid NativeAOT ThreadStore
+   record.
+3. It executes through a copied runtime-local `Thread` representation whose
+   `TSF_Attached` state prevents the normal foreign-thread registration path.
+4. Its managed stack is not currently proven safely visible to NativeAOT GC;
+   the separate fresh callback/GC probe only proves the narrower live-worker
+   case before scheduler reclamation.
+
+### Existing path versus bypass
+
+The repository already contains a **fresh-entry** path in the callback probe:
+create a zeroed scheduler environment, enter a generated export, let
+`RhpReversePInvoke` attach, execute managed code, return through the generated
+transition, and run GC while the worker remains live. This is a real existing
+mechanism and is the reason N5 is a valid secondary classification.
+
+The managed driver worker bypasses that entry precondition by invoking
+`gxos_managed_kernel_driver_worker_configure_nativeaot_tls` after creating the
+worker and copying the initialized main block. The bypass explains the Phase
+53M wrong-context selection, but reusing the fresh-entry pattern alone does
+not resolve the missing runtime detach before TCB/TLS reclamation.
+
+### Runtime helpers and callable boundary
+
+The exact v10.0.11 helper set relevant to guideXOS is:
+
+| Helper/API | Visibility/calling convention | Role and guideXOS status |
+| --- | --- | --- |
+| `RhpReversePInvoke` | generated/runtime `FCIMPL1`; takes `ReversePInvokeFrame*` | Entry transition; called by generated export thunk, not directly by current loader |
+| `RhpReversePInvokeAttachOrTrapThread2` | `EXTERN_C NOINLINE`, `FASTCALL`; internal bridge to `Thread::ReversePInvokeAttachOrTrapThread` | Internal slow attach helper; not a complete public worker lifecycle API |
+| `RhpReversePInvokeReturn` | generated/runtime `FCIMPL1`; takes `ReversePInvokeFrame*` | Restores the saved transition state; does not detach |
+| `ThreadStore::AttachCurrentThread` | internal C++ static method | Constructs/registers current TLS Thread; reached by reverse P/Invoke or runtime thread entry |
+| `ThreadStore::DetachCurrentThread` | internal C++ static method | Removes/fixes/destroys current runtime Thread; no current direct guideXOS call |
+| `RhGetThreadEntryPointAddress` | exported runtime `FCIMPL0` returning a function pointer | Returns runtime-created-thread entrypoint; not an arbitrary TCB attach API |
+| `RhThreadEntryPoint` | internal static platform thread entry | Attaches an OS-created runtime thread and invokes classlib ThreadEntryPoint |
+| `PalAttachThread` | internal PAL hook | Associates runtime Thread with current OS thread/fiber; Windows PAL rejects multiple runtime Threads on one fiber |
+| `PalGetMaximumStackBounds` | internal PAL hook | Supplies runtime Thread stack bounds |
+| `PalInitComAndFlsSlot` / `FlsAlloc` | internal PAL plus imported platform FLS | Allocates the runtime FLS slot and shutdown callback |
+| `FiberDetachCallback` / `RuntimeThreadShutdown` | internal callback/shutdown path | Expected detach/unregister trigger; missing from scheduler TCB destruction |
+
+The generated `GxManagedKernelRunDriverWorker` export is the legitimate
+callable boundary already used by guideXOS. Directly fabricating a
+`ReversePInvokeFrame`, calling internal attach code, or writing runtime flags
+would not establish the missing platform/thread-store ownership. A proper
+bridge must be a NativeAOT platform/runtime shim or must give each runtime
+Thread a lifecycle that actually invokes the runtime-owned detach path.
+
+### Proposed supported lifecycle for Phase 53O
+
+This is a proposal, not a Phase 53N implementation. It has two possible
+architectural forms, and the detach/GC choice must be made before production
+code changes.
+
+#### Form 1: one runtime Thread per actual OS/fiber execution context
+
+```text
+create scheduler/native execution context with a one-to-one runtime home fiber
+  -> allocate private stack and raw zeroed TLS/vector/GS/TEB state
+  -> initialize the platform PAL/FLS association for that execution context
+  -> enter the generated UnmanagedCallersOnly export
+  -> RhpReversePInvoke sees TSF_Unknown
+  -> ThreadStore::AttachCurrentThread
+       -> PalAttachThread
+       -> Thread::Construct
+       -> fresh zero allocation context and stack bounds
+       -> TSF_Attached and ThreadStore insertion
+  -> generated transition enters managed cooperative mode
+  -> GC enumerates/suspends the registered Thread and its managed stack
+  -> generated return restores preemptive state
+  -> destroy the home fiber / invoke the equivalent runtime shutdown callback
+  -> RuntimeThreadShutdown
+       -> ThreadStore::DetachCurrentThread
+       -> FixAllocContext and Thread::Destroy
+  -> only then release guideXOS TLS, GS, stack, FLS, and TCB resources
+```
+
+This form preserves the v10.0.11 PAL invariant that a fiber has one runtime
+home Thread. It requires proving that guideXOS can provide the corresponding
+OS/fiber lifecycle in the target environment.
+
+#### Form 2: retain green scheduler TCBs with a deliberate NativeAOT port
+
+```text
+create zeroed scheduler TCB/TLS/stack
+  -> NativeAOT port shim creates/registers a matching runtime Thread
+  -> shim binds runtime Thread stack/transition/GC state to the TCB
+  -> every scheduler switch performs the runtime-required Thread/GC state handoff
+  -> GC suspension/root enumeration includes every runnable or blocked green stack
+  -> generated managed entry executes only with the matching current Thread
+  -> scheduler termination calls runtime detach while that TCB/TLS is current
+  -> verify ThreadStore removal and GC quiescence
+  -> release TCB/TLS/stack resources
+```
+
+This is broader than an allocator or scheduler flag change: it requires a
+defined port contract for ThreadStore membership, transition frames, stack
+walking, suspension, FLS callbacks, OS identity/handle behavior, and teardown.
+The current repository does not expose that complete contract.
+
+### N1–N5 ownership classification
+
+* **N1 — not sufficient:** the scheduler can allocate a distinct TCB and call
+  the existing export, but it cannot by itself perform the missing runtime
+  ThreadStore registration and detach lifecycle through an exposed API.
+* **N2 — selected:** a guideXOS NativeAOT platform/runtime shim is needed to
+  connect the scheduler execution-context lifecycle to NativeAOT PAL/FLS,
+  stack, ThreadStore, and shutdown ownership, or to provide a verified shim
+  around the internal runtime boundary.
+* **N3 — selected jointly:** the current NativeAOT platform integration has
+  guideXOS FLS/GS/TEB emulation but lacks the runtime-equivalent per-TCB fiber
+  destruction/shutdown hook and complete custom-thread lifecycle. That is a
+  missing port implementation, not an allocator defect.
+* **N4 — not proven, but a Phase 53O gate:** the v10.0.11 Windows PAL assumes
+  one home fiber per runtime Thread, while guideXOS multiplexes green TCBs.
+  The bounded callback/GC proof shows this is not immediately impossible in
+  the current emulation, but full suspension and teardown compatibility are
+  unresolved. If those cannot be proven, the ownership escalates to N4.
+* **N5 — true as a secondary finding:** the repository's fresh zeroed callback
+  path already exercises the correct reverse-P/Invoke entry mechanism, while
+  the managed driver worker bypasses it with a full initialized-TLS clone.
+  N5 does not eliminate the N2/N3 detach gap.
+
+### Diagnostics, validation, and preserved captures
+
+No production or diagnostic source changes were made in Phase 53N. The audit
+used read-only source inspection, the exact v10.0.11 source clone, repository
+preflight, the existing callback/GC documentation and source path, and the
+authoritative Phase 53M artifacts. No build, QEMU boot, or allocator rerun was
+performed because the repair threshold was not met.
+
+The authoritative Phase 53M raw captures remain preserved at:
+
+```text
+artifacts/phase53m-alloc-context-handoff-capture-1
+artifacts/phase53m-alloc-context-handoff-capture-2
+artifacts/phase53m-alloc-context-handoff-capture-3
+artifacts/phase53m-alloc-context-handoff-capture-4
+artifacts/phase53m-alloc-context-handoff-capture-5
+artifacts/phase53m-alloc-context-handoff-capture-6
+artifacts/phase53m-alloc-context-handoff-capture-7
+```
+
+Capture 7 remains the most complete stale-context selection trace. The
+existing bounded fresh-entry/GC evidence is documented in
+[NATIVEAOT_SCHEDULER_THREAD_ATTACH.md](NATIVEAOT_SCHEDULER_THREAD_ATTACH.md)
+and [NATIVEAOT_GC_SCHEDULER_THREAD.md](NATIVEAOT_GC_SCHEDULER_THREAD.md).
+
+### Smallest unresolved issue and exact Phase 53O step
+
+The smallest unresolved issue is precise:
+
+> When a fresh scheduler worker has attached through the generated reverse
+> P/Invoke path, what guideXOS-owned event is the authoritative equivalent of
+> NativeAOT's home-fiber destruction, and how does it invoke or replace
+> `RuntimeThreadShutdown` so the worker is removed from ThreadStore and its
+> allocation context is fixed before its TLS block is freed?
+
+The first Phase 53O step should be a non-production diagnostic runtime shim or
+instrumented payload that records, for one fresh worker, the current
+`tls_CurrentThread` address, `TSF` value, ThreadStore membership/list count,
+stack low/high, allocation-context address, FLS value, and the exact detach
+event. The probe must then verify that `GcEnumAllocContexts` no longer sees
+the worker before scheduler TLS/stack reclamation. Only after that evidence
+should the project choose Form 1 or Form 2 and draft a production patch.
+
+### Phase 53N final invariants
+
+* The full initialized 0x1000-byte main TLS clone is **not supported**.
+* The Phase 53M M3 wrong-context selection remains valid.
+* No allocator workaround, `FixAllocContext` change, `SetFree` change,
+  collection suppression, worker pinning, or context hiding was introduced.
+* No production source was changed.
+* Nothing was committed or pushed.
+
+**Phase 53N outcome: E — NativeAOT contract materially narrowed; runtime
+detach/unregister and complete green-scheduler GC lifecycle remain unresolved;
+defer implementation to Phase 53O.**
