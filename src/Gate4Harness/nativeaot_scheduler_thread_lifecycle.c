@@ -13,11 +13,295 @@
 #define PHASE53O_PHASE_IN_MANAGED 8U
 #define PHASE53O_PHASE_AFTER_MANAGED_RETURN 9U
 
+static uint64_t lifecycle_load_u64(uint64_t address, uint32_t offset)
+{
+    return *(const uint64_t *)(uintptr_t)(address + offset);
+}
+
+int gxos_nativeaot_scheduler_threadstore_count(uint64_t head,
+                                                uint64_t *last_out)
+{
+    uint32_t count = 0;
+    uint64_t current = head;
+    uint64_t last = 0;
+
+    while (current != 0 && count != PHASE53O_THREADSTORE_MAX) {
+        last = current;
+        current = lifecycle_load_u64(
+            current, GXOS_NATIVEAOT_TLS_THREADSTORE_NEXT_OFFSET);
+        ++count;
+    }
+    if (current != 0) return 0;
+    if (last_out != 0) *last_out = last;
+    return (int)count;
+}
+
+int gxos_nativeaot_scheduler_worker_prepare(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    GXOS_SCHEDULER_TCB *main_thread, GXOS_SCHEDULER_TCB *thread,
+    uint32_t tls_index, uint32_t runtime_fls_slot,
+    GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup)
+{
+    GXOS_SCHEDULER_TCB *current = gxos_scheduler_current_thread();
+    if (lifecycle == 0 || main_thread == 0 || thread == 0 ||
+        main_thread == thread || (current != main_thread && current != thread) ||
+        tls_index >= GXOS_SCHEDULER_TLS_VECTOR_SLOTS ||
+        runtime_fls_slot >= GXOS_SCHEDULER_FLS_SLOTS ||
+        runtime_fls_cleanup == 0 || !main_thread->live ||
+        !thread->live || thread->is_boot_thread ||
+        thread->fls_values[runtime_fls_slot] != 0 ||
+        main_thread->fls_values[runtime_fls_slot] == 0 ||
+        thread->tls_block_base == 0 ||
+        thread->tls_block_base == main_thread->tls_block_base ||
+        !gxos_scheduler_validate_thread_context(thread)) {
+        return 0;
+    }
+    /* The vector is fresh scheduler-owned storage.  Install the PE TLS
+       template at the actual NativeAOT TLS slot; slot zero is only the
+       scheduler's initial placeholder and is not a substitute for the PE
+       loader's TLS index. */
+    {
+        uint64_t *vector = (uint64_t *)(uintptr_t)thread->tls_vector_base;
+        if (tls_index != 0) vector[0] = 0;
+        vector[tls_index] = thread->tls_block_base;
+    }
+    lifecycle->main_thread = main_thread;
+    lifecycle->thread = thread;
+    lifecycle->tls_index = tls_index;
+    lifecycle->runtime_fls_slot = runtime_fls_slot;
+    lifecycle->runtime_fls_cleanup = runtime_fls_cleanup;
+    lifecycle->main_runtime_thread =
+        main_thread->fls_values[runtime_fls_slot];
+    lifecycle->main_allocation_context = lifecycle->main_runtime_thread +
+                                         GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET;
+    lifecycle->allocation_context = thread->tls_block_base + 0x38U;
+    lifecycle->main_alloc_limit = lifecycle_load_u64(
+        lifecycle->main_allocation_context,
+        GXOS_NATIVEAOT_THREAD_ALLOC_LIMIT_OFFSET -
+            GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET);
+    lifecycle->main_alloc_ptr = lifecycle_load_u64(
+        lifecycle->main_allocation_context,
+        0);
+    lifecycle->alloc_limit_before = 0;
+    lifecycle->alloc_ptr_before = 0;
+    lifecycle->detached = 0;
+    return lifecycle->main_runtime_thread != 0;
+}
+
+static int lifecycle_current_thread_is_active(
+    const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    return lifecycle != 0 && lifecycle->thread != 0 &&
+           gxos_scheduler_current_thread() == lifecycle->thread &&
+           lifecycle->thread->live && !lifecycle->thread->is_boot_thread &&
+           lifecycle->runtime_fls_slot < GXOS_SCHEDULER_FLS_SLOTS &&
+           lifecycle->thread->fls_values[lifecycle->runtime_fls_slot] != 0;
+}
+
+static int lifecycle_capture_attached(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    GXOS_SCHEDULER_TCB *thread = lifecycle->thread;
+    uint64_t runtime_thread = thread->fls_values[
+        lifecycle->runtime_fls_slot];
+    uint64_t main_thread = lifecycle->main_runtime_thread;
+
+    lifecycle->runtime_thread = runtime_thread;
+    if (runtime_thread == 0 || main_thread == 0) {
+        lifecycle->runtime_state_before = 0;
+        lifecycle->runtime_transition_frame = 0;
+        lifecycle->runtime_stack_low = 0;
+        lifecycle->runtime_stack_high = 0;
+        lifecycle->alloc_limit_before = 0;
+        lifecycle->alloc_ptr_before = 0;
+        lifecycle->main_alloc_limit = 0;
+        lifecycle->main_alloc_ptr = 0;
+        lifecycle->threadstore_before = 0;
+        lifecycle->threadstore_after = 0;
+        return 0;
+    }
+    lifecycle->runtime_state_before = lifecycle_load_u64(
+        runtime_thread, GXOS_NATIVEAOT_TLS_STATE_FLAGS_OFFSET);
+    lifecycle->runtime_transition_frame = lifecycle_load_u64(
+        runtime_thread, GXOS_NATIVEAOT_TLS_TRANSITION_FRAME_OFFSET);
+    lifecycle->runtime_stack_low = lifecycle_load_u64(
+        runtime_thread, GXOS_NATIVEAOT_TLS_STACK_LOW_OFFSET);
+    lifecycle->runtime_stack_high = lifecycle_load_u64(
+        runtime_thread, GXOS_NATIVEAOT_TLS_STACK_HIGH_OFFSET);
+    lifecycle->alloc_limit_before = lifecycle_load_u64(
+        runtime_thread, GXOS_NATIVEAOT_THREAD_ALLOC_LIMIT_OFFSET);
+    lifecycle->alloc_ptr_before = lifecycle_load_u64(
+        runtime_thread, GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET);
+    lifecycle->main_alloc_limit = lifecycle_load_u64(
+        main_thread, GXOS_NATIVEAOT_THREAD_ALLOC_LIMIT_OFFSET);
+    lifecycle->main_alloc_ptr = lifecycle_load_u64(
+        main_thread, GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET);
+    lifecycle->threadstore_before =
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(main_thread, 0);
+    lifecycle->threadstore_after =
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(runtime_thread, 0);
+    return runtime_thread == thread->tls_block_base + 0x30U &&
+           runtime_thread != main_thread &&
+           lifecycle->runtime_state_before ==
+               GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED &&
+           lifecycle->runtime_transition_frame == UINT64_MAX &&
+           lifecycle->runtime_stack_low == thread->stack_base &&
+           lifecycle->runtime_stack_high == thread->stack_limit &&
+           thread->context.rsp >= lifecycle->runtime_stack_low &&
+           thread->context.rsp <= lifecycle->runtime_stack_high &&
+           lifecycle->threadstore_after == lifecycle->threadstore_before + 1U;
+}
+
+int gxos_nativeaot_scheduler_worker_attach(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_bridge, int32_t input,
+    int32_t *result, uint32_t *callback_status_out)
+{
+    uint32_t status;
+    if (callback_status_out != 0) *callback_status_out = UINT32_MAX;
+    if (lifecycle == 0 || managed_bridge == 0 || result == 0 ||
+        lifecycle->attached || lifecycle->detached ||
+        lifecycle->runtime_fls_cleanup == 0 || lifecycle->thread == 0 ||
+        lifecycle->main_runtime_thread == 0 ||
+        gxos_scheduler_current_thread() != lifecycle->thread) {
+        return 0;
+    }
+    status = (uint32_t)gxos_nativeaot_callback_invoke(
+        managed_bridge, input, result);
+    if (callback_status_out != 0) *callback_status_out = status;
+    if (status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        !lifecycle_current_thread_is_active(lifecycle)) {
+        return 0;
+    }
+    lifecycle->attached = 1;
+    return lifecycle_capture_attached(lifecycle);
+}
+
+int gxos_nativeaot_scheduler_worker_invoke(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_bridge, int32_t input,
+    int32_t *result, uint32_t *callback_status_out)
+{
+    uint32_t status;
+    if (callback_status_out != 0) *callback_status_out = UINT32_MAX;
+    if (lifecycle == 0 || managed_bridge == 0 || result == 0 ||
+        lifecycle->detached || lifecycle->thread == 0 ||
+        gxos_scheduler_current_thread() != lifecycle->thread) {
+        return 0;
+    }
+    if (!lifecycle->attached) {
+        return gxos_nativeaot_scheduler_worker_attach(
+            lifecycle, managed_bridge, input, result, callback_status_out);
+    }
+    if (!lifecycle_current_thread_is_active(lifecycle)) return 0;
+    if (lifecycle->thread->fls_values[lifecycle->runtime_fls_slot] !=
+            lifecycle->runtime_thread ||
+        lifecycle_load_u64(lifecycle->runtime_thread,
+                           GXOS_NATIVEAOT_TLS_STATE_FLAGS_OFFSET) !=
+            GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED) {
+        return 0;
+    }
+    status = (uint32_t)gxos_nativeaot_callback_invoke(
+        managed_bridge, input, result);
+    if (callback_status_out != 0) *callback_status_out = status;
+    if (status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        !lifecycle_current_thread_is_active(lifecycle) ||
+        lifecycle->thread->fls_values[lifecycle->runtime_fls_slot] !=
+            lifecycle->runtime_thread) {
+        return 0;
+    }
+    lifecycle->alloc_limit_after = lifecycle_load_u64(
+        lifecycle->runtime_thread, GXOS_NATIVEAOT_THREAD_ALLOC_LIMIT_OFFSET);
+    lifecycle->alloc_ptr_after = lifecycle_load_u64(
+        lifecycle->runtime_thread, GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET);
+    lifecycle->main_alloc_limit = lifecycle_load_u64(
+        lifecycle->main_runtime_thread, GXOS_NATIVEAOT_THREAD_ALLOC_LIMIT_OFFSET);
+    lifecycle->main_alloc_ptr = lifecycle_load_u64(
+        lifecycle->main_runtime_thread, GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET);
+    return 1;
+}
+
+int gxos_nativeaot_scheduler_worker_detach(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    uint64_t value;
+    if (lifecycle == 0 || !lifecycle->attached || lifecycle->detached ||
+        !lifecycle_current_thread_is_active(lifecycle) ||
+        lifecycle->runtime_fls_cleanup == 0) {
+        return 0;
+    }
+    value = lifecycle->thread->fls_values[lifecycle->runtime_fls_slot];
+    if (value != lifecycle->runtime_thread) return 0;
+    lifecycle->runtime_fls_cleanup((void *)(uintptr_t)value);
+    lifecycle->runtime_state_after = lifecycle_load_u64(
+        value, GXOS_NATIVEAOT_TLS_STATE_FLAGS_OFFSET);
+    lifecycle->alloc_limit_after_detach = lifecycle_load_u64(
+        value, GXOS_NATIVEAOT_THREAD_ALLOC_LIMIT_OFFSET);
+    lifecycle->alloc_ptr_after_detach = lifecycle_load_u64(
+        value, GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET);
+    lifecycle->threadstore_head_after = lifecycle->main_thread->fls_values[
+        lifecycle->runtime_fls_slot];
+    lifecycle->threadstore_after =
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+            lifecycle->threadstore_head_after, 0);
+    if (lifecycle->runtime_state_after !=
+            GXOS_NATIVEAOT_RUNTIME_THREAD_DETACHED ||
+        lifecycle->threadstore_after != lifecycle->threadstore_before ||
+        lifecycle->alloc_limit_after_detach != 0 ||
+        lifecycle->alloc_ptr_after_detach != 0) {
+        return 0;
+    }
+    gxos_scheduler_set_fls(lifecycle->runtime_fls_slot, 0);
+    if (gxos_scheduler_get_fls(lifecycle->runtime_fls_slot) != 0) return 0;
+    lifecycle->detached = 1;
+    return 1;
+}
+
+int gxos_nativeaot_scheduler_worker_no_stale_context_overlap(
+    const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    uint64_t object_address, uint64_t object_size,
+    uint64_t *offending_context_out)
+{
+    uint64_t current;
+    uint64_t object_end;
+    uint32_t count = 0;
+    if (offending_context_out != 0) *offending_context_out = 0;
+    if (lifecycle == 0 || !lifecycle->attached || lifecycle->runtime_thread == 0 ||
+        object_address == 0 || object_size == 0 ||
+        object_address > UINT64_MAX - object_size ||
+        lifecycle_load_u64(lifecycle->runtime_thread,
+                           GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET) <= object_address) {
+        return 0;
+    }
+    object_end = object_address + object_size;
+    if (object_end > lifecycle_load_u64(
+            lifecycle->runtime_thread, GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET)) {
+        return 0;
+    }
+    current = lifecycle->runtime_thread;
+    while (current != 0 && count != PHASE53O_THREADSTORE_MAX) {
+        uint64_t alloc_ptr = lifecycle_load_u64(
+            current, GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET);
+        uint64_t alloc_limit = lifecycle_load_u64(
+            current, GXOS_NATIVEAOT_THREAD_ALLOC_LIMIT_OFFSET);
+        if (current != lifecycle->runtime_thread && alloc_ptr == object_address &&
+            alloc_limit > alloc_ptr) {
+            if (offending_context_out != 0) *offending_context_out = current;
+            return 0;
+        }
+        current = lifecycle_load_u64(
+            current, GXOS_NATIVEAOT_TLS_THREADSTORE_NEXT_OFFSET);
+        ++count;
+    }
+    return current == 0;
+}
+
 typedef struct {
     GXOS_PHASE53O_PROBE *probe;
     uint32_t cycle;
     GXOS_SCHEDULER_HANDLE handle;
     GXOS_SCHEDULER_TCB *thread;
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE lifecycle;
     uint32_t callback_status;
     int32_t callback_result;
     uint32_t gc_status;
@@ -79,19 +363,8 @@ static int phase53o_fail(GXOS_PHASE53O_CYCLE *cycle)
 static uint32_t phase53o_threadstore_count(uint64_t head,
                                              uint64_t *last_out)
 {
-    uint32_t count = 0;
-    uint64_t current = head;
-    uint64_t last = 0;
-
-    while (current != 0 && count != PHASE53O_THREADSTORE_MAX) {
-        last = current;
-        current = phase53o_load_u64(current,
-                                    PHASE53O_TLS_THREADSTORE_NEXT_OFFSET);
-        ++count;
-    }
-    if (current != 0) return 0;
-    if (last_out != 0) *last_out = last;
-    return count;
+    return (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+        head, last_out);
 }
 
 static uint32_t phase53o_canary_mask(const GXOS_SCHEDULER_TCB *thread)
@@ -256,54 +529,53 @@ phase53o_worker(void *argument)
         thread->tls_block_base == probe->main_tls_block ||
         thread->fls_values[probe->runtime_fls_slot] != 0 ||
         thread->tls_vector_base == 0 || thread->gs_base == 0 ||
-        thread->teb_base == 0 ||
-        !gxos_scheduler_validate_thread_context(thread)) {
+         thread->teb_base == 0 ||
+         !gxos_scheduler_validate_thread_context(thread)) {
         return (uintptr_t)phase53o_fail(cycle);
     }
-    cycle->allocation_context = thread->tls_block_base + 0x30U;
-    cycle->main_allocation_context = probe->main_tls_block + 0x30U;
+    if (!gxos_nativeaot_scheduler_worker_prepare(
+            &cycle->lifecycle, probe->main_thread, thread,
+            probe->tls_index, probe->runtime_fls_slot,
+            probe->runtime_fls_cleanup)) {
+        return (uintptr_t)phase53o_fail(cycle);
+    }
+    cycle->allocation_context = cycle->lifecycle.allocation_context;
+    cycle->main_allocation_context = cycle->lifecycle.main_allocation_context;
     cycle->stack_canary_memory = thread->stack_canary_memory;
-    cycle->alloc_limit_before =
-        phase53o_load_u64(thread->tls_block_base,
-                          PHASE53O_TLS_ALLOC_LIMIT_OFFSET);
-    cycle->alloc_ptr_before =
-        phase53o_load_u64(thread->tls_block_base, PHASE53O_TLS_ALLOC_PTR_OFFSET);
     phase53o_text(probe, "GXOS_NET10:PHASE53O_THREAD_CYCLE_BEGIN\r\n");
+    phase53o_hex(probe, "GXOS_NET10:PHASE53O_TLS_INDEX=0x",
+                 probe->tls_index);
+    phase53o_hex(probe, "GXOS_NET10:PHASE53O_TLS_VECTOR_SLOT0=0x",
+                 ((uint64_t *)(uintptr_t)thread->tls_vector_base)[0]);
+    phase53o_hex(probe, "GXOS_NET10:PHASE53O_TLS_VECTOR_SLOT_TLS=0x",
+                 ((uint64_t *)(uintptr_t)thread->tls_vector_base)[probe->tls_index]);
     phase53o_text(probe, "GXOS_NET10:MANAGED_THREAD_ATTACH_STATE=UNATTACHED_DIAGNOSTIC\r\n");
 
     probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
-    cycle->callback_status = (uint32_t)gxos_nativeaot_callback_invoke(
-        probe->callback_bridge, cycle->cycle == 1U ? 7 : 9, &callback_result);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->lifecycle, probe->callback_bridge,
+            cycle->cycle == 1U ? 7 : 9, &callback_result,
+            &cycle->callback_status)) {
+        good = 0;
+    }
     probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
     cycle->callback_result = callback_result;
-    if (cycle->callback_status != GXOS_NATIVEAOT_CALLBACK_OK) good = 0;
-
-    cycle->runtime_thread =
-        (uint64_t)thread->fls_values[probe->runtime_fls_slot];
-    cycle->runtime_state_before =
-        cycle->runtime_thread == 0 ? 0 :
-        phase53o_load_u64(cycle->runtime_thread,
-                          PHASE53O_TLS_STATE_FLAGS_OFFSET);
-    cycle->runtime_transition_frame =
-        cycle->runtime_thread == 0 ? 0 :
-        phase53o_load_u64(cycle->runtime_thread,
-                          PHASE53O_RUNTIME_TRANSITION_FRAME_OFFSET);
-    cycle->runtime_next =
-        cycle->runtime_thread == 0 ? 0 :
-        phase53o_load_u64(cycle->runtime_thread,
-                          PHASE53O_TLS_THREADSTORE_NEXT_OFFSET);
-    cycle->runtime_stack_low =
-        cycle->runtime_thread == 0 ? 0 :
-        phase53o_load_u64(cycle->runtime_thread,
-                          PHASE53O_TLS_STACK_LOW_OFFSET);
-    cycle->runtime_stack_high =
-        cycle->runtime_thread == 0 ? 0 :
-        phase53o_load_u64(cycle->runtime_thread,
-                          PHASE53O_TLS_STACK_HIGH_OFFSET);
-    cycle->threadstore_before =
-        phase53o_threadstore_count(cycle->runtime_thread, 0);
-    if (cycle->runtime_thread != thread->tls_block_base + 0x30U ||
-        cycle->runtime_state_before != PHASE53O_RUNTIME_THREAD_ATTACHED ||
+    cycle->runtime_thread = cycle->lifecycle.runtime_thread;
+    cycle->runtime_state_before = cycle->lifecycle.runtime_state_before;
+    cycle->runtime_transition_frame = cycle->lifecycle.runtime_transition_frame;
+    cycle->runtime_next = phase53o_load_u64(
+        cycle->runtime_thread, PHASE53O_TLS_THREADSTORE_NEXT_OFFSET);
+    cycle->runtime_stack_low = cycle->lifecycle.runtime_stack_low;
+    cycle->runtime_stack_high = cycle->lifecycle.runtime_stack_high;
+    cycle->alloc_limit_before = cycle->lifecycle.alloc_limit_before;
+    cycle->alloc_ptr_before = cycle->lifecycle.alloc_ptr_before;
+    /* Preserve the diagnostic report's historical meaning: BEFORE is the
+       attached census, while the shared lifecycle keeps its separate
+       pre-attach baseline for detach validation. */
+    cycle->threadstore_before = cycle->lifecycle.threadstore_after;
+    if (cycle->callback_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        cycle->runtime_thread != thread->tls_block_base + 0x30U ||
+        cycle->runtime_state_before != GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED ||
         cycle->runtime_transition_frame != UINT64_MAX ||
         cycle->runtime_stack_low != thread->stack_base ||
         cycle->runtime_stack_high != thread->stack_limit ||
@@ -315,8 +587,11 @@ phase53o_worker(void *argument)
     phase53o_text(probe, "GXOS_NET10:MANAGED_THREAD_ATTACH_OK=1\r\n");
 
     probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
-    cycle->gc_status = (uint32_t)gxos_nativeaot_callback_invoke(
-        probe->gc_bridge, (int32_t)seed, &gc_result);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->lifecycle, probe->gc_bridge, (int32_t)seed, &gc_result,
+            &cycle->gc_status)) {
+        good = 0;
+    }
     probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
     cycle->gc_result = gc_result;
     if (cycle->gc_status != GXOS_NATIVEAOT_CALLBACK_OK ||
@@ -327,43 +602,32 @@ phase53o_worker(void *argument)
         cycle->gc_delta == 0U) {
         good = 0;
     }
-    cycle->alloc_limit_after_gc =
-        phase53o_load_u64(cycle->runtime_thread, 0);
-    cycle->alloc_ptr_after_gc =
-        phase53o_load_u64(cycle->runtime_thread, 8U);
+    cycle->alloc_limit_after_gc = cycle->lifecycle.alloc_limit_after;
+    cycle->alloc_ptr_after_gc = cycle->lifecycle.alloc_ptr_after;
     cycle->canary_before_detach = phase53o_canary_mask(thread);
     phase53o_text(probe, "GXOS_NET10:MANAGED_CALLBACK_RETURN_OK=1\r\n");
     phase53o_text(probe, "GXOS_NET10:MANAGED_GC_ALLOCATION_OK=1\r\n");
     phase53o_text(probe, "GXOS_NET10:MANAGED_GC_COLLECTION_OBSERVED=1\r\n");
     phase53o_text(probe, "GXOS_NET10:MANAGED_GC_ROOT_SURVIVED=1\r\n");
 
-    if (probe->runtime_fls_cleanup == 0 || cycle->runtime_thread == 0) {
+    if (!gxos_nativeaot_scheduler_worker_detach(&cycle->lifecycle)) {
         good = 0;
     } else {
-        probe->runtime_fls_cleanup((void *)(uintptr_t)cycle->runtime_thread);
         cycle->cleanup_called = 1;
-        cycle->runtime_state_after =
-            phase53o_load_u64(cycle->runtime_thread,
-                              PHASE53O_TLS_STATE_FLAGS_OFFSET);
+        cycle->runtime_state_after = cycle->lifecycle.runtime_state_after;
         cycle->alloc_limit_after_detach =
-            phase53o_load_u64(cycle->runtime_thread, 0);
+            cycle->lifecycle.alloc_limit_after_detach;
         cycle->alloc_ptr_after_detach =
-            phase53o_load_u64(cycle->runtime_thread, 8U);
+            cycle->lifecycle.alloc_ptr_after_detach;
         cycle->canary_after_detach = phase53o_canary_mask(thread);
-        if (cycle->runtime_state_after != PHASE53O_RUNTIME_THREAD_DETACHED) {
-            good = 0;
-        }
         phase53o_text(probe,
                       "GXOS_NET10:PHASE53O_FLS_CALLBACK_RETURNED=1\r\n");
     }
 
-    gxos_scheduler_set_fls(probe->runtime_fls_slot, 0);
     cycle->scheduler_fls_cleared =
         gxos_scheduler_get_fls(probe->runtime_fls_slot) == 0;
-    cycle->threadstore_head_after =
-        (uint64_t)probe->main_thread->fls_values[probe->runtime_fls_slot];
-    cycle->threadstore_after =
-        phase53o_threadstore_count(cycle->threadstore_head_after, 0);
+    cycle->threadstore_head_after = cycle->lifecycle.threadstore_head_after;
+    cycle->threadstore_after = cycle->lifecycle.threadstore_after;
     if (!cycle->cleanup_called || !cycle->scheduler_fls_cleared ||
         cycle->threadstore_after == 0 ||
         cycle->threadstore_before != cycle->threadstore_after + 1U) {

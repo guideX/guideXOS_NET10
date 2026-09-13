@@ -2208,8 +2208,10 @@ function Invoke-Phase34HttpsExchange11([Net.Sockets.UdpClient]$peerUdp,
                                        [bool]$negativeControl,
                                        [bool]$resourceProof = $false,
                                        [Net.Sockets.TcpClient]$screenMonitor = $null,
-                                       [string]$screenPath = '') {
+    [string]$screenPath = '') {
     $deadline = Get-Phase11Deadline11 $timeoutSeconds
+    $phase53 = [bool]$EnablePhase53Protocol
+    $phase53BadPngCrc = [bool]$EnablePhase53BadPngCrcControl
     $phase52 = [bool]$EnablePhase52Protocol
     $phase52BadPngCrc = [bool]$EnablePhase52BadPngCrcControl
     $phase51 = [bool]($EnablePhase51Protocol -or $EnablePhase51WrongMimeControl -or $EnablePhase51ResetReuseControl)

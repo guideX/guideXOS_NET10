@@ -1224,7 +1224,10 @@ if ($Scenario -eq 'NativeAotEventWait' -or $Scenario -eq 'ManagedKernelPhase11')
     $gccArguments += $multibyteSource
     $gccArguments += $multibyteAssembly
 }
-if ($EnableNativeAotSchedulerThreadLifecycle) {
+if ($EnableNativeAotSchedulerThreadLifecycle -or $PayloadMode -eq 'ManagedKernel') {
+    # Phase 53P shares the Phase 53O attach/return/detach implementation with
+    # the production managed driver worker; the diagnostic entry point remains
+    # gated separately below.
     $gccArguments += $phase53oSource
 }
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }

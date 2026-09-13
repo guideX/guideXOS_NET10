@@ -2816,3 +2816,209 @@ detached through the runtime-owned FLS cleanup path, disappeared from the
 ThreadStore census, and was reclaimed by the scheduler afterward on three
 fresh boots. This is a diagnostic proof only; it does not authorize replacing
 the production TLS-clone worker path in this phase.
+
+## Phase 53P — production managed-driver lifecycle migration
+
+Phase 53P applied the Phase 53O lifecycle to the real
+`ManagedSerialDriverSubsystem` worker. The version-matched NativeAOT runtime
+model remains v10.0.11 at commit
+`79d0c463f1b55624c874a11585f7e47731e8d675`; the repository's historical
+artifact metadata continues to identify 10.0.10 where previously documented.
+
+### Old production lifecycle
+
+The production path before this migration was:
+
+    ManagedSerialDriverSubsystem.RunDriverWorker(stage 1)
+      -> gate4 phase 9 creates event and suspended scheduler TCB
+      -> worker stack, GS area, TLS vector, TLS block, and TEB are allocated
+      -> gxos_managed_kernel_driver_worker_configure_nativeaot_tls(
+           g_tls_block, 0x1000)
+      -> initialized main NativeAOT TLS page is copied byte-for-byte
+      -> scheduler resumes the worker
+      -> worker_entry directly calls the managed RunDriverWorker export
+      -> RunDriverWorker publishes s_driverWorker and dispatches work
+      -> stop destroys the worker and scheduler reclaims its backing state
+
+The `configure_nativeaot_tls` operation duplicated the main thread's live
+NativeAOT `Thread*`, allocation ownership, transition/runtime fields, and
+other thread-owned state. There was no supported NativeAOT attach on worker
+entry and no runtime detach before scheduler reclamation. The helper and its
+historical evidence remain in the Phase 53 forensic record, but the normal
+production worker no longer calls it.
+
+### Production-to-Phase-53O mapping
+
+| Production component | Phase 53O counterpart | Phase 53P action |
+| --- | --- | --- |
+| scheduler TCB creation | diagnostic suspended TCB | unchanged scheduler creation and activation |
+| private stack creation | diagnostic registered stack | reused unchanged stack ownership; runtime receives the same low/high bounds |
+| GS/TLS environment | fresh diagnostic GS/vector/block/TEB | reused fresh scheduler-owned environment |
+| full TLS clone | fresh runtime state | removed from the production worker |
+| direct managed call | generated reverse-P/Invoke callback | replaced by `gxos_nativeaot_callback_invoke` through the shared lifecycle |
+| real worker stage 1 | diagnostic managed callback | invokes `GxManagedKernelRunDriverWorker(1)` |
+| real dispatch stages | diagnostic managed callback | invokes the real stage 2 callback on the scheduler worker |
+| managed return | Phase 53O return | uses the same callback-return boundary |
+| worker teardown | Phase 53O FLS cleanup/detach | runtime cleanup callback, ThreadStore census, then scheduler reclaim |
+
+The shared implementation is in
+`nativeaot_scheduler_thread_lifecycle.c/.h`. Its reusable operations are
+`gxos_nativeaot_scheduler_worker_prepare`,
+`gxos_nativeaot_scheduler_worker_attach`,
+`gxos_nativeaot_scheduler_worker_invoke`, and
+`gxos_nativeaot_scheduler_worker_detach`. The Phase 53O diagnostic worker
+uses those same operations; no second ThreadStore or managed-side runtime
+thread implementation was introduced.
+
+### New production lifecycle
+
+The repaired path is:
+
+    scheduler TCB
+      -> fresh scheduler-owned vector/block/GS/TEB/stack
+      -> PE TLS block installed at the actual TLS index
+      -> generated reverse-P/Invoke enters NativeAOT
+      -> NativeAOT creates and attaches a unique Thread*
+      -> ThreadStore membership and fresh allocation context
+      -> real managed driver worker stage 1
+      -> s_driverWorker publication and real dispatch/GC work
+      -> managed callback returns
+      -> runtime FLS cleanup callback detaches/unregisters Thread*
+      -> ThreadStore absence verified
+      -> scheduler reclaims TLS, stack, and TCB
+
+Phase 53P does not change the driver's purpose, serial protocol, dispatch
+policy, publication semantics, or managed worker layout. The only production
+execution change is the NativeAOT thread/runtime ownership boundary.
+
+### Production identity and allocation proof
+
+Representative clean production run-1 values from
+`evidence/phase53p-production-worker-fresh-boots-v3/runs/run-1/serial.log`
+were:
+
+| Proof item | Main | Production worker |
+| --- | ---: | ---: |
+| scheduler TCB | boot TCB | `0x1A99F0` |
+| stack low/high | main-owned | `0x4CFF000 / 0x4D03000` |
+| GS base | main-owned | `0x4CFE000` |
+| TLS vector/block | main-owned | `0x4CFD000 / 0x4CFC000` |
+| NativeAOT Thread* | `0x4EAA030` | `0x4CFC030` |
+| ThreadStore census before/after attach | `2` | `2 / 3` |
+| ThreadStore census after detach/reclaim | `2` | `2 / 2` |
+| allocation pointer before first callback | main live state | `0` (fresh worker) |
+| first worker allocation | not claimed by main | `0x4000050000FE8`, size `0x40` |
+| worker allocation pointer after | not applicable | `0x4000050001028` |
+| main allocation pointer at same point | `0x4000050000E50` | independently unchanged |
+
+Thus `main Thread* != worker Thread*`, the worker TLS block is distinct from
+the main TLS block, and the worker begins without a copied live bump-pointer
+range. The bounded ThreadStore allocation-context scan reported
+`PHASE53_STALE_CONTEXT_REGRESSION_PASS=1`; it found no second GC-visible
+context whose free boundary claimed the already allocated worker object.
+The worker published `s_driverWorker` successfully.
+
+The production worker also emitted the attach, ThreadStore, stack-bounds,
+allocation-context, GC-root, `GcEnumAllocContexts`, `FixAllocContext`,
+`SetFree`, relocation, post-GC dispatch, return, detach, and reclaim pass
+markers. These are bounded proof markers around the actual managed
+allocation/GC path; no allocator, GC, `FixAllocContext`, or `SetFree`
+implementation was changed.
+
+### Ownership table
+
+| Resource | Created by | Owned while active | Released by |
+| --- | --- | --- | --- |
+| scheduler TCB | guideXOS scheduler | scheduler | scheduler collection after worker termination |
+| native stack | guideXOS scheduler | scheduler; registered with NativeAOT as bounds | scheduler collection after detach |
+| GS state | scheduler worker preparation | scheduler while active; installed on worker switch | scheduler collection |
+| NativeAOT TLS storage | scheduler worker preparation as fresh zeroed storage | scheduler storage plus NativeAOT runtime fields after attach | scheduler after runtime detach |
+| NativeAOT `Thread*` | NativeAOT reverse-P/Invoke attach | NativeAOT ThreadStore and worker FLS slot | runtime FLS cleanup callback |
+| ThreadStore membership | NativeAOT attach | NativeAOT runtime | `ThreadStore::DetachCurrentThread` through cleanup callback |
+| allocation context | NativeAOT attach/runtime | the unique worker `Thread*` | runtime detach/fix-up |
+| managed worker object | real managed stage-1 callback | `ManagedSerialDriverSubsystem.s_driverWorker` and worker managed roots | real managed stop/destroy sequence |
+
+### Historical invariant and canary audit
+
+The historical bad state was:
+
+    main context at X/e50
+      -> full clone copied into worker
+      -> worker allocates object X and advances to X+size
+      -> original main-origin context remains at X
+      -> GC later selects the stale context and SetFree consumes worker memory
+
+The repaired production path cannot produce that state through TLS cloning:
+the worker starts with fresh runtime storage, NativeAOT creates a distinct
+`Thread*`, and the worker's allocation context is independently owned. The
+first production managed allocation and the bounded overlap scan passed on
+all clean worker boots. No `FixAllocContext` or `SetFree` workaround, GC
+suppression, pinning, allocation serialization, or object-layout change was
+introduced.
+
+The Phase 53O low-sentinel canary rehome remains diagnostic-only. Production
+worker allocation and production stack placement do not depend on that
+rehome; the production gate used the normal worker stack allocation.
+
+### Validation
+
+Focused host validation passed, including:
+
+    MANAGED_KERNEL_PHASE53_HOST_TESTS_PASS cases=540
+    MANAGED_KERNEL_DRIVER_WORKER_HOST_TESTS=PASSED
+    scheduler model checks=256
+    NativeAOT GC probe contract checks=8
+    NativeAOT interrupt, stack-VM, durability, memory-accounting, and
+    allocator/GC contract suites passed
+
+The Phase 53O diagnostic regression remained green on three fresh boots. Its
+authoritative payload remains 730112 bytes with SHA-256
+`AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012`, and
+its authoritative EFI remains 538602 bytes with SHA-256
+`40BC0724CB9A5A64D991690DCC8F38AC221948657A67A7C61237ED13E002F37E`.
+
+The production worker-only regression passed 3/3 fresh boots and every boot
+emitted all production lifecycle and stale-context markers. A longer
+25-boot worker stress run passed runs 1 through 11. Run 12 then exposed a
+separate, concrete production-scheduling fault after the worker's fresh
+identity and first managed allocation had passed:
+
+    X64 Exception Type - 0D (#GP)
+    RIP 0x4FF3B80 (payload RVA 0x147B80)
+    RCX 0x48C3C3C920C48378 (invalid Thread-shaped receiver)
+    worker RSP 0x4D028C8
+
+The fault occurred during the real worker's longer dispatch/runtime-activity
+sequence, before the worker GC/return/detach markers. It is not the
+Phase-53M stale allocation-context condition: no duplicate live bump-pointer
+range or `SetFree` ownership violation was observed. Because this is a
+production-only scheduler/NativeAOT compatibility failure under extended
+stress, the migration is not classified as production-ready.
+
+The original broader Phase 53 replay was also executed with the repaired
+worker. The production worker completed its attach, managed publication,
+managed allocation, actual GC/root path, return, detach, and reclaim before
+the page test. The HTML document and stylesheet resource bodies were reached
+in the clean replay, but the host/guest fixture stalled before the content
+image TCP request; an earlier preserved replay reached the image response and
+reported image transport failure (`0x13`). No Phase-53M stale-context marker
+or worker reclamation corruption appeared in those replays. The remaining
+failure is therefore kept as a separate production scheduler/page-fixture
+boundary, not attributed to the repaired TLS ownership defect.
+
+### Phase 53P principal outcome
+
+**Outcome E — production migration exposes broader scheduler/NativeAOT
+compatibility under extended real-worker scheduling.**
+
+Phase 53O generalizes to the real worker for clean attach, ThreadStore
+registration, independent allocation, managed GC/root participation, return,
+detach, and scheduler reclaim. However, the required extended production
+stress was not zero-fault: a later real-worker dispatch entered a
+NativeAOT Thread-state routine with an invalid receiver. The exact failure is
+preserved in
+`evidence/phase53p-production-worker-stress-25/runs/run-12/serial.log`.
+The complete diagnostic Phase 53O proof remains preserved and green, and the
+production migration must not be treated as suitable for retention until this
+broader compatibility failure and the remaining page replay boundary are
+resolved.

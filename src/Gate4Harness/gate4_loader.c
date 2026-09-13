@@ -50,7 +50,8 @@
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
 #include "nativeaot_gc_probe_contract.h"
 #endif
-#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE
+#if defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE) || \
+    defined(GXOS_ENABLE_MANAGED_KERNEL)
 #include "nativeaot_scheduler_thread_lifecycle.h"
 #endif
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
@@ -687,6 +688,11 @@ static GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT
     g_managed_kernel_interrupt_context;
 static GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT
     g_managed_kernel_driver_worker_context;
+static GXOS_NATIVEAOT_CALLBACK_BRIDGE
+    g_managed_kernel_driver_worker_bridge;
+static uint32_t g_managed_kernel_runtime_fls_slot = UINT32_MAX;
+static GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK
+    g_managed_kernel_runtime_fls_cleanup;
 static GX_MANAGED_KERNEL_KEYBOARD_PLATFORM_DEVICE_V1
     g_managed_kernel_keyboard_device;
 static GX_MANAGED_KERNEL_KEYBOARD_STATUS_V1
@@ -5877,7 +5883,7 @@ static void emit_import_failfast_stub(uint8_t *stub, const IMPORT_RECORD *record
     while (cursor < 32) stub[cursor++] = 0xCC;
 }
 
-typedef void (EFIAPI *FlsCleanupCallback)(void *value);
+typedef GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK FlsCleanupCallback;
 static uint8_t g_fls_allocated[64];
 static void *g_fls_values[64];
 static FlsCleanupCallback g_fls_callbacks[64];
@@ -6031,6 +6037,35 @@ static int EFIAPI platform_fls_free(uint32_t index)
     fls_trace("FREE", index, (uintptr_t)value, 0, 1);
     return 1;
 }
+
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+static int nativeaot_managed_kernel_find_runtime_fls(
+    uint32_t *slot_out,
+    GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK *cleanup_out)
+{
+    GXOS_SCHEDULER_TCB *main_thread = gxos_scheduler_current_thread();
+    uint32_t index;
+    uint32_t found = 0;
+    uint32_t found_index = UINT32_MAX;
+
+    if (main_thread == 0 || !main_thread->is_boot_thread ||
+        g_tls_block == 0 || slot_out == 0 || cleanup_out == 0) {
+        return 0;
+    }
+    for (index = 0; index != 64U; ++index) {
+        if (g_fls_allocated[index] && g_fls_callbacks[index] != 0 &&
+            main_thread->fls_allocated[index] &&
+            main_thread->fls_values[index] == g_tls_block + 0x30U) {
+            found_index = index;
+            ++found;
+        }
+    }
+    if (found != 1U) return 0;
+    *slot_out = found_index;
+    *cleanup_out = g_fls_callbacks[found_index];
+    return 1;
+}
+#endif
 
 #ifdef GXOS_ENABLE_GET_MODULE_HANDLE
 static const char *platform_get_module_handle_status_name(
@@ -14672,9 +14707,15 @@ static int managed_kernel_interrupt_wait_for_enqueued(
             __asm__ volatile ("pause" : : : "memory");
             continue;
         }
+        /* A managed activation may drain more than one queued record. The
+           drain is performed by the managed worker callback itself, so a
+           complete drain plus a healthy activation proves the required work
+           without treating event count as activation count. */
         if (__atomic_load_n(&g_managed_kernel_interrupt_context.drained_count,
                             __ATOMIC_ACQUIRE) >= expected_count &&
-            worker->managed_dispatch_count >= expected_count) return 1;
+            worker->managed_dispatch_count != 0U && worker->failure == 0U) {
+            return 1;
+        }
         managed_kernel_interrupt_enable_cpu();
         if (gxos_managed_kernel_driver_worker_pump(worker)) {
             continue;
@@ -14686,6 +14727,23 @@ static int managed_kernel_interrupt_wait_for_enqueued(
         }
     }
     serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WAIT_TIMEOUT\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WAIT_EXPECTED=0x",
+                     expected_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WAIT_ENQUEUED=0x",
+                     __atomic_load_n(&g_managed_kernel_interrupt_context.enqueued_count,
+                                     __ATOMIC_ACQUIRE));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WAIT_DRAINED=0x",
+                     __atomic_load_n(&g_managed_kernel_interrupt_context.drained_count,
+                                     __ATOMIC_ACQUIRE));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WAIT_DISPATCHED=0x",
+                     worker->managed_dispatch_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WAIT_FAILURE=0x",
+                     worker->failure);
+    serial_text("\r\n");
     return 0;
 }
 
@@ -14743,13 +14801,15 @@ static int managed_kernel_interrupt_wait_for_optional_burst(
 
 static void managed_kernel_phase9_interrupt(
     EFI_BOOT_SERVICES *boot_services,
-    const PE_IMAGE *image,
     ManagedKernelInstallInterruptServicesEntry install_interrupt_services,
     ManagedKernelInstallInputServicesEntry install_input_services,
     ManagedKernelRunPhase9Entry run_phase9,
     ManagedKernelRunDriverWorkerEntry run_driver_worker,
     ManagedKernelRunPhase10Entry run_phase10,
-    ManagedKernelRunPhase11Entry run_phase11)
+    ManagedKernelRunPhase11Entry run_phase11,
+    GXOS_NATIVEAOT_CALLBACK_BRIDGE *worker_bridge,
+    uint32_t tls_index, uint32_t runtime_fls_slot,
+    GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup)
 {
     GX_MANAGED_KERNEL_INTERRUPT_SERVICES_V1 bad_services;
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE11
@@ -14780,12 +14840,13 @@ static void managed_kernel_phase9_interrupt(
     const uint64_t driver_arena_bytes = 0x7000ULL;
     const uint64_t driver_arena_virtual_bytes = 0x5000ULL;
     const uint64_t driver_arena_reserved_bytes = 0x2000ULL;
-    uint32_t tls_index;
-    const uint8_t *tls_source;
 
-    if (boot_services == 0 || image == 0 || install_interrupt_services == 0 ||
+    if (boot_services == 0 || install_interrupt_services == 0 ||
         install_input_services == 0 || run_phase9 == 0 ||
         run_driver_worker == 0 || run_phase10 == 0 || run_phase11 == 0 ||
+        worker_bridge == 0 || tls_index >= GXOS_SCHEDULER_TLS_VECTOR_SLOTS ||
+        runtime_fls_slot >= 64U ||
+        runtime_fls_cleanup == 0 ||
         g_managed_kernel_serial_context.successful_transmit_count != 2U) {
         fail("managed-kernel-interrupt-precondition");
     }
@@ -14848,21 +14909,12 @@ static void managed_kernel_phase9_interrupt(
     if (!gxos_managed_kernel_driver_worker_initialize(
             &g_managed_kernel_driver_worker_context,
             &g_create_event_scheduler, &g_event_api_context,
-            &g_managed_kernel_interrupt_context, run_driver_worker,
+            &g_managed_kernel_interrupt_context, worker_bridge,
+            tls_index, runtime_fls_slot, runtime_fls_cleanup,
             serial_text, serial_field_hex)) {
         fail("managed-kernel-driver-worker-start");
     }
-    tls_index = read_u32(rva_to_loaded(image, image->tls_index_rva, 4));
-    /* Clone the initialized main NativeAOT TLS block. The PE TLS template
-       alone does not contain the runtime thread state established during
-       startup; each scheduler worker still receives its own private block. */
-    tls_source = (const uint8_t *)(uintptr_t)g_tls_block;
-    if (!gxos_managed_kernel_driver_worker_configure_nativeaot_tls(
-        &g_managed_kernel_driver_worker_context, tls_index,
-            tls_source, GXOS_SCHEDULER_PAGE_SIZE)) {
-        fail("managed-kernel-driver-worker-nativeaot-tls");
-    }
-    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_TLS_READY\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_FRESH_RUNTIME_STATE_READY\r\n");
     gxos_managed_kernel_interrupt_set_work_notification(
         &g_managed_kernel_interrupt_context,
         managed_kernel_driver_worker_notify,
@@ -20216,6 +20268,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     uint32_t managed_kernel_memory_region_equal_count_status;
     uint32_t managed_kernel_memory_region_greater_count_status;
 #endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_kernel_worker_bridge_resolution = {0};
+#endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
     GXOS_NATIVEAOT_EXPORT_RESOLUTION callback_resolution = {0};
     int32_t callback_result1 = 0;
@@ -20739,6 +20794,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
                                          &gc_probe_resolution)) {
         fail("ManagedGcProbe-registration");
     }
+#endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+    managed_kernel_worker_bridge_resolution.rva =
+        image.managed_kernel_run_driver_worker_rva;
+    managed_kernel_worker_bridge_resolution.address =
+        (uintptr_t)(image.actual_base + image.managed_kernel_run_driver_worker_rva);
+    managed_kernel_worker_bridge_resolution.ordinal = 0;
+    if (!gxos_nativeaot_callback_register(
+            &g_managed_kernel_driver_worker_bridge,
+            &managed_kernel_worker_bridge_resolution)) {
+        fail("ManagedKernelRunDriverWorker-registration");
+    }
+    serial_text("GXOS_NET10:PRODUCTION_WORKER_REVERSE_PINVOKE_REGISTERED=1\r\n");
 #endif
     serial_field_hex("GXOS_NET10:IMAGE_BASE=0x", image.actual_base);
     serial_text("\r\n");
@@ -21852,12 +21920,29 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         managed_kernel_install_serial_services,
         managed_kernel_run_phase8_accounting, managed_kernel_run_phase8);
     restore_nativeaot_tls();
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
+    if (!nativeaot_managed_kernel_find_runtime_fls(
+            &g_managed_kernel_runtime_fls_slot,
+            &g_managed_kernel_runtime_fls_cleanup) ||
+        !gxos_nativeaot_callback_mark_ready(
+            &g_managed_kernel_driver_worker_bridge)) {
+        fail("managed-kernel-driver-worker-runtime-readiness");
+    }
+    serial_field_hex("GXOS_NET10:PRODUCTION_WORKER_RUNTIME_FLS_SLOT=0x",
+                     g_managed_kernel_runtime_fls_slot);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PRODUCTION_WORKER_RUNTIME_READY=1\r\n");
+#endif
     activate_nativeaot_tls();
     managed_kernel_phase9_interrupt(
-        boot_services, &image, managed_kernel_install_interrupt_services,
+        boot_services, managed_kernel_install_interrupt_services,
         managed_kernel_install_input_services,
         managed_kernel_run_phase9, managed_kernel_run_driver_worker,
-        managed_kernel_run_phase10, managed_kernel_run_phase11);
+        managed_kernel_run_phase10, managed_kernel_run_phase11,
+        &g_managed_kernel_driver_worker_bridge,
+        read_u32(rva_to_loaded(&image, image.tls_index_rva, 4)),
+        g_managed_kernel_runtime_fls_slot,
+        g_managed_kernel_runtime_fls_cleanup);
     restore_nativeaot_tls();
     activate_nativeaot_tls();
     managed_kernel_phase13_mmio(
@@ -22104,7 +22189,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
             (GXOS_PHASE53O_LOG_TEXT)serial_text,
             (GXOS_PHASE53O_LOG_HEX)serial_field_hex,
             nativeaot_phase53o_in_managed,
-            nativeaot_phase53o_after_managed
+            nativeaot_phase53o_after_managed,
+            read_u32(rva_to_loaded(&image, image.tls_index_rva, 4))
         };
         if (!gxos_nativeaot_scheduler_thread_lifecycle_probe(&phase53o_probe)) {
             fail("nativeaot-scheduler-thread-lifecycle");

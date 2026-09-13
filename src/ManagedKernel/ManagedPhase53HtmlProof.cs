@@ -31,10 +31,21 @@ internal sealed class ManagedPhase53HtmlProof : IManagedPageTerminalProof
         if (_page.BeginGetUrl(PageUrl) != NetworkOperationResult.Started)
             return false;
         ManagedNetworkServiceBackend.LiveEthernet?.EnablePhase34Polling();
+        if (!KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE53_RESOURCE_STARTED\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:MANAGED_HTTPS_PHASE53_REQUEST_STARTED\r\n"u8))
+            return false;
+        bool documentBodyReceivedLogged = false;
         for (int poll = 0; poll != 262_144; ++poll)
         {
             NetworkOperationResult result = _page.Poll();
             if (_completed) return true;
+            if (!documentBodyReceivedLogged &&
+                _page.DocumentResource.ResponseBodyComplete &&
+                !KernelLog.Write(
+                    "GXOS_NET10:MANAGED_HTTPS_PHASE53_RESOURCE_BODY_RECEIVED\r\n"u8))
+                return false;
+            if (_page.DocumentResource.ResponseBodyComplete)
+                documentBodyReceivedLogged = true;
             if (result == NetworkOperationResult.Failed ||
                 _page.State == ManagedPageResourceState.Failed)
             {
@@ -175,7 +186,10 @@ internal sealed class ManagedPhase53HtmlProof : IManagedPageTerminalProof
     {
         byte[] entropy = new byte[64];
         ManagedTls12Phase31Fixtures.ClientRandom.CopyTo(entropy, 0);
-        entropy[63] = 2;
+        /* Keep the Phase 53 proof on the established deterministic TLS
+           fixture.  The CSS/image proof is distinguished by its resource
+           graph and pixel assertions, not by a second ECDHE secret. */
+        entropy[63] = 1;
         return entropy;
     }
 
