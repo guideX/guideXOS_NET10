@@ -2710,3 +2710,109 @@ should the project choose Form 1 or Form 2 and draft a production patch.
 **Phase 53N outcome: E — NativeAOT contract materially narrowed; runtime
 detach/unregister and complete green-scheduler GC lifecycle remain unresolved;
 defer implementation to Phase 53O.**
+
+## Phase 53O diagnostic attach/detach completion
+
+Phase 53O added a diagnostic-only scheduler lifecycle probe. The production
+managed driver-worker path and its full initialized-TLS clone remain
+unchanged and available for historical reproduction. The new path is isolated
+in:
+
+    src/Gate4Harness/nativeaot_scheduler_thread_lifecycle.c
+    src/Gate4Harness/nativeaot_scheduler_thread_lifecycle.h
+    tools/Run-NativeAotSchedulerThreadLifecycleFreshBoots.ps1
+
+The build is enabled with the switch
+EnableNativeAotSchedulerThreadLifecycle alongside the existing
+NativeAotEventWait, managed-callback, scheduler-callback, managed-GC, and
+startup switches. The probe uses the generated reverse-P/Invoke export for
+attachment. It does not write NativeAOT thread flags or fabricate a
+ReversePInvokeFrame.
+
+### Detach mechanism proven
+
+The runtime-created FLS slot and its registered cleanup callback are captured
+from the existing platform FLS adapter. After managed return and the managed
+GC/root probe, the diagnostic worker invokes that runtime-owned callback with
+the current FLS value. This exercises the NativeAOT cleanup chain:
+
+    runtime FLS callback
+      -> RuntimeThreadShutdown
+      -> ThreadStore::DetachCurrentThread
+      -> Thread::Detach / FixAllocContext
+      -> Thread::Destroy
+      -> callback returns
+      -> scheduler FLS slot is cleared
+      -> scheduler handle closes and TCB/TLS/stack resources reclaim
+
+The FLS value is the runtime Thread*, which is the scheduler TLS allocation
+base plus 0x30. The diagnostic census walks the version-matched
+RuntimeThreadLocals::m_pNext link at offset 0x60 from that runtime Thread*;
+this is deliberately a bounded forensic layout check, not a new production
+runtime API. The runtime transition-frame sentinel is at 0x48, the state
+flags at 0x40, and runtime stack bounds at 0xA8/0xB0.
+
+The diagnostic worker rehomes its scheduler low-sentinel page to a separate
+nonadjacent page before entering managed code. This preserves the scheduler
+integrity check at a boundary NativeAOT may own during stack probing; the
+production scheduler allocation and the production managed TLS-clone path are
+not changed.
+
+### Fresh-boot evidence
+
+The final gate used the preserved authoritative managed payload:
+
+    size: 730112
+    SHA-256: AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012
+    EFI size: 538602
+    EFI SHA-256: 40BC0724CB9A5A64D991690DCC8F38AC221948657A67A7C61237ED13E002F37E
+
+Three independent QEMU fresh boots passed:
+
+    evidence/phase53o-scheduler-thread-lifecycle-fresh-boots-auth-9/runs/run-1/serial.log
+      bytes=521514 sha256=E8E36A6E771F6E2708E32159E0A6E80646315439E1D1A11FAE56AD3D5DF7013F
+    evidence/phase53o-scheduler-thread-lifecycle-fresh-boots-auth-9/runs/run-2/serial.log
+      bytes=521514 sha256=DAE19C0BF7F34969023EC398474975BA5C441C99C3ECC5094346B4296AEA9C60
+    evidence/phase53o-scheduler-thread-lifecycle-fresh-boots-auth-9/runs/run-3/serial.log
+      bytes=521514 sha256=A18474DF9AC183BCEC78C5F3E70CED594D9448468480CE49011198FB517C83E4
+
+Representative run-1 facts were:
+
+| Proof item | Cycle 1 | Cycle 2 |
+| --- | ---: | ---: |
+| Scheduler identity | 5 | 6 |
+| Scheduler TLS block | 0x5309000 | 0x52F5000 |
+| Runtime Thread* / allocation context | 0x5309030 | 0x52F5030 |
+| Runtime stack low/high | 0x530D000 / 0x5311000 | 0x5309000 / 0x530D000 |
+| ThreadStore count before/after detach | 3 / 2 | 3 / 2 |
+| Runtime state before/after | 1 / 2 | 1 / 2 |
+| GC collection delta | 1 | 1 |
+
+Both cycles also emitted the managed callback return, GC allocation,
+collection, root-survival, FLS-callback-returned, managed-return,
+detach/unregister, scheduler-reclaim, and repeat markers. After each
+reclaim, the scheduler TCB was no longer live, the handle lookup was empty,
+the runtime TLS/vector/GS/TEB fields were zeroed, the stack VM identity was
+zeroed, and the VM-region count returned to its baseline.
+
+The first early capture with the newly rebuilt SDK 10.0.401 payload is
+preserved under evidence/phase53o-scheduler-thread-lifecycle-fresh-boots; it
+stopped at the known strict-timezone precondition. Additional failed
+diagnostic-gate iterations and the non-authoritative 10.0.401 managed rebuild
+remain preserved under the corresponding artifacts/phase53o-* directories.
+The final passing gate intentionally returned to the existing authoritative
+payload because its historical NativeAOT export/RVA identity is required by
+the harness.
+
+### Phase 53O principal outcome
+
+**Outcome A — complete diagnostic attach/detach lifecycle proven.**
+
+A scheduler-created worker attached through the supported generated
+reverse-P/Invoke mechanism, became a distinct ThreadStore member with fresh
+TLS and allocation state, reported the expected stack bounds, executed
+managed callback and allocating GC/root work, returned to native execution,
+detached through the runtime-owned FLS cleanup path, disappeared from the
+ThreadStore census, and was reclaimed by the scheduler afterward on three
+fresh boots. This is a diagnostic proof only; it does not authorize replacing
+the production TLS-clone worker path in this phase.

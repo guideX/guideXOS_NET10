@@ -50,6 +50,9 @@
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
 #include "nativeaot_gc_probe_contract.h"
 #endif
+#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE
+#include "nativeaot_scheduler_thread_lifecycle.h"
+#endif
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
     defined(GXOS_ENABLE_CREATE_MEMORY_RESOURCE_NOTIFICATION) || \
@@ -58,6 +61,7 @@
     defined(GXOS_ENABLE_RESUME_THREAD) || \
     defined(GXOS_ENABLE_IS_PROCESS_IN_JOB) || \
     defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT) || \
+    defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL)
 #include "scheduler_foundation.h"
 #endif
@@ -340,7 +344,9 @@ typedef struct {
 
 static const EFI_GUID gLoadedImageProtocol = {0x5B1B31A1, 0x9562, 0x11D2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static const EFI_GUID gSimpleFileSystemProtocol = {0x964E5B22, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
+#ifdef GXOS_ENABLE_MANAGED_KERNEL
 static const EFI_GUID gEfiGraphicsOutputProtocol = {0x9042A9DE, 0x23DC, 0x4A38, {0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A}};
+#endif
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
 static const EFI_GUID gEfiPciIoProtocol = {0x4CF5B200, 0x68B8, 0x4CA5, {0x9E, 0xEC, 0xB2, 0x3E, 0x3F, 0x50, 0x02, 0x9A}};
 #endif
@@ -559,6 +565,21 @@ enum {
 };
 
 static uint32_t g_phase;
+#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE
+static void GXOS_PHASE53O_MS_ABI nativeaot_phase53o_in_managed(
+    uint32_t phase)
+{
+    (void)phase;
+    g_phase = PHASE_IN_MANAGED;
+}
+
+static void GXOS_PHASE53O_MS_ABI nativeaot_phase53o_after_managed(
+    uint32_t phase)
+{
+    (void)phase;
+    g_phase = PHASE_AFTER_MANAGED_RETURN;
+}
+#endif
 static uint64_t g_managed_target;
 static uint64_t g_managed_image_base;
 static uint64_t g_managed_image_size;
@@ -933,7 +954,8 @@ static int GXOS_MEMORY_STATUS_EX_MS_ABI platform_global_memory_status_ex(
     defined(GXOS_ENABLE_SET_THREAD_PRIORITY) || \
     defined(GXOS_ENABLE_RESUME_THREAD) || \
     defined(GXOS_ENABLE_IS_PROCESS_IN_JOB) || \
-    defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT)
+    defined(GXOS_ENABLE_NATIVEAOT_EVENT_WAIT) || \
+    defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE)
 static GXOS_SCHEDULER g_create_event_scheduler;
 #endif
 #ifdef GXOS_ENABLE_CREATE_EVENT_W
@@ -18761,6 +18783,7 @@ static GXOS_SCHEDULER_REGISTER_SNAPSHOT g_nativeaot_durability_main_snapshot;
 static GXOS_VM_MEMORY_BASIC_INFORMATION g_nativeaot_durability_information;
 
 #ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
+#if !defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE)
 /* The generated reverse-P/Invoke helper loads the active NativeAOT thread
    state from the TLS block at +0x78.  +0x30 is the adjacent allocation
    context, not the thread-state pointer. */
@@ -18800,6 +18823,7 @@ typedef struct {
 static GXOS_NATIVEAOT_SCHEDULER_CALLBACK_CONTEXT
     g_nativeaot_scheduler_callback_context;
 #endif
+#endif
 
 static void nativeaot_durability_require(int condition, const char *reason)
 {
@@ -18826,6 +18850,7 @@ static void nativeaot_gc_emit_result(
     serial_text("\r\n");
 }
 
+#if !defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE)
 static void nativeaot_gc_emit_worker_state(
     const char *prefix, const GXOS_SCHEDULER_TCB *thread)
 {
@@ -18896,6 +18921,7 @@ static void nativeaot_gc_emit_worker_state(
     serial_field_hex("TICK_COUNT=0x", g_nativeaot_gc_tick_count);
     serial_text("\r\n");
 }
+#endif
 #endif
 
 static uint32_t nativeaot_durability_live_thread_count(void)
@@ -19031,7 +19057,8 @@ static uint64_t nativeaot_tls_thread_state_value(uint64_t tls_block)
 }
 #endif
 
-#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
+#if defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK) && \
+    !defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE)
 static uint64_t nativeaot_scheduler_callback_thread_state(
     const GXOS_SCHEDULER_TCB *thread)
 {
@@ -22062,7 +22089,29 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_GC_COLLECTION_OBSERVED=1\r\n");
     serial_text("GXOS_NET10:MANAGED_GC_ROOT_SURVIVED=1\r\n");
 #endif
-#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
+#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE
+    {
+        GXOS_PHASE53O_PROBE phase53o_probe = {
+            &g_create_event_scheduler,
+            callback_thread,
+            &g_managed_callback_bridge,
+            &g_managed_gc_probe_bridge,
+            g_nativeaot_runtime_fls_slot,
+            (GXOS_PHASE53O_FLS_CLEANUP_CALLBACK)
+                g_fls_callbacks[g_nativeaot_runtime_fls_slot],
+            (uint64_t)g_tls_block,
+            &g_memory_vm_regions.live_count,
+            (GXOS_PHASE53O_LOG_TEXT)serial_text,
+            (GXOS_PHASE53O_LOG_HEX)serial_field_hex,
+            nativeaot_phase53o_in_managed,
+            nativeaot_phase53o_after_managed
+        };
+        if (!gxos_nativeaot_scheduler_thread_lifecycle_probe(&phase53o_probe)) {
+            fail("nativeaot-scheduler-thread-lifecycle");
+        }
+    }
+    serial_text("GXOS_NET10:MANAGED_GC_WORKER_RETURN_OK=1\r\n");
+#elif defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK)
     nativeaot_scheduler_callback_probe();
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     serial_text("GXOS_NET10:MANAGED_GC_WORKER_RETURN_OK=1\r\n");
@@ -22101,7 +22150,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_PROCESS_INITIALIZATION_CALLS=0x",
                      nativeaot_process_entry_calls);
     serial_text("\r\n");
-#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
+#ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE
+    if (g_managed_callback_bridge.invocation_count != 4U ||
+#elif defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK)
     if (g_managed_callback_bridge.invocation_count != 5U ||
 #else
     if (g_managed_callback_bridge.invocation_count != 2U ||

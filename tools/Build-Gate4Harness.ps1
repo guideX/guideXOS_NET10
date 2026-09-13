@@ -11,6 +11,7 @@ param(
     [switch]$EnableNativeAotManagedCallback,
     [switch]$EnableNativeAotSchedulerCallback,
     [switch]$EnableNativeAotManagedGcProbe,
+    [switch]$EnableNativeAotSchedulerThreadLifecycle,
     [switch]$EnableManagedKernelPhase27,
     [switch]$EnableManagedKernelPhase28,
     [switch]$EnableManagedKernelPhase28Standalone,
@@ -50,8 +51,12 @@ $historicalControlPayloadSha256 = '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C
 $callbackPayloadSha256 = '72F5CD40EE698B6BCCF6D67AEAB1BA570A2CE6B49B083B447AF067AA6F1EE9FA'
 $authoritativePayloadSha256 = 'AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012'
 $authoritativePayloadSize = 730112
-$requiresCallbackPayload = $EnableNativeAotManagedCallback -or $EnableNativeAotSchedulerCallback
-$requiresAuthoritativePayload = $EnableNativeAotManagedGcProbe
+$phase53oPayloadSha256 = '7ABDCB03E45E36615713937F34E5D4E055CBE094B70EEE74D844A424153AF117'
+$phase53oPayloadSize = 730624
+$requiresCallbackPayload = $EnableNativeAotManagedCallback -or
+    $EnableNativeAotSchedulerCallback -or $EnableNativeAotSchedulerThreadLifecycle
+$requiresAuthoritativePayload = $EnableNativeAotManagedGcProbe -or
+    $EnableNativeAotSchedulerThreadLifecycle
 
 if ($PayloadMode -eq 'ManagedKernel' -and
     ($EnableNativeAotManagedCallback -or $EnableNativeAotSchedulerCallback -or
@@ -79,6 +84,22 @@ if ($EnableNativeAotManagedGcProbe -and -not $EnableNativeAotManagedCallback) {
 }
 if ($EnableNativeAotManagedGcProbe -and -not $EnableNativeAotSchedulerCallback) {
     throw 'NativeAot managed GC validation requires -EnableNativeAotSchedulerCallback.'
+}
+if ($EnableNativeAotSchedulerThreadLifecycle -and
+    -not $EnableNativeAotStartup) {
+    throw 'NativeAot scheduler thread lifecycle validation requires -EnableNativeAotStartup.'
+}
+if ($EnableNativeAotSchedulerThreadLifecycle -and
+    -not $EnableNativeAotManagedCallback) {
+    throw 'NativeAot scheduler thread lifecycle validation requires -EnableNativeAotManagedCallback.'
+}
+if ($EnableNativeAotSchedulerThreadLifecycle -and
+    -not $EnableNativeAotSchedulerCallback) {
+    throw 'NativeAot scheduler thread lifecycle validation requires -EnableNativeAotSchedulerCallback.'
+}
+if ($EnableNativeAotSchedulerThreadLifecycle -and
+    -not $EnableNativeAotManagedGcProbe) {
+    throw 'NativeAot scheduler thread lifecycle validation requires -EnableNativeAotManagedGcProbe.'
 }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -129,6 +150,7 @@ $multibyteAssembly = Join-Path $root 'src\Gate4Harness\platform_multibyte_entry.
 $moduleRegistrySource = Join-Path $root 'src\Gate4Harness\platform_module_registry.c'
 $loadLibrarySource = Join-Path $root 'src\Gate4Harness\platform_load_library.c'
 $nativeAotCallbackBridgeSource = Join-Path $root 'src\Gate4Harness\nativeaot_callback_bridge.c'
+$phase53oSource = Join-Path $root 'src\Gate4Harness\nativeaot_scheduler_thread_lifecycle.c'
 $createMemoryResourceNotificationSource = Join-Path $root 'src\Gate4Harness\create_memory_resource_notification.c'
 $createThreadSource = Join-Path $root 'src\Gate4Harness\create_thread.c'
 $createThreadEntryAssembly = Join-Path $root 'src\Gate4Harness\create_thread_entry.S'
@@ -176,6 +198,10 @@ if (-not (Test-Path -LiteralPath $moduleRegistrySource) -or
 }
 if (-not (Test-Path -LiteralPath $nativeAotCallbackBridgeSource)) {
     throw "NativeAOT callback bridge source not found: $nativeAotCallbackBridgeSource"
+}
+if ($EnableNativeAotSchedulerThreadLifecycle -and
+    -not (Test-Path -LiteralPath $phase53oSource)) {
+    throw "Phase 53O lifecycle source not found: $phase53oSource"
 }
 if (-not (Test-Path -LiteralPath $memoryAccountingSource)) { throw "Memory accounting source not found: $memoryAccountingSource" }
 if (-not (Test-Path -LiteralPath $managedKernelBootResourcesSource)) { throw "ManagedKernel boot-resource source not found: $managedKernelBootResourcesSource" }
@@ -244,7 +270,15 @@ if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
     $payloadSize = (Get-Item -LiteralPath $managedArtifact).Length
     if ($PayloadMode -eq 'ManagedKernel') {
         # ManagedKernel establishes its own payload identity for this phase.
-    } elseif ($requiresAuthoritativePayload -and
+    } elseif ($EnableNativeAotSchedulerThreadLifecycle) {
+        if (($payloadHash -ne $phase53oPayloadSha256 -or
+             $payloadSize -ne $phase53oPayloadSize) -and
+            ($payloadHash -ne $authoritativePayloadSha256 -or
+             $payloadSize -ne $authoritativePayloadSize)) {
+            throw "Phase 53O requires the captured diagnostic or authoritative payload. Hash=$payloadHash Size=$payloadSize"
+        }
+    }
+    elseif ($requiresAuthoritativePayload -and
         ($payloadHash -ne $authoritativePayloadSha256 -or $payloadSize -ne $authoritativePayloadSize)) {
         throw "The managed GC integration requires the authoritative $authoritativePayloadSize-byte payload. Hash=$payloadHash Size=$payloadSize"
     }
@@ -285,12 +319,24 @@ Write-Output "MANAGED_PAYLOAD_STAGED_SHA256=$stagedPayloadHash"
 if ($requiresAuthoritativePayload -or $requiresCallbackPayload) {
     $stagedPayloadHash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant()
     $stagedPayloadSize = (Get-Item -LiteralPath $payload).Length
-    $expectedStagedHash = if ($requiresAuthoritativePayload) {
+    $expectedStagedHash = if ($EnableNativeAotSchedulerThreadLifecycle) {
+        if ($sourcePayloadHash -eq $authoritativePayloadSha256) {
+            $authoritativePayloadSha256
+        } else {
+            $phase53oPayloadSha256
+        }
+    } elseif ($requiresAuthoritativePayload) {
         $authoritativePayloadSha256
     } else {
         $callbackPayloadSha256
     }
-    $expectedStagedSize = if ($requiresAuthoritativePayload) {
+    $expectedStagedSize = if ($EnableNativeAotSchedulerThreadLifecycle) {
+        if ($sourcePayloadHash -eq $authoritativePayloadSha256) {
+            $authoritativePayloadSize
+        } else {
+            $phase53oPayloadSize
+        }
+    } elseif ($requiresAuthoritativePayload) {
         $authoritativePayloadSize
     } else {
         $null
@@ -1178,10 +1224,16 @@ if ($Scenario -eq 'NativeAotEventWait' -or $Scenario -eq 'ManagedKernelPhase11')
     $gccArguments += $multibyteSource
     $gccArguments += $multibyteAssembly
 }
+if ($EnableNativeAotSchedulerThreadLifecycle) {
+    $gccArguments += $phase53oSource
+}
 if ($EnableNativeAotStartup) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_STARTUP' }
 if ($EnableNativeAotManagedCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK' }
 if ($EnableNativeAotSchedulerCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK' }
 if ($EnableNativeAotManagedGcProbe) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE' }
+if ($EnableNativeAotSchedulerThreadLifecycle) {
+    $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE'
+}
 if ($PayloadMode -eq 'ManagedKernel') { $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL' }
 if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE11'
