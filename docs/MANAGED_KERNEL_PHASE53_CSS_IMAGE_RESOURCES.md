@@ -1850,3 +1850,337 @@ transition between those observations remains incomplete.
 
 **Outcome: C — worker allocation isolated, but context-transition provenance
 remains incomplete; no production repair is justified.**
+
+## Phase 53M — allocation-context handoff and stale-context selection
+
+Phase 53M supersedes the open-provenance portion of Phase 53L. It used the
+preserved historical payload and PDB, not a rebuild:
+
+```text
+payload SHA256 = E82F3B7111716291CDDE931D6618D14DD3B4490577535B4A1C8760B48F107388
+PDB SHA256     = 7270B65498976A8B531E04758C91E1A627E4A916508DB5FC411E9FB4CA8FCA9C
+runtime        = NativeAOT package 10.0.11
+```
+
+The principal result is **Outcome B — exact context-handoff defect proven;
+repair belongs outside the current guideXOS allocator layer**. The evidence
+now proves the origin of the stale value, the full TLS clone, the worker's
+private advance, the later context selection, the `FixAllocContext` call
+chain, and the first invalid boundary. It does not justify clearing fields,
+adding a registration call, or changing allocator behavior without first
+selecting and validating the supported NativeAOT thread/TLS integration
+contract.
+
+### Context lifecycle
+
+The direct `0x501d038` address below is from capture 5. Capture 7 relocated
+the same source context to `0x500d038`, with source TLS `0x500d000` and main
+GS base `0x500c000`. The worker allocation and object address remained
+`0x400005000e50` in both captures.
+
+| Event | Thread | TLS base | GS base | `gc_alloc_context` | `alloc_ptr` | `alloc_limit` | Origin/source | GC-visible? | Meaning |
+|---|---|---:|---:|---:|---:|---:|---|---|---|
+| NativeAOT TLS creation | main TCB `0x1a5150`, identity 1 | `0x501d000` | `0x501c000` | `0x501d038` | `0` | `0` | `initialize_nativeaot_tls`, entry `0x105db0`; block populated at `0x105e50` | main runtime TLS / registered thread | Earliest observed existence; zero-filled runtime block before nonzero allocation state |
+| First nonzero `alloc_ptr` store | main TCB identity 1 | `0x501d000` | `0x501c000` | `0x501d038` | `0x20` | `0` | generated `mov [rdx],rax`, RVA `0x15e348`; source `RAX=0x20`, `RDX=context` | yes | First watchpoint-observed pointer value; zero-fill itself preceded the watchpoint |
+| First nonzero `alloc_limit` store | main TCB identity 1 | `0x501d000` | `0x501c000` | `0x501d038` | `0x400002800028` | `0x400002800fd0` | generated `mov [rdi+0x08],rax`, RVA `0x162acd`; source `RAX=0x400002800fd0`, destination `RDI=context` | yes | Main context receives its first usable bump range |
+| Source reaches worker boundary | main TCB identity 1 | `0x501d000` | `0x501c000` | `0x501d038` | `0x400005000e50` | `0x400005000fd0` | ordinary NativeAOT allocation writes | yes | The original context is still at the future worker address |
+| Worker TLS configuration entry | scheduler worker TCB `0x1a59f0`, identity 5, state 2 | `0x4e5f000` | not active yet; later `0x4e61000` | `0x4e5f038` | `0` | `0` | `gate4_loader.c` passes main `g_tls_block` and `0x1000` to `gxos_managed_kernel_driver_worker_configure_nativeaot_tls` | custom scheduler live; NativeAOT ThreadStore membership not proven | Destination is independently allocated and initially zeroed |
+| Worker TLS copy reaches context fields | worker TCB identity 5 | `0x4e5f000` | not active yet | `0x4e5f038` | `0x400005000e50` | `0x400005000fd0` | explicit byte loop; helper entry RVA `0x15d600`, byte store RVA `0x15d6f1` | custom scheduler live; ThreadStore membership not proven | Full initialized main TLS state is copied into the worker block |
+| Worker context selected by scheduler | worker TCB identity 5, state 3 | `0x4e5f000` | `0x4e61000` | `0x4e5f038` | `0x400005000e50` | `0x400005000fd0` | scheduler context switch RVA `0x164500`; worker start RVA `0x164fc0` | physically live in active GS/TLS; NativeAOT enumeration membership not proven | Worker executes with the cloned context |
+| Worker allocation | worker TCB identity 5 | `0x4e5f000` | `0x4e61000` | `0x4e5f038` | `0x400005000e90` | `0x400005000fd0` | `RhpNewFast` RVA `0x148a20`; pointer commit RVA `0x148a54` | physically live; worker root follows | Correctly consumes the `0x40` NativeAOT object size |
+| Worker publication | worker TCB identity 5 | `0x4e5f000` | `0x4e61000` | `0x4e5f038` | `0x400005000e90` | `0x400005000fd0` | `s_driverWorker` root cell `0x4000000008c0` | worker object rooted; worker context visibility unresolved | Root contains the live worker while its private context is advanced |
+| Context enumeration selection | current scheduler TCB is worker identity 5; selected record is main-origin | `0x501d000` record source | active GS remains `0x4e61000` | selected `0x501d038` | `0x400005000e50` | `0x400005000fd0` | enumerator record base `RBX=TLS+0x30`; `LEA RCX,[RBX+8]`, RVA `0x152e73`; callback call RVA `0x152e7a` | selected main context is GC-visible; worker ThreadStore inclusion unresolved | The runtime selects the original main context, not the active worker GS context |
+| `FixAllocContext` entry | worker TCB identity 5 executes the fix | `0x4e5f000` active | `0x4e61000` | selected `0x501d038` | `0x400005000e50` | `0x400005000fd0` | `WKS::gc_heap::fix_allocation_context`, RVA `0x172e20` | selected context treated as GC-visible | Main context is fixed while a different context is active |
+| Pre-`SetFree` boundary | worker TCB identity 5 | `0x4e5f000` active | `0x4e61000` | consumer `0x501d038` | `0x400005000e50` | `0x400005000fd0` | direct call site RVA `0x172e95`; object/worker `0x400005000e50`; root still points to it | root proves object is live | Live worker range is consumed as free space; this is the first proven corrupting boundary |
+
+The lifecycle is therefore:
+
+```text
+NativeAOT main TLS 0x501d000
+    +0x38 -> main context 0x501d038: e50 / fd0
+       |
+       +-- full 0x1000-byte guideXOS clone --> worker TLS 0x4e5f000
+                                                +0x38 -> worker context 0x4e5f038: e50 / fd0
+                                                +-- RhpNewFast worker e50
+                                                    -> worker context e90 / fd0
+       |
+       +-- original main context remains e50 / fd0
+             |
+             +-- GcEnumAllocContexts record base RBX = TLS + 0x30
+                 +-- LEA RCX,[RBX+8] at RVA 0x152e73
+                 +-- indirect callback at RVA 0x152e7a
+                 +-- FixAllocContext adapter and fix_allocation_context
+                 +-- SetFree consumes the worker address
+```
+
+The graph is not a worker-context regression. It is a main-context selection
+after the worker has advanced its private copy.
+
+### Characterization and birth of `0x501d038`
+
+The earliest observed point is `initialize_nativeaot_tls` at native RVA
+`0x105db0`. At its block-allocation return site, RVA `0x105e50`, the global
+TLS block cell contained `0x501d000` and the context at `+0x38` was zero.
+The loader creates the TLS vector, TLS block, GS area, and TEB state, copies
+the PE TLS template, stores the block in the TLS vector, and publishes the
+vector through the GS-area slot. The initial `alloc_ptr` and `alloc_limit`
+values were therefore zero-fill/runtime-initialization state, not copied
+from the worker.
+
+The context belongs to the original main scheduler/runtime environment:
+
+```text
+main TCB       = 0x1a5150
+thread identity = 1
+source TLS      = 0x501d000   (capture 5)
+source GS       = 0x501c000   (capture 5)
+context         = 0x501d038
+```
+
+The scheduler-created worker later has TCB `0x1a59f0`, identity 5, worker
+GS `0x4e61000`, worker TLS `0x4e5f000`, and worker context `0x4e5f038`.
+These are different contexts and different scheduler identities; address
+similarity is not being used as an identity claim.
+
+### First writes to the source fields
+
+The hardware watchpoints were installed after the TLS block became
+discoverable, so the zero-fill writes are not represented as watchpoint
+events. The first nonzero source writes are nevertheless captured:
+
+```text
+alloc_ptr:
+  instruction = mov [rdx],rax
+  exact RVA   = 0x15e348
+  watch stop  = RVA 0x15e34b, after the store
+  source      = RAX = 0x20, from the preceding LEA computation
+  destination = RDX = 0x501d038 (0x500d038 in capture 7)
+
+alloc_limit:
+  instruction = mov [rdi+0x08],rax
+  exact RVA   = 0x162acd
+  watch stop  = RVA 0x162ad1, after the store
+  source      = RAX = 0x400002800fd0
+  destination = RDI = 0x501d038 (0x500d038 in capture 7)
+```
+
+The source context subsequently reaches `alloc_ptr=0x400005000e50` and
+`alloc_limit=0x400005000fd0` before the worker TLS configuration call. No
+write was captured that regressed this same context from `0x…0e90` to
+`0x…0e50`; the later stale value belongs to the original context.
+
+### Copy and scheduler handoff
+
+The source call is explicit in `src/Gate4Harness/gate4_loader.c`: it passes
+the initialized `g_tls_block` and `GXOS_SCHEDULER_PAGE_SIZE` to
+`gxos_managed_kernel_driver_worker_configure_nativeaot_tls`. The helper in
+`src/Gate4Harness/managed_kernel_driver_worker.c`:
+
+1. zeroes the worker TLS vector;
+2. zeroes the worker TLS block;
+3. copies the source block byte by byte for `0x1000` bytes; and
+4. installs the worker block in the worker TLS vector.
+
+The helper entry is RVA `0x15d600`; the byte store is at RVA `0x15d6f1`,
+with the loop continuing at RVA `0x15d6f4`. Captures 5 and 7 observe the
+destination context changing from zero to the source pair
+`0x400005000e50 / 0x400005000fd0` as the copy crosses the two fields.
+
+This is a full initialized-TLS clone, not a copy made by `RhpNewFast` and not
+a mutation of the worker context after allocation. The scheduler then
+switches GS to `0x4e61000` and selects TLS `0x4e5f000`. The worker starts with
+the copied pair, allocates the worker, and advances only its private context
+to `0x400005000e90`.
+
+### Exact selection and `FixAllocContext` path
+
+The preserved payload disassembly identifies the callback helper at image
+RVA `0x152e30`; the PDB public record is
+`?GcEnumAllocContexts@GCToEEInterface@@...` (the PDB code-segment offset is
+`0x151e30`, which maps to the image RVA after the code-section base). The
+relevant instructions are:
+
+```text
+RVA 0x152e70   mov rdx,rsi
+RVA 0x152e73   lea rcx,[rbx+0x08]
+RVA 0x152e77   mov rax,rbp
+RVA 0x152e7a   call [rip+0x425c8]       ; IAT RVA 0x195448
+RVA 0x152e80   callback return
+```
+
+In the authoritative capture 7, the wrapper entry at RVA `0x172df0` had:
+
+```text
+RBX = 0x500d030
+RCX = 0x500d038
+return = image + 0x152e80
+```
+
+Thus the runtime-selected context is exactly the record base plus eight,
+matching the static `LEA` instruction. The wrapper's `RDX=0x4e65b60` is a
+separate argument record, not the selected context; the wrapper preserves
+the selected `RCX` in `R10`, moves it to the indirect-call `RDX`, and invokes
+the GC vtable slot. The adapter at RVA `0x15f420` executes `mov rax,rdx`
+and `mov rcx,rax` at RVA `0x15f42a`, then tail-jumps to
+`WKS::gc_heap::fix_allocation_context` at RVA `0x172e20`. The direct
+`SetFree` call is at RVA `0x172e95`.
+
+At the captured endpoint:
+
+```text
+selected/fixed context = 0x500d038 (0x501d038 in capture 5)
+selected ptr/limit     = 0x400005000e50 / 0x400005000fd0
+active worker context  = 0x4e5f038
+active worker ptr      = 0x400005000e90
+worker/root            = 0x400005000e50
+current scheduler TCB  = 0x1a59f0, identity 5
+```
+
+The exact high-level collector reason was not emitted as a separate phase
+flag. The observed path is the NativeAOT GC allocation-context enumeration
+and GC-to-EE callback path; its `GcEnumAllocContexts` record selection and
+the subsequent `FixAllocContext`/`SetFree` path are directly correlated.
+
+### NativeAOT ownership invariant
+
+The matching NativeAOT 10.0.11 sources define the relevant contract:
+
+- `gc_alloc_context::init()` starts the allocation fields at zero;
+- `GcEnumAllocContexts` enumerates every active allocation context exposed by
+  the runtime thread store, and only permits GC-side pointer/limit mutation
+  when both fields are zero; and
+- the caller of allocation operations must ensure that the passed context is
+  owned by the calling thread. Per-thread contexts avoid a lock; contexts
+  not owned by the calling thread require unique ownership before use.
+
+The relevant versioned sources are the [NativeAOT GC interface](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/gc/gcinterface.h),
+[GC-to-EE interface](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/gc/gcinterface.ee.h),
+[NativeAOT thread implementation](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/thread.cpp),
+[NativeAOT thread store](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/threadstore.cpp),
+and [GC environment bridge](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/vm/gcenv.ee.cpp).
+
+The first proven violation is not the existence of two equal initial pairs.
+It is the later use of the original main context, still ending at the live
+worker address, while the worker's independent active context has already
+advanced beyond that object and the object is rooted in `s_driverWorker`.
+`FixAllocContext` therefore binds/fixes the wrong context for the current
+worker execution and `SetFree` consumes a live object range.
+
+### Classification and ownership conclusion
+
+The supported classification is **M3 — wrong context selection proven**.
+The worker context does not regress (so this is not M1). A context clone does
+occur, but it is the worker receiving a copy of the main context; the context
+later selected for `FixAllocContext` is the original main context, not the
+worker copy. The selection hop is now proven, so C and D no longer describe
+the remaining state. The NativeAOT ownership invariant is established, so E
+does not apply. The Phase 53L relationship was refined rather than
+disproven, so F does not apply.
+
+The complete evidence-backed chain is:
+
+```text
+main NativeAOT TLS is created and initialized
+  -> main context reaches ptr=e50, limit=fd0
+  -> guideXOS clones the full initialized TLS block into worker TLS
+  -> worker context starts with the same e50/fd0 pair
+  -> scheduler switches GS/TLS to the worker clone
+  -> worker RhpNewFast allocates e50 and advances worker context to e90
+  -> worker is published at s_driverWorker and is live/rooted
+  -> NativeAOT context enumeration derives main record+8 = main context
+  -> wrapper/adapter passes main context to fix_allocation_context
+  -> FixAllocContext executes on the worker scheduler execution with main ptr=e50
+  -> SetFree consumes the live worker address and corruption begins
+```
+
+This identifies a concrete guideXOS integration boundary: the custom worker
+path clones an already initialized NativeAOT TLS block and switches to it by
+custom scheduler mechanisms, while the evidence does not establish a
+corresponding NativeAOT `ThreadStore::AttachCurrentThread` registration and
+fresh runtime-owned allocation context for that worker. The safe correction
+is therefore a supported thread/TLS attachment and ownership transition, not
+a local allocator workaround. The evidence does not establish enough of
+that bridge's required root, registration, detach, and allocation-space
+semantics to implement it safely in this phase.
+
+### Proven facts, strong inferences, and open hypothesis
+
+Proven facts:
+
+- `0x501d038`/`0x500d038` is the original main TLS context, created by the
+  NativeAOT TLS initialization path.
+- Its first observed nonzero writes, their source registers, destinations,
+  and RVAs are captured.
+- The guideXOS worker helper copies the initialized main TLS block into a
+  separate worker TLS block.
+- The worker context advances from `e50` to `e90`; the main context remains
+  at `e50`.
+- The worker is published/rooted before the stale context is fixed.
+- The enumerator's record-plus-eight selection, callback return address,
+  wrapper, adapter, direct fix entry, and `SetFree` boundary are correlated.
+- The first corrupting boundary is `SetFree` operating from the selected main
+  context while the worker object is live.
+
+Strong inferences:
+
+- The selected record is the NativeAOT active/main context record represented
+  by `GcEnumAllocContexts`; this is supported by the PDB symbol, generated
+  helper shape, and matching NativeAOT source semantics.
+- The worker's custom scheduler TLS is not shown to be a member of the
+  NativeAOT ThreadStore enumeration that selected the main record.
+- The guideXOS custom worker path is exposing runtime thread state without a
+  proven supported NativeAOT attach/registration handoff.
+
+Open hypothesis:
+
+- The exact supported replacement bridge—whether an attach hook, runtime
+  thread-start transition, scheduler integration contract, or another
+  NativeAOT entry point—remains unspecified. It must be resolved before any
+  field reset, registration, or scheduler change is considered.
+
+### Diagnostic tooling and validation
+
+Phase 53M added `tools/Run-Phase53MAllocContextHandoffCapture.ps1`. It
+hash-gates the historical payload/PDB, discovers the main TLS block, watches
+the first source field writes, records scheduler TLS creation/switches,
+captures the full worker TLS copy, correlates worker allocation/publication,
+records the exact wrapper/adapter/fix path, numbers events, and writes a
+machine-readable summary. The script now also has dynamic probes for the
+enumerator selection RVA `0x152e73` and callback call RVA `0x152e7a`.
+
+Captures 1–3 are classified as debugger/tooling failures and are not
+allocator evidence. Captures 4–7 reached the authoritative handoff and
+`FixAllocContext`/`SetFree` endpoint; capture 7 is the most complete final
+run and uses the relocated source `0x500d038`. The final PowerShell parser
+check passed after the script changes. The new enumeration probes were added
+after capture 7; capture 7 proves the selection through the static payload
+instructions plus the runtime wrapper registers/return address.
+
+No production source, allocator policy, GC policy, thread registration,
+worker lifetime, relocation, CSS/image-resource behavior, or serial-driver
+semantics were changed. No rebuild or ceremonial regression run was
+performed because no production repair was justified.
+
+Raw evidence remains under the ignored directories:
+
+```text
+artifacts/phase53m-alloc-context-handoff-capture-1
+artifacts/phase53m-alloc-context-handoff-capture-2
+artifacts/phase53m-alloc-context-handoff-capture-3
+artifacts/phase53m-alloc-context-handoff-capture-4
+artifacts/phase53m-alloc-context-handoff-capture-5
+artifacts/phase53m-alloc-context-handoff-capture-6
+artifacts/phase53m-alloc-context-handoff-capture-7
+```
+
+The smallest remaining question is:
+
+> Which supported NativeAOT thread attachment/registration/TLS-creation
+> bridge must replace the custom full-TLS clone and direct worker path so the
+> worker owns a fresh zeroed allocation context and is correctly represented
+> in ThreadStore/GC enumeration, without losing valid main-thread allocation
+> slack, roots, or detach bookkeeping?
+
+**Phase 53M outcome: B — exact context-handoff defect proven; repair belongs
+outside the current guideXOS allocator layer. No production repair is
+justified.**
