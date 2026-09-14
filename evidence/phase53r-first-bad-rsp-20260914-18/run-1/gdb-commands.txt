@@ -1,0 +1,111 @@
+set pagination off
+set confirm off
+set remotetimeout 30
+target remote 127.0.0.1:54874
+hbreak *0x4FF3B80
+commands
+silent
+if $rcx != 0x4CFC030 && $rcx != 0x4EAA030
+printf "PHASE53R_FAULT_BREAKPOINT\n"
+info registers
+info registers fs_base gs_base
+printf "PHASE53R_FAULT_RSP="
+p/x $rsp
+printf "PHASE53R_FAULT_RIP="
+p/x $rip
+x/16i $rip-16
+x/24gx $rsp-0x40
+printf "PHASE53R_WORKER_GS_30="
+x/gx $gs_base+0x30
+printf "PHASE53R_WORKER_GS_58="
+x/gx $gs_base+0x58
+printf "PHASE53R_WORKER_VECTOR="
+x/8gx 0x4CFD000
+quit
+end
+continue
+end
+break *0x167080
+commands
+silent
+set $phase53r_ctx_old = *(unsigned long long*)$rcx
+set $phase53r_ctx_new = $rdx
+set $phase53r_ctx_rsp = *(unsigned long long*)($phase53r_ctx_new+0x40)
+set $phase53r_ctx_rip = *(unsigned long long*)($phase53r_ctx_new+0x48)
+set $phase53r_ctx_gs = *(unsigned long long*)($phase53r_ctx_new+0x60)
+printf "PHASE53R_CONTEXT_SWITCH oldctx=%p newctx=%p newrsp=%p newrip=%p newgs=%p\n", $phase53r_ctx_old, $phase53r_ctx_new, $phase53r_ctx_rsp, $phase53r_ctx_rip, $phase53r_ctx_gs
+x/16gx $phase53r_ctx_new
+continue
+end
+break *0x16722E
+commands
+silent
+printf "PHASE53R_SCHEDULER_RSP_CONSUMER rip=%p rsp_before=%p new_rsp_operand=%p\n", $rip, $rsp, $r10
+x/6i $rip-8
+continue
+end
+hbreak *0x6B0D680
+disable 4
+commands 4
+silent
+if $gs_base == 0x4CFE000
+if $rsp >= 0x4CFE000 && $rsp < 0x4CFF000
+printf "PHASE53R_FIRST_BAD_RSP OVMF_CALLER_ENTRY_6B0D680\n"
+info registers
+x/24gx $rsp-0x40
+x/16i $rip-16
+x/64i 0x6B0D680
+quit
+end
+end
+continue
+end
+hbreak *0x7E6E6BC
+disable 5
+commands 5
+silent
+if $gs_base == 0x4CFE000
+if $rsp >= 0x4CFE000 && $rsp < 0x4CFF000
+printf "PHASE53R_FIRST_BAD_RSP OVMF_EVENT_CALL_6BC\n"
+info registers
+x/24gx $rsp-0x40
+x/16i $rip-16
+x/64i 0x6B0D680
+quit
+else
+printf "PHASE53R_LAST_GOOD_RSP OVMF_EVENT_CALL_6BC rip=%p rsp=%p rbp=%p return=" , $rip, $rsp, $rbp
+x/gx $rsp
+x/16i $rip-16
+end
+end
+continue
+end
+hbreak *0x6B0D6B9
+disable 6
+commands 6
+silent
+if $gs_base == 0x4CFE000
+if $rsp >= 0x4CFE000 && $rsp < 0x4CFF000
+printf "PHASE53R_FIRST_BAD_RSP OVMF_INDIRECT_CALL_6B0D6B9\n"
+info registers
+x/24gx $rsp-0x40
+x/16i $rip-16
+quit
+end
+end
+continue
+end
+set $phase53r_armed = 0
+break *0x167B40
+commands
+silent
+if $phase53r_armed == 0
+set $phase53r_armed = 1
+enable 4
+enable 5
+enable 6
+end
+continue
+end
+echo PHASE53R_GDB_READY\\n
+continue

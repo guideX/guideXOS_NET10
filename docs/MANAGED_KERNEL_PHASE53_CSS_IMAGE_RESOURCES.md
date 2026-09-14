@@ -3265,3 +3265,139 @@ preserved under the `evidence/phase53q-*` directories, including the clean
 pass, target faults, and the excluded tooling-failure run. Historical Phase
 53P forensic evidence was not overwritten or deleted. No EFI or managed
 payload was rebuilt in Phase 53Q, and nothing was committed or pushed.
+
+## Phase 53R — First Bad-RSP Producer (2026-09-14)
+
+### Scope, preflight, and artifact provenance
+
+Phase 53R was a read-only forensic investigation of the first observed RSP
+pivot into the worker GS page. The requested starting commit `842d0dd` was not
+the live checkout: the repository was on branch
+`nativeaot-managed-kernel-integration`, at
+`30b6e79d6536e99de90e32cbd5851cc41efe81fa`, one commit beyond `842d0dd`, with
+origin at the same commit. The mandatory preflight was clean
+(`git status --porcelain` empty) before the diagnostic script was added. No
+reset, restore, clean, stash, branch switch, rebase, amend, push, merge, or
+production rebuild was performed.
+
+Every target run used the same Phase 53P production gate and exact hashes:
+
+    EFI  artifacts/phase53p-production-gate-final-v8/ESP/EFI/BOOT/BOOTX64.EFI
+         size 681287
+         SHA256 D8DC2BFC4D58DFB27C05A82FFBE145E22AF7BC699599B8477BC3500C60BFD69D
+    DLL  artifacts/phase53p-production-gate-final-v8/ESP/GXOS/gxos-managed-kernel.dll
+         size 4790784
+         SHA256 24ECBA6EBDADD720351BD0AE768AB177F366D5CCECFA318881376128351B6D09
+    PDB  artifacts/phase53p-managed-build-final-v8/publish/gxos-managed-kernel.pdb
+         size 11292672
+         SHA256 BB12D9271C3D4CAC80C2BB3BCF25C3ED839BE4561126F68B818F81A975F3F7ED
+
+The copied QEMU OVMF code image was 3653632 bytes with SHA256
+`33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`; the
+copied variables image was 540672 bytes with SHA256
+`5D2AC383371B408398ACCEE7EC27C8C09EA5B74A0DE0CEEA6513388B15BE5D1E`.
+The NativeAOT source correlation remains version `v10.0.11`, commit
+`79d0c463f1b55624c874a11585f7e47731e8d675`.
+
+The PDB maps `Thread::SetDoNotTriggerGc` to RVA `[0x147B80, 0x147B90)`;
+with image base `0x4EAC000`, the downstream fault address is `0x4FF3B80`.
+The faulting instruction is the expected `lock orl $0x10,0x40(%rcx)`.
+The invalid RCX and its source slot remain the previously recorded
+`0x48C3C3C920C48378` and `0x48C3C3C920C48348`, respectively.
+
+### Diagnostic method and reproductions
+
+The only new source-controlled diagnostic is
+[`Run-Phase53RFirstBadRspCapture.ps1`](../tools/Run-Phase53RFirstBadRspCapture.ps1).
+It validates the artifact sizes and hashes, copies OVMF into a fresh run
+directory, starts the unchanged Phase 53P gate under QEMU/TCG, and arms
+hardware breakpoints only after the worker scheduler start. It records the
+scheduler context restore, the scheduler's `mov rsp` consumer, the event
+callsite, and the narrowed OVMF callback path. It makes no production-source,
+EFI, managed-payload, or NativeAOT changes.
+
+The evidence directories `evidence/phase53r-first-bad-rsp-20260914-01` through
+`-19` are retained. Early runs that stalled, timed out, or produced a
+diagnostic timing perturbation are not target evidence. The useful target
+captures are:
+
+    R13, R14, R15  repeated target faults; first observed bad RSP at
+                   OVMF event callsite 0x7E6E6BC
+    R17            bad RSP at 0x6B0D6B9, before the indirect callback executes
+    R18            bad RSP at 0x6B0D680, after the preceding push/mov prologue
+    R19            bad RSP at true entry 0x6B0D67C, before its push %rbp
+
+R16's extra exact pre-call probe changed the stress timing and ended at the
+guest keyboard timeout; it is retained as a timing-perturbation record, not
+counted as a target reproduction. R19 is the strongest boundary capture
+because it contains both a preceding valid event-call observation and the
+true-entry bad-RSP observation in one run.
+
+### Last-good and first-bad boundary
+
+Observed and repeatable last-good state:
+
+    scheduler context consumer 0x16722E
+    new context               0x1A9A30
+    restored RSP              0x4D02FE8
+    restored RIP              0x167B40
+    restored GS               0x4CFE000
+    worker stack              0x4CFF000–0x4D03000
+
+R19 then observed a valid worker-stack event call at `0x7E6E6BC`, with
+`RSP=0x4D02470`, followed in the same execution trace by the first narrow
+bad boundary:
+
+    PHASE53R_FIRST_BAD_RSP OVMF_CALLER_ENTRY_6B0D67C
+    RIP 0x6B0D67C
+    RSP 0x4CFE228
+    GS  0x4CFE000
+    [RSP] 0x6B61123
+
+The OVMF bytes at this boundary are:
+
+    0x6B0D67C: push %rbp
+    0x6B0D67D: mov  %rsp,%rbp
+    0x6B0D680: push %r12
+    ...
+    0x6B0D6B9: call *0x18(%rax)
+    0x6B0D6BC: mov  %rax,%rbx
+
+This proves the bad RSP predates the `push %rbp` at `0x6B0D67C`, predates
+the indirect callback at `0x6B0D6B9`, and is not created by the callback's
+return. The saved return address `0x6B61123` identifies the next upstream
+OVMF continuation, but no write watchpoint or pre-call capture proves which
+instruction first wrote or loaded the bad RSP. The exact producer therefore
+remains unknown.
+
+### NativeAOT and scheduler correlation
+
+The first-bad RIPs (`0x6B0D67C`, `0x6B0D680`, `0x6B0D6B9`, and the repeated
+`0x7E6E6BC`) are outside the NativeAOT managed payload/PDB region. The
+NativeAOT `SetDoNotTriggerGc` fault is downstream: the OVMF event path runs
+with RSP in the GS page, a return address overwrites the worker TLS-vector
+slot at `GS+0x58`, and the GC end-callout later derives the invalid RCX from
+that corrupted vector. This downstream chain is proven by the captures; the
+earlier RSP writer is not.
+
+The scheduler source and live captures agree: it restores the recorded worker
+RSP/RIP/GS and then consumes RSP at `0x16722E`. No scheduler save/restore
+defect was observed. Likewise, the target fault precedes managed return,
+detach, or reclaim, so stale post-detach `Thread*` or allocator teardown is
+not proven as the mechanism.
+
+### Classification and outcome
+
+The narrowed interval is:
+
+    valid worker context restore at 0x16722E
+      -> valid OVMF event call at 0x7E6E6BC in R19
+      -> unresolved transition/caller path
+      -> OVMF entry 0x6B0D67C with RSP already in GS page 0x4CFE000–0x4CFEFFF
+      -> event-path stack use and downstream TLS-vector corruption
+      -> NativeAOT SetDoNotTriggerGc fault at 0x4FF3B80
+
+**Outcome E — the invalid-pointer provenance and first bad-RSP interval are
+narrowed, but the exact producer is unresolved.** No production repair is
+justified by this evidence. The Phase 53P ownership repair, allocator path,
+and GC workaround were left unchanged; nothing was committed or pushed.
