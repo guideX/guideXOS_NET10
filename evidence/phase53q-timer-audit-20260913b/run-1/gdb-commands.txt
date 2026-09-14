@@ -1,0 +1,129 @@
+set pagination off
+set confirm off
+set remotetimeout 30
+target remote 127.0.0.1:50784
+set $timer_count = 0
+set $timer_idt = 0x194250
+set $timer_handler = (((unsigned long long)*(unsigned int*)($timer_idt+8)) << 32) | (((unsigned long long)*(unsigned short*)($timer_idt+6)) << 16) | (unsigned long long)*(unsigned short*)$timer_idt
+printf "PHASE53Q_TIMER_HANDLER=%p\\n", $timer_handler
+hbreak *$timer_handler
+commands
+silent
+if $gs_base == 0x4CFE000
+set $timer_count = $timer_count + 1
+if $timer_count <= 8
+printf "PHASE53Q_TIMER_ENTRY count=%d RIP=%p RSP=%p GS=%p\\n", $timer_count, $rip, $rsp, $gs_base
+info registers
+x/16i $rip
+x/16gx $rsp
+end
+end
+continue
+end
+hbreak *0x4FF3B80
+commands
+silent
+if $rcx != 0x4CFC030 && $rcx != 0x4EAA030
+printf "PHASE53Q_FAULT_BREAKPOINT\n"
+info registers
+info registers fs_base gs_base
+printf "PHASE53Q_GS_BASE_EXPR="
+p/x $gs_base
+printf "PHASE53Q_FS_BASE_EXPR="
+p/x $fs_base
+x/16i $rip-16
+x/4gx $rsp-0x40
+x/64bx $rsp-0x200
+printf "PHASE53Q_RETURN_ADDRESS="
+x/gx $rsp
+printf "PHASE53Q_GS_30="
+x/gx $gs_base+0x30
+printf "PHASE53Q_GS_58="
+x/gx $gs_base+0x58
+set $fault_vector = *(unsigned long long*)($gs_base+0x58)
+printf "PHASE53Q_FAULT_VECTOR="
+p/x $fault_vector
+x/16gx $fault_vector
+printf "PHASE53Q_FAULT_VECTOR_SLOT0="
+x/gx $fault_vector
+printf "PHASE53Q_WORKER_VECTOR="
+x/8gx 0x4CFD000
+printf "PHASE53Q_FAULT_DISASSEMBLY="
+x/8i $rip
+quit
+end
+continue
+end
+set $bad_worker_teb_count = 0
+set $bad_worker_tls_vector_count = 0
+watch *0x4CFE030
+commands
+silent
+set $watched_slot = *(unsigned long long*)0x4CFE030
+if $watched_slot != 0x4CFB000
+set $bad_worker_teb_count = $bad_worker_teb_count + 1
+printf "PHASE53Q_BAD_WORKER_GS_TEB_WRITE\n"
+info registers
+x/12i $pc-16
+x/16gx $pc-0x40
+x/64bx $pc-0x80
+if $bad_worker_teb_count <= 1
+printf "PHASE53Q_WATCH_RSP=%p GS_BASE=%p\n", $rsp, $gs_base
+x/12gx $rsp-0x40
+set $watch_return = *(unsigned long long*)$rsp
+if $rsp == $gs_base+0x30
+set $watch_caller_return = *(unsigned long long*)($rsp+8)
+else
+set $watch_caller_return = $watch_return
+end
+printf "PHASE53Q_WATCH_STACK_TOP="
+p/x $watch_return
+printf "PHASE53Q_WATCH_CALLER_RETURN="
+p/x $watch_caller_return
+x/8i $watch_caller_return-16
+if $rsp == $gs_base+0x30
+x/96i $watch_caller_return-0x100
+end
+x/64i $pc-0x100
+end
+printf "PHASE53Q_BAD_SLOT_VALUE="
+p/x $watched_slot
+end
+continue
+end
+watch *0x4CFE058
+commands
+silent
+set $watched_slot = *(unsigned long long*)0x4CFE058
+if $watched_slot != 0x4CFD000
+set $bad_worker_tls_vector_count = $bad_worker_tls_vector_count + 1
+printf "PHASE53Q_BAD_WORKER_GS_TLS_VECTOR_WRITE\n"
+info registers
+x/12i $pc-16
+x/16gx $pc-0x40
+x/64bx $pc-0x80
+if $bad_worker_tls_vector_count <= 1
+printf "PHASE53Q_WATCH_RSP=%p GS_BASE=%p\n", $rsp, $gs_base
+x/12gx $rsp-0x40
+set $watch_return = *(unsigned long long*)$rsp
+if $rsp == $gs_base+0x30
+set $watch_caller_return = *(unsigned long long*)($rsp+8)
+else
+set $watch_caller_return = $watch_return
+end
+printf "PHASE53Q_WATCH_STACK_TOP="
+p/x $watch_return
+printf "PHASE53Q_WATCH_CALLER_RETURN="
+p/x $watch_caller_return
+x/8i $watch_caller_return-16
+if $rsp == $gs_base+0x30
+x/96i $watch_caller_return-0x100
+end
+x/64i $pc-0x100
+end
+printf "PHASE53Q_BAD_SLOT_VALUE="
+p/x $watched_slot
+end
+continue
+end
+continue

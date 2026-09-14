@@ -1,0 +1,69 @@
+set pagination off
+set confirm off
+set remotetimeout 30
+target remote 127.0.0.1:55337
+hbreak *0x4FF3B80
+commands
+silent
+if $rcx != 0x4CFC030 && $rcx != 0x4EAA030
+printf "PHASE53Q_FAULT_BREAKPOINT\n"
+info registers
+info registers fs_base gs_base
+printf "PHASE53Q_GS_BASE_EXPR="
+p/x $gs_base
+printf "PHASE53Q_FS_BASE_EXPR="
+p/x $fs_base
+x/16i $rip-16
+x/4gx $rsp-0x40
+x/64bx $rsp-0x200
+printf "PHASE53Q_RETURN_ADDRESS="
+x/gx $rsp
+printf "PHASE53Q_GS_30="
+x/gx $gs_base+0x30
+printf "PHASE53Q_GS_58="
+x/gx $gs_base+0x58
+set $fault_vector = *(unsigned long long*)($gs_base+0x58)
+printf "PHASE53Q_FAULT_VECTOR="
+p/x $fault_vector
+x/16gx $fault_vector
+printf "PHASE53Q_FAULT_VECTOR_SLOT0="
+x/gx $fault_vector
+printf "PHASE53Q_WORKER_VECTOR="
+x/8gx 0x4CFD000
+printf "PHASE53Q_FAULT_DISASSEMBLY="
+x/8i $rip
+quit
+end
+continue
+end
+watch *0x4CFE030
+commands
+silent
+set $watched_slot = *(unsigned long long*)0x4CFE030
+if $watched_slot != 0x4CFB000
+printf "PHASE53Q_BAD_WORKER_TEB_SLOT_WRITE\n"
+info registers
+x/12i $pc-16
+x/16gx $pc-0x40
+x/64bx $pc-0x80
+printf "PHASE53Q_BAD_SLOT_VALUE="
+p/x $watched_slot
+end
+continue
+end
+watch *0x4CFE058
+commands
+silent
+set $watched_slot = *(unsigned long long*)0x4CFE058
+if $watched_slot != 0x4CFD000
+printf "PHASE53Q_BAD_WORKER_TLS_VECTOR_SLOT_WRITE\n"
+info registers
+x/12i $pc-16
+x/16gx $pc-0x40
+x/64bx $pc-0x80
+printf "PHASE53Q_BAD_SLOT_VALUE="
+p/x $watched_slot
+end
+continue
+end
+continue

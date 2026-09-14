@@ -3022,3 +3022,246 @@ The complete diagnostic Phase 53O proof remains preserved and green, and the
 production migration must not be treated as suitable for retention until this
 broader compatibility failure and the remaining page replay boundary are
 resolved.
+
+## Phase 53Q — repeated-production-worker NativeAOT lifetime/context fault
+
+Phase 53Q investigated the separate fault exposed by the Phase 53P production
+worker stress. The Phase 53P ownership repair was preserved: production uses
+fresh scheduler-owned runtime storage, actual PE TLS installation, generated
+reverse-P/Invoke attachment, a unique NativeAOT `Thread*`, managed execution,
+runtime detach, ThreadStore removal, and only then scheduler reclamation. The
+full initialized NativeAOT TLS clone was not restored.
+
+### Artifact identity and reproduction
+
+All successful Phase 53Q captures used the exact Phase 53P production artifacts:
+
+    EFI:     681287 bytes
+             SHA-256 D8DC2BFC4D58DFB27C05A82FFBE145E22AF7BC699599B8477BC3500C60BFD69
+    payload: 4790784 bytes
+             SHA-256 24ECBA6EBDADD720351BD0AE768AB177F366D5CCECFA318881376128351B6D09
+    PDB:     11292672 bytes
+             SHA-256 BB12D9271C3D4CAC80C2BB3BCF25C3ED839BE4561126F68B818F81A975F3F7ED
+
+The runtime remained NativeAOT v10.0.11 at commit
+`79d0c463f1b55624c874a11585f7e47731e8d675`; it was not upgraded. The
+authoritative Phase 53P 25-cycle stress passed cycles 1–11 and faulted on
+cycle 12. An independent no-network reproduction passed cycles 1–9 and
+faulted on cycle 10. The boot number is not stable, but the fault RVA and
+invalid value were stable. A bounded clean diagnostic run reached managed
+return, detach, and reclaim without a target fault. The timer-audit attempt
+was a tooling failure because the dynamic firmware IDT entry was not initialized
+when GDB installed that optional breakpoint; it is not runtime evidence.
+
+The available cycle ledger is:
+
+| cycle | authoritative stress | independent no-network reproduction |
+|---:|---|---|
+| 9 | pass | pass |
+| 10 | pass | target fault |
+| 11 | pass | not reached |
+| 12 | target fault | not reached |
+
+The cycle-12 serial evidence is
+`evidence/phase53p-production-worker-stress-25/runs/run-12/serial.log`.
+
+### Exact fault identity
+
+For payload image base `0x4EAC000`, RVA `0x147B80` is loaded at
+`0x4FF3B80`. The matching PDB resolves the containing function as:
+
+    Thread::SetDoNotTriggerGc
+    function range: RVA [0x147B80, 0x147B90)
+
+The faulting bytes are:
+
+    f0 83 49 40 10    lock orl $0x10,0x40(%rcx)
+    c3                ret
+
+This is NativeAOT runtime code. It is not generated managed code, the guideXOS
+shim, or the scheduler. Under the Windows x64 ABI, `RCX` is the member-function
+`this` receiver. The instruction expects a valid NativeAOT `Thread*` and sets
+the `TSF_DoNotTriggerGc` bit in `Thread::m_ThreadStateFlags` at offset `0x40`;
+it does not accept an arbitrary callback argument.
+
+The direct caller in this capture is `InvokeGcCallouts`, whose function starts
+at RVA `0x1536C0` and calls `Thread::SetDoNotTriggerGc` at RVA `0x1536F8`
+(`+0x38`). The caller's dataflow is:
+
+    GS:0x58
+      -> TLS vector
+      -> vector[runtime TLS index]
+      -> TLS block
+      -> TLS block + 0x30
+      -> RCX / RDI
+      -> Thread::SetDoNotTriggerGc
+
+The captured `RBX=1`, `RDX=2`, `RSI=2`, and `R8=0` match the
+`GcDone -> InvokeGcCallouts(GCRC_EndCollection)` path, not the neighboring
+ref-counted-handle callback path. Version-matched NativeAOT sources document
+the corresponding runtime assumptions in [`thread.cpp`](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/thread.cpp),
+[`RestrictedCallouts.cpp`](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/RestrictedCallouts.cpp),
+and [`gcenv.ee.cpp`](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/gcenv.ee.cpp).
+
+### Invalid value and proven immediate producer
+
+The invalid receiver was:
+
+    RCX = 0x48C3C3C920C48378
+
+The corresponding source-slot value is `RCX-0x30`:
+
+    0x48C3C3C920C48348
+
+As little-endian bytes, the source is:
+
+    48 83 c4 20 c9 c3 c3 48
+
+The complete eight-byte sequence was not found in the matching payload, EFI,
+or PDB. Its leading bytes decode as `add rsp,0x20; leave; ret; ret`, and the
+capture proves why those bytes were consumed as data: the first bad worker
+TLS-vector watch saw `GS+0x58` overwritten with `0x7E6E2B9`. That address is
+the return address pushed by the dynamic-code instruction at `0x7E6E2B6`,
+`call *0x8(%rax)`. The later NativeAOT load therefore treated that firmware
+return address as the TLS-vector pointer and produced the invalid `Thread*`.
+
+The first bad worker-TLS-vector capture was:
+
+    write site RIP = 0x6B5025E
+    RSP            = 0x4CFE058 = worker GS + 0x58
+    GS base        = 0x4CFE000
+    new GS+0x58    = 0x7E6E2B9
+
+The first bad worker-TEB capture was:
+
+    write site RIP = 0x7E6E26B
+    RSP            = 0x4CFE030 = worker GS + 0x30
+
+The surrounding dynamic code is an OVMF/UEFI event/lock dispatch path: its
+`EVENT_SIGNATURE` check, event-list walk, and indirect notification call match
+the EDK2 event core in [`Event.c`](https://github.com/tianocore/edk2/blob/master/MdeModulePkg/Core/Dxe/Event/Event.c).
+This identifies the immediate clobbering execution as outside the payload and
+outside NativeAOT. It does not yet prove what earlier transition placed RSP in
+the GS page. The exact earlier pivot writer is therefore unresolved.
+
+The authoritative target fault state was:
+
+    RIP 0x4FF3B80       RSP 0x4D028C8       RBP 0x4EAC000
+    RAX 0x7E6E2B9       RBX 1                RCX 0x48C3C3C920C48378
+    RDX 2               RSI 2                RDI 0x48C3C3C920C48378
+    R8 0                 R9 0x54FD49          R10 1  R11 1  R12 1  R13 0  R14 1  R15 0
+    GS base 0x4CFE000    FS base 0
+
+At that point the intact worker vector was still `0x4CFD000`, with slot zero
+pointing to `0x4CFC000`; the corrupted value was in the installed GS vector
+slot, not in the fresh worker block observed by the direct vector dump.
+
+### Lifecycle and ownership ledger
+
+The worker identity in the Phase 53P/53Q target was:
+
+    scheduler TCB       0x1A99F0
+    worker stack        0x4CFF000–0x4D03000
+    worker GS           0x4CFE000
+    worker TLS vector   0x4CFD000
+    worker TLS block    0x4CFC000
+    worker Thread*      0x4CFC030
+    main Thread*        0x4EAA030
+
+The successful attach census was ThreadStore `2 -> 3`; Phase 53P's successful
+return/detach census was `3 -> 2`, followed by scheduler reclaim at baseline
+`2`. The faulting cycle occurs before managed return, detach, and reclaim, so
+the failing target does not establish a use-after-reclaim of its own worker
+resources. Clean captures show fresh worker resources can complete the full
+return/detach/reclaim path. Across the available failing captures, the fixed
+QEMU layout reuses the same address ranges; however, cumulative reuse across
+completed worker lifetimes, and all stale references after reclaim, were not
+proven to be the cause of the fault.
+
+The required lifetime rule is:
+
+    while a worker is active, GS+0x58 must name its installed TLS vector;
+    the runtime TLS slot must name that worker's TLS block; TLS block+0x30
+    must remain the live NativeAOT Thread* until GcDone and all callouts using
+    the current thread have completed. RSP must remain in the live worker
+    stack or an explicitly valid transition stack.
+
+The observed violation is the first part of that rule: ordinary firmware
+event-path stack activity ran with RSP in the worker GS page and overwrote
+`GS+0x30`/`GS+0x58`. The missing evidence is the owner of the earlier stack
+pivot. No post-detach stale `Thread*`, TLS block, GS address, stack address,
+transition frame, or scheduler TCB was proven in the target fault. ThreadStore
+baseline alone is therefore not treated as sufficient proof of complete FLS/PAL
+teardown.
+
+### Reverse-P/Invoke, FLS/PAL, GS/TLS, scheduler, and GC audit
+
+The attach/return audit remains consistent with the Phase 53P repair. The
+successful run entered through generated reverse-P/Invoke attachment, used a
+distinct NativeAOT `Thread*`, returned through the managed path, and detached
+before reclaim. The version-matched NativeAOT reverse-transition contract is
+implemented in [`thread.inl`](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/thread.inl)
+and [`UniversalTransition.asm`](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/amd64/UniversalTransition.asm).
+Those sources establish that normal reverse-P/Invoke return restores the saved
+transition frame; they do not explain the earlier RSP pivot seen here.
+
+GS/TLS captures showed the expected worker activation values before the fault:
+worker GS `0x4CFE000`, vector `0x4CFD000`, block `0x4CFC000`, and runtime
+Thread `0x4CFC030`. A clean capture restored main state and completed detach.
+The fault is during worker managed/runtime activity, specifically the GC end
+callout, not during reverse return, FLS cleanup, scheduler reclaim, or main
+thread execution. No causal GC allocation-context overlap was observed; the
+Phase 53P worker allocation context remained independently owned and the
+original `FixAllocContext`/`SetFree` path was unchanged.
+
+The scheduler context audit observed a production switch with:
+
+    old context 0x7E645D8
+    new context 0x1A9A30
+    new RSP     0x4D02FE8
+    new RIP     0x167B40
+    new GS      0x4CFE000
+
+The scheduler assembly saves/restores the nonvolatile GPRs, stack, RIP,
+flags, floating-point state, XMM6–15, and GS; it intentionally does not save
+volatile GPRs under the ABI. Existing model, stack-VM, durability, interrupt,
+and memory-accounting tests remained green. This rules out neither a later
+interrupt/firmware boundary error nor the unresolved pivot, so a scheduler
+context-save/restore defect is not declared proven and the scheduler was not
+rewritten.
+
+### Classification and outcome
+
+The best-supported current classification is an unresolved boundary corruption
+candidate (Q5/Q7 remain possible); no Q1–Q8 mechanism is accepted as proven
+because the first RSP-pivot writer has not been identified. In particular, Q1,
+Q2, Q3, and Q4 are not established by the target fault because it precedes
+detach/reclaim; Q6 is not established because reverse-P/Invoke succeeds in
+isolation and in the clean lifecycle; and Q5 versus Q7 cannot be separated
+without the earlier pivot producer.
+
+**Principal outcome: Outcome E — invalid-pointer provenance narrowed but
+producer unresolved.**
+
+The complete immediate chain is proven:
+
+    valid worker/runtime state
+      -> RSP enters the worker GS page in an earlier, unresolved transition
+      -> OVMF/UEFI event-path calls use that page as a stack
+      -> return address 0x7E6E2B9 overwrites GS+0x58
+      -> GcDone/InvokeGcCallouts loads it as the TLS vector
+      -> TLS-block derivation places 0x48C3C3C920C48378 in RCX
+      -> Thread::SetDoNotTriggerGc at RVA 0x147B80 faults
+
+The decisive first transition into the GS page remains the smallest next
+question. No production repair is justified. The production lifecycle is not
+retainable or acceptance-ready for extended repeated-worker scheduling, but
+Phase 53P's ownership repair remains valid and must be retained.
+
+No allocator or GC workaround was added. No changes were made to
+`FixAllocContext` or `SetFree`. Diagnostic tooling is preserved in
+`tools/Run-Phase53QWorkerLifetimeFaultCapture.ps1`; separate captures are
+preserved under the `evidence/phase53q-*` directories, including the clean
+pass, target faults, and the excluded tooling-failure run. Historical Phase
+53P forensic evidence was not overwritten or deleted. No EFI or managed
+payload was rebuilt in Phase 53Q, and nothing was committed or pushed.
