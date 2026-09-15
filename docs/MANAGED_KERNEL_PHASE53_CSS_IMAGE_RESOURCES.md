@@ -3401,3 +3401,266 @@ The narrowed interval is:
 narrowed, but the exact producer is unresolved.** No production repair is
 justified by this evidence. The Phase 53P ownership repair, allocator path,
 and GC workaround were left unchanged; nothing was committed or pushed.
+
+## Phase 53S — Pre-OVMF Stack-Pivot Transition
+
+Phase 53S remained forensic. It did not change production C, assembly, EFI,
+managed-payload, scheduler, GS setup, or GC behavior. The purpose was to treat
+`0x6B0D67C` as a landing point and capture the final transfer into it before
+its first instruction executed.
+
+### Preflight and inherited boundary
+
+The live preflight found:
+
+    repository       D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration
+    branch           nativeaot-managed-kernel-integration
+    starting HEAD    1930ec1d4ddfe1f6d5d7c3d27db5baacbd623c41  Phase 53R
+    upstream         origin/nativeaot-managed-kernel-integration
+    divergence       0 ahead / 0 behind
+    tracked changes  none
+    untracked files  none (non-ignored)
+
+The prompt's expected `842d0dd` was not the live HEAD; the repository already
+contained the committed Phase 53R work at `1930ec1`. Existing ignored Phase
+53Q/R evidence was inventoried and preserved. An unrelated QEMU process was
+running during preflight and was not terminated.
+
+The decisive retained R19 evidence was read first:
+
+    evidence/phase53r-first-bad-rsp-20260914-19/run-1/capture-manifest.txt
+    evidence/phase53r-first-bad-rsp-20260914-19/run-1/gdb.stdout.log
+    evidence/phase53r-first-bad-rsp-20260914-19/run-1/gdb-commands.txt
+
+The matching Phase 53P artifacts were unchanged across the captures:
+
+    EFI  artifacts/phase53p-production-gate-final-v8/ESP/EFI/BOOT/BOOTX64.EFI
+         size 681287
+         SHA256 D8DC2BFC4D58DFB27C05A82FFBE145E22AF7BC699599B8477BC3500C60BFD69D
+    DLL  artifacts/phase53p-production-gate-final-v8/ESP/GXOS/gxos-managed-kernel.dll
+         size 4790784
+         SHA256 24ECBA6EBDADD720351BD0AE768AB177F366D5CCECFA318881376128351B6D09
+    PDB  artifacts/phase53p-managed-build-final-v8/publish/gxos-managed-kernel.pdb
+         size 11292672
+         SHA256 BB12D9271C3D4CAC80C2BB3BCF25C3ED839BE4561126F68B818F81A975F3F7ED
+
+The inherited last-known-good scheduler state was observed at the scheduler
+RSP consumer `0x16722E`:
+
+    context       0x1A9A30
+    RSP           0x4D02FE8
+    RIP           0x167B40
+    GS base       0x4CFE000
+    worker stack  0x4CFF000–0x4D03000
+
+### Immediate predecessor and exact transfer
+
+The final transfer into `0x6B0D67C` is proven to be an indirect tail jump:
+
+    0x6B57E3C: 4A 8B 04 F7       mov    (%rdi,%r14,8),%rax
+               RDI=0x6B65B00, R14=0x20
+               effective address 0x6B65C00
+               [0x6B65C00] = 0x6B0D67C
+
+    0x6B57E5E: FF E0              jmp    *%rax
+
+The immediate pre-transfer snapshot in the matching bad captures was:
+
+    RIP       0x6B57E5E
+    RAX       0x6B0D67C
+    RSP       0x4CFE228
+    RBP       0x4CFE5C0 (representative matching capture)
+    GS base   0x4CFE000
+
+At OVMF entry, before `push %rbp` executed:
+
+    RIP       0x6B0D67C
+    RSP       0x4CFE228
+    RBP       0x4CFE5C0 (representative matching capture)
+    GS base   0x4CFE000
+    [RSP]     0x6B61123
+
+The jump itself does not change RSP. The target-entry RSP equals the
+pre-jump RSP in every successful final-transfer capture. The apparent
+`pop %rsp` in some raw GDB windows was a misaligned decode of the second byte
+of `41 5C` at `0x6B57E55`; the aligned static decode is `pop %r12` at
+`0x6B57E55`, followed by `pop %r13` at `0x6B57E57`, and no `pop %rsp`.
+
+The upstream OVMF handler call is also ordinary:
+
+    0x6B6111E: E8 B7 5C FF FF    call 0x6B56DDA
+    RSP before call               0x4CFE230
+    return address pushed         0x6B61123 at 0x4CFE228
+
+The thunk at `0x6B56DDA` restores its `0x188`-byte local area and saved
+registers before the final jump. Therefore the ordinary call is a consumer of
+an already GS-page-derived stack, not the pivot producer. Its `RSP` arithmetic
+does, however, exactly explain the final `0x4CFE228` landing value:
+
+    0x4CFE230 - 8 = 0x4CFE228
+
+### Executed backward walk
+
+The following is the narrowest machine-level chain captured in the Phase 53S
+runs. The first four bad entries are ordinary firmware function entries; none
+loads RSP from GS or a saved context in the captured instructions.
+
+    valid  0x16722E   scheduler consumes context RSP 0x4D02FE8
+    valid  0x7E6E6BC  OVMF event call, RSP 0x4D021F0
+                       call 0x7E6E25E
+    bad    0x501A800  function entry, RSP 0x4CFE7B8
+                       first instruction: sub $0x28,%rsp
+                       return address: 0x501C2B3
+    bad    0x501A5B0  function entry, RSP 0x4CFE788
+                       first operations are stack stores, then push %r14;
+                       sub $0x20,%rsp
+    bad    0x5004140  wrapper entry, RSP 0x4CFE758
+                       sub $0x28,%rsp; call *0x5041100
+                       dynamic return site 0x5004150 identifies 0x111870
+    bad    0x111870   function entry, RSP 0x4CFE728
+                       push saves; and $-16,%rsp; sub $0xD0,%rsp
+    bad    0x105BC0   serial function entry, RSP 0x4CFE608
+                       first instruction: push %rbx
+                       return address: 0x111A6E
+                       callsite: 0x111A69: call 0x105BC0
+    bad    0x105C26   serial polling instruction, RSP 0x4CFE600
+    bad    0x6B61004  OVMF vector-0x20 common entry, RSP 0x4CFE5C8
+                       saved interrupted RSP: 0x4CFE600
+    bad    0x6B6111E  direct call to thunk, RSP before call 0x4CFE230
+    bad    0x6B57E3C  target-table load, RSP 0x4CFE060
+                       [0x6B65C00] = 0x6B0D67C
+    bad    0x6B57E5E  jmp *%rax, RSP 0x4CFE228
+    bad    0x6B0D67C  OVMF entry, RSP 0x4CFE228
+
+The `0x501A800` through `0x105BC0` edges were captured dynamically in the
+same failing runs. Their relevant static calls are:
+
+    0x501A86F: call 0x501A5B0
+    0x501A634: call 0x5004140
+    0x500414A: call *0x5041100       -> observed entry 0x111870
+    0x111A69:  call 0x105BC0
+
+The timer interrupt did not create the bad firmware stack. At common entry,
+the hardware/firmware frame already contained interrupted RIP `0x105C28`
+(the probe caught the serial polling site at `0x105C26`) and interrupted RSP
+`0x4CFE600`. The common handler then used ordinary pushes and local frame
+operations before reaching `0x6B6111E`.
+
+### GS-page analysis
+
+The numerical relationship is real for the R19/S1/S5/S7/S11/S12/S13/S15/S16/
+S18/S19-style landing:
+
+    GS base       0x4CFE000
+    entry RSP     0x4CFE228
+    entry RSP-GS  0x228
+
+It is not invariant across all timing variants. Among 21 successful target
+captures, all 21 had RSP inside the page rooted at `0x4CFE000`; the exact
+`GS+0x228` address occurred in 14. Other successful landings were
+`GS+0x178`, `GS+0x1F8`, `GS+0x348`, `GS+0x3A8`, or `GS+0x3B8`. Thus page
+containment is reproducible, while the exact `+0x228` offset depends on stack
+depth/timing.
+
+The loader source identifies `0x4CFE000` as the allocated, zeroed NativeAOT
+GS area. In `src/Gate4Harness/gate4_loader.c`, the established fields are:
+
+    GS+0x30  -> TEB allocation
+    GS+0x58  -> TLS vector allocation
+
+The rest of the page is zeroed initially. The scheduler TCB separately stores
+per-thread `gs_base`, `teb_base`, and `tls_vector_base`; the scheduler context
+stores GS at its defined `+0x60` field. No source definition assigns a GS
+field at `+0x228`.
+
+At the matching target snapshot, the relevant page contents included:
+
+    GS+0x1E8  0x0000000000180047  0x0000000000004000
+    GS+0x1F8  0x0000000004CFE260  0x0000000000243E50
+    GS+0x208  0x0000000000000001  0x0000000000000000
+    GS+0x218  0x0000000004CFE6A0  0x0000000004CFE5C0
+    GS+0x228  0x0000000006B61123  0x0000000000000000
+
+The value at `GS+0x228` is the ordinary return address left by the
+`0x6B6111E` call. The address `GS+0x228` is therefore an active stack
+location at that moment, not an identified GS structure field. No valid
+semantic source for the RSP value itself was established.
+
+### ABI, ownership, GS behavior, and saved context
+
+The observed `0x20` interrupt path is firmware/OVMF-owned. It remained at the
+same privilege level (`CS=0x38`, `SS=0x30`) and no guideXOS IST stack switch
+was observed. The frame contains the already-bad interrupted RSP, so this
+boundary is an interrupt consumer of the bad stack. The subsequent firmware
+dispatcher, thunk, and callback retain firmware control of RSP; the final
+tail jump does not establish a new stack.
+
+The guideXOS scheduler context restore is not implicated by the captured
+values. Context `0x1A9A30` held the valid RSP/RIP/GS triple above, and
+`scheduler_context.S` restores GS, then executes the recorded RSP load and
+indirect jump. No bad saved scheduler RSP was observed. The OVMF interrupt
+frame is a saved copy of the already-bad current RSP, not the identified
+writer of it.
+
+GS base remained `0x4CFE000` at the scheduler boundary, valid event call,
+serial caller/function entries, interrupt common/frame/handler entries,
+target-table load, final jump, and OVMF entry. No `swapgs`, intentional GS
+swap, or GS-base transition correlated with the first bad capture.
+
+No unique saved-RSP slot was identified, so no broad or speculative hardware
+watchpoint was installed. The bounded breakpoint strategy proved the final
+target operand and transfer, then walked backward through the actually
+executed firmware path.
+
+### Reproduction matrix
+
+There were 21 successful target-boundary captures in retained
+`evidence/phase53s-pre-ovmf-stack-pivot-20260914-01` through `-26` runs:
+
+    runs  01,02,05,06,07,08,09,11,12,13,15,16,18,19,20,21,22,23,24,25,26
+    entry RSP values  GS+0x228 (14), GS+0x178, GS+0x1F8 (2),
+                     GS+0x348 (2), GS+0x3A8, GS+0x3B8
+    final transfer    0x6B57E5E: jmp *%rax, target 0x6B0D67C in all 21
+    GS-page relation  21/21 inside 0x4CFE000–0x4CFEFFF
+
+Runs `03`, `04`, `10`, `14`, and `17` are retained non-target records caused
+by debugger timing or command-file setup; they were not counted as causal
+reproductions. Run `17` specifically stopped on an incorrect GDB breakpoint
+number before capture and was retained rather than overwritten.
+
+### Classification and outcome
+
+**Outcome E — producer still unresolved, with the interval narrowed further.**
+
+The exact final transition is proven:
+
+    valid scheduler restore
+      -> valid OVMF event-call observation
+      -> unresolved transition before OVMF function 0x501A800
+      -> 0x501A800 / 0x501A5B0 / 0x5004140 / 0x111870
+         ordinary firmware stack consumers, already GS-page-based
+      -> serial call 0x111A69 -> serial entry 0x105BC0
+      -> timer IRQ saves the already-bad RSP 0x4CFE600
+      -> handler call 0x6B6111E with RSP 0x4CFE230
+      -> call pushes 0x6B61123 at 0x4CFE228
+      -> target-table load and 0x6B57E5E jmp *%rax
+      -> OVMF entry 0x6B0D67C with RSP 0x4CFE228
+
+The smallest remaining causal boundary is before the captured entry of OVMF
+function `0x501A800`, which already had `RSP=0x4CFE7B8` and return address
+`0x501C2B3`. The exact instruction or architectural transition that first
+changes a legitimate stack into that GS-page value remains unknown. No
+source operand or saved-context writer for the first bad RSP was proven.
+
+Phase 53T should therefore test the boundary before `0x501A800`—including
+the caller/return or firmware context handoff that reaches it—using a narrow
+entry/return capture or a specifically identified saved-RSP watchpoint. It
+should not treat `0x6B57E5E`, the target-table load, the ordinary call at
+`0x6B6111E`, the timer interrupt frame, or OVMF's `push %rbp` as the pivot
+producer.
+
+Phase 53S changes are limited to the diagnostic script
+`tools/Run-Phase53SPreOvmfStackPivotCapture.ps1`, retained raw evidence, and
+this documentation section. No production source changes were made. HEAD
+remains `1930ec1d4ddfe1f6d5d7c3d27db5baacbd623c41` (`Phase 53R`), with no
+commit and no push.

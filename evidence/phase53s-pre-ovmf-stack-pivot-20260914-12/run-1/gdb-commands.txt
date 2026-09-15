@@ -1,0 +1,225 @@
+set pagination off
+set confirm off
+set remotetimeout 30
+target remote 127.0.0.1:63109
+hbreak *0x4FF3B80
+commands
+silent
+if $rcx != 0x4CFC030 && $rcx != 0x4EAA030
+printf "PHASE53S_FAULT_BREAKPOINT\n"
+info registers
+info registers fs_base gs_base
+x/24gx $rsp-0x40
+quit
+end
+continue
+end
+break *0x167080
+commands
+silent
+set $phase53s_ctx_new = $rdx
+set $phase53s_ctx_rsp = *(unsigned long long*)($rdx+0x40)
+set $phase53s_ctx_rip = *(unsigned long long*)($rdx+0x48)
+set $phase53s_ctx_gs = *(unsigned long long*)($rdx+0x60)
+printf "PHASE53S_CONTEXT newctx=%p newrsp=%p newrip=%p newgs=%p\n", $phase53s_ctx_new, $phase53s_ctx_rsp, $phase53s_ctx_rip, $phase53s_ctx_gs
+continue
+end
+break *0x16722E
+commands
+silent
+printf "PHASE53S_SCHEDULER_CONSUMER rip=%p rsp_before=%p rsp_operand=%p\n", $rip, $rsp, $r10
+x/6i $rip-8
+continue
+end
+hbreak *0x7E6E6BC
+disable 4
+commands 4
+silent
+if $gs_base == 0x4CFE000
+if $rsp >= 0x4CFF000 && $rsp < 0x4D03000
+if $phase53s_event_seen == 0
+set $phase53s_event_seen = 1
+printf "PHASE53S_EVENT_VALID rip=%p rsp=%p rbp=%p gs=%p return=", $rip, $rsp, $rbp, $gs_base
+x/gx $rsp
+x/16i $rip-16
+end
+else
+printf "PHASE53S_EVENT_GS_PAGE rip=%p rsp=%p rbp=%p gs=%p\n", $rip, $rsp, $rbp, $gs_base
+end
+end
+continue
+end
+hbreak *0x6B6111E
+disable 5
+commands 5
+silent
+if $gs_base == 0x4CFE000
+if $rsp >= 0x4CFE000 && $rsp < 0x4CFF000
+printf "PHASE53S_PRE_TRANSFER rip=%p rsp=%p rbp=%p gs=%p bytes=", $rip, $rsp, $rbp, $gs_base
+x/8bx $rip
+x/16i $rip-8
+x/8gx $rsp-0x20
+info registers
+end
+end
+continue
+end
+hbreak *0x6B0D67C
+disable 6
+commands 6
+silent
+if $gs_base == 0x4CFE000
+if $rsp >= 0x4CFE000 && $rsp < 0x4CFF000
+set $phase53s_ret = *(unsigned long long*)$rsp
+set $phase53s_inferred_pre_rsp = $rsp + 8
+printf "PHASE53S_OVMF_ENTRY rip=%p rsp=%p inferred_pre_rsp=%p rbp=%p gs=%p return=%p\n", $rip, $rsp, $phase53s_inferred_pre_rsp, $rbp, $gs_base, $phase53s_ret
+info registers
+info registers fs_base gs_base
+x/24gx $rsp-0x40
+x/8bx $phase53s_ret-5
+x/24i $phase53s_ret-0x40
+printf "PHASE53S_THUNK_6B56DDA\\n"
+x/1000i 0x6B56DDA
+printf "PHASE53S_CALLER_WINDOW_6B6110E\\n"
+x/80i 0x6B6110E
+x/16i $rip-16
+x/64i 0x6B0D680
+printf "PHASE53S_GS_PAGE base=%p offsets=", $gs_base
+x/20gx $gs_base+0x1E8
+printf "PHASE53S_ARITH entry_minus_gs=%p\n", $rsp-$gs_base
+printf "PHASE53S_TARGET_HIT\n"
+quit
+end
+end
+continue
+end
+break *0x6B57E5E
+disable 7
+commands 7
+silent
+if $gs_base == 0x4CFE000
+if $rax == 0x6B0D67C
+printf "PHASE53S_FINAL_TRANSFER_PRE rip=%p rsp=%p rax=%p target=%p rbp=%p gs=%p bytes=", $rip, $rsp, $rax, $rax, $rbp, $gs_base
+x/8bx $rip
+x/8i $rip-8
+x/8gx $rsp-0x20
+info registers
+end
+end
+continue
+end
+break *0x6B57E3C
+disable 8
+commands 8
+silent
+if $gs_base == 0x4CFE000
+if $rsp >= 0x4CFE000 && $rsp < 0x4CFF000
+printf "PHASE53S_FINAL_TARGET_LOAD rip=%p rsp=%p rdi=%p r14=%p effective=%p value=%p gs=%p bytes=", $rip, $rsp, $rdi, $r14, $rdi + $r14 * 8, *(unsigned long long*)($rdi + $r14 * 8), $gs_base
+x/8bx $rip
+x/6i $rip-8
+x/4gx $rdi+$r14*8
+info registers rax rdi r14 rsp rbp gs_base
+end
+end
+continue
+end
+break *0x6B610E3
+disable 9
+commands 9
+silent
+if $gs_base == 0x4CFE000
+if $rsp >= 0x4CFF000 && $rsp < 0x4D03000
+if $phase53s_irq_valid_seen == 0
+set $phase53s_irq_valid_seen = 1
+printf "PHASE53S_INTERRUPT_VALID_ENTRY rip=%p rsp=%p rbp=%p gs=%p\n", $rip, $rsp, $rbp, $gs_base
+x/24gx $rsp-0x40
+x/32gx $rbp-0x20
+x/16i $rip-0x20
+info registers
+end
+else
+printf "PHASE53S_INTERRUPT_BAD_ENTRY rip=%p rsp=%p rbp=%p gs=%p\n", $rip, $rsp, $rbp, $gs_base
+x/24gx $rsp-0x40
+x/48gx $rbp-0x40
+x/16i $rip-0x20
+x/96i $rip-0x200
+info registers
+end
+else
+if $rsp >= 0x4CFE000 && $rsp < 0x4CFF000
+printf "PHASE53S_INTERRUPT_BAD_ENTRY rip=%p rsp=%p rbp=%p gs=%p\n", $rip, $rsp, $rbp, $gs_base
+x/24gx $rsp-0x40
+x/48gx $rbp-0x40
+x/16i $rip-0x20
+info registers
+end
+end
+continue
+end
+break *0x6B60FE2
+disable 10
+condition 10 $gs_base == 0x4CFE000 && $rsp >= 0x4CFE000 && $rsp < 0x4D03000
+commands 10
+silent
+printf "PHASE53S_INTERRUPT_COMMON_ENTRY rip=%p rsp=%p gs=%p\n", $rip, $rsp, $gs_base
+x/16gx $rsp-0x20
+continue
+end
+break *0x6B60FE5
+disable 11
+condition 11 $gs_base == 0x4CFE000 && $rsp >= 0x4CFE000 && $rsp < 0x4CFF000
+commands 11
+silent
+printf "PHASE53S_INTERRUPT_COMMON_AFTER_MOV_BAD rip=%p rsp=%p rax=%p gs=%p\n", $rip, $rsp, $rax, $gs_base
+continue
+end
+break *0x6B60FE9
+disable 12
+condition 12 $gs_base == 0x4CFE000 && $rsp >= 0x4CFE000 && $rsp < 0x4CFF000
+commands 12
+silent
+printf "PHASE53S_INTERRUPT_COMMON_AFTER_ALIGN_BAD rip=%p rsp=%p rax=%p gs=%p\n", $rip, $rsp, $rax, $gs_base
+continue
+end
+break *0x6B61004
+disable 13
+condition 13 $gs_base == 0x4CFE000 && $rsp >= 0x4CFE000 && $rsp < 0x4D03000
+commands 13
+silent
+printf "PHASE53S_INTERRUPT_DISPATCH_ENTRY rip=%p rsp=%p rax=%p rcx=%p gs=%p\n", $rip, $rsp, $rax, $rcx, $gs_base
+x/24gx $rsp-0x40
+x/16i $rip-0x20
+continue
+end
+break *0x6B6102B
+disable 14
+condition 14 $gs_base == 0x4CFE000 && $rsp >= 0x4CFE000 && $rsp < 0x4D03000
+commands 14
+silent
+printf "PHASE53S_INTERRUPT_FRAME_ENTRY rip=%p rsp=%p rbp=%p rcx=%p gs=%p\n", $rip, $rsp, $rbp, $rcx, $gs_base
+x/24gx $rsp-0x40
+x/16i $rip-0x20
+continue
+end
+set $phase53s_event_seen = 0
+set $phase53s_irq_valid_seen = 0
+set $phase53s_common_valid_seen = 0
+break *0x167B40
+commands
+silent
+enable 4
+enable 5
+enable 6
+enable 7
+enable 8
+enable 9
+enable 10
+enable 11
+enable 12
+enable 13
+enable 14
+enable 15
+continue
+end
+echo PHASE53S_GDB_READY\\n
+continue
