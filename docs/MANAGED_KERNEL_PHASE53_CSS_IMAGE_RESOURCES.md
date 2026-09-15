@@ -3664,3 +3664,248 @@ Phase 53S changes are limited to the diagnostic script
 this documentation section. No production source changes were made. HEAD
 remains `1930ec1d4ddfe1f6d5d7c3d27db5baacbd623c41` (`Phase 53R`), with no
 commit and no push.
+
+## Phase 53T — First GS-page RSP Producer (2026-09-14)
+
+Phase 53T preserves the Phase 53S record above and resolves the remaining
+producer question. Phase 53S correctly identified the exact OVMF transfer and
+the already-invalid stack observed by later firmware code. Its statement that
+the first producer was still unknown is retained as the state at the end of
+Phase 53S; the bounded prologue trace below supersedes only that unresolved
+part of the conclusion.
+
+### Live preflight and repository state
+
+The live preflight was performed before adding the Phase 53T diagnostic. The
+prompt's expected HEAD was not current; the actual repository state was
+
+    repository  D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration
+    branch      nativeaot-managed-kernel-integration
+    HEAD        4008a890d94ac5ca68867499d1ad6f1f960fd169
+    subject     Outcome E — exact OVMF transfer proven; first GS-page RSP producer remains unresolved.
+    upstream    origin/nativeaot-managed-kernel-integration
+    ahead       0
+    behind      0
+    status      clean
+
+The starting worktree was clean. This differs from the prompt's expected
+`1930ec1d4ddfe1f6d5d7c3d27db5baacbd623c41`; no attempt was made to reconcile
+the two states. The Phase 53S document, its 26 retained evidence directories,
+the Phase 53S capture script, and all other existing forensic artifacts were
+preserved.
+
+At preflight, two QEMU processes were already running: the repository's
+unrelated application-runtime validation and a separate Phase 28 compiler
+bootstrap validation. No GDB, LLDB, or WinDbg process was running. Neither
+unrelated QEMU process was stopped or reused. Each Phase 53T capture launched
+its own QEMU/GDB pair and recorded a before/after process inventory; the clean
+confirmation run left no diagnostic process behind.
+
+The exact Phase 53S v8 binary remains available and was treated as
+authoritative. No rebuild was required. The preserved artifacts used for the
+Phase 53T confirmation were
+
+    managed payload  4,790,784 bytes
+                    SHA-256 24ECBA6EBDADD720351BD0AE768AB177F366D5CCECFA318881376128351B6D09
+    BOOTX64.EFI      681,287 bytes
+                    SHA-256 D8DC2BFC4D58DFB27C05A82FFBE145E22AF7BC699599B8477BC3500C60BFD69D
+    matching PDB     11,292,672 bytes
+                    SHA-256 BB12D9271C3D4CAC80C2BB3BCF25C3ED839BE4561126F68B818F81A975F3F7ED
+    OVMF code        3,653,632 bytes
+                    SHA-256 33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A
+    OVMF vars        540,672 bytes
+                    SHA-256 5D2AC383371B408398ACCEE7EC27C8C09EA5B74A0DE0CEEA6513388B15BE5D1E
+
+The diagnostic toolchain was PowerShell 7.6.5, QEMU 11.0.0, and MinGW GDB
+17.1. The repository's `global.json` requests .NET SDK 10.0.302 while only
+10.0.401 is installed on this host, but no build was attempted because the
+preserved v8 artifact was sufficient.
+
+### Inherited domains and Phase 53S boundary
+
+The retained Phase 53S run established the following domains and observations:
+
+    target GSBASE                 0x4CFE000
+    GS page                       0x4CFE000–0x4CFEFFF
+    worker stack                  0x4CFF000–0x4D02FFF
+    valid scheduler RSP           0x4D02FE8 (context 0x1A9A30)
+    valid event-call RSP          e.g. 0x4D021F0 / 0x4D02470
+    bad OVMF-entry RSP             0x4CFE228 (Phase 53S run 19)
+    later bad serial/interrupt RSP values in the same GS page
+
+Phase 53S also proved the scheduler consumer at `0x16722E`:
+
+    mov 0x128(%rsp),%r10
+    mov %r10,%rsp
+    jmp *%rax
+
+The context `0x1A9A30` supplied a valid worker RSP and GS pair. The OVMF
+entry at `0x6B0D67C`, its caller, the timer frame, and the later firmware
+thunk therefore remained downstream consumers of an already-invalid stack.
+The OVMF-side transfer boundary remains valid after Phase 53T.
+
+### Experiment design and captures
+
+`tools/Run-Phase53TFirstRspProducerCapture.ps1` reused the exact v8 payload,
+fresh copied OVMF code/vars, and the bounded Phase 53S serial/keyboard input
+sequence. It added debugger-side breakpoints at the scheduler restore, worker
+entry, valid event call, the suspected large-frame function, the generated
+stack-probe GS read, the explicit RSP subtraction, and the first instruction
+after that subtraction. Known Phase 53S downstream faults for the two retained
+worker contexts were logged and continued so they could not hide a later
+invocation of the target function.
+
+The bounded run sequence was retained as raw evidence:
+
+    run-02  diagnostic layout/timing variant; no target pivot, excluded
+    run-03  worker path did not reach the large-frame routine
+    run-04  same bounded negative observation on a fresh boot
+    run-05  reached the routine; nested single-step instrumentation stopped after the probe setup
+    run-06  reached the writer pre-state; nested single-step instrumentation stopped before post-state
+    run-07  captured the complete pivot; result marker was present in GDB output
+    run-08  clean confirmation; FIRST_RSP_PIVOT_CAPTURED
+
+The authoritative confirmation is
+`evidence/phase53t-first-rsp-producer-20260914-08/run-1/`. Its manifest and
+GDB log contain the complete before/after state. Runs 05 and 06 are retained
+as instrumentation diagnostics rather than interpreted as negative runtime
+results.
+
+### Static disassembly and exact function
+
+The preserved payload's PE preferred image base is `0x180000000`; the v8
+loaded image base is `0x4EAC000`. The `.pdata` entry covering the target
+routine spans preferred `0x18016F330–0x180170327`, or loaded
+`0x501B330–0x501C327`. The PDB is retained, but the available MinGW objdump
+does not emit its managed NativeAOT symbol name; the exact module, loaded
+address, preferred address, and unwind range are unambiguous.
+
+This is the NativeAOT-generated large-frame routine in
+`gxos-managed-kernel.dll`, loaded at `0x501B330` (`.text+0x16E330`, preferred
+`0x18016F330`). Its relevant prologue is
+
+    0x501B330: 48 89 5C 24 08       mov [rsp+0x08],rbx
+    0x501B335: 48 89 74 24 10       mov [rsp+0x10],rsi
+    0x501B33A: 48 89 7C 24 18       mov [rsp+0x18],rdi
+    0x501B33F: 55                    push rbp
+    0x501B340: 41 54                 push r12
+    0x501B342: 41 55                 push r13
+    0x501B344: 41 56                 push r14
+    0x501B346: 41 57                 push r15
+    0x501B348: 48 8D AC 24 50 BF FF FF lea rbp,[rsp-0x40B0]
+    0x501B350: B8 B0 41 00 00       mov eax,0x41B0
+    0x501B355: E8 E6 D2 01 00       call 0x5038640
+    0x501B35A: 48 2B E0             sub rsp,rax
+    0x501B35D: 48 8B 05 9C DD 30 00 mov rax,[rip+0x30DD9C]
+
+The call target at `0x5038640` is a stack-probe helper. Its relevant
+GS-relative audit is
+
+    0x503865C: 65 4C 8B 1C 25 10 00 00 00  mov r11,qword ptr gs:[0x10]
+
+The helper temporarily subtracts `0x10` from its own RSP, computes a
+prospective lower address from RAX, reads `GS+0x10`, and conditionally probes
+pages. It restores its temporary frame and returns; it does not load RSP from
+GS. The Phase 53T GDB capture observed the GS read at effective address
+`0x4CFE010` with value zero, and then observed RAX still equal to `0x41B0`
+at the explicit `sub rsp,rax` instruction.
+
+### First architectural RSP pivot
+
+The confirmation timeline is
+
+    T-3  context 0x1A9A30 supplies RSP=0x4D02FE8, RIP=0x167B40,
+         GSBASE=0x4CFE000; scheduler restores RSP at 0x16722E.
+    T-2  target worker executes valid event calls, including
+         RIP=0x7E6E6BC with RSP=0x4D021F0 and GSBASE=0x4CFE000.
+    T-1  large-frame routine enters at RIP=0x501B330 with RSP=0x4D02998.
+         Its pushes reduce RSP only within the valid worker stack.
+    T-0  0x501B350 supplies the immediate frame size 0x41B0; the
+         0x5038640 probe returns with RAX=0x41B0.
+    T0   0x501B35A executes bytes 48 2B E0: sub rsp,rax.
+         old RSP=0x4D02970; RAX=0x41B0.
+    T+1  0x501B35D is reached with RSP=0x4CFE7C0.
+         This equals GSBASE+0x7C0 and lies in 0x4CFE000–0x4CFEFFF.
+    T+n  the later call reaches the Phase 53S-observed 0x501A800 entry
+         with the already-invalid GS-page stack; OVMF/interrupt/GC failures
+         remain downstream symptoms.
+
+The arithmetic is exact:
+
+    0x4D02970 - 0x41B0 = 0x4CFE7C0
+    0x4CFE7C0 - 0x4CFE000 = 0x7C0
+    worker-stack-low 0x4CFF000 - new-RSP 0x4CFE7C0 = 0x840
+
+Thus the exact valid RSP immediately before the first invalid transition is
+`0x4D02970`, and the exact first observed invalid RSP is `0x4CFE7C0`.
+The earlier pushes and the probe helper's temporary subtraction remain inside
+the valid stack domain. No earlier RSP writer was observed in this execution:
+the scheduler restore, worker entry, event call, generated prologue pushes,
+and probe-helper return all leave architectural RSP valid. The explicit
+`sub rsp,rax` is therefore the first writer that moves RSP into the GS page.
+
+### Source provenance and GS-relative interpretation
+
+The source is not a saved context field, return slot, interrupt frame member,
+`ret`, `iretq`, or direct GS-relative pointer load. It is the generated
+immediate `0x41B0` at `0x501B350`, preserved through the stack-probe call at
+`0x5038640`, and consumed by `sub rsp,rax` at `0x501B35A`.
+
+The GS relationship is causal as an address-domain collision, but not as the
+source operand of RSP. The valid current stack was already only `0x3970`
+above the worker-stack low boundary, while the generated frame allocation was
+`0x41B0`; the subtraction crossed that boundary by `0x840` and landed at
+`GSBASE+0x7C0`. The GS-relative stack-limit read at `GS+0x10` returned zero
+and may explain why the probe did not guard this boundary, but it did not
+supply the new RSP. The correct conclusion is therefore: GS-page overlap is
+proven causal in placement, while a GS pointer/value load is disproven as the
+direct RSP producer.
+
+### Classification and disposition
+
+**Outcome A — First RSP Producer Proven.**
+
+The first architectural producer is `sub rsp,rax` at loaded address
+`0x501B35A` in the NativeAOT-generated `gxos-managed-kernel.dll` routine
+starting at `0x501B330`. Its source is `RAX=0x41B0`, supplied by the
+`mov eax,0x41B0` generated frame-size constant at `0x501B350` and preserved
+by the stack-probe helper. The Phase 53S OVMF boundary remains valid but is
+downstream of this newly proven pivot.
+
+No production repair was made. The evidence proves the producer, but Phase
+53T does not yet establish the complete intended stack-contract repair. In
+particular, the worker stack assignment, its GS-page exclusion, and the
+meaning/initialization of the GS stack-limit slot require a separate bounded
+repair design and before/after reproduction.
+
+### Files, validation, and final repository state
+
+Phase 53T added the diagnostic script
+`tools/Run-Phase53TFirstRspProducerCapture.ps1` and retained raw evidence in
+`evidence/phase53t-first-rsp-producer-20260914-02` through `-08`. The script
+was PowerShell-AST parsed successfully after its final changes. The clean
+confirmation run 08 completed with `target_result=FIRST_RSP_PIVOT_CAPTURED`;
+its process inventory shows no diagnostic process left running. No production
+source, EFI, payload, PDB, OVMF image, scheduler assembly, or runtime helper
+was modified. No rebuild, commit, push, PR, reset, clean, stash, checkout,
+amend, rebase, merge, or destructive operation was performed.
+
+The ending HEAD is unchanged:
+
+    4008a890d94ac5ca68867499d1ad6f1f960fd169
+    Outcome E — exact OVMF transfer proven; first GS-page RSP producer remains unresolved.
+
+Ending ahead/behind remains `0/0`. The ending worktree contains the modified
+Phase 53 forensic document, the untracked Phase 53T diagnostic script, and
+the untracked retained Phase 53T evidence directories; existing Phase 53S
+work remains intact.
+
+### Recommended Phase 53U target
+
+Target the worker-stack contract around context `0x1A9A30` and the generated
+frame/probe contract, not the later OVMF or GC failure. Specifically, prove
+why the worker's current RSP reaches `0x4D02970` while its low boundary is
+`GSBASE+0x1000`, why `GS+0x10` is zero, and whether the stack-probe/runtime
+contract is supposed to reject or accommodate a `0x41B0` frame. Phase 53U
+should then design a local repair with a before/after boot proof; it should
+not patch the later callback, interrupt frame, allocator, or exception path.

@@ -1,0 +1,103 @@
+set pagination off
+set confirm off
+set remotetimeout 45
+target remote 127.0.0.1:62518
+set $phase53t_worker_seen = 0
+set $phase53t_pivot_seen = 0
+set $phase53t_active_gs = 0
+set $phase53t_active_stack_low = 0
+set $phase53t_active_stack_high = 0
+hbreak *0x4FF3B80
+commands
+silent
+printf "PHASE53T_DOWNSTREAM_FAULT rip=%p rsp=%p gs=%p\n", $rip, $rsp, $gs_base
+info registers
+info registers fs_base gs_base
+x/24gx $rsp-0x40
+quit
+end
+break *0x167080
+commands
+silent
+printf "PHASE53T_CONTEXT newctx=%p newrsp=%p newrip=%p newgs=%p\n", $rdx, *(unsigned long long*)($rdx+0x40), *(unsigned long long*)($rdx+0x48), *(unsigned long long*)($rdx+0x60)
+continue
+end
+break *0x16722E
+commands
+silent
+printf "PHASE53T_SCHEDULER_CONSUMER rip=%p rsp_before=%p source=%p gs=%p\n", $rip, $rsp, $r10, $gs_base
+x/6i $rip-8
+continue
+end
+hbreak *0x7E6E6BC
+commands
+silent
+if $gs_base != 0
+if $rsp >= $phase53t_active_stack_low && $rsp < $phase53t_active_stack_high
+printf "PHASE53T_EVENT_VALID rip=%p rsp=%p rbp=%p gs=%p\n", $rip, $rsp, $rbp, $gs_base
+end
+end
+continue
+end
+break *0x167B40
+commands
+silent
+if $gs_base != 0
+set $phase53t_worker_seen = 1
+set $phase53t_active_gs = $gs_base
+set $phase53t_active_stack_low = $gs_base + 0x1000
+set $phase53t_active_stack_high = $gs_base + 0x5000
+end
+printf "PHASE53T_WORKER_ENTRY rip=%p rsp=%p gs=%p\n", $rip, $rsp, $gs_base
+continue
+end
+break *0x501B330
+condition 6 $phase53t_worker_seen == 1 && $gs_base == $phase53t_active_gs && $rsp >= $phase53t_active_stack_low && $rsp < $phase53t_active_stack_high
+commands 6
+silent
+printf "PHASE53T_LARGE_FRAME_ENTRY rip=%p rsp_entry=%p gs=%p\n", $rip, $rsp, $gs_base
+x/12i $rip
+continue
+end
+break *0x501B350
+condition 7 $phase53t_worker_seen == 1 && $gs_base == $phase53t_active_gs
+commands 7
+silent
+printf "PHASE53T_FRAME_SIZE_SOURCE rip=%p rsp=%p rax_before_mov=%p gs=%p\n", $rip, $rsp, $rax, $gs_base
+x/5i $rip
+si
+printf "PHASE53T_FRAME_SIZE_LOADED rip=%p rsp=%p rax=%p gs=%p\n", $rip, $rsp, $rax, $gs_base
+continue
+end
+hbreak *0x503865C
+condition 8 $phase53t_worker_seen == 1 && $gs_base == $phase53t_active_gs && $rax == 0x41B0
+commands 8
+silent
+printf "PHASE53T_STACK_PROBE_GS_READ_PRE rip=%p rsp=%p rax=%p gs=%p effective=%p value=%p\n", $rip, $rsp, $rax, $gs_base, $gs_base+0x10, *(unsigned long long*)($gs_base+0x10)
+si
+printf "PHASE53T_STACK_PROBE_GS_READ_POST rip=%p rsp=%p rax=%p r10=%p r11=%p gs=%p\n", $rip, $rsp, $rax, $r10, $r11, $gs_base
+continue
+end
+hbreak *0x501B35A
+condition 9 $phase53t_worker_seen == 1 && $gs_base == $phase53t_active_gs
+commands 9
+silent
+set $phase53t_old_rsp = $rsp
+set $phase53t_frame_size = $rax
+printf "PHASE53T_RSP_WRITER_PRE rip=%p rsp_old=%p rax_source=%p gs=%p\n", $rip, $rsp, $rax, $gs_base
+x/8bx $rip
+x/8i $rip-0x20
+si
+printf "PHASE53T_RSP_WRITER_POST rip=%p rsp_new=%p delta=%p rax_source=%p gs=%p\n", $rip, $rsp, $phase53t_old_rsp-$rsp, $phase53t_frame_size, $gs_base
+if $rsp >= $phase53t_active_gs && $rsp < $phase53t_active_gs + 0x1000
+set $phase53t_pivot_seen = 1
+printf "PHASE53T_FIRST_RSP_PIVOT writer=0x501B35A mnemonic=sub_rsp_rax old_rsp=%p new_rsp=%p source_rax=%p gs_base=%p gs_plus_10=%p\n", $phase53t_old_rsp, $rsp, $phase53t_frame_size, $gs_base, $gs_base+0x10
+info registers cr3 eflags rsp rip gs_base
+x/32gx $rsp-0x20
+x/20i $rip
+quit
+end
+continue
+end
+echo PHASE53T_GDB_READY\n
+continue
