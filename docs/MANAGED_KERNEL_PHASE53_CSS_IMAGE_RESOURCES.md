@@ -3909,3 +3909,398 @@ why the worker's current RSP reaches `0x4D02970` while its low boundary is
 contract is supposed to reject or accommodate a `0x41B0` frame. Phase 53U
 should then design a local repair with a before/after boot proof; it should
 not patch the later callback, interrupt frame, allocator, or exception path.
+
+## Phase 53U — Worker Stack / GS Stack-Limit Contract (2026-09-14)
+
+### Live preflight and inherited boundary
+
+This phase started with a read-only preflight of the actual workspace. The
+live state differed from the Phase 53T handoff described above:
+
+    repository: D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration
+    branch: nativeaot-managed-kernel-integration
+    HEAD: 9397ae6516d52d8e330d8535d81c61710142cca8
+    subject: ...
+    HEAD^: 4008a890d94ac5ca68867499d1ad6f1f960fd169
+    HEAD^ subject: Outcome E — exact OVMF transfer proven; first GS-page RSP producer remains unresolved.
+    upstream: origin/nativeaot-managed-kernel-integration
+    ahead/behind: 0/0
+    starting git status --short: clean
+
+The Phase 53T documentation, capture script, and Phase 53T evidence that
+were expected to be worktree changes were already present in commit
+`9397ae6`; they were not modified, reset, or discarded by Phase 53U. The
+retained Phase 53T capture directories are
+`evidence/phase53t-first-rsp-producer-20260914-02` through `-08`, each with
+one `run-1` capture. Run 08 contains the clean
+`FIRST_RSP_PIVOT_CAPTURED` result. The Phase 53T v8 artifacts remain
+available, so no rebuild was necessary for this forensic phase:
+
+    payload: artifacts\phase53p-production-gate-final-v8\ESP\GXOS\gxos-managed-kernel.dll
+    payload SHA256: 24ECBA6EBDADD720351BD0AE768AB177F366D5CCECFA318881376128351B6D09
+    EFI: artifacts\phase53p-production-gate-final-v8\ESP\EFI\BOOT\BOOTX64.EFI
+    EFI SHA256: D8DC2BFC4D58DFB27C05A82FFBE145E22AF7BC699599B8477BC3500C60BFD69
+    PDB: artifacts\phase53p-managed-build-final-v8\publish\gxos-managed-kernel.pdb
+    PDB SHA256: BB12D9271C3D4CAC80C2BB3BCF25C3ED839BE4561126F68B818F81A975F3F7ED
+
+At the first preflight there were no QEMU/GDB/LLDB processes. A later
+read-only inventory during this phase found two QEMU processes and no
+GDB/LLDB process. PID 14248 has a command line using the repository's
+`bin/qemu-firmware`, `ESP`, and `serial_uefi_validation_20260914_203413.txt`
+with QEMU name `guideXOS`. PID 9580 uses the separate
+`D:\dev\guideXOSServerV1.1_DOTNET_SUPPORT` tree. The command lines do not
+identify an owner with certainty; neither process was attached to,
+terminated, or otherwise altered. This phase did not start a new capture.
+
+The inherited Phase 53T facts remain valid: context `0x1A9A30` supplied the
+worker RSP/GS pair; the first architectural RSP producer was
+`sub rsp,rax` at `0x501B35A`; immediately before it RSP was `0x4D02970`, RAX
+was `0x41B0`, and afterwards RSP was `0x4CFE7C0`; GS was
+`0x4CFE000`; and the former OVMF, interrupt, scheduler-restoration, and
+GC/allocator observations are downstream of that transition.
+
+### Worker and context identity
+
+`0x1A9A30` is not a guessed TCB address. It is the address of the embedded
+`GXOS_SCHEDULER_CONTEXT` object held by the worker TCB (`TCB.context`), as
+defined by `src/Gate4Harness/scheduler_foundation.h`. The context layout
+puts `rsp` at offset `0x40`, `rip` at `0x48`, and `gs_base` at `0x60`.
+The containing TCB separately stores `stack_base`, `stack_limit`,
+`initial_rsp`, `stack_pages_memory`, `stack_canary_memory`, `stack_vm_identity`,
+`teb_base`, and `gs_base`.
+
+The failing managed worker is created through the ordinary
+`gxos_scheduler_create_suspended_thread` path in
+`src/Gate4Harness/managed_kernel_driver_worker.c`, followed by
+`gxos_nativeaot_scheduler_worker_prepare` and resume. It does not pass a
+special stack size: `src/Gate4Harness/create_thread.c` rejects a nonzero
+caller stack size and the scheduler default is used. The managed worker is
+therefore representative of the normal scheduler-managed NativeAOT worker
+configuration, not an isolated ad-hoc entry stack.
+
+### Allocation and initialization trace
+
+The source-to-context contract is explicit:
+
+* `scheduler_foundation.h:28-30` defines a 4096-byte page, a
+  `GXOS_SCHEDULER_STACK_SIZE` of 16384 bytes, four stack pages, and a
+  16-byte canary policy.
+* `scheduler_foundation.c:921-955` allocates exactly four pages, zeros them,
+  sets `stack_base = stack_memory` and
+  `stack_limit = stack_memory + GXOS_SCHEDULER_STACK_SIZE`, uses a separate
+  canary page, and registers exactly `[stack_base, stack_limit)` as committed,
+  private, read/write virtual memory.
+* `scheduler_foundation.c:967-971` chooses
+  `stack_top = stack_limit - 16`, aligns it down to 16 bytes, then reserves
+  the synthetic return slot. For this worker the saved initial RSP is
+  `0x4D02FE8`.
+* `scheduler_foundation.c:972-987` stores that value in both the context and
+  `initial_rsp`, stores the worker entry RIP, and pairs the context with the
+  worker GS base.
+* `scheduler_foundation.c:1008-1048` validates the exact four-page range,
+  initial-RSP placement/alignment, canaries, GS+0x30/GS+0x58 relationships,
+  and TEB fields. It does not validate `GS+0x10`.
+* `scheduler_foundation.c:245-284` allocates separate one-page GS, TLS,
+  block, and TEB objects. It writes TEB+0x08 and TEB+0x10 with the high and
+  low worker bounds, but it does not write GS+0x10.
+* `gate4_loader.c:11723-11739` shows that page allocation is
+  `EFI_ALLOCATE_ANY_PAGES`; the source does not deliberately request
+  adjacency. In the authoritative Phase 53T execution, the separately
+  allocated GS page nevertheless landed immediately below the four-page
+  worker allocation.
+* `gate4_loader.c:11614-11627` registers the entire worker range as committed
+  read/write memory. No lower guard or inaccessible page is reserved by that
+  registration.
+
+The source therefore proves that guideXOS's scheduler naming is a
+low-to-high interval: `stack_base` is the lower address and `stack_limit` is
+the exclusive upper address. That is opposite to the usual Windows TIB
+terminology in which `StackBase` is the high address and `StackLimit` is the
+low address. Both meanings are called out below so that the two contracts are
+not conflated.
+
+### Proven worker geometry
+
+The authoritative Phase 53T capture and the allocator trace agree on this
+layout. The end address below is exclusive; the last allocated worker byte is
+`0x4D02FFF`.
+
+    allocation / worker stack: 0x4CFF000 – 0x4D03000 exclusive
+    allocation size:           0x4000 (16384 bytes, four committed pages)
+    guideXOS stack_base:       0x4CFF000 (low address)
+    guideXOS stack_limit:      0x4D03000 (exclusive high address)
+    initial saved RSP:          0x4D02FE8
+    Phase 53T pre-frame RSP:    0x4D02970
+    frame allocation:           0x41B0 (16816 bytes)
+    Phase 53T post-frame RSP:  0x4CFE7C0
+    GS base/page:               0x4CFE000 – 0x4CFEFFF
+
+    high address
+    0x4D03000  +-------------------------------+  exclusive stack end
+               | 0x690 bytes above pre-frame RSP|
+               | current caller/prologue window  |
+    0x4D02970  +-------------------------------+  pre-frame RSP
+               |                               |
+               | requested frame: 0x41B0 bytes |
+               |                               |
+    0x4CFF000  +-------------------------------+  guideXOS stack_base / low
+               | GS+0x7C0 = post-frame RSP      |
+    0x4CFE000  +-------------------------------+  GS base, mapped GS page
+               | GS/per-CPU/TLS state           |
+    0x4CFD000  +-------------------------------+  TLS vector page
+    0x4CFC000  +-------------------------------+  runtime block page
+    0x4CFB000  +-------------------------------+  TEB page
+    low address
+
+The three lower-page object addresses shown in the diagram are the matching
+Phase 53T captured environment addresses; they are not part of the worker
+stack allocation. The important proven adjacency is the GS page directly
+below the worker stack in this execution. The worker stack itself is not
+embedded in the GS page and the source does not intentionally make it so.
+
+The scheduler context restore in `scheduler_context.S` restores the context
+RSP and the paired GS MSR before jumping to the worker RIP. This explains why
+the initial/current RSP and GS pair are valid at entry; it does not explain
+the later first producer. The lifecycle audit in
+`nativeaot_scheduler_thread_lifecycle.c:127-152` also confirms that the
+runtime-reported low/high stack values are accepted only when they equal the
+TCB's stack base/limit and when the current RSP lies in that interval. This
+is a separate runtime-thread metadata check; it does not populate GS+0x10.
+
+### GS and GS+0x10 audit
+
+The worker GS page is zeroed by `page_allocate`. The source writes:
+
+    GS+0x30 = TEB base       (scheduler_foundation.c:275;
+                              gate4_loader.c:11040)
+    GS+0x58 = TLS vector     (scheduler_foundation.c:276;
+                              gate4_loader.c:11041)
+    TEB+0x08 = stack high    (scheduler_foundation.c:277-278)
+    TEB+0x10 = stack low     (scheduler_foundation.c:279-281)
+
+There is no source write to `GS+0x10` in either the worker environment setup
+or boot-environment adoption path. The Phase 53T GDB capture read the same
+slot at effective address `0x4CFE010` and obtained zero. The scheduler
+validator checks GS+0x30, GS+0x58, TLS-vector[0], and the TEB stack fields,
+but not GS+0x10. Thus zero is not a proven sentinel or intentional
+stack-limit value; it is the zero left by page initialization.
+
+The distinction is material:
+
+    guideXOS TEB+0x10 = 0x4CFF000  (low worker boundary)
+    actual GS+0x10    = 0
+
+The helper called by the failing generated prologue reads the second value,
+not the first. In the Windows x64 TEB/NT_TIB convention that the helper
+implements, GS+0x08 is the high `StackBase` and GS+0x10 is the low
+`StackLimit`; GS+0x30 is the TEB self pointer. guideXOS currently uses a
+separate GS page containing a pointer to its TEB at +0x30, so the custom
+layout is not ABI-equivalent merely because a TEB page also contains matching
+fields. The actual machine-code consumer makes this an ABI contract issue,
+not a naming issue.
+
+### NativeAOT/compiler stack-check contract
+
+The Phase 53T call target at loaded `0x5038640` is preferred address
+`0x18018C640` in the v8 image. Its relevant disassembly is:
+
+    0x18018C640: 48 83 EC 10                 sub rsp,0x10
+    0x18018C644: 4C 89 14 24                 mov [rsp],r10
+    0x18018C648: 4C 89 5C 24 08              mov [rsp+8],r11
+    0x18018C64D: 4D 33 DB                    xor r11,r11
+    0x18018C650: 4C 8D 54 24 18              lea r10,[rsp+0x18]
+    0x18018C655: 4C 2B D0                    sub r10,rax
+    0x18018C658: 4D 0F 42 D3                 cmovb r10,r11
+    0x18018C65C: 65 4C 8B 1C 25 10 00 00 00  mov r11,qword ptr gs:[0x10]
+    0x18018C665: 4D 3B D3                    cmp r10,r11
+    0x18018C668: 73 16                       jae 0x18018C680
+    0x18018C66A: 66 41 81 E2 00 F0           and r10w,0xf000
+    0x18018C670: 4D 8D 9B 00 F0 FF FF        lea r11,[r11-0x1000]
+    0x18018C677: 41 C6 03 00                 mov byte ptr [r11],0
+    0x18018C67B: 4D 3B D3                    cmp r10,r11
+    0x18018C67E: 75 F0                       jne 0x18018C670
+    0x18018C680: 4C 8B 14 24                 mov r10,[rsp]
+    0x18018C684: 4C 8B 5C 24 08              mov r11,[rsp+8]
+    0x18018C689: 48 83 C4 10                 add rsp,0x10
+    0x18018C68D: C3                          ret
+
+The helper receives the allocation size in RAX. Its temporary frame makes
+`R10 = caller_RSP - RAX`; it reads the lower-bound value from GS+0x10; and it
+probes one byte on each page from the limit downward when the prospective
+lower address is below that limit. It saves/restores R10 and R11, changes
+flags, does not write architectural RSP, and returns RAX unchanged. The
+caller then performs the separate `sub rsp,rax` at `0x501B35A`. This keeps
+the Phase 53T first-producer result unchanged.
+
+The byte sequence is the compiler/linker `__chkstk`-style x64 stack checker,
+not the canonical NativeAOT `RhpStackProbe`. The v8 PDB identifies a separate
+`RhpStackProbe` at preferred `0x18014BCD0` (loaded `0x4FF6CD0`), whose code
+probes below RSP down to R11 and does not read GS. The distinction corrects
+the shorthand in the Phase 53T section: `0x5038640` is the stack checker
+invoked by this NativeAOT-generated prologue, while the canonical NativeAOT
+helper is a different symbol and contract.
+
+This behavior agrees with the documented x64 large-frame calling convention:
+the caller loads the allocation size, calls `__chkstk` before changing RSP,
+and then subtracts the returned size. The checker relies on the platform's
+stack-bound/guard semantics; it is not a substitute for a valid stack domain.
+The official references used for this comparison are [Microsoft's x64
+prolog and epilog documentation](https://learn.microsoft.com/en-us/cpp/build/prolog-and-epilog?view=msvc-140),
+the [`__chkstk` routine reference](https://learn.microsoft.com/en-us/windows/win32/devnotes/-win32-__chkstk),
+and the versioned [NativeAOT amd64
+`MiscStubs.asm`](https://raw.githubusercontent.com/dotnet/runtime/v10.0.11/src/coreclr/nativeaot/Runtime/amd64/MiscStubs.asm).
+
+For the captured worker, `GS+0x10=0` makes the unsigned `jae` test succeed
+for every ordinary nonnegative prospective address, so the probe loop is
+skipped. If GS+0x10 had instead contained the correct worker low boundary
+`0x4CFF000`, the prospective `0x4CFE7C0` would be below it and the first
+probe address would be `0x4CFE000`—the currently mapped GS page. This proves
+two independent contract failures: the current slot disables the checker,
+and simply filling the slot would make the adjacent GS page the first probe
+target. A correct repair must provide both the expected metadata and a
+separate guard/faulting page or equivalent platform mechanism below the
+usable stack.
+
+### Exact safety-margin calculation
+
+The already-proven values give an exact, non-inferred calculation:
+
+    valid bytes below pre-frame RSP:
+        0x4D02970 - 0x4CFF000 = 0x3970 = 14,704 bytes
+
+    requested frame:
+        0x41B0 = 16,816 bytes
+
+    deficit:
+        0x41B0 - 0x3970 = 0x840 = 2,112 bytes
+
+    resulting RSP:
+        0x4D02970 - 0x41B0 = 0x4CFE7C0
+
+    distance into GS page:
+        0x4CFE7C0 - 0x4CFE000 = 0x7C0 = 1,984 bytes
+
+    worker-low to post-frame RSP:
+        0x4CFF000 - 0x4CFE7C0 = 0x840
+
+The exact path therefore needs a usable low boundary at or below
+`0x4CFE7C0`. Keeping the captured high end `0x4D03000` and page-aligning the
+new low end gives a minimum **usable** stack size of `0x5000` (20,480 bytes),
+not `0x4000`. One additional usable page would make that `0x6000`; a separate
+one-page guard below it would make the minimum reserved span `0x7000` before
+any additional metadata or policy margin. These are geometry calculations,
+not a selected production size.
+
+`0x41B0` is only the frame observed on this path. The caller/prologue already
+consumes `0x690` below the stack high end before the explicit allocation, and
+future NativeAOT methods, exception paths, GC transitions, nested calls, and
+interrupt entry can have different high-water requirements. The proper
+policy is to measure or bound the complete managed worker call path, round
+the usable range to pages, add a real guard/reserved page, and then add a
+deliberate safety margin. Choosing exactly `0x5000` merely makes this one
+capture fit and would not prove the shared worker contract.
+
+### Root-cause classification
+
+**Outcome C — Contract Proven, Multiple Defects Found.** The evidence proves
+the following independent contributors, in repair order:
+
+1. **A / worker stack undersized.** The normal worker has only four committed
+   usable pages. At the first producer it has `0x3970` valid bytes remaining,
+   while the legitimate frame requires `0x41B0`; the exact deficit is
+   `0x840`.
+2. **C + E / incorrect stack-limit metadata and GS ABI.** guideXOS stores the
+   low bound at TEB+0x10 but leaves the actual consumer slot GS+0x10 at zero.
+   The generated checker reads the latter under the x64 TEB/NT_TIB contract.
+   The scheduler validator currently does not enforce this slot.
+3. **D + B / missing guard semantics with unsafe observed placement.** The
+   registered worker range is wholly committed RW with no lower guard page.
+   In the authoritative run the separate GS page occupies the immediately
+   lower page. With a corrected limit, the checker would probe that unrelated
+   state page instead of faulting at a guard boundary.
+
+The initial RSP is not the primary defect: it is derived from the high end,
+has the expected `mod 16 == 8` call-entry alignment, is stored in the context,
+and is restored together with the worker GS base. NativeAOT is not classified
+as defective: the emitted frame allocation and the checker behavior match the
+demonstrated x64 platform contract. The defect is the guideXOS platform
+contract supplied to that code.
+
+### Neighboring worker configurations
+
+The managed worker uses the shared scheduler default; the durability tests
+and final validation tool explicitly expect `0x4000` for scheduler stacks.
+The scheduler foundation, boot environment, and managed-worker lifecycle all
+use the same base/limit/context machinery. No separate larger NativeAOT
+worker-stack policy was found. Scheduler/context validation covers the same
+four-page range, but not the GS+0x10 ABI field or a guard page.
+
+The boot/main synthetic stack is configured separately in
+`gate4_loader.c:11034-11039` with a one-megabyte range recorded in its TEB,
+so it is not evidence that the worker policy is safe. Interrupt and firmware
+stacks are different execution domains and were not rewritten in this phase.
+The shared managed-worker path means the same class of failure can threaten
+other managed contexts that execute a comparable large NativeAOT frame; this
+is not justified as a one-worker special case.
+
+### Repair gate and Phase 53V target
+
+No production repair was implemented in Phase 53U. Increasing one allocation
+without correcting GS+0x10 and the guard domain would leave the checker ABI
+invalid; filling GS+0x10 while leaving GS adjacent would make the checker
+touch GS; moving only the crash site would prove nothing. The safe
+platform-level repair target is:
+
+1. Define one explicit downward-growing per-thread stack contract with a
+   page-aligned usable interval, high/low meanings, initial-RSP placement,
+   and a separate lower guard/reserved page.
+2. Make the GS base presented to generated code expose the required
+   TEB/NT_TIB-compatible stack fields, including the actual low limit at
+   GS+0x10, while preserving the intended TLS fields. If the custom GS page
+   remains, implement and validate an explicit ABI adapter rather than
+   relying on the separate TEB pointer at GS+0x30.
+3. Update scheduler context creation, validation, and context switching so
+   the RSP, GS base, and stack-limit metadata are one paired contract.
+4. Size the usable worker stack from full managed-path high-water evidence,
+   not exactly from `0x41B0`; retain a guard page and a future-frame margin.
+5. Provide a real guard fault/growth/fail-fast path and ensure the guard page
+   cannot be a GS/TLS/per-CPU page.
+6. Add bounds instrumentation for allocation, base, limit, initial/current
+   RSP, frame size, post-frame RSP, GS base, and GS+0x10, then test all
+   representative managed contexts.
+
+This is a narrowly scoped Phase 53V implementation target: first introduce
+the shared stack/GS contract and diagnostics, then validate allocation and
+guard semantics, and only then select the final stack-size policy. Do not
+special-case RIP `0x501B35A`, disable probes, reduce the generated frame, or
+catch the downstream failure.
+
+### Phase 53U validation and disposition
+
+The phase performed static, non-mutating validation against the preserved v8
+payload/PDB: PE/RVA disassembly of both helpers, PDB public-symbol lookup for
+the separate `RhpStackProbe`, source audit of allocator/context/GS setup,
+and arithmetic against the seven retained Phase 53T captures. The canonical
+NativeAOT helper comparison used the versioned runtime source cited above.
+No Phase 53U production build, host test, managed-kernel test, scheduler test,
+NativeAOT integration test, or fresh post-repair QEMU boot was run because no
+repair was made. Phase 53T supplied seven bounded fresh captures, with run 08
+as the authoritative first-producer capture; those runs are not being
+re-labeled as Phase 53U repair validation. The active QEMU instances were
+left untouched.
+
+The Phase 53U worktree change is this forensic documentation section only.
+No production source, EFI, payload, PDB, scheduler assembly, runtime helper,
+Phase 53T script, or evidence directory was changed. No commit was created.
+After this documentation edit, the expected ending state is one modified
+documentation file and no new evidence. Existing Phase 53T evidence remains
+preserved.
+
+**Outcome: C — Contract Proven, Multiple Defects Found.** guideXOS permitted
+the legitimate `0x41B0` frame to cross into GS because the shared worker
+stack had only `0x3970` valid bytes left, the emitted checker read an
+uninitialized zero from GS+0x10 instead of the low worker bound, and no guard
+page separated the usable stack from the adjacent mapped GS page. The
+correct repair is a shared TEB/GS stack-limit contract plus a sufficiently
+bounded worker stack and a real guard/fault domain; it is deferred to
+Phase 53V for implementation and fresh-boot validation.
