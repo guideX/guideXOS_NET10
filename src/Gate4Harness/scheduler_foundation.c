@@ -2,6 +2,9 @@
 
 /* The proof is intentionally single-instance and single-CPU. */
 static GXOS_SCHEDULER *g_scheduler;
+static GXOS_SCHEDULER_TCB *g_guard_probe_thread;
+static uint32_t g_guard_probe_armed;
+static void zero_bytes(void *destination, size_t count);
 
 #ifdef GXOS_SCHEDULER_HOST_TEST
 /* Host-only link fallbacks.  Event API tests provide strong shims that model
@@ -33,20 +36,46 @@ static uint64_t g_host_flags = 0x202U;
 /* Existing scheduler-only host tests do not exercise the VM substrate.  Keep
    their stack lifecycle explicit while allowing the VM integration test to
    replace these callbacks with a real region ledger. */
-static int host_register_stack_vm(void *context, uint64_t base, uint64_t bytes,
-                                  uint64_t *allocation_identity_out)
+static int host_allocate_stack_vm(
+    void *context, uint64_t usable_bytes,
+    GXOS_SCHEDULER_STACK_CONTRACT *contract_out)
 {
-    (void)context;
-    if (allocation_identity_out == 0 || base == 0 || bytes == 0) return 0;
-    *allocation_identity_out = base;
+    GXOS_SCHEDULER *scheduler = (GXOS_SCHEDULER *)context;
+    uint64_t memory = 0;
+    if (scheduler == 0 || contract_out == 0 ||
+        usable_bytes != GXOS_SCHEDULER_STACK_USABLE_SIZE ||
+        scheduler->allocate_pages == 0 ||
+        scheduler->allocate_pages(0, 4,
+                                   GXOS_SCHEDULER_STACK_RESERVATION_PAGES,
+                                   &memory) != 0 || memory == 0) return 0;
+    zero_bytes((void *)(uintptr_t)memory,
+               GXOS_SCHEDULER_STACK_RESERVATION_SIZE);
+    zero_bytes(contract_out, sizeof(*contract_out));
+    contract_out->reservation_base = memory;
+    contract_out->reservation_bytes = GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract_out->guard_base = memory;
+    contract_out->guard_bytes = GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract_out->usable_stack_low = memory + GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract_out->usable_stack_high = memory +
+        GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract_out->usable_stack_bytes = GXOS_SCHEDULER_STACK_USABLE_SIZE;
+    contract_out->guard_vm_identity = memory;
+    contract_out->usable_vm_identity = contract_out->usable_stack_low;
+    contract_out->backing_memory = memory;
+    contract_out->backing_pages = GXOS_SCHEDULER_STACK_RESERVATION_PAGES;
+    contract_out->guard_nonpresent = 1;
     return 1;
 }
 
-static int host_unregister_stack_vm(void *context, uint64_t base, uint64_t bytes,
-                                    uint64_t allocation_identity)
+static int host_free_stack_vm(
+    void *context, const GXOS_SCHEDULER_STACK_CONTRACT *contract)
 {
-    (void)context;
-    return base != 0 && bytes != 0 && allocation_identity == base;
+    GXOS_SCHEDULER *scheduler = (GXOS_SCHEDULER *)context;
+    if (scheduler == 0 || contract == 0 || contract->backing_memory == 0 ||
+        contract->backing_pages != GXOS_SCHEDULER_STACK_RESERVATION_PAGES ||
+        scheduler->free_pages == 0) return 0;
+    return scheduler->free_pages(contract->backing_memory,
+                                 contract->backing_pages) == 0;
 }
 #endif
 
@@ -216,9 +245,9 @@ static void set_canaries(GXOS_SCHEDULER_TCB *thread)
         thread->high_canary[index] = (uint8_t)(0xD7U + index);
     }
     for (index = 0; index != GXOS_SCHEDULER_CANARY_BYTES; ++index) {
-        ((uint8_t *)(uintptr_t)thread->stack_canary_memory)[index] =
-            thread->low_canary[index];
-        ((uint8_t *)(uintptr_t)thread->stack_limit - GXOS_SCHEDULER_CANARY_BYTES)[index] =
+        uint8_t *diagnostic = (uint8_t *)(uintptr_t)thread->stack_canary_memory;
+        diagnostic[index] = thread->low_canary[index];
+        diagnostic[GXOS_SCHEDULER_CANARY_BYTES + index] =
             thread->high_canary[index];
     }
 }
@@ -228,14 +257,15 @@ int gxos_scheduler_check_canaries(const GXOS_SCHEDULER_TCB *thread)
     uint32_t index;
     if (thread == 0 || !thread->live || thread->stack_base == 0 ||
         thread->stack_canary_memory == 0 ||
-        thread->stack_limit <= thread->stack_base + GXOS_SCHEDULER_CANARY_BYTES) {
+        thread->stack_limit <= thread->stack_base) {
         return 0;
     }
     for (index = 0; index != GXOS_SCHEDULER_CANARY_BYTES; ++index) {
-        if (((const uint8_t *)(uintptr_t)thread->stack_canary_memory)[index] !=
-                thread->low_canary[index] ||
-            ((const uint8_t *)(uintptr_t)thread->stack_limit -
-             GXOS_SCHEDULER_CANARY_BYTES)[index] != thread->high_canary[index]) {
+        const uint8_t *diagnostic =
+            (const uint8_t *)(uintptr_t)thread->stack_canary_memory;
+        if (diagnostic[index] != thread->low_canary[index] ||
+            diagnostic[GXOS_SCHEDULER_CANARY_BYTES + index] !=
+                thread->high_canary[index]) {
             return 0;
         }
     }
@@ -272,13 +302,17 @@ static int allocate_thread_environment(GXOS_SCHEDULER_TCB *thread)
     gs = (uint8_t *)(uintptr_t)gs_area;
     teb_bytes = (uint8_t *)(uintptr_t)teb;
     tls_vector[0] = block;
+    *(uint64_t *)(gs + 0x08) = thread->is_boot_thread
+        ? scheduler->boot_stack_upper : thread->stack_contract.usable_stack_high;
+    *(uint64_t *)(gs + 0x10) = thread->is_boot_thread
+        ? scheduler->boot_stack_lower : thread->stack_contract.usable_stack_low;
     *(uint64_t *)(gs + 0x30) = teb;
     *(uint64_t *)(gs + 0x58) = vector;
     *(uint64_t *)(teb_bytes + 0x08) = thread->is_boot_thread
-        ? scheduler->boot_stack_upper : thread->stack_limit;
+        ? scheduler->boot_stack_upper : thread->stack_contract.usable_stack_high;
     *(uint64_t *)(teb_bytes + 0x10) = thread->is_boot_thread
         ? scheduler->boot_stack_lower
-        : thread->stack_base;
+        : thread->stack_contract.usable_stack_low;
     *(uint64_t *)(teb_bytes + 0x100) = thread->identity;
     zero_bytes((void *)(uintptr_t)block, GXOS_SCHEDULER_PAGE_SIZE);
     thread->environment_owned = 1;
@@ -601,8 +635,9 @@ int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
     scheduler->log_hex = log_hex;
     scheduler->log_u32 = log_u32;
 #ifdef GXOS_SCHEDULER_HOST_TEST
-    scheduler->register_stack_vm = host_register_stack_vm;
-    scheduler->unregister_stack_vm = host_unregister_stack_vm;
+    scheduler->allocate_stack_vm = host_allocate_stack_vm;
+    scheduler->free_stack_vm = host_free_stack_vm;
+    scheduler->stack_vm_context = scheduler;
 #endif
     scheduler->next_identity = 1;
     scheduler->next_wait_generation = 1;
@@ -644,19 +679,19 @@ int gxos_scheduler_initialize(GXOS_SCHEDULER *scheduler,
 
 int gxos_scheduler_configure_stack_vm(
     GXOS_SCHEDULER *scheduler,
-    GXOS_SCHEDULER_REGISTER_STACK_VM register_stack_vm,
-    GXOS_SCHEDULER_UNREGISTER_STACK_VM unregister_stack_vm,
+    GXOS_SCHEDULER_ALLOCATE_STACK_VM allocate_stack_vm,
+    GXOS_SCHEDULER_FREE_STACK_VM free_stack_vm,
     void *context)
 {
     uint32_t index;
     if (scheduler == 0 || scheduler != g_scheduler || !scheduler->active ||
         scheduler->current != scheduler->boot_thread ||
-        register_stack_vm == 0 || unregister_stack_vm == 0) return 0;
+        allocate_stack_vm == 0 || free_stack_vm == 0) return 0;
     for (index = 1; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
         if (scheduler->threads[index].live) return 0;
     }
-    scheduler->register_stack_vm = register_stack_vm;
-    scheduler->unregister_stack_vm = unregister_stack_vm;
+    scheduler->allocate_stack_vm = allocate_stack_vm;
+    scheduler->free_stack_vm = free_stack_vm;
     scheduler->stack_vm_context = context;
     return 1;
 }
@@ -743,6 +778,8 @@ int gxos_scheduler_adopt_boot_environment(GXOS_SCHEDULER *scheduler,
     scheduler->boot_stack_upper = stack_upper;
     gs = (uint8_t *)(uintptr_t)gs_base;
     teb = (uint8_t *)(uintptr_t)teb_base;
+    *(uint64_t *)(gs + 0x08) = stack_upper;
+    *(uint64_t *)(gs + 0x10) = stack_lower;
     *(uint64_t *)(gs + 0x30) = teb_base;
     *(uint64_t *)(gs + 0x58) = tls_vector_base;
     *(uint64_t *)(teb + 0x08) = stack_upper;
@@ -890,14 +927,13 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
     GXOS_SCHEDULER_TCB *thread;
     GXOS_SCHEDULER_OBJECT *object;
     uint16_t object_slot;
-    uint64_t stack_memory;
     uint64_t stack_top;
-    uint64_t stack_vm_identity = 0;
+    GXOS_SCHEDULER_STACK_CONTRACT stack_contract;
     if (handle != 0) *handle = 0;
     if (thread_out != 0) *thread_out = 0;
     if (scheduler == 0 || scheduler != g_scheduler || entry == 0 ||
-        handle == 0 || thread_out == 0 || scheduler->register_stack_vm == 0 ||
-        scheduler->unregister_stack_vm == 0) return 0;
+        handle == 0 || thread_out == 0 || scheduler->allocate_stack_vm == 0 ||
+        scheduler->free_stack_vm == 0) return 0;
     thread = find_free_thread();
     if (thread == 0) return 0;
     zero_bytes(thread, sizeof(*thread));
@@ -918,22 +954,42 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
     thread->identity = scheduler->next_identity++;
     thread->generation = object->generation;
     thread->object_slot = object_slot;
-    stack_memory = 0;
-    if (scheduler->allocate_pages(0, 4, GXOS_SCHEDULER_STACK_PAGES,
-                                  &stack_memory) != 0 || stack_memory == 0) {
+    zero_bytes(&stack_contract, sizeof(stack_contract));
+    if (!scheduler->allocate_stack_vm(
+            scheduler->stack_vm_context, GXOS_SCHEDULER_STACK_USABLE_SIZE,
+            &stack_contract) ||
+        stack_contract.reservation_base == 0 ||
+        stack_contract.reservation_bytes != GXOS_SCHEDULER_STACK_RESERVATION_SIZE ||
+        stack_contract.guard_base != stack_contract.reservation_base ||
+        stack_contract.guard_bytes != GXOS_SCHEDULER_STACK_GUARD_SIZE ||
+        stack_contract.usable_stack_low !=
+            stack_contract.guard_base + GXOS_SCHEDULER_STACK_GUARD_SIZE ||
+        stack_contract.usable_stack_high !=
+            stack_contract.usable_stack_low + GXOS_SCHEDULER_STACK_USABLE_SIZE ||
+        stack_contract.usable_stack_bytes != GXOS_SCHEDULER_STACK_USABLE_SIZE ||
+        stack_contract.guard_vm_identity == 0 ||
+        stack_contract.usable_vm_identity == 0 ||
+        !stack_contract.guard_nonpresent) {
+        if (stack_contract.reservation_base != 0) {
+            (void)scheduler->free_stack_vm(scheduler->stack_vm_context,
+                                           &stack_contract);
+        }
         release_object_record(object);
         --scheduler->next_identity;
         *handle = 0;
         zero_bytes(thread, sizeof(*thread));
         return 0;
     }
-    zero_bytes((void *)(uintptr_t)stack_memory, GXOS_SCHEDULER_STACK_SIZE);
-    thread->stack_pages_memory = stack_memory;
-    thread->stack_base = stack_memory;
-    thread->stack_limit = stack_memory + GXOS_SCHEDULER_STACK_SIZE;
+    thread->stack_contract = stack_contract;
+    zero_bytes((void *)(uintptr_t)thread->stack_contract.usable_stack_low,
+               GXOS_SCHEDULER_STACK_USABLE_SIZE);
+    thread->stack_pages_memory = thread->stack_contract.backing_memory;
+    thread->stack_base = thread->stack_contract.usable_stack_low;
+    thread->stack_limit = thread->stack_contract.usable_stack_high;
     thread->stack_canary_memory = page_allocate(scheduler);
     if (thread->stack_canary_memory == 0) {
-        page_free(scheduler, stack_memory);
+        (void)scheduler->free_stack_vm(scheduler->stack_vm_context,
+                                        &thread->stack_contract);
         release_object_record(object);
         --scheduler->next_identity;
         *handle = 0;
@@ -943,30 +999,20 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
     set_canaries(thread);
     if (!allocate_thread_environment(thread)) {
         page_free(scheduler, thread->stack_canary_memory);
-        page_free(scheduler, stack_memory);
+        (void)scheduler->free_stack_vm(scheduler->stack_vm_context,
+                                        &thread->stack_contract);
         release_object_record(object);
         --scheduler->next_identity;
         *handle = 0;
         zero_bytes(thread, sizeof(*thread));
         return 0;
     }
-    if (!scheduler->register_stack_vm(
-            scheduler->stack_vm_context, thread->stack_base,
-            thread->stack_limit - thread->stack_base, &stack_vm_identity) ||
-        stack_vm_identity == 0) {
-        free_thread_environment(thread);
-        page_free(scheduler, thread->stack_canary_memory);
-        page_free(scheduler, stack_memory);
-        release_object_record(object);
-        --scheduler->next_identity;
-        *handle = 0;
-        zero_bytes(thread, sizeof(*thread));
-        return 0;
-    }
-    thread->stack_vm_identity = stack_vm_identity;
-    stack_top = thread->stack_limit - GXOS_SCHEDULER_CANARY_BYTES;
+    stack_top = thread->stack_contract.usable_stack_high;
     stack_top &= ~0xFULL;
     thread->initial_rsp = stack_top - 8U;
+    thread->stack_contract.initial_rsp = thread->initial_rsp;
+    thread->stack_contract.minimum_rsp = thread->initial_rsp;
+    thread->stack_vm_identity = thread->stack_contract.usable_vm_identity;
     *(uint64_t *)(uintptr_t)thread->initial_rsp =
         (uint64_t)(uintptr_t)gxos_scheduler_invalid_thread_return;
     zero_bytes(&thread->context, sizeof(thread->context));
@@ -1008,12 +1054,28 @@ int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread)
     if (thread == 0 || !thread->live || thread->is_boot_thread ||
         thread->execution_refs == 0 || thread->saved_context != &thread->context ||
         thread->entry == 0 || !canonical_nonzero_pointer((uint64_t)(uintptr_t)thread->entry) ||
-        thread->stack_pages_memory == 0 ||
+        thread->stack_contract.reservation_base == 0 ||
+        thread->stack_contract.reservation_bytes !=
+            GXOS_SCHEDULER_STACK_RESERVATION_SIZE ||
+        thread->stack_contract.guard_base !=
+            thread->stack_contract.reservation_base ||
+        thread->stack_contract.guard_bytes != GXOS_SCHEDULER_STACK_GUARD_SIZE ||
+        thread->stack_contract.usable_stack_low !=
+            thread->stack_contract.guard_base + GXOS_SCHEDULER_STACK_GUARD_SIZE ||
+        thread->stack_contract.usable_stack_high !=
+            thread->stack_contract.usable_stack_low +
+                GXOS_SCHEDULER_STACK_USABLE_SIZE ||
+        thread->stack_contract.usable_stack_bytes !=
+            GXOS_SCHEDULER_STACK_USABLE_SIZE ||
+        thread->stack_contract.guard_vm_identity == 0 ||
+        thread->stack_contract.usable_vm_identity == 0 ||
+        !thread->stack_contract.guard_nonpresent ||
         thread->stack_canary_memory == 0 ||
-        !aligned_page_pointer(thread->stack_base) ||
-        thread->stack_limit != thread->stack_base + GXOS_SCHEDULER_STACK_SIZE ||
-        thread->initial_rsp < thread->stack_base + GXOS_SCHEDULER_CANARY_BYTES ||
-        thread->initial_rsp >= thread->stack_limit - GXOS_SCHEDULER_CANARY_BYTES ||
+        thread->stack_base != thread->stack_contract.usable_stack_low ||
+        thread->stack_limit != thread->stack_contract.usable_stack_high ||
+        thread->initial_rsp != thread->stack_contract.initial_rsp ||
+        thread->initial_rsp < thread->stack_contract.usable_stack_low ||
+        thread->initial_rsp >= thread->stack_contract.usable_stack_high ||
         (thread->initial_rsp & 0xFULL) != 8U ||
         thread->context.rsp != thread->initial_rsp ||
         thread->context.rip != (uint64_t)(uintptr_t)gxos_scheduler_start_worker ||
@@ -1042,9 +1104,12 @@ int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread)
     if (*(const uint64_t *)(gs + 0x30) != thread->teb_base ||
         *(const uint64_t *)(gs + 0x58) != thread->tls_vector_base ||
         tls_vector[0] != thread->tls_block_base ||
-        *(const uint64_t *)(teb + 0x08) != thread->stack_limit ||
+        *(const uint64_t *)(gs + 0x08) != thread->stack_contract.usable_stack_high ||
+        *(const uint64_t *)(gs + 0x10) != thread->stack_contract.usable_stack_low ||
+        *(const uint64_t *)(teb + 0x08) !=
+            thread->stack_contract.usable_stack_high ||
         *(const uint64_t *)(teb + 0x10) !=
-            thread->stack_base ||
+            thread->stack_contract.usable_stack_low ||
         *(const uint64_t *)(teb + 0x100) != thread->identity) {
         return 0;
     }
@@ -1052,6 +1117,113 @@ int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread)
         if (thread->fls_allocated[index] > 1U) return 0;
     }
     return 1;
+}
+
+int gxos_scheduler_validate_worker_snapshot(
+    const GXOS_SCHEDULER_TCB *thread,
+    const GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot)
+{
+    const uint8_t *gs;
+    const uint8_t *teb;
+    const uint64_t *tls_vector;
+    if (thread == 0 || snapshot == 0 || !thread->live || thread->is_boot_thread ||
+        thread->stack_contract.usable_stack_low == 0 ||
+        thread->stack_contract.usable_stack_high <=
+            thread->stack_contract.usable_stack_low ||
+        snapshot->gs_base == 0 || snapshot->gs_base != thread->gs_base ||
+        !canonical_nonzero_pointer(snapshot->gs_base) ||
+        !aligned_page_pointer(thread->teb_base) ||
+        !aligned_page_pointer(thread->tls_vector_base) ||
+        !aligned_page_pointer(thread->tls_block_base) ||
+        snapshot->rsp < thread->stack_contract.usable_stack_low ||
+        snapshot->rsp >= thread->stack_contract.usable_stack_high) {
+        return 0;
+    }
+    gs = (const uint8_t *)(uintptr_t)snapshot->gs_base;
+    teb = (const uint8_t *)(uintptr_t)thread->teb_base;
+    tls_vector = (const uint64_t *)(uintptr_t)thread->tls_vector_base;
+    return *(const uint64_t *)(gs + 0x30U) == thread->teb_base &&
+        *(const uint64_t *)(gs + 0x58U) == thread->tls_vector_base &&
+        *(const uint64_t *)(gs + 0x08U) ==
+            thread->stack_contract.usable_stack_high &&
+        *(const uint64_t *)(gs + 0x10U) ==
+            thread->stack_contract.usable_stack_low &&
+        *(const uint64_t *)(teb + 0x08U) ==
+            thread->stack_contract.usable_stack_high &&
+        *(const uint64_t *)(teb + 0x10U) ==
+            thread->stack_contract.usable_stack_low &&
+        *(const uint64_t *)(teb + 0x100U) == thread->identity &&
+        tls_vector[0] == thread->tls_block_base;
+}
+
+int gxos_scheduler_note_worker_snapshot(
+    GXOS_SCHEDULER_TCB *thread,
+    const GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot)
+{
+    uint64_t high_water;
+    if (!gxos_scheduler_validate_worker_snapshot(thread, snapshot)) {
+        if (thread != 0) thread->stack_contract.diagnostic_overflow = 1;
+        return 0;
+    }
+    if (thread->stack_contract.minimum_rsp == 0 ||
+        snapshot->rsp < thread->stack_contract.minimum_rsp) {
+        thread->stack_contract.minimum_rsp = snapshot->rsp;
+    }
+    high_water = thread->stack_contract.usable_stack_high -
+        thread->stack_contract.minimum_rsp;
+    if (high_water > thread->stack_contract.usable_stack_bytes) {
+        thread->stack_contract.diagnostic_overflow = 1;
+        return 0;
+    }
+    thread->stack_contract.high_water_bytes = high_water;
+    if (thread->stack_contract.high_water_samples != UINT32_MAX) {
+        ++thread->stack_contract.high_water_samples;
+    }
+    return 1;
+}
+
+void gxos_scheduler_note_captured_registers(
+    const GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot)
+{
+    if (g_scheduler != 0 && g_scheduler->active &&
+        g_scheduler->current != 0 && !g_scheduler->current->is_boot_thread &&
+        g_scheduler->current->live) {
+        (void)gxos_scheduler_note_worker_snapshot(g_scheduler->current,
+                                                  snapshot);
+    }
+}
+
+int gxos_scheduler_arm_guard_probe(GXOS_SCHEDULER_TCB *thread)
+{
+    if (thread == 0 || !thread->live || thread->is_boot_thread ||
+        !gxos_scheduler_validate_thread_context(thread)) return 0;
+    g_guard_probe_thread = thread;
+    g_guard_probe_armed = 1;
+    return 1;
+}
+
+void gxos_scheduler_trigger_guard_probe(void)
+{
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    volatile uint8_t *guard;
+    if (g_guard_probe_armed == 0 || thread == 0 ||
+        thread != g_guard_probe_thread || !thread->live) return;
+    guard = (volatile uint8_t *)(uintptr_t)thread->stack_contract.guard_base;
+    *guard = 0xA5U;
+}
+
+GXOS_SCHEDULER_TCB *gxos_scheduler_guard_probe_thread(void)
+{
+    return g_guard_probe_thread;
+}
+
+int gxos_scheduler_guard_probe_expected(uint64_t fault_address)
+{
+    return g_guard_probe_armed != 0 && g_guard_probe_thread != 0 &&
+        g_guard_probe_thread->live &&
+        fault_address >= g_guard_probe_thread->stack_contract.guard_base &&
+        fault_address < g_guard_probe_thread->stack_contract.guard_base +
+            g_guard_probe_thread->stack_contract.guard_bytes;
 }
 
 int gxos_scheduler_resume_thread(GXOS_SCHEDULER_HANDLE handle,
@@ -1104,19 +1276,17 @@ static void maybe_reclaim_thread(GXOS_SCHEDULER_TCB *thread)
         thread->runnable_queued || !gxos_scheduler_check_canaries(thread)) return;
     object = &g_scheduler->objects[thread->object_slot];
     if (!object->live || object->type != GXOS_SCHEDULER_OBJECT_THREAD) return;
-    if (thread->stack_pages_memory != 0) {
-        if (thread->stack_vm_identity == 0 ||
-            g_scheduler->unregister_stack_vm == 0 ||
-            !g_scheduler->unregister_stack_vm(
-                g_scheduler->stack_vm_context, thread->stack_base,
-                thread->stack_limit - thread->stack_base,
-                thread->stack_vm_identity)) {
+    if (thread->stack_contract.reservation_base != 0) {
+        if (thread->stack_contract.usable_vm_identity == 0 ||
+            g_scheduler->free_stack_vm == 0 ||
+            !g_scheduler->free_stack_vm(
+                g_scheduler->stack_vm_context, &thread->stack_contract)) {
             return;
         }
+        zero_bytes(&thread->stack_contract, sizeof(thread->stack_contract));
         thread->stack_vm_identity = 0;
     }
     object->internal_refs = 0;
-    page_free(g_scheduler, thread->stack_pages_memory);
     thread->stack_pages_memory = 0;
     page_free(g_scheduler, thread->stack_canary_memory);
     thread->stack_canary_memory = 0;

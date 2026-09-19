@@ -377,8 +377,8 @@ static uint32_t phase53o_canary_mask(const GXOS_SCHEDULER_TCB *thread)
             thread->low_canary[index]) {
             mask |= 1U;
         }
-        if (((const uint8_t *)(uintptr_t)thread->stack_limit -
-             GXOS_SCHEDULER_CANARY_BYTES)[index] !=
+        if (((const uint8_t *)(uintptr_t)thread->stack_canary_memory)[
+                GXOS_SCHEDULER_CANARY_BYTES + index] !=
             thread->high_canary[index]) {
             mask |= 2U;
         }
@@ -387,12 +387,9 @@ static uint32_t phase53o_canary_mask(const GXOS_SCHEDULER_TCB *thread)
 }
 
 /*
- * The scheduler's production stack layout places its low sentinel page
- * immediately below the registered stack.  NativeAOT owns that boundary
- * while executing managed code and may legitimately clear the adjacent page
- * during stack probing.  Rehome only the diagnostic worker's low sentinel so
- * the scheduler's reclaim check still protects a non-owned page; production
- * scheduler allocation remains unchanged.
+ * Rehome only the diagnostic canary page. The production stack contract has
+ * a real reserved, non-present guard and does not use a writable boundary
+ * sentinel as its safety mechanism.
  */
 static int phase53o_rehome_canary(GXOS_PHASE53O_PROBE *probe,
                                   GXOS_SCHEDULER_TCB *thread)
@@ -420,6 +417,8 @@ static int phase53o_rehome_canary(GXOS_PHASE53O_PROBE *probe,
     for (index = 0; index != GXOS_SCHEDULER_CANARY_BYTES; ++index) {
         ((uint8_t *)(uintptr_t)new_canary)[index] =
             thread->low_canary[index];
+        ((uint8_t *)(uintptr_t)new_canary)[GXOS_SCHEDULER_CANARY_BYTES + index] =
+            thread->high_canary[index];
     }
     if (probe->scheduler->free_pages(old_canary, 1) != 0) {
         (void)probe->scheduler->free_pages(new_canary, 1);
@@ -436,6 +435,23 @@ static void phase53o_emit_cycle_state(GXOS_PHASE53O_CYCLE *cycle)
 
     gxos_scheduler_capture_registers(&snapshot);
     cycle->worker_rsp = snapshot.rsp;
+    if (cycle->thread == 0 ||
+        !gxos_scheduler_validate_worker_snapshot(cycle->thread, &snapshot)) {
+        (void)phase53o_fail(cycle);
+    } else {
+        phase53o_hex(probe, "GXOS_NET10:PHASE53V_WORKER_CONTEXT_COHERENT_ID=0x",
+                     cycle->thread->identity);
+        phase53o_hex(probe, "GXOS_NET10:PHASE53V_WORKER_GS_LOWER=0x",
+                     *(const uint64_t *)(uintptr_t)(cycle->thread->gs_base + 0x10U));
+        phase53o_hex(probe, "GXOS_NET10:PHASE53V_WORKER_TEB_LOWER=0x",
+                     *(const uint64_t *)(uintptr_t)(cycle->thread->teb_base + 0x10U));
+        phase53o_hex(probe, "GXOS_NET10:PHASE53V_WORKER_USABLE_LOW=0x",
+                     cycle->thread->stack_contract.usable_stack_low);
+        phase53o_hex(probe, "GXOS_NET10:PHASE53V_WORKER_MINIMUM_RSP=0x",
+                     cycle->thread->stack_contract.minimum_rsp);
+        phase53o_hex(probe, "GXOS_NET10:PHASE53V_WORKER_HIGH_WATER_BYTES=0x",
+                     cycle->thread->stack_contract.high_water_bytes);
+    }
     phase53o_hex(probe, "GXOS_NET10:PHASE53O_CYCLE=", cycle->cycle);
     phase53o_hex(probe, "GXOS_NET10:PHASE53O_IDENTITY=0x",
                 cycle->thread == 0 ? 0 : cycle->thread->identity);

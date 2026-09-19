@@ -71,24 +71,70 @@ static uint64_t GXOS_SCHEDULER_MS_ABI test_free(
     return 0;
 }
 
-static int GXOS_SCHEDULER_MS_ABI register_stack(
-    void *context, uint64_t base, uint64_t bytes,
-    uint64_t *allocation_identity_out)
+static int GXOS_SCHEDULER_MS_ABI allocate_stack(
+    void *context, uint64_t usable_bytes,
+    GXOS_SCHEDULER_STACK_CONTRACT *contract)
 {
-    GXOS_VM_STATUS status = gxos_vm_region_register(
-        (GXOS_VM_REGION_LEDGER *)context, base, bytes, base,
-        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_STATE_COMMIT,
-        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_TYPE_PRIVATE,
-        allocation_identity_out);
-    return status == GXOS_VM_STATUS_OK;
+    GXOS_VM_REGION_LEDGER *ledger = (GXOS_VM_REGION_LEDGER *)context;
+    GXOS_VM_STATUS status;
+    uint64_t reservation = 0;
+    if (usable_bytes != GXOS_SCHEDULER_STACK_USABLE_SIZE || contract == 0 ||
+        test_allocate(0, 0, GXOS_SCHEDULER_STACK_RESERVATION_PAGES,
+                      &reservation) != 0) return 0;
+    memset(contract, 0, sizeof(*contract));
+    contract->reservation_base = reservation;
+    contract->reservation_bytes = GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract->guard_base = reservation;
+    contract->guard_bytes = GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract->usable_stack_low = reservation + GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract->usable_stack_high = reservation +
+        GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract->usable_stack_bytes = GXOS_SCHEDULER_STACK_USABLE_SIZE;
+    contract->backing_memory = reservation;
+    contract->backing_pages = GXOS_SCHEDULER_STACK_RESERVATION_PAGES;
+    contract->guard_nonpresent = 1;
+    status = gxos_vm_region_register(
+        ledger, contract->guard_base, contract->guard_bytes,
+        contract->reservation_base, 0, GXOS_VM_REGION_STATE_RESERVE, 0,
+        GXOS_VM_REGION_TYPE_PRIVATE, &contract->guard_vm_identity);
+    if (status != GXOS_VM_STATUS_OK) {
+        (void)test_free(reservation, GXOS_SCHEDULER_STACK_RESERVATION_PAGES);
+        return 0;
+    }
+    status = gxos_vm_region_register(
+        ledger, contract->usable_stack_low, contract->usable_stack_bytes,
+        contract->reservation_base, GXOS_VM_REGION_PAGE_READWRITE,
+        GXOS_VM_REGION_STATE_COMMIT, GXOS_VM_REGION_PAGE_READWRITE,
+        GXOS_VM_REGION_TYPE_PRIVATE, &contract->usable_vm_identity);
+    if (status != GXOS_VM_STATUS_OK) {
+        (void)gxos_vm_region_unregister(
+            ledger, contract->guard_base, contract->guard_bytes,
+            contract->guard_vm_identity);
+        (void)test_free(reservation, GXOS_SCHEDULER_STACK_RESERVATION_PAGES);
+        memset(contract, 0, sizeof(*contract));
+        return 0;
+    }
+    return 1;
 }
 
-static int GXOS_SCHEDULER_MS_ABI unregister_stack(
-    void *context, uint64_t base, uint64_t bytes, uint64_t identity)
+static int GXOS_SCHEDULER_MS_ABI free_stack(
+    void *context, const GXOS_SCHEDULER_STACK_CONTRACT *contract)
 {
-    return gxos_vm_region_unregister(
-               (GXOS_VM_REGION_LEDGER *)context, base, bytes, identity) ==
-        GXOS_VM_STATUS_OK;
+    GXOS_VM_REGION_LEDGER *ledger = (GXOS_VM_REGION_LEDGER *)context;
+    if (contract == 0 || contract->backing_memory == 0 ||
+        contract->backing_pages != GXOS_SCHEDULER_STACK_RESERVATION_PAGES ||
+        gxos_vm_region_unregister(ledger, contract->usable_stack_low,
+                                  contract->usable_stack_bytes,
+                                  contract->usable_vm_identity) !=
+            GXOS_VM_STATUS_OK ||
+        gxos_vm_region_unregister(ledger, contract->guard_base,
+                                  contract->guard_bytes,
+                                  contract->guard_vm_identity) !=
+            GXOS_VM_STATUS_OK ||
+        test_free(contract->backing_memory, contract->backing_pages) != 0) {
+        return 0;
+    }
+    return 1;
 }
 
 static uintptr_t GXOS_SCHEDULER_MS_ABI test_entry(void *argument)
@@ -138,10 +184,15 @@ static void require_stack(const GXOS_SCHEDULER_TCB *thread)
                 &g_regions, thread->stack_base, &information,
                 sizeof(information)) == sizeof(information));
     REQUIRE(information.BaseAddress == thread->stack_base);
-    REQUIRE(information.AllocationBase == thread->stack_base);
+    REQUIRE(information.AllocationBase == thread->stack_contract.reservation_base);
     REQUIRE(information.RegionSize == GXOS_SCHEDULER_STACK_SIZE);
     REQUIRE(information.State == GXOS_VM_REGION_STATE_COMMIT);
     REQUIRE(information.Type == GXOS_VM_REGION_TYPE_PRIVATE);
+    REQUIRE(gxos_vm_region_virtual_query(
+                &g_regions, thread->stack_contract.guard_base, &information,
+                sizeof(information)) == sizeof(information));
+    REQUIRE(information.State == GXOS_VM_REGION_STATE_RESERVE &&
+            information.Protect == 0);
 }
 
 static void require_current_fls(GXOS_SCHEDULER_TCB *thread,
@@ -149,6 +200,20 @@ static void require_current_fls(GXOS_SCHEDULER_TCB *thread,
 {
     REQUIRE(gxos_scheduler_current_thread() == thread);
     REQUIRE(gxos_scheduler_get_fls(TEST_FLS_SLOT) == expected);
+}
+
+static void require_current_worker_snapshot(GXOS_SCHEDULER_TCB *thread)
+{
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT snapshot;
+    if (thread == 0 || thread->is_boot_thread) return;
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.rsp = thread->context.rsp;
+    snapshot.gs_base = thread->context.gs_base;
+    REQUIRE(gxos_scheduler_validate_worker_snapshot(thread, &snapshot));
+    REQUIRE(snapshot.rsp >= thread->stack_contract.usable_stack_low &&
+            snapshot.rsp < thread->stack_contract.usable_stack_high);
+    REQUIRE(*(const uint64_t *)(uintptr_t)(snapshot.gs_base + 0x10U) ==
+            thread->stack_contract.usable_stack_low);
 }
 
 int main(void)
@@ -181,7 +246,7 @@ int main(void)
     REQUIRE(gxos_scheduler_initialize(
                 &g_scheduler, test_allocate, test_free, 0, 0, 0));
     REQUIRE(gxos_scheduler_configure_stack_vm(
-                &g_scheduler, register_stack, unregister_stack, &g_regions));
+            &g_scheduler, allocate_stack, free_stack, &g_regions));
     main_thread = gxos_scheduler_current_thread();
     require_fresh_thread(main_thread);
     REQUIRE(gxos_scheduler_runnable_count() == 0U);
@@ -195,7 +260,8 @@ int main(void)
     require_fresh_thread(second);
     require_stack(first);
     require_stack(second);
-    REQUIRE(first->stack_vm_identity != second->stack_vm_identity);
+    REQUIRE(first->stack_contract.usable_vm_identity !=
+            second->stack_contract.usable_vm_identity);
     REQUIRE(first->gs_base != 0U && first->teb_base != 0U);
     REQUIRE(first->tls_vector_base != 0U && first->tls_block_base != 0U);
     REQUIRE(second->gs_base != 0U && second->teb_base != 0U);
@@ -214,11 +280,11 @@ int main(void)
             first->tls_block_base != second->tls_block_base);
     REQUIRE(first->context.gs_base == first->gs_base &&
             second->context.gs_base == second->gs_base);
-    REQUIRE(g_regions.live_count == 2U);
+    REQUIRE(g_regions.live_count == 4U);
     first_identity = first->identity;
     first_generation = first->generation;
     first_stack_base = first->stack_base;
-    first_stack_identity = first->stack_vm_identity;
+    first_stack_identity = first->stack_contract.usable_vm_identity;
 
     REQUIRE(gxos_scheduler_resume_thread(first_handle,
                                          &previous_suspend_count));
@@ -242,7 +308,9 @@ int main(void)
         } else {
             REQUIRE(0);
         }
+        require_current_worker_snapshot(current);
         REQUIRE(gxos_scheduler_prepare_yield(&plan));
+        require_current_worker_snapshot(gxos_scheduler_current_thread());
         REQUIRE(gxos_scheduler_blocked_count() == 0U);
         REQUIRE(gxos_scheduler_active_wait_count() == 0U);
         REQUIRE(gxos_scheduler_get_fls(TEST_FLS_SLOT) == 0U ||

@@ -25,7 +25,13 @@
 #define GXOS_SCHEDULER_FLS_SLOTS 64U
 #define GXOS_SCHEDULER_TLS_VECTOR_SLOTS 512U
 #define GXOS_SCHEDULER_PAGE_SIZE 4096U
-#define GXOS_SCHEDULER_STACK_SIZE 16384U
+#define GXOS_SCHEDULER_STACK_USABLE_SIZE 65536U
+#define GXOS_SCHEDULER_STACK_GUARD_SIZE GXOS_SCHEDULER_PAGE_SIZE
+#define GXOS_SCHEDULER_STACK_RESERVATION_SIZE \
+    (GXOS_SCHEDULER_STACK_USABLE_SIZE + GXOS_SCHEDULER_STACK_GUARD_SIZE)
+#define GXOS_SCHEDULER_STACK_RESERVATION_PAGES \
+    (GXOS_SCHEDULER_STACK_RESERVATION_SIZE / GXOS_SCHEDULER_PAGE_SIZE)
+#define GXOS_SCHEDULER_STACK_SIZE GXOS_SCHEDULER_STACK_USABLE_SIZE
 #define GXOS_SCHEDULER_STACK_PAGES (GXOS_SCHEDULER_STACK_SIZE / GXOS_SCHEDULER_PAGE_SIZE)
 #define GXOS_SCHEDULER_CANARY_BYTES 16U
 #define GXOS_SCHEDULER_TLS_OFFSET 0x100U
@@ -54,16 +60,35 @@ typedef void (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_LOG_HEX)(const char *name,
                                                                uint64_t value);
 typedef void (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_LOG_U32)(const char *name,
                                                               uint32_t value);
-typedef int (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_REGISTER_STACK_VM)(
+typedef struct {
+    uint64_t reservation_base;
+    uint64_t reservation_bytes;
+    uint64_t guard_base;
+    uint64_t guard_bytes;
+    uint64_t usable_stack_low;
+    uint64_t usable_stack_high;
+    uint64_t usable_stack_bytes;
+    uint64_t guard_vm_identity;
+    uint64_t usable_vm_identity;
+    uint32_t reservation_slot;
+    uint32_t committed_page_count;
+    uint64_t backing_memory;
+    uint64_t backing_pages;
+    uint64_t initial_rsp;
+    uint64_t minimum_rsp;
+    uint64_t high_water_bytes;
+    uint32_t high_water_samples;
+    uint8_t guard_nonpresent;
+    uint8_t diagnostic_overflow;
+    uint16_t reserved;
+} GXOS_SCHEDULER_STACK_CONTRACT;
+typedef int (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_ALLOCATE_STACK_VM)(
     void *context,
-    uint64_t base,
-    uint64_t bytes,
-    uint64_t *allocation_identity_out);
-typedef int (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_UNREGISTER_STACK_VM)(
+    uint64_t usable_bytes,
+    GXOS_SCHEDULER_STACK_CONTRACT *contract_out);
+typedef int (GXOS_SCHEDULER_MS_ABI *GXOS_SCHEDULER_FREE_STACK_VM)(
     void *context,
-    uint64_t base,
-    uint64_t bytes,
-    uint64_t allocation_identity);
+    const GXOS_SCHEDULER_STACK_CONTRACT *contract);
 
 typedef struct __attribute__((aligned(16))) {
     uint64_t rbx;
@@ -263,6 +288,8 @@ typedef struct GXOS_SCHEDULER_TCB {
     GXOS_SCHEDULER_ENTRY entry;
     void *entry_argument;
     uintptr_t return_value;
+    GXOS_SCHEDULER_STACK_CONTRACT stack_contract;
+    /* Compatibility mirrors; stack_contract is authoritative. */
     uint64_t stack_base;
     uint64_t stack_limit;
     uint64_t initial_rsp;
@@ -299,8 +326,8 @@ typedef struct GXOS_SCHEDULER {
     GXOS_SCHEDULER_LOG_TEXT log_text;
     GXOS_SCHEDULER_LOG_HEX log_hex;
     GXOS_SCHEDULER_LOG_U32 log_u32;
-    GXOS_SCHEDULER_REGISTER_STACK_VM register_stack_vm;
-    GXOS_SCHEDULER_UNREGISTER_STACK_VM unregister_stack_vm;
+    GXOS_SCHEDULER_ALLOCATE_STACK_VM allocate_stack_vm;
+    GXOS_SCHEDULER_FREE_STACK_VM free_stack_vm;
     void *stack_vm_context;
     GXOS_SCHEDULER_TCB threads[GXOS_SCHEDULER_MAX_THREADS];
     GXOS_SCHEDULER_WAIT_RECORD wait_records[GXOS_SCHEDULER_MAX_WAIT_RECORDS];
@@ -336,6 +363,8 @@ typedef struct GXOS_SCHEDULER {
 void gxos_scheduler_context_switch(GXOS_SCHEDULER_CONTEXT **old_context,
                                    GXOS_SCHEDULER_CONTEXT *new_context);
 void gxos_scheduler_capture_registers(GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot);
+void gxos_scheduler_note_captured_registers(
+    const GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot);
 void gxos_scheduler_main_block(GXOS_SCHEDULER_HANDLE event,
                                GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot,
                                int32_t *wait_result);
@@ -370,8 +399,8 @@ int gxos_scheduler_adopt_boot_environment(GXOS_SCHEDULER *scheduler,
                                            uint64_t stack_upper);
 int gxos_scheduler_configure_stack_vm(
     GXOS_SCHEDULER *scheduler,
-    GXOS_SCHEDULER_REGISTER_STACK_VM register_stack_vm,
-    GXOS_SCHEDULER_UNREGISTER_STACK_VM unregister_stack_vm,
+    GXOS_SCHEDULER_ALLOCATE_STACK_VM allocate_stack_vm,
+    GXOS_SCHEDULER_FREE_STACK_VM free_stack_vm,
     void *context);
 int gxos_scheduler_configure_clock(GXOS_SCHEDULER *scheduler,
                                    GXOS_SCHEDULER_NOW_MS now_ms,
@@ -397,6 +426,16 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
 int gxos_scheduler_resume_thread(GXOS_SCHEDULER_HANDLE handle,
                                  uint32_t *previous_suspend_count);
 int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread);
+int gxos_scheduler_validate_worker_snapshot(
+    const GXOS_SCHEDULER_TCB *thread,
+    const GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot);
+int gxos_scheduler_note_worker_snapshot(
+    GXOS_SCHEDULER_TCB *thread,
+    const GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot);
+int gxos_scheduler_arm_guard_probe(GXOS_SCHEDULER_TCB *thread);
+void gxos_scheduler_trigger_guard_probe(void);
+GXOS_SCHEDULER_TCB *gxos_scheduler_guard_probe_thread(void);
+int gxos_scheduler_guard_probe_expected(uint64_t fault_address);
 uint32_t gxos_scheduler_runnable_count(void);
 uint32_t gxos_scheduler_runnable_position(const GXOS_SCHEDULER_TCB *thread);
 int gxos_scheduler_is_runnable_queued(const GXOS_SCHEDULER_TCB *thread);

@@ -31,6 +31,7 @@
 #include "vectored_handler.h"
 #include "platform_multibyte.h"
 #include "nativeaot_callback_bridge.h"
+#include "nativeaot_scheduler_thread_lifecycle.h"
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
 #include "managed_kernel_abi.h"
 #include "managed_kernel_entropy.h"
@@ -4387,6 +4388,60 @@ static void emit_fault_gc_provenance(const GXOS_X64_TRAP_FRAME *frame)
     serial_text("GXOS_NET10:FAULT_GC_PROVENANCE_END\r\n");
 }
 
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+static void emit_phase53v_guard_fault(const GXOS_X64_TRAP_FRAME *frame)
+{
+    GXOS_SCHEDULER_TCB *thread;
+    GXOS_VM_MAPPING mapping = {0};
+    uint64_t gs_lower;
+    uint64_t gs_upper;
+    uint64_t teb_lower;
+    uint64_t teb_upper;
+    int mapping_ok;
+    int metadata_ok;
+    int unrelated_ok;
+    if (frame == 0 || frame->vector != 14U ||
+        !gxos_scheduler_guard_probe_expected(frame->cr2)) return;
+    thread = gxos_scheduler_guard_probe_thread();
+    if (thread == 0) return;
+    gs_lower = *(const uint64_t *)(uintptr_t)(thread->gs_base + 0x10U);
+    gs_upper = *(const uint64_t *)(uintptr_t)(thread->gs_base + 0x08U);
+    teb_lower = *(const uint64_t *)(uintptr_t)(thread->teb_base + 0x10U);
+    teb_upper = *(const uint64_t *)(uintptr_t)(thread->teb_base + 0x08U);
+    mapping_ok = gxos_vm_paging_query(&g_vm_paging, frame->cr2, &mapping) ==
+        GXOS_VM_PAGING_STATUS_NOT_PRESENT;
+    metadata_ok = gs_lower == thread->stack_contract.usable_stack_low &&
+        teb_lower == thread->stack_contract.usable_stack_low &&
+        gs_upper == thread->stack_contract.usable_stack_high &&
+        teb_upper == thread->stack_contract.usable_stack_high &&
+        frame->rsp >= thread->stack_contract.usable_stack_low &&
+        frame->rsp < thread->stack_contract.usable_stack_high;
+    unrelated_ok = g_memory_map.generation != 0 && g_vm_paging.active != 0 &&
+        g_loader_image_base != 0;
+    serial_text("GXOS_NET10:PHASE53V_GUARD_FAULT=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_GUARD_FAULT_CR2=0x", frame->cr2);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_GUARD_FAULT_WORKER_ID=0x",
+                     thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_GUARD_FAULT_GS_BASE=0x",
+                     thread->gs_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_GUARD_FAULT_TEB_BASE=0x",
+                     thread->teb_base);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE53V_GUARD_NONPRESENT=");
+    serial_text(mapping_ok ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:PHASE53V_GUARD_GS_TEB_INTACT=");
+    serial_text(metadata_ok ? "1\r\n" : "0\r\n");
+    serial_text("GXOS_NET10:PHASE53V_GUARD_UNRELATED_STATE_INTACT=");
+    serial_text(unrelated_ok ? "1\r\n" : "0\r\n");
+    if (!mapping_ok || !metadata_ok || !unrelated_ok) {
+        fail("phase53v-guard-fault-proof");
+    }
+}
+#endif
+
 static void fault_handler(const GXOS_X64_TRAP_FRAME *frame)
 {
 #ifdef GXOS_ENABLE_CRT_INITTERM
@@ -4411,6 +4466,9 @@ static void fault_handler(const GXOS_X64_TRAP_FRAME *frame)
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:FAULT_CR2=0x", frame->cr2);
     serial_text("\r\n");
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    emit_phase53v_guard_fault(frame);
+#endif
     emit_fault_gc_provenance(frame);
     serial_field_hex("GXOS_NET10:FAULT_IMAGE_BASE=0x", g_managed_image_base);
     serial_text("\r\n");
@@ -11611,30 +11669,156 @@ static void memory_make_allocation(
     allocation->generation = g_memory_map.generation;
 }
 
-static int GXOS_MEMORY_EFIAPI __attribute__((unused)) memory_register_scheduler_stack(
-    void *context,
-    uint64_t base,
-    uint64_t bytes,
-    uint64_t *allocation_identity_out)
+static int GXOS_MEMORY_EFIAPI __attribute__((unused))
+memory_free_scheduler_stack(void *context,
+                            const GXOS_SCHEDULER_STACK_CONTRACT *contract)
 {
-    GXOS_VM_STATUS status;
-    status = gxos_vm_region_register(
-        (GXOS_VM_REGION_LEDGER *)context, base, bytes, base,
-        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_STATE_COMMIT,
-        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_TYPE_PRIVATE,
-        allocation_identity_out);
-    return status == GXOS_VM_STATUS_OK;
+    GXOS_VM_REGION_LEDGER *regions = (GXOS_VM_REGION_LEDGER *)context;
+    uint32_t index;
+    if (regions == 0 || contract == 0 || contract->reservation_base == 0 ||
+        contract->reservation_slot >= GXOS_VM_MAX_RESERVATIONS ||
+        contract->usable_stack_bytes != GXOS_SCHEDULER_STACK_USABLE_SIZE ||
+        contract->committed_page_count != GXOS_SCHEDULER_STACK_PAGES) {
+        return 0;
+    }
+    for (index = 0; index != contract->committed_page_count; ++index) {
+        uint64_t virtual_page = contract->usable_stack_low +
+            (uint64_t)index * EFI_PAGE_SIZE;
+        uint32_t commitment_slot;
+        GXOS_VM_COMMITMENT *commitment;
+        uint64_t physical_page;
+        if (gxos_vm_arena_find_commitment(
+                &g_memory_virtual_arena, virtual_page,
+                &commitment_slot) != GXOS_VM_STATUS_OK) {
+            return 0;
+        }
+        commitment = &g_memory_virtual_arena.commitments[commitment_slot];
+        physical_page = commitment->physical_base;
+        if (gxos_vm_paging_unmap_page(&g_vm_paging, virtual_page, 0) !=
+                GXOS_VM_PAGING_STATUS_OK ||
+            gxos_vm_arena_decommit_page(&g_memory_virtual_arena, virtual_page,
+                                        0) != GXOS_VM_STATUS_OK) {
+            return 0;
+        }
+        vm_uefi_free_page(&g_vm_data_page_context, physical_page,
+                          vm_uefi_physical_alias(&g_vm_data_page_context,
+                                                 physical_page));
+    }
+    if (contract->usable_vm_identity != 0 &&
+        gxos_vm_region_unregister(
+            regions, contract->usable_stack_low,
+            contract->usable_stack_bytes, contract->usable_vm_identity) !=
+            GXOS_VM_STATUS_OK) {
+        return 0;
+    }
+    if (contract->guard_vm_identity != 0 &&
+        gxos_vm_region_unregister(
+            regions, contract->guard_base, contract->guard_bytes,
+            contract->guard_vm_identity) != GXOS_VM_STATUS_OK) {
+        return 0;
+    }
+    return gxos_vm_arena_release(&g_memory_virtual_arena,
+                                 contract->reservation_slot) ==
+        GXOS_VM_STATUS_OK;
 }
 
-static int GXOS_MEMORY_EFIAPI __attribute__((unused)) memory_unregister_scheduler_stack(
-    void *context,
-    uint64_t base,
-    uint64_t bytes,
-    uint64_t allocation_identity)
+static int GXOS_MEMORY_EFIAPI __attribute__((unused))
+memory_allocate_scheduler_stack(
+    void *context, uint64_t usable_bytes,
+    GXOS_SCHEDULER_STACK_CONTRACT *contract_out)
 {
-    return gxos_vm_region_unregister(
-               (GXOS_VM_REGION_LEDGER *)context, base, bytes,
-               allocation_identity) == GXOS_VM_STATUS_OK;
+    GXOS_VM_REGION_LEDGER *regions = (GXOS_VM_REGION_LEDGER *)context;
+    GXOS_VM_COMMIT_OPERATION operation;
+    GXOS_VM_MAPPING mapping;
+    GXOS_VM_STATUS region_status;
+    uint64_t base = 0;
+    uint32_t reservation_slot = 0;
+    uint32_t new_page_count = 0;
+    if (regions == 0 || contract_out == 0 ||
+        usable_bytes != GXOS_SCHEDULER_STACK_USABLE_SIZE) return 0;
+    zero_bytes((uint8_t *)contract_out, sizeof(*contract_out));
+    if (gxos_vm_arena_reserve_any(
+            &g_memory_virtual_arena, GXOS_SCHEDULER_STACK_RESERVATION_SIZE,
+            GXOS_MEMORY_ALLOCATION_SCHEDULER_STACK,
+            GXOS_MEMORY_OWNER_SCHEDULER, g_memory_map.generation,
+            &base, &reservation_slot) != GXOS_VM_STATUS_OK) {
+        return 0;
+    }
+    contract_out->reservation_base = base;
+    contract_out->reservation_bytes = GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract_out->guard_base = base;
+    contract_out->guard_bytes = GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract_out->usable_stack_low = base + GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract_out->usable_stack_high = base +
+        GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract_out->usable_stack_bytes = GXOS_SCHEDULER_STACK_USABLE_SIZE;
+    contract_out->reservation_slot = reservation_slot;
+    contract_out->guard_nonpresent = 1;
+    zero_bytes((uint8_t *)&operation, sizeof(operation));
+    operation.arena = &g_memory_virtual_arena;
+    operation.paging = &g_vm_paging;
+    operation.data_allocator.context = &g_vm_data_page_context;
+    operation.data_allocator.allocate_page = vm_uefi_allocate_page;
+    operation.data_allocator.free_page = vm_uefi_free_page;
+    operation.data_allocator.physical_alias = vm_uefi_physical_alias;
+    operation.generation = g_memory_map.generation;
+    if (gxos_vm_commit_range(
+            &operation, reservation_slot, contract_out->usable_stack_low,
+            contract_out->usable_stack_bytes, 1, 0, &new_page_count) !=
+            GXOS_VM_COMMIT_OPERATION_OK ||
+        new_page_count != GXOS_SCHEDULER_STACK_PAGES) {
+        contract_out->committed_page_count = new_page_count;
+        (void)memory_free_scheduler_stack(context, contract_out);
+        zero_bytes((uint8_t *)contract_out, sizeof(*contract_out));
+        return 0;
+    }
+    contract_out->committed_page_count = new_page_count;
+    if (gxos_vm_paging_query(&g_vm_paging, contract_out->guard_base, &mapping) !=
+            GXOS_VM_PAGING_STATUS_NOT_PRESENT) {
+        (void)memory_free_scheduler_stack(context, contract_out);
+        zero_bytes((uint8_t *)contract_out, sizeof(*contract_out));
+        return 0;
+    }
+    region_status = gxos_vm_region_register(
+        regions, contract_out->guard_base, contract_out->guard_bytes,
+        contract_out->reservation_base, 0, GXOS_VM_REGION_STATE_RESERVE, 0,
+        GXOS_VM_REGION_TYPE_PRIVATE, &contract_out->guard_vm_identity);
+    if (region_status != GXOS_VM_STATUS_OK) {
+        (void)memory_free_scheduler_stack(context, contract_out);
+        zero_bytes((uint8_t *)contract_out, sizeof(*contract_out));
+        return 0;
+    }
+    region_status = gxos_vm_region_register(
+        regions, contract_out->usable_stack_low,
+        contract_out->usable_stack_bytes, contract_out->reservation_base,
+        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_STATE_COMMIT,
+        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_TYPE_PRIVATE,
+        &contract_out->usable_vm_identity);
+    if (region_status != GXOS_VM_STATUS_OK) {
+        (void)memory_free_scheduler_stack(context, contract_out);
+        zero_bytes((uint8_t *)contract_out, sizeof(*contract_out));
+        return 0;
+    }
+    serial_field_hex("GXOS_NET10:PHASE53V_RESERVATION_BASE=0x",
+                     contract_out->reservation_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_GUARD_BASE=0x",
+                     contract_out->guard_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_USABLE_STACK_LOW=0x",
+                     contract_out->usable_stack_low);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_USABLE_STACK_HIGH=0x",
+                     contract_out->usable_stack_high);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_GUARD_BYTES=0x",
+                     contract_out->guard_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_USABLE_STACK_BYTES=0x",
+                     contract_out->usable_stack_bytes);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE53V_GUARD_NONPRESENT=1\r\n");
+    return 1;
 }
 
 static int memory_find_ledger_base(uint64_t base, uint32_t *slot_out)
@@ -18920,6 +19104,22 @@ static void nativeaot_gc_emit_worker_state(
     serial_field_hex("STACK_LIMIT=0x", thread == 0 ? 0 : thread->stack_limit);
     serial_text("\r\n");
     serial_text(prefix);
+    serial_field_hex("STACK_GUARD_BASE=0x", thread == 0 ? 0 :
+                     thread->stack_contract.guard_base);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("STACK_MINIMUM_RSP=0x", thread == 0 ? 0 :
+                     thread->stack_contract.minimum_rsp);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("STACK_HIGH_WATER_BYTES=0x", thread == 0 ? 0 :
+                     thread->stack_contract.high_water_bytes);
+    serial_text("\r\n");
+    serial_text(prefix);
+    serial_field_hex("STACK_HIGH_WATER_SAMPLES=0x", thread == 0 ? 0 :
+                     thread->stack_contract.high_water_samples);
+    serial_text("\r\n");
+    serial_text(prefix);
     serial_field_hex("CANARY_MEMORY=0x", thread == 0 ? 0 :
                      thread->stack_canary_memory);
     serial_text("\r\n");
@@ -19091,14 +19291,31 @@ static int nativeaot_durability_stack_query(GXOS_SCHEDULER_TCB *thread)
 {
     GXOS_VM_MEMORY_BASIC_INFORMATION information;
     if (thread == 0 || !thread->live || thread->stack_base == 0 ||
-        thread->stack_limit <= thread->stack_base) return 0;
-    return gxos_vm_region_virtual_query(
-               &g_memory_vm_regions, thread->stack_base, &information,
-               sizeof(information)) == sizeof(information) &&
-        information.BaseAddress == thread->stack_base &&
-        information.RegionSize == thread->stack_limit - thread->stack_base &&
-        information.State == GXOS_VM_REGION_STATE_COMMIT &&
-        information.Type == GXOS_VM_REGION_TYPE_PRIVATE;
+        thread->stack_limit <= thread->stack_base ||
+        thread->stack_base != thread->stack_contract.usable_stack_low ||
+        thread->stack_limit != thread->stack_contract.usable_stack_high ||
+        thread->stack_contract.guard_base !=
+            thread->stack_contract.reservation_base ||
+        thread->stack_contract.guard_bytes != GXOS_SCHEDULER_STACK_GUARD_SIZE ||
+        thread->stack_contract.usable_stack_bytes !=
+            GXOS_SCHEDULER_STACK_USABLE_SIZE ||
+        !thread->stack_contract.guard_nonpresent) return 0;
+    if (gxos_vm_region_virtual_query(
+            &g_memory_vm_regions, thread->stack_base, &information,
+            sizeof(information)) != sizeof(information) ||
+        information.BaseAddress != thread->stack_base ||
+        information.AllocationBase != thread->stack_contract.reservation_base ||
+        information.RegionSize != thread->stack_limit - thread->stack_base ||
+        information.State != GXOS_VM_REGION_STATE_COMMIT ||
+        information.Type != GXOS_VM_REGION_TYPE_PRIVATE) return 0;
+    if (gxos_vm_region_virtual_query(
+            &g_memory_vm_regions, thread->stack_contract.guard_base,
+            &information, sizeof(information)) != sizeof(information)) return 0;
+    return information.BaseAddress == thread->stack_contract.guard_base &&
+        information.AllocationBase == thread->stack_contract.reservation_base &&
+        information.RegionSize == thread->stack_contract.guard_bytes &&
+        information.State == GXOS_VM_REGION_STATE_RESERVE &&
+        information.Protect == 0;
 }
 
 #ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK
@@ -19147,6 +19364,29 @@ static uintptr_t EFIAPI nativeaot_scheduler_callback_thread_entry(void *argument
     context->thread = thread;
     object = gxos_scheduler_object_from_handle(context->handle);
     gxos_scheduler_capture_registers(&context->before_callback);
+    nativeaot_durability_require(
+        gxos_scheduler_validate_worker_snapshot(thread,
+                                                &context->before_callback),
+        "phase53v-worker-rsp-gs-coherency-callback");
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_CONTEXT_COHERENT_ID=0x",
+                     thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_CONTEXT_RSP=0x",
+                     context->before_callback.rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_CONTEXT_GS=0x",
+                     context->before_callback.gs_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_GS_LOWER=0x",
+                     *(const uint64_t *)(uintptr_t)(thread->gs_base + 0x10U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_TEB_LOWER=0x",
+                     *(const uint64_t *)(uintptr_t)(thread->teb_base + 0x10U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_USABLE_LOW=0x",
+                     thread->stack_contract.usable_stack_low);
+    serial_text("\r\n");
     context->native_thread_state_before =
         nativeaot_scheduler_callback_thread_state(thread);
     context->fls_before = nativeaot_scheduler_callback_fls(thread);
@@ -19321,6 +19561,13 @@ static uintptr_t EFIAPI nativeaot_scheduler_callback_thread_entry(void *argument
                                  "nativeaot-scheduler-callback-resume-state");
 
     gxos_scheduler_capture_registers(&context->second_before_callback);
+    nativeaot_durability_require(
+        gxos_scheduler_validate_worker_snapshot(
+            thread, &context->second_before_callback),
+        "phase53v-worker-rsp-gs-coherency-callback-resume");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_CONTEXT_RESUMED_ID=0x",
+                     thread->identity);
+    serial_text("\r\n");
     g_phase = PHASE_IN_MANAGED;
     status = (uint32_t)gxos_nativeaot_callback_invoke(
         &g_managed_callback_bridge, 8, &result);
@@ -19503,8 +19750,10 @@ static void nativeaot_scheduler_callback_probe(void)
              ++canary_probe_index) {
             uint8_t low_actual = ((const uint8_t *)(uintptr_t)thread->stack_canary_memory)[
                 canary_probe_index];
-            uint8_t high_actual = ((const uint8_t *)(uintptr_t)thread->stack_limit -
-                                   GXOS_SCHEDULER_CANARY_BYTES)[canary_probe_index];
+            uint8_t high_actual = ((const uint8_t *)(uintptr_t)
+                                   thread->stack_canary_memory)[
+                                       GXOS_SCHEDULER_CANARY_BYTES +
+                                       canary_probe_index];
             if (canary_index == UINT32_MAX &&
                 low_actual != thread->low_canary[canary_probe_index]) {
                 canary_index = canary_probe_index;
@@ -19679,11 +19928,42 @@ static uintptr_t EFIAPI nativeaot_durability_thread_entry(void *argument)
     GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT *context =
         (GXOS_NATIVEAOT_DURABILITY_THREAD_CONTEXT *)argument;
     GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT stack_snapshot = {0};
     uintptr_t generated_value;
     int32_t hresult;
 
     nativeaot_durability_require(context != 0 && thread != 0 && thread->live,
                                  "nativeaot-durability-thread-context");
+    gxos_scheduler_capture_registers(&stack_snapshot);
+    nativeaot_durability_require(
+        gxos_scheduler_validate_worker_snapshot(thread, &stack_snapshot),
+        "phase53v-worker-rsp-gs-coherency");
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_CONTEXT_COHERENT_ID=0x",
+                     thread->identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_CONTEXT_RSP=0x",
+                     stack_snapshot.rsp);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_CONTEXT_GS=0x",
+                     stack_snapshot.gs_base);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_GS_LOWER=0x",
+                     *(const uint64_t *)(uintptr_t)(thread->gs_base + 0x10U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_TEB_LOWER=0x",
+                     *(const uint64_t *)(uintptr_t)(thread->teb_base + 0x10U));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE53V_WORKER_USABLE_LOW=0x",
+                     thread->stack_contract.usable_stack_low);
+    serial_text("\r\n");
+#ifdef GXOS_ENABLE_PHASE53V_GUARD_PROBE
+    nativeaot_durability_require(
+        gxos_scheduler_arm_guard_probe(thread),
+        "phase53v-guard-probe-arm");
+    serial_text("GXOS_NET10:PHASE53V_GUARD_PROBE_ARMED=1\r\n");
+    gxos_scheduler_trigger_guard_probe();
+#endif
     generated_value = ((uintptr_t)0xD000000000000000ULL) |
                       (uintptr_t)thread->identity;
     context->expected_fls = generated_value;
@@ -21417,8 +21697,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     }
     ++g_create_event_scheduler_initialize_count;
     if (!gxos_scheduler_configure_stack_vm(
-            &g_create_event_scheduler, memory_register_scheduler_stack,
-            memory_unregister_scheduler_stack, &g_memory_vm_regions)) {
+            &g_create_event_scheduler, memory_allocate_scheduler_stack,
+            memory_free_scheduler_stack, &g_memory_vm_regions)) {
         fail("createeventw-scheduler-stack-vm");
     }
     if (!gxos_scheduler_adopt_boot_environment(
@@ -21536,9 +21816,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     restore_nativeaot_tls();
     restore_fault_handlers();
 #ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+#ifdef GXOS_ENABLE_PHASE53V_GUARD_PROBE
+    install_fault_handlers();
+#endif
     g_phase = PHASE_IN_MANAGED;
     nativeaot_durability_probe();
     g_phase = PHASE_AFTER_MANAGED_RETURN;
+#ifdef GXOS_ENABLE_PHASE53V_GUARD_PROBE
+    restore_fault_handlers();
+#endif
 #endif
 #ifdef GXOS_ENABLE_CRT_ONEXIT_REGISTER
     if (g_crt_onexit_register_successes != 0) {

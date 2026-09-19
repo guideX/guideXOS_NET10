@@ -26,23 +26,48 @@ typedef struct {
 
 static GXOS_SCHEDULER_PROOF_STATE *g_proof;
 static GXOS_SCHEDULER_PROOF_STATE g_proof_storage;
+static void proof_zero(void *destination, size_t count);
 
-static int GXOS_SCHEDULER_MS_ABI proof_register_stack_vm(
-    void *context, uint64_t base, uint64_t bytes,
-    uint64_t *allocation_identity_out)
+static int GXOS_SCHEDULER_MS_ABI proof_allocate_stack_vm(
+    void *context, uint64_t usable_bytes,
+    GXOS_SCHEDULER_STACK_CONTRACT *contract)
 {
-    (void)context;
-    if (base == 0 || bytes == 0 || allocation_identity_out == 0) return 0;
-    *allocation_identity_out = base;
+    GXOS_SCHEDULER *scheduler = (GXOS_SCHEDULER *)context;
+    uint64_t memory = 0;
+    if (scheduler == 0 || contract == 0 ||
+        usable_bytes != GXOS_SCHEDULER_STACK_USABLE_SIZE ||
+        scheduler->allocate_pages == 0 ||
+        scheduler->allocate_pages(0, 4,
+                                   GXOS_SCHEDULER_STACK_RESERVATION_PAGES,
+                                   &memory) != 0 || memory == 0) return 0;
+    proof_zero(contract, sizeof(*contract));
+    proof_zero((void *)(uintptr_t)memory,
+               GXOS_SCHEDULER_STACK_RESERVATION_SIZE);
+    contract->reservation_base = memory;
+    contract->reservation_bytes = GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract->guard_base = memory;
+    contract->guard_bytes = GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract->usable_stack_low = memory + GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract->usable_stack_high = memory +
+        GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract->usable_stack_bytes = GXOS_SCHEDULER_STACK_USABLE_SIZE;
+    contract->guard_vm_identity = memory;
+    contract->usable_vm_identity = contract->usable_stack_low;
+    contract->backing_memory = memory;
+    contract->backing_pages = GXOS_SCHEDULER_STACK_RESERVATION_PAGES;
+    contract->guard_nonpresent = 1;
     return 1;
 }
 
-static int GXOS_SCHEDULER_MS_ABI proof_unregister_stack_vm(
-    void *context, uint64_t base, uint64_t bytes,
-    uint64_t allocation_identity)
+static int GXOS_SCHEDULER_MS_ABI proof_free_stack_vm(
+    void *context, const GXOS_SCHEDULER_STACK_CONTRACT *contract)
 {
-    (void)context;
-    return base != 0 && bytes != 0 && allocation_identity == base;
+    GXOS_SCHEDULER *scheduler = (GXOS_SCHEDULER *)context;
+    if (scheduler == 0 || contract == 0 || contract->backing_memory == 0 ||
+        contract->backing_pages != GXOS_SCHEDULER_STACK_RESERVATION_PAGES ||
+        scheduler->free_pages == 0) return 0;
+    return scheduler->free_pages(contract->backing_memory,
+                                 contract->backing_pages) == 0;
 }
 
 static void proof_zero(void *destination, size_t count)
@@ -402,8 +427,8 @@ int gxos_synthetic_scheduler_proof(
         return 0;
     }
     if (!gxos_scheduler_configure_stack_vm(
-            &proof->scheduler, proof_register_stack_vm,
-            proof_unregister_stack_vm, 0)) {
+            &proof->scheduler, proof_allocate_stack_vm,
+            proof_free_stack_vm, &proof->scheduler)) {
         proof_text("GXOS_NET10:SCHEDULER_PROOF=FAILED\r\n");
         g_proof = 0;
         return 0;
@@ -426,12 +451,22 @@ int gxos_synthetic_scheduler_proof(
     proof_text("GXOS_NET10:SCHEDULER_WORKER_STATE=CreatedSuspended\r\n");
     proof_hex("GXOS_NET10:SCHEDULER_WORKER_STACK_BASE=0x", worker->stack_base);
     proof_hex("GXOS_NET10:SCHEDULER_WORKER_STACK_LIMIT=0x", worker->stack_limit);
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_RESERVATION_BASE=0x",
+              worker->stack_contract.reservation_base);
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_GUARD_BASE=0x",
+              worker->stack_contract.guard_base);
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_USABLE_STACK_LOW=0x",
+              worker->stack_contract.usable_stack_low);
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_USABLE_STACK_HIGH=0x",
+              worker->stack_contract.usable_stack_high);
+    proof_u32("GXOS_NET10:SCHEDULER_WORKER_GUARD_NONPRESENT=0x",
+              worker->stack_contract.guard_nonpresent);
     proof_hex("GXOS_NET10:SCHEDULER_WORKER_INITIAL_RSP=0x", worker->initial_rsp);
     proof_hex("GXOS_NET10:SCHEDULER_WORKER_INITIAL_RIP=0x", worker->context.rip);
-    proof_hex("GXOS_NET10:SCHEDULER_WORKER_INITIAL_LOW_CANARY=0x",
-              *(uint64_t *)(uintptr_t)worker->stack_base);
-    proof_hex("GXOS_NET10:SCHEDULER_WORKER_INITIAL_HIGH_CANARY=0x",
-              *(uint64_t *)(uintptr_t)(worker->stack_limit - 16U));
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_INITIAL_USABLE_LOW=0x",
+              worker->stack_contract.usable_stack_low);
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_INITIAL_USABLE_HIGH=0x",
+              worker->stack_contract.usable_stack_high);
     proof_u32("GXOS_NET10:SCHEDULER_WORKER_ENTRY_ALIGNMENT=0x",
               (uint32_t)(worker->initial_rsp & 0xFU));
     if (proof->worker_executed != 0 || worker->state !=
@@ -515,10 +550,16 @@ int gxos_synthetic_scheduler_proof(
     *(uint8_t *)(uintptr_t)worker->stack_canary_memory = saved_low_canary;
     proof_text("GXOS_NET10:SCHED_NEGATIVE_STACK_CANARY_REJECTION=1\r\n");
     if (!gxos_scheduler_check_canaries(worker)) positive = 0;
-    proof_hex("GXOS_NET10:SCHEDULER_WORKER_FINAL_LOW_CANARY=0x",
-              *(uint64_t *)(uintptr_t)worker->stack_base);
-    proof_hex("GXOS_NET10:SCHEDULER_WORKER_FINAL_HIGH_CANARY=0x",
-              *(uint64_t *)(uintptr_t)(worker->stack_limit - 16U));
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_MINIMUM_RSP=0x",
+              worker->stack_contract.minimum_rsp);
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_HIGH_WATER_BYTES=0x",
+              worker->stack_contract.high_water_bytes);
+    proof_u32("GXOS_NET10:SCHEDULER_WORKER_HIGH_WATER_SAMPLES=0x",
+              worker->stack_contract.high_water_samples);
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_FINAL_LOW_DIAGNOSTIC=0x",
+              *(uint64_t *)(uintptr_t)worker->stack_canary_memory);
+    proof_hex("GXOS_NET10:SCHEDULER_WORKER_FINAL_HIGH_DIAGNOSTIC=0x",
+              *(uint64_t *)(uintptr_t)(worker->stack_canary_memory + 16U));
     proof_text("GXOS_NET10:SCHEDULER_WORKER_CANARIES_INTACT=1\r\n");
     if (!gxos_scheduler_collect(&proof->scheduler) || worker->live) positive = 0;
     proof_text("GXOS_NET10:SCHEDULER_CLOSED_HANDLE_TERMINATION_OBSERVED=1\r\n");

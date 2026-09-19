@@ -74,24 +74,72 @@ static uint64_t GXOS_SCHEDULER_MS_ABI test_free(
     return 0;
 }
 
-static int GXOS_SCHEDULER_MS_ABI register_stack(
-    void *context, uint64_t base, uint64_t bytes,
-    uint64_t *allocation_identity_out)
+static int GXOS_SCHEDULER_MS_ABI allocate_stack(
+    void *context, uint64_t usable_bytes,
+    GXOS_SCHEDULER_STACK_CONTRACT *contract)
 {
-    GXOS_VM_STATUS status = gxos_vm_region_register(
-        (GXOS_VM_REGION_LEDGER *)context, base, bytes, base,
-        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_STATE_COMMIT,
-        GXOS_VM_REGION_PAGE_READWRITE, GXOS_VM_REGION_TYPE_PRIVATE,
-        allocation_identity_out);
-    return status == GXOS_VM_STATUS_OK;
+    GXOS_VM_REGION_LEDGER *ledger = (GXOS_VM_REGION_LEDGER *)context;
+    uint64_t reservation = 0;
+    GXOS_VM_STATUS status;
+
+    if (usable_bytes != GXOS_SCHEDULER_STACK_USABLE_SIZE ||
+        contract == 0 || test_allocate(0, 0,
+                                        GXOS_SCHEDULER_STACK_RESERVATION_PAGES,
+                                        &reservation) != 0) return 0;
+    memset(contract, 0, sizeof(*contract));
+    contract->reservation_base = reservation;
+    contract->reservation_bytes = GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract->guard_base = reservation;
+    contract->guard_bytes = GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract->usable_stack_low = reservation + GXOS_SCHEDULER_STACK_GUARD_SIZE;
+    contract->usable_stack_high = reservation +
+        GXOS_SCHEDULER_STACK_RESERVATION_SIZE;
+    contract->usable_stack_bytes = GXOS_SCHEDULER_STACK_USABLE_SIZE;
+    contract->backing_memory = reservation;
+    contract->backing_pages = GXOS_SCHEDULER_STACK_RESERVATION_PAGES;
+    contract->guard_nonpresent = 1;
+    status = gxos_vm_region_register(
+        ledger, contract->guard_base, contract->guard_bytes,
+        contract->reservation_base, 0, GXOS_VM_REGION_STATE_RESERVE, 0,
+        GXOS_VM_REGION_TYPE_PRIVATE, &contract->guard_vm_identity);
+    if (status != GXOS_VM_STATUS_OK) {
+        (void)test_free(reservation, GXOS_SCHEDULER_STACK_RESERVATION_PAGES);
+        return 0;
+    }
+    status = gxos_vm_region_register(
+        ledger, contract->usable_stack_low, contract->usable_stack_bytes,
+        contract->reservation_base, GXOS_VM_REGION_PAGE_READWRITE,
+        GXOS_VM_REGION_STATE_COMMIT, GXOS_VM_REGION_PAGE_READWRITE,
+        GXOS_VM_REGION_TYPE_PRIVATE, &contract->usable_vm_identity);
+    if (status != GXOS_VM_STATUS_OK) {
+        (void)gxos_vm_region_unregister(
+            ledger, contract->guard_base, contract->guard_bytes,
+            contract->guard_vm_identity);
+        (void)test_free(reservation, GXOS_SCHEDULER_STACK_RESERVATION_PAGES);
+        memset(contract, 0, sizeof(*contract));
+        return 0;
+    }
+    return 1;
 }
 
-static int GXOS_SCHEDULER_MS_ABI unregister_stack(
-    void *context, uint64_t base, uint64_t bytes, uint64_t identity)
+static int GXOS_SCHEDULER_MS_ABI free_stack(
+    void *context, const GXOS_SCHEDULER_STACK_CONTRACT *contract)
 {
-    return gxos_vm_region_unregister(
-               (GXOS_VM_REGION_LEDGER *)context, base, bytes, identity) ==
-        GXOS_VM_STATUS_OK;
+    GXOS_VM_REGION_LEDGER *ledger = (GXOS_VM_REGION_LEDGER *)context;
+    if (contract == 0 || contract->backing_memory == 0 ||
+        contract->backing_pages != GXOS_SCHEDULER_STACK_RESERVATION_PAGES ||
+        gxos_vm_region_unregister(ledger, contract->usable_stack_low,
+                                  contract->usable_stack_bytes,
+                                  contract->usable_vm_identity) !=
+            GXOS_VM_STATUS_OK ||
+        gxos_vm_region_unregister(ledger, contract->guard_base,
+                                  contract->guard_bytes,
+                                  contract->guard_vm_identity) !=
+            GXOS_VM_STATUS_OK ||
+        test_free(contract->backing_memory, contract->backing_pages) != 0) {
+        return 0;
+    }
+    return 1;
 }
 
 static uintptr_t GXOS_SCHEDULER_MS_ABI test_entry(void *argument)
@@ -203,7 +251,7 @@ static void test_scheduler_lifecycle(void)
     REQUIRE(gxos_scheduler_initialize(
                 &g_scheduler, test_allocate, test_free, 0, 0, 0));
     REQUIRE(gxos_scheduler_configure_stack_vm(
-                &g_scheduler, register_stack, unregister_stack, &g_regions));
+            &g_scheduler, allocate_stack, free_stack, &g_regions));
     REQUIRE(gxos_scheduler_create_suspended_thread(
                 &g_scheduler, test_entry, (void *)(uintptr_t)1,
                 &first_handle, &first));
@@ -213,14 +261,61 @@ static void test_scheduler_lifecycle(void)
     REQUIRE(first != 0 && second != 0 && first->state ==
             GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED &&
             second->state == GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED);
-    REQUIRE(g_regions.live_count == 2);
-    REQUIRE(first->stack_vm_identity != 0 &&
-            second->stack_vm_identity != first->stack_vm_identity);
+    REQUIRE(g_regions.live_count == 4);
+    REQUIRE(first->stack_contract.usable_vm_identity != 0 &&
+            second->stack_contract.usable_vm_identity !=
+                first->stack_contract.usable_vm_identity);
+    REQUIRE(first->stack_contract.reservation_bytes ==
+                GXOS_SCHEDULER_STACK_RESERVATION_SIZE &&
+            first->stack_contract.guard_bytes ==
+                GXOS_SCHEDULER_STACK_GUARD_SIZE &&
+            first->stack_contract.usable_stack_bytes ==
+                GXOS_SCHEDULER_STACK_USABLE_SIZE);
+    REQUIRE(first->stack_contract.usable_stack_low ==
+                first->stack_contract.guard_base +
+                    GXOS_SCHEDULER_STACK_GUARD_SIZE &&
+            first->stack_contract.usable_stack_high ==
+                first->stack_contract.usable_stack_low +
+                    GXOS_SCHEDULER_STACK_USABLE_SIZE &&
+            first->stack_contract.usable_stack_low !=
+                first->stack_contract.reservation_base);
+    REQUIRE(first->stack_contract.initial_rsp >=
+                first->stack_contract.usable_stack_low &&
+            first->stack_contract.initial_rsp <
+                first->stack_contract.usable_stack_high);
+    REQUIRE(*(const uint64_t *)(uintptr_t)(first->gs_base + 0x08) ==
+                first->stack_contract.usable_stack_high &&
+            *(const uint64_t *)(uintptr_t)(first->gs_base + 0x10) ==
+                first->stack_contract.usable_stack_low &&
+            *(const uint64_t *)(uintptr_t)(first->teb_base + 0x08) ==
+                first->stack_contract.usable_stack_high &&
+            *(const uint64_t *)(uintptr_t)(first->teb_base + 0x10) ==
+                first->stack_contract.usable_stack_low);
+    REQUIRE(gxos_scheduler_validate_thread_context(first));
+    {
+        GXOS_SCHEDULER_REGISTER_SNAPSHOT snapshot;
+        memset(&snapshot, 0, sizeof(snapshot));
+        snapshot.rsp = first->stack_contract.initial_rsp;
+        snapshot.gs_base = first->gs_base;
+        REQUIRE(gxos_scheduler_validate_worker_snapshot(first, &snapshot));
+        REQUIRE(gxos_scheduler_note_worker_snapshot(first, &snapshot));
+        snapshot.gs_base = second->gs_base;
+        REQUIRE(!gxos_scheduler_validate_worker_snapshot(first, &snapshot));
+        snapshot.gs_base = 0;
+        REQUIRE(!gxos_scheduler_validate_worker_snapshot(first, &snapshot));
+        snapshot.gs_base = first->gs_base;
+        snapshot.rsp = first->stack_contract.usable_stack_high - 0x200U;
+        REQUIRE(gxos_scheduler_note_worker_snapshot(first, &snapshot));
+        REQUIRE(first->stack_contract.minimum_rsp == snapshot.rsp &&
+                first->stack_contract.high_water_bytes == 0x200U);
+        snapshot.rsp = first->stack_contract.guard_base;
+        REQUIRE(!gxos_scheduler_note_worker_snapshot(first, &snapshot));
+    }
     REQUIRE(gxos_vm_region_virtual_query(
                 &g_regions, first->stack_base, &information,
                 sizeof(information)) == sizeof(information));
     REQUIRE(information.BaseAddress == first->stack_base &&
-            information.AllocationBase == first->stack_base &&
+            information.AllocationBase == first->stack_contract.reservation_base &&
             information.RegionSize == GXOS_SCHEDULER_STACK_SIZE &&
             information.State == GXOS_VM_REGION_STATE_COMMIT &&
             information.AllocationProtect == GXOS_VM_REGION_PAGE_READWRITE &&
@@ -230,8 +325,13 @@ static void test_scheduler_lifecycle(void)
                 &g_regions, first->stack_limit - 1U, &information,
                 sizeof(information)) == sizeof(information));
     REQUIRE(gxos_vm_region_virtual_query(
-                &g_regions, first->stack_base - 1U, &information,
-                sizeof(information)) == 0);
+                &g_regions, first->stack_contract.guard_base, &information,
+                sizeof(information)) == sizeof(information));
+    REQUIRE(information.BaseAddress == first->stack_contract.guard_base &&
+            information.AllocationBase == first->stack_contract.reservation_base &&
+            information.RegionSize == GXOS_SCHEDULER_STACK_GUARD_SIZE &&
+            information.State == GXOS_VM_REGION_STATE_RESERVE &&
+            information.Protect == 0);
     REQUIRE(gxos_vm_region_virtual_query(
                 &g_regions, first->stack_limit, &information,
                 sizeof(information)) == 0);
@@ -255,7 +355,7 @@ static void test_scheduler_lifecycle(void)
 
     REQUIRE(gxos_scheduler_close_handle(first_handle));
     REQUIRE(gxos_scheduler_discard_created_thread(first));
-    REQUIRE(g_regions.live_count == 1);
+    REQUIRE(g_regions.live_count == 2);
     REQUIRE(gxos_scheduler_close_handle(second_handle));
     REQUIRE(gxos_scheduler_discard_created_thread(second));
     REQUIRE(g_regions.live_count == 0 && gxos_scheduler_runnable_count() == 0);
@@ -266,7 +366,7 @@ static void test_scheduler_lifecycle(void)
         REQUIRE(gxos_scheduler_create_suspended_thread(
                     &g_scheduler, test_entry, (void *)(uintptr_t)cycle,
                     &handle, &thread));
-        REQUIRE(thread != 0 && g_regions.live_count == 1);
+        REQUIRE(thread != 0 && g_regions.live_count == 2);
         REQUIRE(gxos_scheduler_close_handle(handle));
         REQUIRE(gxos_scheduler_discard_created_thread(thread));
         REQUIRE(g_regions.live_count == 0 &&

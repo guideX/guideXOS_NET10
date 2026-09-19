@@ -12,6 +12,7 @@ param(
     [switch]$EnableNativeAotSchedulerCallback,
     [switch]$EnableNativeAotManagedGcProbe,
     [switch]$EnableNativeAotSchedulerThreadLifecycle,
+    [switch]$EnablePhase53VGuardProbe,
     [switch]$EnableManagedKernelPhase27,
     [switch]$EnableManagedKernelPhase28,
     [switch]$EnableManagedKernelPhase28Standalone,
@@ -88,6 +89,9 @@ if ($EnableNativeAotManagedGcProbe -and -not $EnableNativeAotSchedulerCallback) 
 if ($EnableNativeAotSchedulerThreadLifecycle -and
     -not $EnableNativeAotStartup) {
     throw 'NativeAot scheduler thread lifecycle validation requires -EnableNativeAotStartup.'
+}
+if ($EnablePhase53VGuardProbe -and $Scenario -ne 'NativeAotEventWait') {
+    throw 'Phase 53V guard probing requires the NativeAotEventWait scenario.'
 }
 if ($EnableNativeAotSchedulerThreadLifecycle -and
     -not $EnableNativeAotManagedCallback) {
@@ -1236,6 +1240,9 @@ if ($EnableNativeAotSchedulerCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEA
 if ($EnableNativeAotManagedGcProbe) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE' }
 if ($EnableNativeAotSchedulerThreadLifecycle) {
     $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE'
+}
+if ($EnablePhase53VGuardProbe) {
+    $gccArguments += '-DGXOS_ENABLE_PHASE53V_GUARD_PROBE'
 }
 if ($PayloadMode -eq 'ManagedKernel') { $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL' }
 if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase11') {

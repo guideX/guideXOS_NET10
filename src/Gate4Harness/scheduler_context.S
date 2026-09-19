@@ -119,6 +119,10 @@ gxos_scheduler_capture_registers:
     shlq    $32, %rdx
     orq     %rdx, %rax
     movq    %rax, 248(%r11)
+    movq    %r11, %rcx
+    subq    $40, %rsp
+    call    gxos_scheduler_note_captured_registers
+    addq    $40, %rsp
     ret
 
 .p2align 4

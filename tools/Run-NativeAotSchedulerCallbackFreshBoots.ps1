@@ -149,6 +149,10 @@ try {
             'GXOS_NET10:MANAGED_THREAD_RECLAIMED=1',
             'GXOS_NET10:MANAGED_THREAD_SECOND_FRESH=1',
             'GXOS_NET10:MANAGED_THREAD_REUSE_OK=1',
+            'GXOS_NET10:PHASE53V_GUARD_NONPRESENT=1',
+            'GXOS_NET10:PHASE53V_USABLE_STACK_BYTES=0x0000000000010000',
+            'GXOS_NET10:PHASE53V_GUARD_BYTES=0x0000000000001000',
+            'GXOS_NET10:PHASE53V_WORKER_CONTEXT_COHERENT_ID=0x',
             'GXOS_NET10:NATIVEAOT_DURABILITY_PASS=1',
             'GXOS_NET10:MANAGED_CALLBACK_COUNT=0x0000000000000005',
             'GXOS_NET10:MANAGED_CALLBACK_PROCESS_INITIALIZATION_CALLS=0x0000000000000001')) {
@@ -158,6 +162,18 @@ try {
             "run $sequence repeated NativeAOT startup marker"
         Require ((Get-Count $text 'GXOS_NET10:GC_STARTUP_ADVANCED') -eq 1) `
             "run $sequence repeated GC startup marker"
+        Require ((Get-Count $text 'GXOS_NET10:PHASE53V_WORKER_CONTEXT_COHERENT_ID=0x') -ge 2) `
+            "run $sequence did not prove two-worker RSP/GS coherency"
+        Require ((Get-Count $text 'GXOS_NET10:PHASE53V_GUARD_NONPRESENT=1') -ge 2) `
+            "run $sequence did not record a non-present guard for each worker"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE53V_WORKER_GS_LOWER=') -eq
+                 (Get-Hex $text 'GXOS_NET10:PHASE53V_WORKER_USABLE_LOW=') -and
+                 (Get-Hex $text 'GXOS_NET10:PHASE53V_WORKER_TEB_LOWER=') -eq
+                 (Get-Hex $text 'GXOS_NET10:PHASE53V_WORKER_USABLE_LOW=')) `
+            "run $sequence GS/TEB lower-bound aliasing failed"
+        Require ((Get-Hex $text 'STACK_HIGH_WATER_SAMPLES=') -gt 0 -and
+                 (Get-Hex $text 'STACK_HIGH_WATER_BYTES=') -le 0x10000) `
+            "run $sequence bounded high-water evidence is missing"
         Require ((Get-Count $text 'GXOS_NET10:MANAGED_ENTRY_COMPLETE') -eq 1) `
             "run $sequence repeated managed-entry completion marker"
         Require ($text.IndexOf('GXOS_NET10:MANAGED_ENTRY_COMPLETE') -lt
