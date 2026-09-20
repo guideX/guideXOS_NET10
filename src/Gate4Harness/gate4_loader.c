@@ -19915,7 +19915,9 @@ static void nativeaot_scheduler_callback_probe(void)
                                      thread->tls_block_base == 0 &&
                                      gxos_scheduler_thread_from_handle(handle) == 0 &&
                                      vm_regions_after_gc != 0 &&
-                                     g_memory_vm_regions.live_count + 1U ==
+                                     /* The worker stack contract has separate
+                                        guard and usable VM ledger records. */
+                                     g_memory_vm_regions.live_count + 2U ==
                                          vm_regions_after_gc,
                                      "nativeaot-scheduler-callback-thread-reclaim");
     }

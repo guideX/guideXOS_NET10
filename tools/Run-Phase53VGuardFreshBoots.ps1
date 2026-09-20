@@ -31,11 +31,12 @@ function Read-Serial([string]$path) {
     } catch { return '' }
 }
 
-function Get-Hex([string]$text, [string]$prefix) {
+function Get-Hex([string]$text, [string]$prefix, [switch]$Last) {
     $key = $prefix.TrimEnd('=')
-    $match = [regex]::Match($text,
+    $matches = [regex]::Matches($text,
         [regex]::Escape($key) + '=(?<value>0x[0-9A-Fa-f]+|[0-9]+)')
-    if (!$match.Success) { throw "Missing field: $key" }
+    if ($matches.Count -eq 0) { throw "Missing field: $key" }
+    $match = if ($Last) { $matches[$matches.Count - 1] } else { $matches[0] }
     $value = $match.Groups['value'].Value
     if ($value.StartsWith('0x')) { return [Convert]::ToUInt64($value.Substring(2), 16) }
     return [Convert]::ToUInt64($value, 10)
@@ -111,7 +112,7 @@ try {
             Require ($text.Contains($marker)) "run $sequence missing marker: $marker"
         }
         $cr2 = Get-Hex $text 'GXOS_NET10:PHASE53V_GUARD_FAULT_CR2='
-        $guard = Get-Hex $text 'GXOS_NET10:PHASE53V_GUARD_BASE='
+        $guard = Get-Hex $text 'GXOS_NET10:PHASE53V_GUARD_BASE=' -Last
         Require ($cr2 -ge $guard -and $cr2 -lt ($guard + 0x1000)) "run $sequence CR2 was not inside the dedicated guard page"
         Write-Output ("PHASE53V_GUARD_RUN_{0}=PASS serial={1}" -f $sequence, $serial)
     }
