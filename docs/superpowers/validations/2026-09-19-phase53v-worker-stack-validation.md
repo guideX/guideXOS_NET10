@@ -1,6 +1,16 @@
 # Phase 53V worker-stack validation — 2026-09-19
 
-## Outcome
+## Current outcome — Outcome A
+
+Phase 53V is closed. Boot 3 completed as a new isolated QEMU boot using the
+committed Phase 53V artifacts and reproduced the repaired worker-stack
+contract. The final result is 3/3 fresh isolated boots, with no production
+source changes required.
+
+The previous Outcome B attempt remains below as historical record; its blocked
+attempts and earlier evidence have not been rewritten or removed.
+
+## Historical Outcome B — prior validation pass
 
 Outcome B — the committed Phase 53V repair remains valid, but the required
 third isolated fresh QEMU boot was blocked by another task's QEMU process.
@@ -54,7 +64,7 @@ report has no debug directory. The QEMU firmware hashes were
 `edk2-x86_64-code.fd = 33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`
 and `edk2-i386-vars.fd = 5D2AC383371B408398ACCEE7EC27C8C09EA5B74A0DE0CEEA6513388B15BE5D1E`.
 
-## Fresh isolated boots
+## Fresh isolated boots — prior validation pass
 
 Two fresh boots completed and persisted serial evidence under
 `evidence\phase53v-guard-fresh-boot-20260919-final-attempt\run-1` and
@@ -135,7 +145,7 @@ The original defect class did not recur: no RSP entered the active GS page,
 the dedicated guard stopped exhaustion, and `GS+0x10` was nonzero and equal to
 the usable low bound on both completed boots.
 
-## Downstream classification and disposition
+## Historical downstream classification and disposition
 
 The known `nativeaot_gc_readable_range` failure in Normal/SyntheticScheduler
 builds remains separate downstream work. It was not investigated or changed
@@ -149,3 +159,78 @@ host QEMU ownership. No completion commit was created under Outcome B.
 Exact Phase 53W target: investigate and repair `nativeaot_gc_readable_range`
 in the Normal/SyntheticScheduler NativeAOT paths, without changing the Phase
 53V worker-stack contract.
+
+## Final closure pass — Boot 3
+
+The final closure pass began from repository
+`D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration`, branch
+`nativeaot-managed-kernel-integration`, at HEAD
+`6618afbddacacca678c2ad326f6d2cbbe1c35e66` (`...`). The configured upstream
+was `origin/nativeaot-managed-kernel-integration`, with starting ahead/behind
+`0/0`, and the starting worktree was clean. The preflight found no active
+QEMU, GDB, or LLDB processes, so no unrelated process was active or modified.
+The previously present empty `run-3` directory was left untouched; Boot 3
+used the distinct fresh evidence directory
+`evidence\phase53v-guard-fresh-boot-20260919-final-attempt\run-3-fresh`.
+
+The authoritative committed gate remained
+`artifacts\phase53v-guard-build-final6` with the following current hashes:
+
+| Artifact | Size | SHA-256 |
+| --- | ---: | --- |
+| `ESP\GXOS\gxos-managed-entry-probe.dll` | 730112 | `AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012` |
+| `ESP\EFI\BOOT\BOOTX64.EFI` | 554272 | `2F17CE1CFB0195D6C534AE7B561E0CF5326F618AFB01E2E2A2B3808918EACA3C` |
+
+QEMU `11.0.0` launched exactly one new isolated instance, PID `20796`, with a
+new copied OVMF variable store. The process was owned by this validation,
+stopped after the deterministic guard-fault marker, and confirmed gone. No
+failure marker or CPU-exception marker was emitted.
+
+Boot 3 serial evidence records:
+
+| Field | Boot 3 value |
+| --- | --- |
+| Worker identity | `0x3` |
+| Reservation base | `0x40000FEC0000` |
+| Guard range | `0x40000FEC0000..0x40000FEC0FFF` |
+| Guard size | `0x1000` / 4 KiB |
+| Usable stack | `0x40000FEC1000..0x40000FED1000` |
+| Usable stack size | `0x10000` / 64 KiB |
+| Initial RSP | Not emitted for the deliberate probe worker; derived contract value `usableStackHigh - 8 = 0x40000FED0FF8`. The independent creation record for worker `0x2` reports `0x400000010FF8`. |
+| GS base | `0x5321000` |
+| GS+0x10 | `0x40000FEC1000` |
+| TEB+0x10 | `0x40000FEC1000` |
+| Fault CR2 | `0x40000FEC0000` |
+| Fault RSP | `0x40000FED0E78` |
+
+The required arithmetic and identity invariants pass:
+
+* `usableStackHigh - usableStackLow == 0x10000`.
+* The guard is exactly `0x1000` bytes immediately below the usable stack.
+* `GS+0x10 == TEB+0x10 == usableStackLow`.
+* `GS+0x10` is nonzero and belongs to the active worker; no mixed-worker
+  stack/GS metadata was observed.
+* CR2 is inside the dedicated guard page, and fault RSP is inside the
+  committed usable stack interval.
+* `PHASE53V_GUARD_NONPRESENT=1`,
+  `PHASE53V_GUARD_GS_TEB_INTACT=1`, and
+  `PHASE53V_GUARD_UNRELATED_STATE_INTACT=1`.
+
+The historical regression remains absent. Boot 3 reports
+`CREATETHREAD_STACK_SIZE=0x10000`; no old `0x4000` scheduler-worker geometry,
+zero GS stack limit, worker-stack-to-GS collision, or GS/TEB corruption was
+observed. The deliberate exhaustion probe faulted at the non-present guard
+before unrelated memory corruption. Together with the prior Phase 53T
+`0x41B0` frame evidence and the two completed Phase 53V boots, this closes the
+original failure class.
+
+The known `nativeaot_gc_readable_range` failure in Normal/SyntheticScheduler
+builds remains an independent downstream failure retained for Phase 53W. It
+was not investigated or modified in this pass.
+
+Therefore, **Phase 53V — sparse managed worker stacks — is formally complete
+at 3/3 fresh isolated QEMU boots.**
+
+Next phase: **Phase 53W — investigate and repair
+`nativeaot_gc_readable_range` in the Normal/SyntheticScheduler NativeAOT paths,
+without changing the Phase 53V worker-stack contract.**
