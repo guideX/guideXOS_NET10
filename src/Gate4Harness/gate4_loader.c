@@ -6503,6 +6503,85 @@ static uint32_t EFIAPI platform_get_current_process_id(void)
     return 1;
 }
 
+#if !defined(GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE) && \
+    !defined(GXOS_ENABLE_MANAGED_KERNEL)
+static int nativeaot_gc_canonical_address(uint64_t address)
+{
+    uint64_t upper = address >> 48;
+    uint64_t sign = (address >> 47) & 1U;
+    return (sign == 0 && upper == 0) ||
+        (sign != 0 && upper == 0xFFFFU);
+}
+
+static int nativeaot_gc_range_within(uint64_t address, uint64_t bytes,
+                                     uint64_t lower, uint64_t upper)
+{
+    uint64_t end;
+    if (bytes == 0 || lower >= upper || address < lower || address > upper ||
+        address > UINT64_MAX - bytes) return 0;
+    end = address + bytes;
+    return end > address && end <= upper &&
+        nativeaot_gc_canonical_address(address) &&
+        nativeaot_gc_canonical_address(end - 1U);
+}
+
+static int nativeaot_gc_committed_arena_range(uint64_t address,
+                                              uint64_t bytes)
+{
+    uint64_t end;
+    uint64_t page;
+    uint64_t last_page;
+    uint32_t commitment_slot;
+    if (!g_memory_virtual_arena.valid || bytes == 0 ||
+        address > UINT64_MAX - bytes ||
+        !gxos_vm_arena_contains(&g_memory_virtual_arena, address, bytes)) {
+        return 0;
+    }
+    end = address + bytes;
+    page = address & ~((uint64_t)GXOS_VM_PAGE_SIZE - 1U);
+    last_page = (end - 1U) & ~((uint64_t)GXOS_VM_PAGE_SIZE - 1U);
+    for (;;) {
+        if (gxos_vm_arena_find_commitment(
+                &g_memory_virtual_arena, page, &commitment_slot) !=
+            GXOS_VM_STATUS_OK) return 0;
+        if (page == last_page) return 1;
+        if (page > UINT64_MAX - GXOS_VM_PAGE_SIZE) return 0;
+        page += GXOS_VM_PAGE_SIZE;
+    }
+}
+
+/* The fault-provenance path is compiled for every harness mode.  Keep the
+   range predicate available there even when the NativeAOT GC/unwind imports
+   themselves are not enabled. */
+static int nativeaot_gc_readable_range(uint64_t address, uint64_t bytes)
+{
+    uint64_t image_end;
+    uint32_t index;
+    if (g_managed_image_base == 0 || g_managed_image_size == 0 ||
+        g_managed_image_base > UINT64_MAX - g_managed_image_size) return 0;
+    image_end = g_managed_image_base + g_managed_image_size;
+    if (nativeaot_gc_range_within(address, bytes, g_managed_image_base,
+                                  image_end) ||
+        nativeaot_gc_range_within(address, bytes, g_stack_lower,
+                                  g_stack_upper) ||
+        (g_stack_lower >= EFI_PAGE_SIZE && nativeaot_gc_range_within(
+            address, bytes, g_stack_lower - EFI_PAGE_SIZE, g_stack_upper)) ||
+        nativeaot_gc_committed_arena_range(address, bytes)) return 1;
+#ifdef GXOS_ENABLE_NATIVEAOT_EVENT_WAIT
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        const GXOS_SCHEDULER_TCB *thread = &g_create_event_scheduler.threads[index];
+        if (thread->live && nativeaot_gc_range_within(
+                address, bytes, thread->stack_base, thread->stack_limit)) {
+            return 1;
+        }
+    }
+#else
+    (void)index;
+#endif
+    return 0;
+}
+#endif
+
 #if defined(GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL)
 static uint64_t EFIAPI platform_get_tick_count64(void)
