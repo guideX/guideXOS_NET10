@@ -204,10 +204,14 @@ try {
                  (Get-Hex $text 'GXOS_NET10:MANAGED_THREAD_SECOND_IDENTITY=')) `
             "run $sequence scheduler thread identities were reused unsafely"
         Require ((Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_FINALIZER_WAIT_RECORD=') -ne 0 -and
-                 (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_ACTIVE_WAITS=') -eq 1 -and
-                 (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_VALID_WAIT_RECORDS=') -eq 1 -and
-                 (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_STACK_VM_REGIONS=') -eq 2) `
-            "run $sequence finalizer wait or stack VM state changed"
+                  (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_ACTIVE_WAITS=') -eq 1 -and
+                  (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_VALID_WAIT_RECORDS=') -eq 1) `
+             "run $sequence finalizer wait or stack VM state changed"
+        Require ($text.Contains('GXOS_NET10:MANAGED_CALLBACK_POST_STATE_OK=1')) `
+            "run $sequence managed callback post-state assertion failed"
+        Require ((Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_VM_BASELINE=') -eq
+                 (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_STACK_VM_REGIONS=')) `
+            "run $sequence callback VM count did not return to its baseline"
         Write-Output ("NATIVEAOT_SCHEDULER_CALLBACK_RUN_{0}=PASS bytes={1} sha256={2} serial={3}" -f `
             $sequence, ([Text.Encoding]::UTF8.GetByteCount($text)),
             (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant(), $serial)

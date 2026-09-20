@@ -211,19 +211,25 @@ try {
                  (Get-Hex $text 'GXOS_NET10:MANAGED_THREAD_FLS_AFTER=') -ne
                  (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_MAIN_FLS_AFTER=')) `
             "run $sequence scheduler FLS isolation or switch preservation failed"
+        $beforeVmRegions = Get-Hex $text 'GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_BEFORE_VM_REGIONS='
+        $afterCloseVmRegions = Get-Hex $text 'GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_VM_REGIONS='
         Require ((Get-Hex $text 'GXOS_NET10:MANAGED_GC_WORKER_AFTER_UNWIND_FAILURES=') -eq 0 -and
-                 (Get-Hex $text 'GXOS_NET10:MANAGED_GC_WORKER_REPEAT_AFTER_UNWIND_FAILURES=') -eq 0 -and
-                 (Get-Hex $text 'GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_VM_REGIONS=') -eq 2 -and
-                 (Get-Hex $text 'GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_THREAD_LIVE=') -eq 0 -and
+                  (Get-Hex $text 'GXOS_NET10:MANAGED_GC_WORKER_REPEAT_AFTER_UNWIND_FAILURES=') -eq 0 -and
+                  $afterCloseVmRegions -eq $beforeVmRegions -and
+                  (Get-Hex $text 'GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_THREAD_LIVE=') -eq 0 -and
                  (Get-Hex $text 'GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_THREAD_FLS=') -eq 0 -and
                  (Get-Hex $text 'GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_THREAD_TLS=') -eq 0 -and
                  (Get-Hex $text 'GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_HANDLE_LOOKUP=') -eq 0) `
             "run $sequence GC unwind, VM, FLS/TLS, or handle reclamation evidence is incorrect"
         Require ((Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_FINALIZER_WAIT_RECORD=') -ne 0 -and
-                 (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_ACTIVE_WAITS=') -eq 1 -and
-                 (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_VALID_WAIT_RECORDS=') -eq 1 -and
-                 (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_STACK_VM_REGIONS=') -eq 2) `
-            "run $sequence finalizer wait or stack VM state changed"
+                  (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_ACTIVE_WAITS=') -eq 1 -and
+                  (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_VALID_WAIT_RECORDS=') -eq 1) `
+             "run $sequence finalizer wait or stack VM state changed"
+        Require ($text.Contains('GXOS_NET10:MANAGED_CALLBACK_POST_STATE_OK=1')) `
+            "run $sequence managed callback post-state assertion failed"
+        Require ((Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_VM_BASELINE=') -eq
+                 (Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_STACK_VM_REGIONS=')) `
+            "run $sequence callback VM count did not return to its baseline"
         Write-Output ("NATIVEAOT_SCHEDULER_GC_RUN_{0}=PASS bytes={1} sha256={2} serial={3}" -f `
             $sequence, ([Text.Encoding]::UTF8.GetByteCount($text)),
             (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant(), $serial)

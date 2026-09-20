@@ -1386,6 +1386,12 @@ extern const uint8_t gxos_exception_probe_int3[];
 extern void gxos_exception_probe_landing(void);
 static void serial_text(const char *text);
 static void serial_field_hex(const char *name, uint64_t value);
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+static void nativeaot_phase53y_emit_vm_checkpoint(
+    const char *checkpoint,
+    const GXOS_SCHEDULER_TCB *persistent_worker,
+    const GXOS_SCHEDULER_TCB *ephemeral_worker);
+#endif
 extern void gxos_platform_virtual_query_capture(void);
 uint64_t gxos_virtual_query_entry_rcx;
 uint64_t gxos_virtual_query_entry_rdx;
@@ -12078,6 +12084,9 @@ static void initialize_memory_accounting(const PE_IMAGE *image,
         !gxos_vm_region_ledger_validate(&g_memory_vm_regions)) {
         fail("memory-main-stack-region");
     }
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    nativeaot_phase53y_emit_vm_checkpoint("B0", 0, 0);
+#endif
     if (image->memory_region_count == 0 ||
         image->memory_region_count + 1U >
             GXOS_MEMORY_STATUS_EX_MAX_MEMORY_REGIONS) {
@@ -19348,6 +19357,149 @@ static GXOS_SCHEDULER_TCB *nativeaot_durability_blocked_worker(void)
     return 0;
 }
 
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+static void nativeaot_phase53y_emit_vm_checkpoint(
+    const char *checkpoint,
+    const GXOS_SCHEDULER_TCB *persistent_worker,
+    const GXOS_SCHEDULER_TCB *ephemeral_worker)
+{
+    uint32_t index;
+
+    if (checkpoint == 0) return;
+    serial_text("GXOS_NET10:PHASE53Y_");
+    serial_text(checkpoint);
+    serial_text("_VM_COUNT=0x");
+    serial_hex64(g_memory_vm_regions.live_count);
+    serial_text("\r\n");
+    for (index = 0; index != GXOS_VM_REGION_LEDGER_CAPACITY; ++index) {
+        const GXOS_VM_REGION *region = &g_memory_vm_regions.entries[index];
+        const char *owner = "UNKNOWN";
+        const char *source = "UNKNOWN";
+        const char *lifetime = "UNKNOWN";
+        const char *persistence = "UNCLASSIFIED";
+        const char *mapping = "UNKNOWN";
+        uint64_t end;
+
+        if (!region->live) continue;
+        end = region->base + region->bytes;
+        if (region->base == g_stack_lower &&
+            region->bytes == g_stack_upper - g_stack_lower &&
+            region->allocation_identity == g_loader_stack_vm_identity) {
+            owner = "BOOT_STACK";
+            source = "LOADER_MEMORY_INIT";
+            lifetime = "HARNESS_KERNEL";
+            persistence = "PERSISTENT_BASELINE";
+        } else if (persistent_worker != 0 &&
+                   region->base == persistent_worker->stack_contract.guard_base &&
+                   region->bytes == persistent_worker->stack_contract.guard_bytes &&
+                   region->allocation_identity ==
+                       persistent_worker->stack_contract.guard_vm_identity) {
+            owner = "FINALIZER_WORKER_GUARD";
+            source = "MEMORY_ALLOCATE_SCHEDULER_STACK";
+            lifetime = "DURABLE_FINALIZER_WORKER";
+            persistence = "PERSISTENT_BASELINE";
+        } else if (persistent_worker != 0 &&
+                   region->base == persistent_worker->stack_contract.usable_stack_low &&
+                   region->bytes == persistent_worker->stack_contract.usable_stack_bytes &&
+                   region->allocation_identity ==
+                       persistent_worker->stack_contract.usable_vm_identity) {
+            owner = "FINALIZER_WORKER_USABLE_STACK";
+            source = "MEMORY_ALLOCATE_SCHEDULER_STACK";
+            lifetime = "DURABLE_FINALIZER_WORKER";
+            persistence = "PERSISTENT_BASELINE";
+        } else if (ephemeral_worker != 0 &&
+                   region->base == ephemeral_worker->stack_contract.guard_base &&
+                   region->bytes == ephemeral_worker->stack_contract.guard_bytes &&
+                   region->allocation_identity ==
+                       ephemeral_worker->stack_contract.guard_vm_identity) {
+            owner = "CALLBACK_WORKER_GUARD";
+            source = "MEMORY_ALLOCATE_SCHEDULER_STACK";
+            lifetime = "CALLBACK_WORKER_UNTIL_COLLECT";
+            persistence = "EPHEMERAL";
+        } else if (ephemeral_worker != 0 &&
+                   region->base == ephemeral_worker->stack_contract.usable_stack_low &&
+                   region->bytes == ephemeral_worker->stack_contract.usable_stack_bytes &&
+                   region->allocation_identity ==
+                       ephemeral_worker->stack_contract.usable_vm_identity) {
+            owner = "CALLBACK_WORKER_USABLE_STACK";
+            source = "MEMORY_ALLOCATE_SCHEDULER_STACK";
+            lifetime = "CALLBACK_WORKER_UNTIL_COLLECT";
+            persistence = "EPHEMERAL";
+        }
+        if (region->state == GXOS_VM_REGION_STATE_COMMIT) {
+            mapping = "COMMITTED_PRESENT";
+        } else if (region->state == GXOS_VM_REGION_STATE_RESERVE) {
+            mapping = "RESERVED_NONPRESENT";
+        }
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_field_hex("INDEX=0x", index);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_field_hex("BASE=0x", region->base);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_field_hex("END=0x", end);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_field_hex("SIZE=0x", region->bytes);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_field_hex("ALLOCATION_BASE=0x", region->allocation_base);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_field_hex("IDENTITY=0x", region->allocation_identity);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_field_hex("STATE=0x", region->state);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_text("MAPPING=");
+        serial_text(mapping);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_text("OWNER=");
+        serial_text(owner);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_text("SOURCE=");
+        serial_text(source);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_text("LIFETIME=");
+        serial_text(lifetime);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PHASE53Y_");
+        serial_text(checkpoint);
+        serial_text("_VM_RECORD_");
+        serial_text("PERSISTENCE=");
+        serial_text(persistence);
+        serial_text("\r\n");
+    }
+}
+#endif
+
 static uint32_t nativeaot_durability_find_runtime_fls_slot(
     GXOS_SCHEDULER_TCB *main_thread, GXOS_SCHEDULER_TCB *blocked_worker)
 {
@@ -19447,6 +19599,10 @@ static uintptr_t EFIAPI nativeaot_scheduler_callback_thread_entry(void *argument
         gxos_scheduler_validate_worker_snapshot(thread,
                                                 &context->before_callback),
         "phase53v-worker-rsp-gs-coherency-callback");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    nativeaot_phase53y_emit_vm_checkpoint(
+        "B4", nativeaot_durability_blocked_worker(), thread);
+#endif
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:PHASE53V_WORKER_CONTEXT_COHERENT_ID=0x",
                      thread->identity);
@@ -19729,6 +19885,10 @@ static void nativeaot_scheduler_callback_probe(void)
 
     zero_bytes((uint8_t *)context, sizeof(*context));
     before = nativeaot_durability_counts();
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    nativeaot_phase53y_emit_vm_checkpoint(
+        "B2", nativeaot_durability_blocked_worker(), 0);
+#endif
     nativeaot_durability_require(main_thread != 0 &&
                                  g_create_event_scheduler.current == main_thread,
                                  "nativeaot-scheduler-callback-main-state");
@@ -19756,6 +19916,10 @@ static void nativeaot_scheduler_callback_probe(void)
                                  thread->tls_block_base != g_tls_block &&
                                  nativeaot_durability_stack_query(thread),
                                  "nativeaot-scheduler-callback-thread-fresh");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    nativeaot_phase53y_emit_vm_checkpoint(
+        "B3", nativeaot_durability_blocked_worker(), thread);
+#endif
     serial_text("GXOS_NET10:MANAGED_THREAD_CREATED=1\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_THREAD_CREATED_IDENTITY=0x",
                      thread->identity);
@@ -19791,6 +19955,10 @@ static void nativeaot_scheduler_callback_probe(void)
                                  thread->return_value ==
                                      (uintptr_t)context->second_callback_result,
                                  "nativeaot-scheduler-callback-thread-return");
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    nativeaot_phase53y_emit_vm_checkpoint(
+        "B5", nativeaot_durability_blocked_worker(), thread);
+#endif
     serial_field_hex("GXOS_NET10:MANAGED_THREAD_RETURN_VALUE=0x",
                      thread->return_value);
     serial_text("\r\n");
@@ -19856,8 +20024,18 @@ static void nativeaot_scheduler_callback_probe(void)
             canaries_before_close != 0,
             "nativeaot-scheduler-callback-thread-reclaim-sentinel");
         uint32_t close_result = gxos_scheduler_close_handle(handle);
-        uint32_t collect_result = close_result != 0 &&
+        uint32_t vm_regions_after_close = g_memory_vm_regions.live_count;
+        uint32_t collect_result;
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+        nativeaot_phase53y_emit_vm_checkpoint(
+            "B6", nativeaot_durability_blocked_worker(), thread);
+#endif
+        collect_result = close_result != 0 &&
             gxos_scheduler_collect(&g_create_event_scheduler);
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+        nativeaot_phase53y_emit_vm_checkpoint(
+            "B7", nativeaot_durability_blocked_worker(), 0);
+#endif
         serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_CLOSE_RESULT=0x",
                          close_result);
         serial_text("\r\n");
@@ -19865,7 +20043,7 @@ static void nativeaot_scheduler_callback_probe(void)
                          collect_result);
         serial_text("\r\n");
         serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_VM_REGIONS=0x",
-                         g_memory_vm_regions.live_count);
+                         vm_regions_after_close);
         serial_text("\r\n");
         serial_field_hex("GXOS_NET10:MANAGED_GC_THREAD_RECLAIM_AFTER_CLOSE_THREAD_LIVE=0x",
                          thread->live);
@@ -20151,6 +20329,9 @@ static void nativeaot_durability_probe(void)
     g_nativeaot_runtime_fls_slot = fls_slot;
 #endif
     baseline = nativeaot_durability_counts();
+#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_CALLBACK
+    nativeaot_phase53y_emit_vm_checkpoint("B1", blocked_worker, 0);
+#endif
     baseline_blocked = baseline.blocked_count;
     baseline_active_waits = baseline.active_wait_count;
     baseline_valid_wait_records = baseline.valid_wait_records;
@@ -20641,6 +20822,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     uintptr_t callback_fls_before;
     uintptr_t callback_fls_after;
     uintptr_t callback_finalizer_fls_before;
+    GXOS_NATIVEAOT_DURABILITY_COUNTS callback_baseline;
     GXOS_NATIVEAOT_DURABILITY_COUNTS callback_counts;
 #endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
@@ -22359,6 +22541,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("nativeaot-managed-callback-thread-affinity");
     }
     callback_counts = nativeaot_durability_counts();
+    callback_baseline = callback_counts;
+    serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_VM_BASELINE=0x",
+                     callback_baseline.vm_region_count);
+    serial_text("\r\n");
     serial_text("GXOS_NET10:MANAGED_CALLBACK_READY=1\r\n");
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     serial_text("GXOS_NET10:MANAGED_GC_PROBE_READY=1\r\n");
@@ -22573,6 +22759,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     restore_fault_handlers();
     callback_finalizer = nativeaot_durability_blocked_worker();
     callback_counts = nativeaot_durability_counts();
+    nativeaot_phase53y_emit_vm_checkpoint(
+        "B8", callback_finalizer, 0);
     if (callback_thread != gxos_scheduler_current_thread() ||
         callback_thread->state != GXOS_SCHEDULER_THREAD_RUNNING ||
         callback_finalizer == 0 ||
@@ -22585,9 +22773,10 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         gxos_com_model(callback_finalizer) != GXOS_COM_MODEL_MTA ||
         callback_counts.active_wait_count != 1U ||
         callback_counts.valid_wait_records != 1U ||
-        callback_counts.vm_region_count != 2U) {
+        callback_counts.vm_region_count != callback_baseline.vm_region_count) {
         fail("nativeaot-managed-callback-post-state");
     }
+    serial_text("GXOS_NET10:MANAGED_CALLBACK_POST_STATE_OK=1\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_MAIN_FLS_AFTER=0x",
                      callback_thread->fls_values[g_nativeaot_runtime_fls_slot]);
     serial_text("\r\n");
