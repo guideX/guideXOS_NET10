@@ -145,7 +145,11 @@ static int lifecycle_capture_attached(
            lifecycle->runtime_state_before ==
                GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED &&
            lifecycle->runtime_transition_frame == UINT64_MAX &&
-           lifecycle->runtime_stack_low == thread->stack_base &&
+           /* NativeAOT reports the complete reserved stack interval.  The
+              scheduler's compatibility stack_base is the usable interval
+              low, one guard page above the reservation base. */
+           lifecycle->runtime_stack_low ==
+               thread->stack_contract.reservation_base &&
            lifecycle->runtime_stack_high == thread->stack_limit &&
            thread->context.rsp >= lifecycle->runtime_stack_low &&
            thread->context.rsp <= lifecycle->runtime_stack_high &&
@@ -593,7 +597,8 @@ phase53o_worker(void *argument)
         cycle->runtime_thread != thread->tls_block_base + 0x30U ||
         cycle->runtime_state_before != GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED ||
         cycle->runtime_transition_frame != UINT64_MAX ||
-        cycle->runtime_stack_low != thread->stack_base ||
+        cycle->runtime_stack_low !=
+            thread->stack_contract.reservation_base ||
         cycle->runtime_stack_high != thread->stack_limit ||
         cycle->worker_rsp < cycle->runtime_stack_low ||
         cycle->worker_rsp > cycle->runtime_stack_high ||

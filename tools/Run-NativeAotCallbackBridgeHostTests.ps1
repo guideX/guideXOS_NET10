@@ -30,8 +30,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 $object = Join-Path $output 'nativeaot_callback_bridge.o'
 $undefined = Join-Path $output 'nativeaot_callback_bridge.undefined.txt'
-& $gcc.Source '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fno-builtin',
-    '-ffreestanding', '-c', '-I', $include, $source, '-o', $object
+$freestandingArguments = @(
+    '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fno-builtin',
+    '-ffreestanding', '-c', '-I', $include, $source, '-o', $object)
+& $gcc.Source @freestandingArguments
 if ($LASTEXITCODE -ne 0) {
     throw "NativeAOT callback bridge freestanding compile failed: $LASTEXITCODE"
 }

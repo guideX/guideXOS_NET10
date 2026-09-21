@@ -21,7 +21,7 @@ $payloadPath = [IO.Path]::GetFullPath($PayloadPath)
 $esp = Join-Path $buildDirectory 'ESP'
 $efi = Join-Path $esp 'EFI\BOOT\BOOTX64.EFI'
 $builtPayload = Join-Path $esp 'GXOS\gxos-managed-entry-probe.dll'
-$expectedHash = '2F66A6E85B61C48E87238EC972C9681B15084340C6F3C86F2FCA5EDC7FC3F837'
+$expectedHash = 'AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012'
 
 if (-not (Test-Path -LiteralPath $efi)) { throw "Synthetic harness not found: $efi" }
 if (-not (Test-Path -LiteralPath $payloadPath)) { throw "Payload not found: $payloadPath" }
