@@ -2,7 +2,11 @@
 
 Date: 2026-09-20
 
-Outcome: **Outcome B — Phase 53 regression found and repaired; Phase 53 accepted and closed**
+Outcome: **Outcome A — current final source revalidated; Phase 53 accepted and closed**
+
+The preceding narrow Outcome B repairs are already present in the starting
+`d844cf72` closure commit. This audit made no new production repair; it
+revalidated that final source and preserved those repairs.
 
 ## Scope and original problem
 
@@ -23,14 +27,87 @@ It does not start Phase 54.
 | --- | --- |
 | Repository | `D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration` |
 | Branch | `nativeaot-managed-kernel-integration` |
-| Starting HEAD | `2f711cc18316e09d7093629904a4e542db0802da` — `Complete Phase 53Y managed callback VM baseline validation` |
+| Starting HEAD | `d844cf72f8091586d732243867cb2301058c0ec8` — `Close NativeAOT managed-kernel Phase 53` |
 | Upstream | `origin/nativeaot-managed-kernel-integration` |
 | Live starting ahead/behind | `0 / 0` |
 | Starting worktree | Clean |
-| Expected-state comparison | HEAD and source frontier matched the supplied baseline. The supplied `2 ahead / 0 behind` count did not match live Git state; the configured upstream already pointed at the supplied HEAD. |
+| Expected-state comparison | The supplied `2f711cc` / `2 ahead` state was stale. The live branch already contained the coherent closure commit at `d844cf72`, and its configured upstream pointed at that same commit. |
 
-No unexpected source change was present before this closure work. Existing
-53V–53Y evidence and artifacts were retained and reused.
+No source change appeared after the live starting HEAD. Relative to the
+supplied `2f711cc` parent, only the known closure document, stack-bound
+diagnostic repair, and two bounded acceptance-runner repairs were present.
+Existing 53V–53Y evidence and artifacts were retained and reused.
+
+## Current final-source revalidation
+
+The following fresh matrix was run from the live starting HEAD above. The
+Phase 53 source contract was taken from `MANAGED_KERNEL_PHASE53_CSS_IMAGE_RESOURCES.md`,
+`NATIVEAOT_DURABILITY.md`, `NATIVEAOT_MANAGED_CALLBACK.md`,
+`NATIVEAOT_SCHEDULER_THREAD_ATTACH.md`, `NATIVEAOT_GC_SCHEDULER_THREAD.md`,
+and the 53V–53Y validation records.
+
+### Fresh host and build evidence
+
+- `Run-SchedulerModelTests.ps1`: `SCHEDULER_MODEL_TESTS=PASSED checks=256`.
+- `Run-SchedulerDurabilityHostTests.ps1`: `SCHEDULER_DURABILITY_HOST_TEST=PASS`.
+- `Run-SchedulerStackVmHostTests.ps1`: `SCHEDULER_STACK_VM_HOST_TEST=PASS`.
+- `Run-NativeAotGcProbeContractTests.ps1`: `PASSED checks=8`.
+- `Run-NativeAotCallbackBridgeHostTests.ps1`: host pass and zero external
+  references.
+- `Run-Phase53WReadableRangeBuildTests.ps1`: Normal EFI
+  `04F208423AA27BC47AE15E484FA9E91BA566496558FC58A0A28A357C0556F964` and
+  SyntheticScheduler EFI
+  `4681AC05E641A1305817730ED712BB487C6BBAD943D11C2DE13B332AA7AC7D9A`;
+  both staged payloads were 730112 bytes with SHA-256
+  `AE19A4C414A7F642B89B637D131A86E206300323914858E882E1293636A5C012`.
+- Dedicated guard Gate 4 EFI:
+  `BF234DCF8F903D3900A64F0BE1B151A1C24A3CAA7AF9D104CB3CD38507F96B09`.
+- Dedicated lifecycle Gate 4 EFI:
+  `B3D192AC3D4B261BCB9C283F1D97914A286C74E826646DDA0421A87AB1699D4F`.
+- Dedicated callback/GC/reclaim Gate 4 EFI:
+  `71C0F5D95649CAC4156B8E332FC2B45D33CA04649D37CCEB2E652E5E42ACD054`.
+
+The repository pins SDK `10.0.302` with roll-forward disabled, while this
+host has only SDK `10.0.401`. The normal `Build-Gate1.ps1` entry point
+therefore stopped before compilation with the exact SDK-resolution error. An
+explicit out-of-repository SDK 10.0.401 publish proved the toolchain can
+publish all exe/shared/static forms, but produced a different 730624-byte
+payload (`2969D31849641F38F7EE61453B5E0F808A0B67889B328FF22EC4EEC71B2C2049`),
+so it was not substituted. The accepted 730112-byte payload is unchanged
+since 53Y and was identity-checked and staged into every fresh Gate 4 build.
+
+### Fresh QEMU evidence
+
+- `Run-Phase53VGuardFreshBoots.ps1`: 3/3 fresh boots passed.
+- `Run-NativeAotSchedulerThreadLifecycleFreshBoots.ps1`: 3/3 fresh boots
+  passed; serial hashes are retained under
+  `artifacts\phase53-final-rerun-lifecycle-boots-utc`.
+- `Run-Phase53XCallbackReclaimFreshBoot.ps1`: pass with
+  `vmBefore=0x3`, `vmCreated=0x5`, `vmAfter=0x3`, identity `0x5`.
+- `Run-NativeAotSchedulerCallbackFreshBoots.ps1`: 3/3 passed.
+- `Run-NativeAotSchedulerGcFreshBoots.ps1`: 3/3 passed, including
+  `MANAGED_GC_MAIN_OK=1` on each boot.
+- `Run-NativeAotManagedCallbackFreshBoots.ps1`: 25/25 fresh final-source
+  boots passed under `artifacts\phase53-final-rerun-managed-callback-25`.
+  Every boot recorded callback count `5`, baseline `3`, post-state `3`,
+  `MANAGED_CALLBACK_POST_STATE_OK=1`, `MANAGED_GC_MAIN_OK=1`, and the
+  Phase 53Y pattern `3 -> 5 -> 3` at B1/B2, B3–B5, and B6–B8.
+- `Run-SyntheticSchedulerProof.ps1`: 3/3 passed with
+  `classification=EXPECTED_HALT`, zero scheduler failures, intact canaries,
+  teardown, and restored GS.
+
+Fresh evidence roots are `artifacts\phase53-final-rerun-*`; no generated
+logs or binaries from those ignored evidence directories are staged.
+
+Two configuration/environment divergences were reproduced and separated from
+the product path: a Gate 4 build without `-AssumeUnspecifiedTimezoneUtc`
+stopped at the QEMU `TIME_INVALID_TIMEZONE` diagnostic, and combining the
+intentional Phase 53V guard-fault probe with the Phase 53O lifecycle caused
+the expected guard-page fault before lifecycle markers. The established
+separate guard, lifecycle, and callback/GC fixtures passed. An initial X
+runner invocation used the lifecycle fixture, which correctly lacked the X
+callback-2 marker; the dedicated callback/GC fixture passed immediately.
+These were fixture selection/environment issues, not production defects.
 
 ## Contract checklist
 
@@ -49,10 +126,11 @@ defines the following proven boundary. The final matrix below revalidated it:
 - Baseline-relative acceptance with no stale absolute VM count.
 - Normal and SyntheticScheduler build/proof behavior, guard behavior, repeated lifecycle, repeated final-source boots, and clean downstream managed execution.
 
-## Narrow repairs made during final audit
+## Narrow repairs preserved from the prior closure audit
 
-The first fresh lifecycle boot exposed a stale diagnostic contract, not a new
-scheduler failure. NativeAOT reported the complete reserved stack interval
+The starting `d844cf72` source already contains the prior audit's repairs. The
+first lifecycle boot in that audit exposed a stale diagnostic contract, not a
+new scheduler failure. NativeAOT reported the complete reserved stack interval
 (`runtime_stack_low`), while the scheduler compatibility `stack_base` denotes
 the usable interval low, exactly one 4 KiB guard page above the reservation
 base. The first divergence was:
