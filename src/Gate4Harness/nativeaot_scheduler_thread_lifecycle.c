@@ -18,6 +18,60 @@ static uint64_t lifecycle_load_u64(uint64_t address, uint32_t offset)
     return *(const uint64_t *)(uintptr_t)(address + offset);
 }
 
+static int lifecycle_transition_allowed(
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_STATE from,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_STATE to)
+{
+    return (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_FREE &&
+                to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED) ||
+           (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED &&
+                to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNABLE) ||
+           (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNABLE &&
+                to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING) ||
+           (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING &&
+                to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED) ||
+           (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED &&
+                to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_DETACH_PENDING) ||
+           (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_DETACH_PENDING &&
+                to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_DETACHED) ||
+           (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_DETACHED &&
+                to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMABLE) ||
+           (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMABLE &&
+                to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED);
+}
+
+static int lifecycle_transition(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_STATE next)
+{
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_STATE current;
+    if (lifecycle == 0) return 0;
+    current = lifecycle->ownership_state;
+    if (!lifecycle_transition_allowed(current, next)) {
+        if (lifecycle->ownership_transition_failures != UINT32_MAX) {
+            ++lifecycle->ownership_transition_failures;
+        }
+        return 0;
+    }
+    if (lifecycle->ownership_history_count == 0U) {
+        lifecycle->ownership_history[0] = (uint8_t)current;
+        lifecycle->ownership_history_count = 1U;
+    }
+    if (lifecycle->ownership_history_count <
+            GXOS_NATIVEAOT_WORKER_OWNERSHIP_HISTORY_MAX) {
+        lifecycle->ownership_history[
+            lifecycle->ownership_history_count++] = (uint8_t)next;
+    } else {
+        ++lifecycle->ownership_transition_failures;
+        return 0;
+    }
+    lifecycle->ownership_state = next;
+    if (lifecycle->ownership_transition_count != UINT32_MAX) {
+        ++lifecycle->ownership_transition_count;
+    }
+    return 1;
+}
+
 int gxos_nativeaot_scheduler_threadstore_count(uint64_t head,
                                                 uint64_t *last_out)
 {
@@ -43,6 +97,8 @@ int gxos_nativeaot_scheduler_worker_prepare(
     GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup)
 {
     GXOS_SCHEDULER_TCB *current = gxos_scheduler_current_thread();
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE fresh = {0};
+    uint32_t scheduler_slot;
     if (lifecycle == 0 || main_thread == 0 || thread == 0 ||
         main_thread == thread || (current != main_thread && current != thread) ||
         tls_index >= GXOS_SCHEDULER_TLS_VECTOR_SLOTS ||
@@ -53,7 +109,37 @@ int gxos_nativeaot_scheduler_worker_prepare(
         main_thread->fls_values[runtime_fls_slot] == 0 ||
         thread->tls_block_base == 0 ||
         thread->tls_block_base == main_thread->tls_block_base ||
+        (lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_FREE &&
+         lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED) ||
         !gxos_scheduler_validate_thread_context(thread)) {
+        return 0;
+    }
+    scheduler_slot = gxos_scheduler_thread_slot(thread);
+    if (scheduler_slot == UINT32_MAX) return 0;
+    *lifecycle = fresh;
+    lifecycle->scheduler_slot = scheduler_slot;
+    lifecycle->worker_identity = thread->identity;
+    lifecycle->worker_generation = thread->generation;
+    lifecycle->scheduler_owned = 1;
+    lifecycle->stack_owned = 1;
+    lifecycle->environment_owned = thread->environment_owned;
+    lifecycle->tls_fls_owned = 1;
+    lifecycle->vm_resources_owned = 1;
+    lifecycle->stack_reservation_base = thread->stack_contract.reservation_base;
+    lifecycle->stack_guard_base = thread->stack_contract.guard_base;
+    lifecycle->stack_usable_low = thread->stack_contract.usable_stack_low;
+    lifecycle->stack_usable_high = thread->stack_contract.usable_stack_high;
+    lifecycle->saved_rsp = thread->context.rsp;
+    lifecycle->gs_base = thread->gs_base;
+    lifecycle->teb_base = thread->teb_base;
+    lifecycle->tls_vector_base = thread->tls_vector_base;
+    lifecycle->tls_block_base = thread->tls_block_base;
+    lifecycle->guard_vm_identity = thread->stack_contract.guard_vm_identity;
+    lifecycle->usable_vm_identity = thread->stack_contract.usable_vm_identity;
+    lifecycle->thread = thread;
+    lifecycle->main_thread = main_thread;
+    if (!lifecycle_transition(lifecycle,
+                              GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED)) {
         return 0;
     }
     /* The vector is fresh scheduler-owned storage.  Install the PE TLS
@@ -65,8 +151,6 @@ int gxos_nativeaot_scheduler_worker_prepare(
         if (tls_index != 0) vector[0] = 0;
         vector[tls_index] = thread->tls_block_base;
     }
-    lifecycle->main_thread = main_thread;
-    lifecycle->thread = thread;
     lifecycle->tls_index = tls_index;
     lifecycle->runtime_fls_slot = runtime_fls_slot;
     lifecycle->runtime_fls_cleanup = runtime_fls_cleanup;
@@ -85,7 +169,45 @@ int gxos_nativeaot_scheduler_worker_prepare(
     lifecycle->alloc_limit_before = 0;
     lifecycle->alloc_ptr_before = 0;
     lifecycle->detached = 0;
-    return lifecycle->main_runtime_thread != 0;
+    if (lifecycle->main_runtime_thread == 0) {
+        lifecycle->ownership_transition_failures++;
+        return 0;
+    }
+    return 1;
+}
+
+int gxos_nativeaot_scheduler_worker_mark_runnable(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    if (lifecycle == 0 || lifecycle->thread == 0 ||
+        lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED ||
+        !lifecycle->thread->live ||
+        lifecycle->thread->state != GXOS_SCHEDULER_THREAD_RUNNABLE ||
+        !lifecycle->thread->runnable_queued) {
+        if (lifecycle != 0 && lifecycle->ownership_transition_failures != UINT32_MAX) {
+            ++lifecycle->ownership_transition_failures;
+        }
+        return 0;
+    }
+    return lifecycle_transition(lifecycle,
+                                GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNABLE);
+}
+
+int gxos_nativeaot_scheduler_worker_mark_running(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    if (lifecycle == 0 || lifecycle->thread == 0 ||
+        lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNABLE ||
+        !lifecycle->thread->live ||
+        lifecycle->thread->state != GXOS_SCHEDULER_THREAD_RUNNING ||
+        gxos_scheduler_current_thread() != lifecycle->thread) {
+        if (lifecycle != 0 && lifecycle->ownership_transition_failures != UINT32_MAX) {
+            ++lifecycle->ownership_transition_failures;
+        }
+        return 0;
+    }
+    return lifecycle_transition(lifecycle,
+                                GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING);
 }
 
 static int lifecycle_current_thread_is_active(
@@ -165,6 +287,7 @@ int gxos_nativeaot_scheduler_worker_attach(
     if (callback_status_out != 0) *callback_status_out = UINT32_MAX;
     if (lifecycle == 0 || managed_bridge == 0 || result == 0 ||
         lifecycle->attached || lifecycle->detached ||
+        lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING ||
         lifecycle->runtime_fls_cleanup == 0 || lifecycle->thread == 0 ||
         lifecycle->main_runtime_thread == 0 ||
         gxos_scheduler_current_thread() != lifecycle->thread) {
@@ -174,11 +297,20 @@ int gxos_nativeaot_scheduler_worker_attach(
         managed_bridge, input, result);
     if (callback_status_out != 0) *callback_status_out = status;
     if (status != GXOS_NATIVEAOT_CALLBACK_OK ||
-        !lifecycle_current_thread_is_active(lifecycle)) {
+        !lifecycle_current_thread_is_active(lifecycle) ||
+        managed_bridge->ready == 0) {
+        return 0;
+    }
+    if (!lifecycle_capture_attached(lifecycle) ||
+        !lifecycle_transition(
+            lifecycle, GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED)) {
         return 0;
     }
     lifecycle->attached = 1;
-    return lifecycle_capture_attached(lifecycle);
+    lifecycle->runtime_thread_owned = 1;
+    lifecycle->managed_worker_object_owned = 1;
+    lifecycle->callback_registration_observed = 1;
+    return 1;
 }
 
 int gxos_nativeaot_scheduler_worker_invoke(
@@ -190,6 +322,8 @@ int gxos_nativeaot_scheduler_worker_invoke(
     if (callback_status_out != 0) *callback_status_out = UINT32_MAX;
     if (lifecycle == 0 || managed_bridge == 0 || result == 0 ||
         lifecycle->detached || lifecycle->thread == 0 ||
+        (lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING &&
+         lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED) ||
         gxos_scheduler_current_thread() != lifecycle->thread) {
         return 0;
     }
@@ -230,12 +364,20 @@ int gxos_nativeaot_scheduler_worker_detach(
 {
     uint64_t value;
     if (lifecycle == 0 || !lifecycle->attached || lifecycle->detached ||
+        lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED ||
         !lifecycle_current_thread_is_active(lifecycle) ||
         lifecycle->runtime_fls_cleanup == 0) {
+        if (lifecycle != 0 && lifecycle->ownership_transition_failures != UINT32_MAX) {
+            ++lifecycle->ownership_transition_failures;
+        }
         return 0;
     }
     value = lifecycle->thread->fls_values[lifecycle->runtime_fls_slot];
     if (value != lifecycle->runtime_thread) return 0;
+    if (!lifecycle_transition(lifecycle,
+                              GXOS_NATIVEAOT_WORKER_OWNERSHIP_DETACH_PENDING)) {
+        return 0;
+    }
     lifecycle->runtime_fls_cleanup((void *)(uintptr_t)value);
     lifecycle->runtime_state_after = lifecycle_load_u64(
         value, GXOS_NATIVEAOT_TLS_STATE_FLAGS_OFFSET);
@@ -257,8 +399,66 @@ int gxos_nativeaot_scheduler_worker_detach(
     }
     gxos_scheduler_set_fls(lifecycle->runtime_fls_slot, 0);
     if (gxos_scheduler_get_fls(lifecycle->runtime_fls_slot) != 0) return 0;
+    lifecycle->runtime_thread_owned = 0;
+    lifecycle->managed_worker_object_owned = 0;
+    lifecycle->tls_fls_owned = 0;
     lifecycle->detached = 1;
-    return 1;
+    return lifecycle_transition(lifecycle,
+                                GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_DETACHED);
+}
+
+int gxos_nativeaot_scheduler_worker_note_reclaimable(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    GXOS_SCHEDULER_TCB *thread;
+    if (lifecycle == 0 || lifecycle->thread == 0 || !lifecycle->detached ||
+        lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_DETACHED) {
+        if (lifecycle != 0 && lifecycle->ownership_transition_failures != UINT32_MAX) {
+            ++lifecycle->ownership_transition_failures;
+        }
+        return 0;
+    }
+    thread = lifecycle->thread;
+    if (!thread->live || thread == gxos_scheduler_current_thread() ||
+        thread->state != GXOS_SCHEDULER_THREAD_TERMINATED ||
+        thread->execution_refs != 0 || thread->runnable_queued ||
+        thread->wait_record != 0) {
+        if (lifecycle->ownership_transition_failures != UINT32_MAX) {
+            ++lifecycle->ownership_transition_failures;
+        }
+        return 0;
+    }
+    return lifecycle_transition(lifecycle,
+                                GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMABLE);
+}
+
+int gxos_nativeaot_scheduler_worker_note_reclaimed(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    GXOS_SCHEDULER_TCB *thread;
+    if (lifecycle == 0 || lifecycle->thread == 0 ||
+        lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMABLE) {
+        if (lifecycle != 0 && lifecycle->ownership_transition_failures != UINT32_MAX) {
+            ++lifecycle->ownership_transition_failures;
+        }
+        return 0;
+    }
+    thread = lifecycle->thread;
+    if (thread->live || thread->stack_contract.reservation_base != 0 ||
+        thread->stack_vm_identity != 0 || thread->gs_base != 0 ||
+        thread->teb_base != 0 || thread->tls_vector_base != 0 ||
+        thread->tls_block_base != 0 || thread->environment_owned != 0) {
+        if (lifecycle->ownership_transition_failures != UINT32_MAX) {
+            ++lifecycle->ownership_transition_failures;
+        }
+        return 0;
+    }
+    lifecycle->scheduler_owned = 0;
+    lifecycle->stack_owned = 0;
+    lifecycle->environment_owned = 0;
+    lifecycle->vm_resources_owned = 0;
+    return lifecycle_transition(lifecycle,
+                                GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED);
 }
 
 int gxos_nativeaot_scheduler_worker_no_stale_context_overlap(
@@ -553,10 +753,7 @@ phase53o_worker(void *argument)
          !gxos_scheduler_validate_thread_context(thread)) {
         return (uintptr_t)phase53o_fail(cycle);
     }
-    if (!gxos_nativeaot_scheduler_worker_prepare(
-            &cycle->lifecycle, probe->main_thread, thread,
-            probe->tls_index, probe->runtime_fls_slot,
-            probe->runtime_fls_cleanup)) {
+    if (!gxos_nativeaot_scheduler_worker_mark_running(&cycle->lifecycle)) {
         return (uintptr_t)phase53o_fail(cycle);
     }
     cycle->allocation_context = cycle->lifecycle.allocation_context;
@@ -665,6 +862,8 @@ static int phase53o_reclaim_cycle(GXOS_PHASE53O_CYCLE *cycle,
     GXOS_SCHEDULER_TCB *thread = cycle->thread;
     int close_result;
     int collect_result;
+    int reclaimable_result;
+    int reclaimed_result;
 
     if (thread == 0 || !gxos_scheduler_thread_is_terminated(thread) ||
         thread->return_value != (uintptr_t)cycle->callback_result ||
@@ -678,13 +877,29 @@ static int phase53o_reclaim_cycle(GXOS_PHASE53O_CYCLE *cycle,
                   "GXOS_NET10:MANAGED_THREAD_DETACH_OK=1\r\n");
     phase53o_text(cycle->probe,
                   "GXOS_NET10:MANAGED_THREAD_UNREGISTER_OK=1\r\n");
-    close_result = gxos_scheduler_close_handle(cycle->handle);
+    reclaimable_result = gxos_nativeaot_scheduler_worker_note_reclaimable(
+        &cycle->lifecycle);
+    close_result = reclaimable_result &&
+        gxos_scheduler_close_handle(cycle->handle);
     collect_result = close_result &&
         gxos_scheduler_collect(cycle->probe->scheduler);
+    reclaimed_result = collect_result &&
+        gxos_nativeaot_scheduler_worker_note_reclaimed(&cycle->lifecycle);
+    collect_result = collect_result && reclaimed_result;
+    phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_RECLAIMABLE_RESULT=",
+                 (uint64_t)reclaimable_result);
     phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_RECLAIM_CLOSE_RESULT=",
                  (uint64_t)close_result);
     phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_RECLAIM_COLLECT_RESULT=",
                  (uint64_t)collect_result);
+    phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_RECLAIMED_RESULT=",
+                 (uint64_t)reclaimed_result);
+    phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_OWNERSHIP_STATE=",
+                 cycle->lifecycle.ownership_state);
+    phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_OWNERSHIP_TRANSITIONS=",
+                 cycle->lifecycle.ownership_transition_count);
+    phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_OWNERSHIP_FAILURES=",
+                 cycle->lifecycle.ownership_transition_failures);
     phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_RECLAIM_THREAD_LIVE=",
                  thread->live);
     phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_RECLAIM_THREAD_TLS=",
@@ -714,7 +929,9 @@ static int phase53o_reclaim_cycle(GXOS_PHASE53O_CYCLE *cycle,
                  *cycle->probe->vm_region_count);
     phase53o_hex(cycle->probe, "GXOS_NET10:PHASE53O_RECLAIM_HANDLE_LOOKUP=",
                  gxos_scheduler_thread_from_handle(cycle->handle) != 0);
-    if (!close_result || !collect_result || thread->live != 0 ||
+    if (!close_result || !collect_result ||
+        cycle->lifecycle.ownership_state !=
+            GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED || thread->live != 0 ||
         thread->tls_block_base != 0 || thread->tls_vector_base != 0 ||
         thread->gs_base != 0 || thread->teb_base != 0 ||
         thread->stack_vm_identity != 0 ||
@@ -794,6 +1011,12 @@ int gxos_nativeaot_scheduler_thread_lifecycle_probe(
         }
         cycles[cycle_index].handle = handle;
         cycles[cycle_index].thread = thread;
+        if (!gxos_nativeaot_scheduler_worker_prepare(
+                &cycles[cycle_index].lifecycle, probe->main_thread, thread,
+                probe->tls_index, probe->runtime_fls_slot,
+                probe->runtime_fls_cleanup)) {
+            return 0;
+        }
         if (!phase53o_rehome_canary(probe, thread) ||
             !gxos_scheduler_validate_thread_context(thread)) {
             return 0;
@@ -804,7 +1027,9 @@ int gxos_nativeaot_scheduler_thread_lifecycle_probe(
         phase53o_hex(probe, "GXOS_NET10:PHASE53O_FRESH_IDENTITY=0x", identity);
         phase53o_hex(probe, "GXOS_NET10:PHASE53O_FRESH_TLS_BLOCK=0x",
                      thread->tls_block_base);
-        if (!gxos_scheduler_resume_thread(handle, 0)) return 0;
+        if (!gxos_scheduler_resume_thread(handle, 0) ||
+            !gxos_nativeaot_scheduler_worker_mark_runnable(
+                &cycles[cycle_index].lifecycle)) return 0;
         gxos_scheduler_main_dispatch(&snapshot);
         if (gxos_scheduler_current_thread() != probe->main_thread ||
             !phase53o_reclaim_cycle(&cycles[cycle_index], baseline_vm_regions)) {
@@ -819,5 +1044,403 @@ int gxos_nativeaot_scheduler_thread_lifecycle_probe(
     }
     phase53o_text(probe, "GXOS_NET10:PHASE53O_COMPLETE=1\r\n");
     phase53o_text(probe, "GXOS_NET10:PHASE53O_PASS=1\r\n");
+    return 1;
+}
+
+#define PHASE54_CYCLE_COUNT 12U
+
+typedef struct {
+    GXOS_PHASE53O_PROBE *probe;
+    uint32_t cycle;
+    uint32_t worker_number;
+    uint32_t input;
+    uint32_t seed;
+    GXOS_SCHEDULER_HANDLE handle;
+    GXOS_SCHEDULER_TCB *thread;
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE lifecycle;
+    int32_t callback_result;
+    int32_t gc_result;
+    uint32_t callback_status;
+    uint32_t gc_status;
+    uint32_t gc_delta;
+    uint32_t gc_generation;
+    uint32_t gc_checksum;
+    uint64_t worker_rsp;
+    uint32_t failure;
+} GXOS_PHASE54_WORKER;
+
+static void phase54_text(GXOS_PHASE53O_PROBE *probe, const char *text)
+{
+    probe->log_text(text);
+}
+
+static void phase54_hex(GXOS_PHASE53O_PROBE *probe,
+                        const char *name, uint64_t value)
+{
+    probe->log_hex(name, value);
+    probe->log_text("\r\n");
+}
+
+static uint32_t phase54_live_threads(const GXOS_SCHEDULER *scheduler)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        if (scheduler->threads[index].live) ++count;
+    }
+    return count;
+}
+
+static uint32_t phase54_live_objects(const GXOS_SCHEDULER *scheduler)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        if (scheduler->objects[index].live) ++count;
+    }
+    return count;
+}
+
+static int phase54_fail(GXOS_PHASE54_WORKER *worker)
+{
+    worker->failure = 1;
+    phase54_text(worker->probe, "GXOS_NET10:PHASE54_FAILURE=1\r\n");
+    return 0;
+}
+
+static uintptr_t GXOS_PHASE53O_MS_ABI
+phase54_worker_entry(void *argument)
+{
+    GXOS_PHASE54_WORKER *worker = (GXOS_PHASE54_WORKER *)argument;
+    GXOS_PHASE53O_PROBE *probe = worker->probe;
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT snapshot = {0};
+    uint32_t callback_low;
+    int good = 1;
+
+    worker->thread = thread;
+    gxos_scheduler_capture_registers(&snapshot);
+    worker->worker_rsp = snapshot.rsp;
+    if (thread == 0 || !gxos_nativeaot_scheduler_worker_mark_running(
+            &worker->lifecycle) ||
+        !gxos_scheduler_validate_worker_snapshot(thread, &snapshot) ||
+        worker->lifecycle.worker_identity != thread->identity ||
+        worker->lifecycle.scheduler_slot == UINT32_MAX) {
+        return (uintptr_t)phase54_fail(worker);
+    }
+    phase54_text(probe, worker->worker_number == 2U
+        ? "GXOS_NET10:PHASE54_WORKER_B_RUNNING=1\r\n"
+        : "GXOS_NET10:PHASE54_WORKER_A_RUNNING=1\r\n");
+
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &worker->lifecycle, probe->callback_bridge,
+            (int32_t)worker->input, &worker->callback_result,
+            &worker->callback_status)) {
+        good = 0;
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    callback_low = (uint32_t)worker->callback_result & 0xFFFFU;
+    if (worker->callback_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        callback_low != worker->input + 1U ||
+        worker->lifecycle.ownership_state !=
+            GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED ||
+        worker->lifecycle.runtime_thread == 0 ||
+        worker->lifecycle.runtime_thread != thread->tls_block_base + 0x30U) {
+        good = 0;
+    }
+    phase54_text(probe, worker->worker_number == 2U
+        ? "GXOS_NET10:PHASE54_WORKER_B_MANAGED_ENTRY_REACHED=1\r\n"
+        : "GXOS_NET10:PHASE54_WORKER_A_MANAGED_ENTRY_REACHED=1\r\n");
+
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &worker->lifecycle, probe->gc_bridge, (int32_t)worker->seed,
+            &worker->gc_result, &worker->gc_status)) {
+        good = 0;
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    if (worker->gc_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        !gxos_nativeaot_gc_result_valid(worker->gc_result, worker->seed,
+                                        &worker->gc_delta,
+                                        &worker->gc_generation,
+                                        &worker->gc_checksum) ||
+        worker->gc_delta == 0U) {
+        good = 0;
+    } else {
+        worker->lifecycle.managed_root_survived = 1;
+    }
+    if (worker->worker_number == 2U) {
+        phase54_text(probe,
+                     "GXOS_NET10:PHASE54_WORKER_B_POST_GC_CONTINUATION=1\r\n");
+    } else {
+        phase54_text(probe,
+                     "GXOS_NET10:PHASE54_WORKER_A_POST_GC_CONTINUATION=1\r\n");
+    }
+
+    if (!gxos_nativeaot_scheduler_worker_detach(&worker->lifecycle) ||
+        worker->lifecycle.ownership_state !=
+            GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_DETACHED ||
+        gxos_scheduler_get_fls(probe->runtime_fls_slot) != 0) {
+        good = 0;
+    }
+    if (worker->worker_number == 2U) {
+        phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_B_DETACHED=1\r\n");
+    } else {
+        phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_A_DETACHED=1\r\n");
+    }
+    if (!good) return (uintptr_t)phase54_fail(worker);
+    return (uintptr_t)worker->callback_result;
+}
+
+int gxos_nativeaot_managed_worker_ownership_probe(
+    GXOS_PHASE53O_PROBE *probe)
+{
+    static GXOS_PHASE54_WORKER worker_a;
+    static GXOS_PHASE54_WORKER worker_b;
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT snapshot = {0};
+    uint32_t baseline_vm_regions;
+    uint32_t baseline_threads;
+    uint32_t baseline_objects;
+    uint32_t peak_vm_regions;
+    uint32_t peak_threads;
+    uint32_t peak_objects;
+    uint32_t after_threads;
+    uint32_t after_objects;
+    uint32_t cycle;
+    uint32_t dispatches;
+    uint32_t previous_b_identity = 0;
+    uint16_t previous_b_generation = 0;
+    uint32_t previous_b_slot = UINT32_MAX;
+    uint32_t invalid_transition_rejections = 0;
+    uint32_t duplicate_teardown_rejections = 0;
+    int independence_passed = 1;
+    int reuse_passed = 1;
+
+    if (probe == 0 || probe->scheduler == 0 || probe->main_thread == 0 ||
+        probe->callback_bridge == 0 || probe->gc_bridge == 0 ||
+        probe->runtime_fls_cleanup == 0 || probe->vm_region_count == 0 ||
+        probe->log_text == 0 || probe->log_hex == 0 ||
+        probe->phase_in_managed == 0 || probe->phase_after_managed == 0 ||
+        probe->main_thread != gxos_scheduler_current_thread() ||
+        !probe->main_thread->is_boot_thread) {
+        return 0;
+    }
+
+    baseline_vm_regions = *probe->vm_region_count;
+    baseline_threads = phase54_live_threads(probe->scheduler);
+    baseline_objects = phase54_live_objects(probe->scheduler);
+    peak_vm_regions = baseline_vm_regions;
+    peak_threads = baseline_threads;
+    peak_objects = baseline_objects;
+    phase54_text(probe, "GXOS_NET10:PHASE54_BEGIN\r\n");
+    phase54_text(probe,
+                 "GXOS_NET10:PHASE54_OWNERSHIP_LEDGER=EXTENDED_LIFECYCLE_RECORD\r\n");
+    phase54_text(probe,
+                 "GXOS_NET10:PHASE54_STATE_SEQUENCE=FREE>ALLOCATED>RUNNABLE>RUNNING>RUNTIME_ATTACHED>DETACH_PENDING>RUNTIME_DETACHED>RECLAIMABLE>RECLAIMED\r\n");
+    phase54_hex(probe, "GXOS_NET10:PHASE54_RESOURCE_BASELINE_VM_REGIONS=0x",
+                baseline_vm_regions);
+    phase54_hex(probe, "GXOS_NET10:PHASE54_RESOURCE_BASELINE_THREADS=0x",
+                baseline_threads);
+    phase54_hex(probe, "GXOS_NET10:PHASE54_RESOURCE_BASELINE_OBJECTS=0x",
+                baseline_objects);
+
+    for (cycle = 0; cycle != PHASE54_CYCLE_COUNT; ++cycle) {
+        worker_a = (GXOS_PHASE54_WORKER){0};
+        worker_b = (GXOS_PHASE54_WORKER){0};
+        worker_a.probe = probe;
+        worker_a.cycle = cycle + 1U;
+        worker_a.worker_number = 1U;
+        worker_a.input = 7U;
+        worker_a.seed = 0x61U;
+        worker_b.probe = probe;
+        worker_b.cycle = cycle + 1U;
+        worker_b.worker_number = 2U;
+        worker_b.input = 9U;
+        worker_b.seed = 0x62U;
+        if (!gxos_scheduler_create_suspended_thread(
+                probe->scheduler, phase54_worker_entry, &worker_a,
+                &worker_a.handle, &worker_a.thread) ||
+            !gxos_scheduler_create_suspended_thread(
+                probe->scheduler, phase54_worker_entry, &worker_b,
+                &worker_b.handle, &worker_b.thread) ||
+            !gxos_nativeaot_scheduler_worker_prepare(
+                &worker_a.lifecycle, probe->main_thread, worker_a.thread,
+                probe->tls_index, probe->runtime_fls_slot,
+                probe->runtime_fls_cleanup) ||
+            !gxos_nativeaot_scheduler_worker_prepare(
+                &worker_b.lifecycle, probe->main_thread, worker_b.thread,
+                probe->tls_index, probe->runtime_fls_slot,
+                probe->runtime_fls_cleanup)) {
+            return 0;
+        }
+        if (cycle == 0U) {
+            if (gxos_nativeaot_scheduler_worker_detach(&worker_b.lifecycle) ||
+                gxos_nativeaot_scheduler_worker_note_reclaimable(
+                    &worker_b.lifecycle) ||
+                worker_b.lifecycle.ownership_transition_failures < 2U) {
+                return 0;
+            }
+            invalid_transition_rejections += 2U;
+        }
+        if (!phase53o_rehome_canary(probe, worker_a.thread) ||
+            !phase53o_rehome_canary(probe, worker_b.thread) ||
+            !gxos_scheduler_resume_thread(worker_a.handle, 0) ||
+            !gxos_nativeaot_scheduler_worker_mark_runnable(
+                &worker_a.lifecycle) ||
+            !gxos_scheduler_resume_thread(worker_b.handle, 0) ||
+            !gxos_nativeaot_scheduler_worker_mark_runnable(
+                &worker_b.lifecycle)) {
+            return 0;
+        }
+        peak_vm_regions = *probe->vm_region_count > peak_vm_regions
+            ? *probe->vm_region_count : peak_vm_regions;
+        peak_threads = phase54_live_threads(probe->scheduler) > peak_threads
+            ? phase54_live_threads(probe->scheduler) : peak_threads;
+        peak_objects = phase54_live_objects(probe->scheduler) > peak_objects
+            ? phase54_live_objects(probe->scheduler) : peak_objects;
+        for (dispatches = 0; dispatches != 4U; ++dispatches) {
+            if (gxos_scheduler_thread_is_terminated(worker_a.thread) &&
+                gxos_scheduler_thread_is_terminated(worker_b.thread)) break;
+            if (gxos_scheduler_current_thread() != probe->main_thread ||
+                gxos_scheduler_runnable_count() == 0U) return 0;
+            gxos_scheduler_main_dispatch(&snapshot);
+        }
+        if (!gxos_scheduler_thread_is_terminated(worker_a.thread) ||
+            !gxos_scheduler_thread_is_terminated(worker_b.thread) ||
+            worker_a.failure != 0 || worker_b.failure != 0 ||
+            worker_a.lifecycle.managed_root_survived == 0 ||
+            worker_b.lifecycle.managed_root_survived == 0 ||
+            worker_a.lifecycle.callback_registration_observed == 0 ||
+            worker_b.lifecycle.callback_registration_observed == 0 ||
+            worker_a.lifecycle.saved_rsp == 0 || worker_b.lifecycle.saved_rsp == 0 ||
+            worker_a.lifecycle.allocation_context == 0 ||
+            worker_b.lifecycle.allocation_context == 0 ||
+            worker_a.lifecycle.guard_vm_identity == 0 ||
+            worker_b.lifecycle.guard_vm_identity == 0 ||
+            worker_a.lifecycle.usable_vm_identity == 0 ||
+            worker_b.lifecycle.usable_vm_identity == 0 ||
+            worker_a.lifecycle.runtime_thread == worker_b.lifecycle.runtime_thread ||
+            worker_a.lifecycle.allocation_context ==
+                worker_b.lifecycle.allocation_context ||
+            worker_a.lifecycle.tls_block_base == worker_b.lifecycle.tls_block_base ||
+            worker_a.lifecycle.gs_base == worker_b.lifecycle.gs_base ||
+            worker_a.lifecycle.teb_base == worker_b.lifecycle.teb_base ||
+            worker_a.lifecycle.tls_vector_base == worker_b.lifecycle.tls_vector_base ||
+            worker_a.lifecycle.stack_reservation_base ==
+                worker_b.lifecycle.stack_reservation_base ||
+            worker_a.lifecycle.usable_vm_identity ==
+                worker_b.lifecycle.usable_vm_identity ||
+            worker_a.worker_rsp < worker_a.lifecycle.stack_usable_low ||
+            worker_a.worker_rsp >= worker_a.lifecycle.stack_usable_high ||
+            worker_b.worker_rsp < worker_b.lifecycle.stack_usable_low ||
+            worker_b.worker_rsp >= worker_b.lifecycle.stack_usable_high) {
+            independence_passed = 0;
+        }
+        if (cycle != 0U &&
+            (worker_b.lifecycle.scheduler_slot != previous_b_slot ||
+             worker_b.lifecycle.worker_identity == previous_b_identity ||
+             worker_b.lifecycle.worker_generation == previous_b_generation)) {
+            reuse_passed = 0;
+        }
+        if (!gxos_nativeaot_scheduler_worker_note_reclaimable(
+                &worker_a.lifecycle) ||
+            !gxos_nativeaot_scheduler_worker_note_reclaimable(
+                &worker_b.lifecycle) ||
+            !gxos_scheduler_close_handle(worker_a.handle) ||
+            !gxos_scheduler_close_handle(worker_b.handle) ||
+            !gxos_scheduler_collect(probe->scheduler) ||
+            !gxos_nativeaot_scheduler_worker_note_reclaimed(
+                &worker_a.lifecycle) ||
+            !gxos_nativeaot_scheduler_worker_note_reclaimed(
+                &worker_b.lifecycle) ||
+            worker_a.lifecycle.ownership_state !=
+                GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED ||
+            worker_b.lifecycle.ownership_state !=
+                GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED ||
+            gxos_scheduler_thread_from_handle(worker_a.handle) != 0 ||
+            gxos_scheduler_thread_from_handle(worker_b.handle) != 0) {
+            return 0;
+        }
+        if (cycle == 0U) {
+            phase54_text(probe,
+                         "GXOS_NET10:PHASE54_INVALID_TRANSITIONS_REJECTED=1\r\n");
+        }
+        if (cycle == PHASE54_CYCLE_COUNT - 1U &&
+            (gxos_nativeaot_scheduler_worker_detach(&worker_b.lifecycle) ||
+             gxos_nativeaot_scheduler_worker_note_reclaimable(
+                 &worker_b.lifecycle))) {
+            return 0;
+        }
+        if (cycle == PHASE54_CYCLE_COUNT - 1U) {
+            duplicate_teardown_rejections += 2U;
+            phase54_text(probe,
+                         "GXOS_NET10:PHASE54_DUPLICATE_TEARDOWN_REJECTED=1\r\n");
+        }
+        after_threads = phase54_live_threads(probe->scheduler);
+        after_objects = phase54_live_objects(probe->scheduler);
+        if (*probe->vm_region_count != baseline_vm_regions ||
+            after_threads != baseline_threads || after_objects != baseline_objects) {
+            return 0;
+        }
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE=", cycle + 1U);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_A_IDENTITY=",
+                    worker_a.lifecycle.worker_identity);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_B_IDENTITY=",
+                    worker_b.lifecycle.worker_identity);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_A_GENERATION=",
+                    worker_a.lifecycle.worker_generation);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_B_GENERATION=",
+                    worker_b.lifecycle.worker_generation);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_A_SLOT=",
+                    worker_a.lifecycle.scheduler_slot);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_B_SLOT=",
+                    worker_b.lifecycle.scheduler_slot);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_A_STATE=",
+                    worker_a.lifecycle.ownership_state);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_B_STATE=",
+                    worker_b.lifecycle.ownership_state);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_A_TRANSITIONS=",
+                    worker_a.lifecycle.ownership_transition_count);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_B_TRANSITIONS=",
+                    worker_b.lifecycle.ownership_transition_count);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_A_RSP=",
+                    worker_a.worker_rsp);
+        phase54_hex(probe, "GXOS_NET10:PHASE54_CYCLE_WORKER_B_RSP=",
+                    worker_b.worker_rsp);
+        phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_A_RECLAIMED=1\r\n");
+        phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_B_RECLAIMED=1\r\n");
+        phase54_text(probe, "GXOS_NET10:PHASE54_BASELINE_RESTORED=1\r\n");
+        previous_b_identity = worker_b.lifecycle.worker_identity;
+        previous_b_generation = worker_b.lifecycle.worker_generation;
+        previous_b_slot = worker_b.lifecycle.scheduler_slot;
+    }
+    if (!independence_passed || !reuse_passed ||
+        invalid_transition_rejections != 2U ||
+        duplicate_teardown_rejections != 2U) return 0;
+    after_threads = phase54_live_threads(probe->scheduler);
+    after_objects = phase54_live_objects(probe->scheduler);
+    phase54_hex(probe, "GXOS_NET10:PHASE54_RESOURCE_PEAK_VM_REGIONS=0x",
+                peak_vm_regions);
+    phase54_hex(probe, "GXOS_NET10:PHASE54_RESOURCE_PEAK_THREADS=0x",
+                peak_threads);
+    phase54_hex(probe, "GXOS_NET10:PHASE54_RESOURCE_PEAK_OBJECTS=0x",
+                peak_objects);
+    phase54_hex(probe, "GXOS_NET10:PHASE54_RESOURCE_AFTER_VM_REGIONS=0x",
+                *probe->vm_region_count);
+    phase54_hex(probe, "GXOS_NET10:PHASE54_RESOURCE_AFTER_THREADS=0x",
+                after_threads);
+    phase54_hex(probe, "GXOS_NET10:PHASE54_RESOURCE_AFTER_OBJECTS=0x",
+                after_objects);
+    phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_INDEPENDENCE_OK=1\r\n");
+    phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_STACK_RSP_BOUNDS_OK=1\r\n");
+    phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_RUNTIME_THREAD_INDEPENDENCE_OK=1\r\n");
+    phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_ALLOCATION_CONTEXT_INDEPENDENCE_OK=1\r\n");
+    phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_ROOT_SURVIVAL_OK=1\r\n");
+    phase54_text(probe, "GXOS_NET10:PHASE54_WORKER_SLOT_LEDGER_OK=1\r\n");
+    phase54_text(probe, "GXOS_NET10:PHASE54_SLOT_REUSE_GENERATION_OK=1\r\n");
+    phase54_text(probe, "GXOS_NET10:PHASE54_OWNERSHIP_LEDGER_BASELINE_OK=1\r\n");
+    phase54_text(probe, "GXOS_NET10:PHASE54_COMPLETE=1\r\n");
+    phase54_text(probe, "GXOS_NET10:PHASE54_PASS=1\r\n");
     return 1;
 }

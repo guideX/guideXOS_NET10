@@ -12,6 +12,7 @@ param(
     [switch]$EnableNativeAotSchedulerCallback,
     [switch]$EnableNativeAotManagedGcProbe,
     [switch]$EnableNativeAotSchedulerThreadLifecycle,
+    [switch]$EnableNativeAotManagedWorkerOwnership,
     [switch]$EnablePhase53VGuardProbe,
     [switch]$EnableManagedKernelPhase27,
     [switch]$EnableManagedKernelPhase28,
@@ -55,9 +56,10 @@ $authoritativePayloadSize = 730112
 $phase53oPayloadSha256 = '7ABDCB03E45E36615713937F34E5D4E055CBE094B70EEE74D844A424153AF117'
 $phase53oPayloadSize = 730624
 $requiresCallbackPayload = $EnableNativeAotManagedCallback -or
-    $EnableNativeAotSchedulerCallback -or $EnableNativeAotSchedulerThreadLifecycle
+    $EnableNativeAotSchedulerCallback -or $EnableNativeAotSchedulerThreadLifecycle -or
+    $EnableNativeAotManagedWorkerOwnership
 $requiresAuthoritativePayload = $EnableNativeAotManagedGcProbe -or
-    $EnableNativeAotSchedulerThreadLifecycle
+    $EnableNativeAotSchedulerThreadLifecycle -or $EnableNativeAotManagedWorkerOwnership
 
 if ($PayloadMode -eq 'ManagedKernel' -and
     ($EnableNativeAotManagedCallback -or $EnableNativeAotSchedulerCallback -or
@@ -104,6 +106,22 @@ if ($EnableNativeAotSchedulerThreadLifecycle -and
 if ($EnableNativeAotSchedulerThreadLifecycle -and
     -not $EnableNativeAotManagedGcProbe) {
     throw 'NativeAot scheduler thread lifecycle validation requires -EnableNativeAotManagedGcProbe.'
+}
+if ($EnableNativeAotManagedWorkerOwnership -and
+    -not $EnableNativeAotSchedulerThreadLifecycle) {
+    throw 'NativeAot managed worker ownership validation requires -EnableNativeAotSchedulerThreadLifecycle.'
+}
+if ($EnableNativeAotManagedWorkerOwnership -and -not $EnableNativeAotStartup) {
+    throw 'NativeAot managed worker ownership validation requires -EnableNativeAotStartup.'
+}
+if ($EnableNativeAotManagedWorkerOwnership -and -not $EnableNativeAotManagedCallback) {
+    throw 'NativeAot managed worker ownership validation requires -EnableNativeAotManagedCallback.'
+}
+if ($EnableNativeAotManagedWorkerOwnership -and -not $EnableNativeAotSchedulerCallback) {
+    throw 'NativeAot managed worker ownership validation requires -EnableNativeAotSchedulerCallback.'
+}
+if ($EnableNativeAotManagedWorkerOwnership -and -not $EnableNativeAotManagedGcProbe) {
+    throw 'NativeAot managed worker ownership validation requires -EnableNativeAotManagedGcProbe.'
 }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -1228,7 +1246,8 @@ if ($Scenario -eq 'NativeAotEventWait' -or $Scenario -eq 'ManagedKernelPhase11')
     $gccArguments += $multibyteSource
     $gccArguments += $multibyteAssembly
 }
-if ($EnableNativeAotSchedulerThreadLifecycle -or $PayloadMode -eq 'ManagedKernel') {
+if ($EnableNativeAotSchedulerThreadLifecycle -or
+    $EnableNativeAotManagedWorkerOwnership -or $PayloadMode -eq 'ManagedKernel') {
     # Phase 53P shares the Phase 53O attach/return/detach implementation with
     # the production managed driver worker; the diagnostic entry point remains
     # gated separately below.
@@ -1240,6 +1259,9 @@ if ($EnableNativeAotSchedulerCallback) { $gccArguments += '-DGXOS_ENABLE_NATIVEA
 if ($EnableNativeAotManagedGcProbe) { $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE' }
 if ($EnableNativeAotSchedulerThreadLifecycle) {
     $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE'
+}
+if ($EnableNativeAotManagedWorkerOwnership) {
+    $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP'
 }
 if ($EnablePhase53VGuardProbe) {
     $gccArguments += '-DGXOS_ENABLE_PHASE53V_GUARD_PROBE'

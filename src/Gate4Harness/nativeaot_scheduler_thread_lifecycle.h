@@ -26,8 +26,50 @@ typedef void (GXOS_PHASE53O_MS_ABI *GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK)(
 #define GXOS_NATIVEAOT_TLS_STACK_HIGH_OFFSET 0xB0U
 #define GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED 1U
 #define GXOS_NATIVEAOT_RUNTIME_THREAD_DETACHED 2U
+#define GXOS_NATIVEAOT_WORKER_OWNERSHIP_HISTORY_MAX 12U
+
+typedef enum {
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_FREE = 0,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED = 1,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNABLE = 2,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING = 3,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED = 4,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_DETACH_PENDING = 5,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_DETACHED = 6,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMABLE = 7,
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED = 8
+} GXOS_NATIVEAOT_WORKER_OWNERSHIP_STATE;
 
 typedef struct {
+    GXOS_NATIVEAOT_WORKER_OWNERSHIP_STATE ownership_state;
+    uint32_t ownership_transition_count;
+    uint32_t ownership_transition_failures;
+    uint32_t scheduler_slot;
+    uint32_t worker_identity;
+    uint16_t worker_generation;
+    uint16_t ownership_history_count;
+    uint8_t ownership_history[GXOS_NATIVEAOT_WORKER_OWNERSHIP_HISTORY_MAX];
+    uint8_t scheduler_owned;
+    uint8_t stack_owned;
+    uint8_t environment_owned;
+    uint8_t tls_fls_owned;
+    uint8_t runtime_thread_owned;
+    uint8_t managed_worker_object_owned;
+    uint8_t managed_root_survived;
+    uint8_t callback_registration_observed;
+    uint8_t vm_resources_owned;
+    uint8_t reserved_ownership[3];
+    uint64_t stack_reservation_base;
+    uint64_t stack_guard_base;
+    uint64_t stack_usable_low;
+    uint64_t stack_usable_high;
+    uint64_t saved_rsp;
+    uint64_t gs_base;
+    uint64_t teb_base;
+    uint64_t tls_vector_base;
+    uint64_t tls_block_base;
+    uint64_t guard_vm_identity;
+    uint64_t usable_vm_identity;
     GXOS_SCHEDULER_TCB *main_thread;
     GXOS_SCHEDULER_TCB *thread;
     uint32_t tls_index;
@@ -66,6 +108,12 @@ int gxos_nativeaot_scheduler_worker_prepare(
     uint32_t tls_index, uint32_t runtime_fls_slot,
     GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup);
 
+int gxos_nativeaot_scheduler_worker_mark_runnable(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
+
+int gxos_nativeaot_scheduler_worker_mark_running(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
+
 int gxos_nativeaot_scheduler_worker_attach(
     GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
     GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_bridge, int32_t input,
@@ -77,6 +125,12 @@ int gxos_nativeaot_scheduler_worker_invoke(
     int32_t *result, uint32_t *callback_status_out);
 
 int gxos_nativeaot_scheduler_worker_detach(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
+
+int gxos_nativeaot_scheduler_worker_note_reclaimable(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
+
+int gxos_nativeaot_scheduler_worker_note_reclaimed(
     GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
 
 int gxos_nativeaot_scheduler_worker_no_stale_context_overlap(
@@ -110,6 +164,9 @@ typedef struct {
 } GXOS_PHASE53O_PROBE;
 
 int gxos_nativeaot_scheduler_thread_lifecycle_probe(
+    GXOS_PHASE53O_PROBE *probe);
+
+int gxos_nativeaot_managed_worker_ownership_probe(
     GXOS_PHASE53O_PROBE *probe);
 
 #endif

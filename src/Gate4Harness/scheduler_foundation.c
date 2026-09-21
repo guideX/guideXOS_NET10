@@ -1119,6 +1119,16 @@ int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread)
     return 1;
 }
 
+uint32_t gxos_scheduler_thread_slot(const GXOS_SCHEDULER_TCB *thread)
+{
+    uint32_t index;
+    if (g_scheduler == 0 || thread == 0) return UINT32_MAX;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        if (&g_scheduler->threads[index] == thread) return index;
+    }
+    return UINT32_MAX;
+}
+
 int gxos_scheduler_validate_worker_snapshot(
     const GXOS_SCHEDULER_TCB *thread,
     const GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot)

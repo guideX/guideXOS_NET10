@@ -426,6 +426,7 @@ int gxos_scheduler_create_suspended_thread(GXOS_SCHEDULER *scheduler,
 int gxos_scheduler_resume_thread(GXOS_SCHEDULER_HANDLE handle,
                                  uint32_t *previous_suspend_count);
 int gxos_scheduler_validate_thread_context(const GXOS_SCHEDULER_TCB *thread);
+uint32_t gxos_scheduler_thread_slot(const GXOS_SCHEDULER_TCB *thread);
 int gxos_scheduler_validate_worker_snapshot(
     const GXOS_SCHEDULER_TCB *thread,
     const GXOS_SCHEDULER_REGISTER_SNAPSHOT *snapshot);

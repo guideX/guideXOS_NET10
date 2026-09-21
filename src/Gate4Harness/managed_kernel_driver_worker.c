@@ -220,6 +220,11 @@ static uintptr_t GXOS_SCHEDULER_MS_ABI worker_entry(void *argument)
         context->event_api == 0 || context->interrupt == 0) {
         return 1;
     }
+    if (!gxos_nativeaot_scheduler_worker_mark_running(
+            &context->nativeaot_lifecycle)) {
+        context->failure = 1;
+        goto worker_complete;
+    }
     if (!gxos_nativeaot_scheduler_worker_attach(
             &context->nativeaot_lifecycle, context->managed_bridge, 0,
             &attach_result, &attach_status)) {
@@ -386,6 +391,17 @@ int gxos_managed_kernel_driver_worker_initialize(
         context->thread = 0;
         return 0;
     }
+    if (!gxos_nativeaot_scheduler_worker_mark_runnable(
+            &context->nativeaot_lifecycle)) {
+        (void)gxos_scheduler_close_handle(context->worker_handle);
+        (void)gxos_scheduler_collect(scheduler);
+        (void)gxos_scheduler_close_handle(context->wake_event);
+        (void)gxos_scheduler_try_destroy_event(context->wake_event);
+        context->worker_handle = 0;
+        context->wake_event = 0;
+        context->thread = 0;
+        return 0;
+    }
     context->state = GXOS_MANAGED_KERNEL_DRIVER_WORKER_CREATED;
     worker_log(context,
                "GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_CREATED\r\n");
@@ -444,8 +460,12 @@ int gxos_managed_kernel_driver_worker_destroy(
     }
     scheduler = context->scheduler;
     thread = context->thread;
-    if (!gxos_scheduler_close_handle(context->worker_handle) ||
-        !gxos_scheduler_collect(scheduler) || thread->live != 0 ||
+    if (!gxos_nativeaot_scheduler_worker_note_reclaimable(
+            &context->nativeaot_lifecycle) ||
+        !gxos_scheduler_close_handle(context->worker_handle) ||
+        !gxos_scheduler_collect(scheduler) ||
+        !gxos_nativeaot_scheduler_worker_note_reclaimed(
+            &context->nativeaot_lifecycle) || thread->live != 0 ||
         thread->stack_base != 0 || thread->stack_limit != 0 ||
         thread->stack_pages_memory != 0 || thread->stack_canary_memory != 0 ||
         thread->gs_base != 0 || thread->tls_vector_base != 0 ||
