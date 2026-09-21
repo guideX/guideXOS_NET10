@@ -72,6 +72,16 @@ static int lifecycle_transition(
     return 1;
 }
 
+static int lifecycle_matches_current_thread(
+    const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    GXOS_SCHEDULER_TCB *thread;
+    if (lifecycle == 0 || (thread = lifecycle->thread) == 0) return 0;
+    return gxos_scheduler_thread_slot(thread) == lifecycle->scheduler_slot &&
+           thread->identity == lifecycle->worker_identity &&
+           thread->generation == lifecycle->worker_generation;
+}
+
 int gxos_nativeaot_scheduler_threadstore_count(uint64_t head,
                                                 uint64_t *last_out)
 {
@@ -181,6 +191,7 @@ int gxos_nativeaot_scheduler_worker_mark_runnable(
 {
     if (lifecycle == 0 || lifecycle->thread == 0 ||
         lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED ||
+        !lifecycle_matches_current_thread(lifecycle) ||
         !lifecycle->thread->live ||
         lifecycle->thread->state != GXOS_SCHEDULER_THREAD_RUNNABLE ||
         !lifecycle->thread->runnable_queued) {
@@ -198,6 +209,7 @@ int gxos_nativeaot_scheduler_worker_mark_running(
 {
     if (lifecycle == 0 || lifecycle->thread == 0 ||
         lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNABLE ||
+        !lifecycle_matches_current_thread(lifecycle) ||
         !lifecycle->thread->live ||
         lifecycle->thread->state != GXOS_SCHEDULER_THREAD_RUNNING ||
         gxos_scheduler_current_thread() != lifecycle->thread) {
@@ -214,6 +226,7 @@ static int lifecycle_current_thread_is_active(
     const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
 {
     return lifecycle != 0 && lifecycle->thread != 0 &&
+           lifecycle_matches_current_thread(lifecycle) &&
            gxos_scheduler_current_thread() == lifecycle->thread &&
            lifecycle->thread->live && !lifecycle->thread->is_boot_thread &&
            lifecycle->runtime_fls_slot < GXOS_SCHEDULER_FLS_SLOTS &&
@@ -288,6 +301,7 @@ int gxos_nativeaot_scheduler_worker_attach(
     if (lifecycle == 0 || managed_bridge == 0 || result == 0 ||
         lifecycle->attached || lifecycle->detached ||
         lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING ||
+        !lifecycle_matches_current_thread(lifecycle) ||
         lifecycle->runtime_fls_cleanup == 0 || lifecycle->thread == 0 ||
         lifecycle->main_runtime_thread == 0 ||
         gxos_scheduler_current_thread() != lifecycle->thread) {
@@ -322,6 +336,7 @@ int gxos_nativeaot_scheduler_worker_invoke(
     if (callback_status_out != 0) *callback_status_out = UINT32_MAX;
     if (lifecycle == 0 || managed_bridge == 0 || result == 0 ||
         lifecycle->detached || lifecycle->thread == 0 ||
+        !lifecycle_matches_current_thread(lifecycle) ||
         (lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING &&
          lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED) ||
         gxos_scheduler_current_thread() != lifecycle->thread) {
@@ -419,7 +434,8 @@ int gxos_nativeaot_scheduler_worker_note_reclaimable(
         return 0;
     }
     thread = lifecycle->thread;
-    if (!thread->live || thread == gxos_scheduler_current_thread() ||
+    if (!lifecycle_matches_current_thread(lifecycle) || !thread->live ||
+        thread == gxos_scheduler_current_thread() ||
         thread->state != GXOS_SCHEDULER_THREAD_TERMINATED ||
         thread->execution_refs != 0 || thread->runnable_queued ||
         thread->wait_record != 0) {
@@ -472,6 +488,7 @@ int gxos_nativeaot_scheduler_worker_no_stale_context_overlap(
     if (offending_context_out != 0) *offending_context_out = 0;
     if (lifecycle == 0 || !lifecycle->attached || lifecycle->runtime_thread == 0 ||
         object_address == 0 || object_size == 0 ||
+        !lifecycle_matches_current_thread(lifecycle) ||
         object_address > UINT64_MAX - object_size ||
         lifecycle_load_u64(lifecycle->runtime_thread,
                            GXOS_NATIVEAOT_THREAD_ALLOC_PTR_OFFSET) <= object_address) {

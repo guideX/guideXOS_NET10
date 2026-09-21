@@ -40,6 +40,24 @@ static void worker_log_hex(GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
     }
 }
 
+static void worker_discard_unpublished_thread(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_SCHEDULER *scheduler)
+{
+    GXOS_SCHEDULER_TCB *thread;
+    if (context == 0 || scheduler == 0) return;
+    if (context->worker_handle != 0) {
+        (void)gxos_scheduler_close_handle(context->worker_handle);
+    }
+    thread = context->thread;
+    if (thread != 0 &&
+        (thread->state == GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED ||
+         thread->state == GXOS_SCHEDULER_THREAD_RUNNABLE)) {
+        (void)gxos_scheduler_discard_created_thread(thread);
+    }
+    (void)gxos_scheduler_collect(scheduler);
+}
+
 static void worker_emit_lifecycle(
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context)
 {
@@ -378,10 +396,7 @@ int gxos_managed_kernel_driver_worker_initialize(
             context->thread, tls_index, runtime_fls_slot,
             runtime_fls_cleanup) ||
         !gxos_scheduler_resume_thread(context->worker_handle, 0)) {
-        if (context->worker_handle != 0) {
-            (void)gxos_scheduler_close_handle(context->worker_handle);
-            (void)gxos_scheduler_collect(scheduler);
-        }
+        worker_discard_unpublished_thread(context, scheduler);
         if (context->wake_event != 0) {
             (void)gxos_scheduler_close_handle(context->wake_event);
             (void)gxos_scheduler_try_destroy_event(context->wake_event);
@@ -393,8 +408,7 @@ int gxos_managed_kernel_driver_worker_initialize(
     }
     if (!gxos_nativeaot_scheduler_worker_mark_runnable(
             &context->nativeaot_lifecycle)) {
-        (void)gxos_scheduler_close_handle(context->worker_handle);
-        (void)gxos_scheduler_collect(scheduler);
+        worker_discard_unpublished_thread(context, scheduler);
         (void)gxos_scheduler_close_handle(context->wake_event);
         (void)gxos_scheduler_try_destroy_event(context->wake_event);
         context->worker_handle = 0;
