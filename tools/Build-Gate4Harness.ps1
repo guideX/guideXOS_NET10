@@ -14,6 +14,7 @@ param(
     [switch]$EnableNativeAotSchedulerThreadLifecycle,
     [switch]$EnableNativeAotManagedWorkerOwnership,
     [switch]$EnablePhase56PreAttachRollback,
+    [switch]$EnablePhase57PostAttachRollback,
     [switch]$EnablePhase53VGuardProbe,
     [switch]$EnableManagedKernelPhase27,
     [switch]$EnableManagedKernelPhase28,
@@ -58,10 +59,15 @@ $phase53oPayloadSha256 = '7ABDCB03E45E36615713937F34E5D4E055CBE094B70EEE74D844A4
 $phase53oPayloadSize = 730624
 $requiresCallbackPayload = $EnableNativeAotManagedCallback -or
     $EnableNativeAotSchedulerCallback -or $EnableNativeAotSchedulerThreadLifecycle -or
-    $EnableNativeAotManagedWorkerOwnership -or $EnablePhase56PreAttachRollback
+    $EnableNativeAotManagedWorkerOwnership -or $EnablePhase56PreAttachRollback -or
+    $EnablePhase57PostAttachRollback
 $requiresAuthoritativePayload = $EnableNativeAotManagedGcProbe -or
     $EnableNativeAotSchedulerThreadLifecycle -or $EnableNativeAotManagedWorkerOwnership -or
-    $EnablePhase56PreAttachRollback
+    $EnablePhase56PreAttachRollback -or $EnablePhase57PostAttachRollback
+
+if ($EnablePhase56PreAttachRollback -and $EnablePhase57PostAttachRollback) {
+    throw 'Phase 56 and Phase 57 diagnostic injection points must be selected exclusively.'
+}
 
 if ($PayloadMode -eq 'ManagedKernel' -and
     ($EnableNativeAotManagedCallback -or $EnableNativeAotSchedulerCallback -or
@@ -146,6 +152,28 @@ if ($EnablePhase56PreAttachRollback -and
 if ($EnablePhase56PreAttachRollback -and
     -not $EnableNativeAotSchedulerThreadLifecycle) {
     throw 'Phase 56 pre-attach rollback validation requires -EnableNativeAotSchedulerThreadLifecycle.'
+}
+if ($EnablePhase57PostAttachRollback -and $Scenario -ne 'NativeAotEventWait') {
+    throw 'Phase 57 post-attach rollback validation requires the NativeAotEventWait scenario.'
+}
+if ($EnablePhase57PostAttachRollback -and -not $EnableNativeAotStartup) {
+    throw 'Phase 57 post-attach rollback validation requires -EnableNativeAotStartup.'
+}
+if ($EnablePhase57PostAttachRollback -and
+    -not $EnableNativeAotManagedCallback) {
+    throw 'Phase 57 post-attach rollback validation requires -EnableNativeAotManagedCallback.'
+}
+if ($EnablePhase57PostAttachRollback -and
+    -not $EnableNativeAotSchedulerCallback) {
+    throw 'Phase 57 post-attach rollback validation requires -EnableNativeAotSchedulerCallback.'
+}
+if ($EnablePhase57PostAttachRollback -and
+    -not $EnableNativeAotManagedGcProbe) {
+    throw 'Phase 57 post-attach rollback validation requires -EnableNativeAotManagedGcProbe.'
+}
+if ($EnablePhase57PostAttachRollback -and
+    -not $EnableNativeAotSchedulerThreadLifecycle) {
+    throw 'Phase 57 post-attach rollback validation requires -EnableNativeAotSchedulerThreadLifecycle.'
 }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -1272,6 +1300,7 @@ if ($Scenario -eq 'NativeAotEventWait' -or $Scenario -eq 'ManagedKernelPhase11')
 }
 if ($EnableNativeAotSchedulerThreadLifecycle -or
     $EnableNativeAotManagedWorkerOwnership -or $EnablePhase56PreAttachRollback -or
+    $EnablePhase57PostAttachRollback -or
     $PayloadMode -eq 'ManagedKernel') {
     # Phase 53P shares the Phase 53O attach/return/detach implementation with
     # the production managed driver worker; the diagnostic entry point remains
@@ -1291,6 +1320,12 @@ if ($EnableNativeAotManagedWorkerOwnership) {
 if ($EnablePhase56PreAttachRollback) {
     $gccArguments += '-DGXOS_ENABLE_PHASE56_FAILURE_INJECTION'
     $gccArguments += '-DGXOS_ENABLE_PHASE56_PREATTACH_ROLLBACK'
+}
+if ($EnablePhase57PostAttachRollback) {
+    # Reuse the Phase 56 single-shot, generation-aware injection mechanism;
+    # the Phase 57 point is the only executable point in this configuration.
+    $gccArguments += '-DGXOS_ENABLE_PHASE56_FAILURE_INJECTION'
+    $gccArguments += '-DGXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK'
 }
 if ($EnablePhase53VGuardProbe) {
     $gccArguments += '-DGXOS_ENABLE_PHASE53V_GUARD_PROBE'

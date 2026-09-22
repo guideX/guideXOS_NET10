@@ -31,7 +31,8 @@ typedef void (GXOS_PHASE53O_MS_ABI *GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK)(
 #ifdef GXOS_ENABLE_PHASE56_FAILURE_INJECTION
 typedef enum {
     GXOS_NATIVEAOT_FAILURE_INJECTION_NONE = 0,
-    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_WORKER_PREPARE = 1
+    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_WORKER_PREPARE = 1,
+    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_RUNTIME_ATTACH = 2
 } GXOS_NATIVEAOT_FAILURE_INJECTION_POINT;
 
 typedef enum {
@@ -102,6 +103,8 @@ typedef struct {
     GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup;
     uint32_t attached;
     uint32_t detached;
+    uint32_t runtime_attach_count;
+    uint32_t runtime_detach_count;
     uint64_t main_runtime_thread;
     uint64_t runtime_thread;
     uint64_t runtime_state_before;
@@ -213,6 +216,11 @@ gxos_nativeaot_phase56_failure_record(void);
 
 #ifdef GXOS_ENABLE_PHASE56_PREATTACH_ROLLBACK
 int gxos_nativeaot_phase56_preattach_rollback_probe(
+    GXOS_PHASE53O_PROBE *probe);
+#endif
+
+#ifdef GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK
+int gxos_nativeaot_phase57_postattach_rollback_probe(
     GXOS_PHASE53O_PROBE *probe);
 #endif
 
