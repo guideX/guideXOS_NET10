@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)] [string]$GateDirectory,
     [Parameter(Mandatory = $true)] [string]$EvidenceDirectory,
     [Parameter(Mandatory = $true)] [string]$PayloadSha256,
+    [string]$QemuPath = '',
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 120
 )
@@ -58,14 +59,21 @@ Require ($expectedHash -match '^[0-9A-F]{64}$') 'Payload SHA-256 must be 64 hex 
 Require ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedHash) 'Staged Phase 53O payload hash is not the captured identity.'
 Require (!(Test-Path -LiteralPath $evidence)) "Evidence directory already exists: $evidence"
 
-$qemuCommand = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue
-$qemu = if ($null -ne $qemuCommand) { [IO.Path]::GetFullPath($qemuCommand.Source) } else { 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
-Require (Test-Path -LiteralPath $qemu) 'qemu-system-x86_64.exe is required.'
+$qemu = if ($QemuPath -ne '') {
+    [IO.Path]::GetFullPath($QemuPath)
+} else {
+    $qemuCommand = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue
+    if ($null -ne $qemuCommand) { [IO.Path]::GetFullPath($qemuCommand.Source) } else { 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
+}
+Require (Test-Path -LiteralPath $qemu) 'Selected QEMU executable is required.'
+$qemuProcessName = [IO.Path]::GetFileNameWithoutExtension($qemu)
+Require (@(Get-Process -Name $qemuProcessName -ErrorAction SilentlyContinue).Count -eq 0) `
+    "A pre-existing selected QEMU process is present: $qemuProcessName."
 $share = Join-Path (Split-Path -Parent $qemu) 'share'
 $ovmf = Join-Path $share 'edk2-x86_64-code.fd'
 $varsTemplate = Join-Path $share 'edk2-i386-vars.fd'
 Require ((Test-Path -LiteralPath $ovmf) -and (Test-Path -LiteralPath $varsTemplate)) 'OVMF firmware is required.'
-$baselineQemuIds = @(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue |
+$baselineQemuIds = @(Get-Process -Name $qemuProcessName -ErrorAction SilentlyContinue |
     ForEach-Object { $_.Id })
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
 
@@ -117,7 +125,7 @@ try {
 } finally {
     foreach ($process in $owned) { Stop-OwnedQemu $process }
 }
-$unexpectedQemu = @(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue |
+$unexpectedQemu = @(Get-Process -Name $qemuProcessName -ErrorAction SilentlyContinue |
     Where-Object { $baselineQemuIds -notcontains $_.Id })
 Require ($unexpectedQemu.Count -eq 0) 'QEMU cleanup failed.'
 Write-Output "NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE_PAYLOAD_SHA256=$expectedHash"

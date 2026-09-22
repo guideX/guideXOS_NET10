@@ -28,6 +28,31 @@ typedef void (GXOS_PHASE53O_MS_ABI *GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK)(
 #define GXOS_NATIVEAOT_RUNTIME_THREAD_DETACHED 2U
 #define GXOS_NATIVEAOT_WORKER_OWNERSHIP_HISTORY_MAX 12U
 
+#ifdef GXOS_ENABLE_PHASE56_FAILURE_INJECTION
+typedef enum {
+    GXOS_NATIVEAOT_FAILURE_INJECTION_NONE = 0,
+    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_WORKER_PREPARE = 1
+} GXOS_NATIVEAOT_FAILURE_INJECTION_POINT;
+
+typedef enum {
+    GXOS_NATIVEAOT_FAILURE_INJECTION_DISARMED = 0,
+    GXOS_NATIVEAOT_FAILURE_INJECTION_ARMED = 1,
+    GXOS_NATIVEAOT_FAILURE_INJECTION_FIRED = 2
+} GXOS_NATIVEAOT_FAILURE_INJECTION_STATE;
+
+typedef struct {
+    GXOS_NATIVEAOT_FAILURE_INJECTION_POINT point;
+    GXOS_NATIVEAOT_FAILURE_INJECTION_STATE state;
+    uint32_t arm_count;
+    uint32_t fire_count;
+    uint32_t mismatch_count;
+    uint32_t scheduler_slot;
+    uint32_t worker_identity;
+    uint16_t worker_generation;
+    uint16_t reserved;
+} GXOS_NATIVEAOT_FAILURE_INJECTION_RECORD;
+#endif
+
 typedef enum {
     GXOS_NATIVEAOT_WORKER_OWNERSHIP_FREE = 0,
     GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED = 1,
@@ -133,6 +158,13 @@ int gxos_nativeaot_scheduler_worker_note_reclaimable(
 int gxos_nativeaot_scheduler_worker_note_reclaimed(
     GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
 
+/* A prepared worker has no runtime ownership and therefore cannot traverse
+   the normal RuntimeDetached -> Reclaimable edge.  This records the result
+   of the scheduler's close -> discard -> collect rollback only after the TCB
+   has been fully zeroed. */
+int gxos_nativeaot_scheduler_worker_note_pre_runtime_reclaimed(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
+
 int gxos_nativeaot_scheduler_worker_no_stale_context_overlap(
     const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
     uint64_t object_address, uint64_t object_size,
@@ -168,5 +200,20 @@ int gxos_nativeaot_scheduler_thread_lifecycle_probe(
 
 int gxos_nativeaot_managed_worker_ownership_probe(
     GXOS_PHASE53O_PROBE *probe);
+
+#ifdef GXOS_ENABLE_PHASE56_FAILURE_INJECTION
+int gxos_nativeaot_phase56_failure_arm(
+    GXOS_NATIVEAOT_FAILURE_INJECTION_POINT point,
+    const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
+int gxos_nativeaot_phase56_failure_try_fire(
+    const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
+const GXOS_NATIVEAOT_FAILURE_INJECTION_RECORD *
+gxos_nativeaot_phase56_failure_record(void);
+#endif
+
+#ifdef GXOS_ENABLE_PHASE56_PREATTACH_ROLLBACK
+int gxos_nativeaot_phase56_preattach_rollback_probe(
+    GXOS_PHASE53O_PROBE *probe);
+#endif
 
 #endif

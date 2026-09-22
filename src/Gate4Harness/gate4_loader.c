@@ -22749,6 +22749,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         if (!gxos_nativeaot_scheduler_thread_lifecycle_probe(&phase53o_probe)) {
             fail("nativeaot-scheduler-thread-lifecycle");
         }
+#ifdef GXOS_ENABLE_PHASE56_PREATTACH_ROLLBACK
+        if (!gxos_nativeaot_phase56_preattach_rollback_probe(&phase53o_probe)) {
+            fail("nativeaot-phase56-preattach-rollback");
+        }
+#endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP
         if (!gxos_nativeaot_managed_worker_ownership_probe(&phase53o_probe)) {
             fail("nativeaot-managed-worker-ownership");
@@ -22758,6 +22763,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_GC_WORKER_RETURN_OK=1\r\n");
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP
     serial_text("GXOS_NET10:MANAGED_WORKER_OWNERSHIP_OK=1\r\n");
+#endif
+#ifdef GXOS_ENABLE_PHASE56_PREATTACH_ROLLBACK
+    serial_text("GXOS_NET10:MANAGED_WORKER_PREATTACH_ROLLBACK_OK=1\r\n");
 #endif
 #elif defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK)
     nativeaot_scheduler_callback_probe();
@@ -22801,7 +22809,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_PROCESS_INITIALIZATION_CALLS=0x",
                      nativeaot_process_entry_calls);
     serial_text("\r\n");
-#ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP
+#ifdef GXOS_ENABLE_PHASE56_PREATTACH_ROLLBACK
+    if (g_managed_callback_bridge.invocation_count != 16U ||
+#elif defined(GXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP)
     if (g_managed_callback_bridge.invocation_count != 28U ||
 #elif defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE)
     if (g_managed_callback_bridge.invocation_count != 4U ||

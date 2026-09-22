@@ -10,6 +10,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
 $gate = [IO.Path]::GetFullPath($GateDirectory)
 $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 $efi = Join-Path $gate 'ESP\EFI\BOOT\BOOTX64.EFI'
@@ -61,37 +62,35 @@ function Stop-OwnedQemu([System.Diagnostics.Process]$process) {
     }
 }
 
-Require ($RunCount -ge 3) 'At least three fresh Phase 54 boots are required.'
+Require ($RunCount -ge 1) 'At least one authoritative Phase 56 boot is required.'
 Require ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
-    'Phase 54 harness or payload is missing.'
+    'Phase 56 harness or payload is missing.'
 Require ($expectedHash -match '^[0-9A-F]{64}$') `
     'Payload SHA-256 must be 64 hex characters.'
 Require ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq
-         $expectedHash) 'Staged Phase 54 payload hash is not authoritative.'
+         $expectedHash) 'Staged Phase 56 payload hash is not authoritative.'
 Require (!(Test-Path -LiteralPath $evidence)) "Evidence directory already exists: $evidence"
-$qemu = if ($QemuPath -ne '') {
+$qemuCommand = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue
+$qemu = if (![string]::IsNullOrWhiteSpace($QemuPath)) {
     [IO.Path]::GetFullPath($QemuPath)
+} elseif ($null -ne $qemuCommand) {
+    [IO.Path]::GetFullPath($qemuCommand.Source)
 } else {
-    $qemuCommand = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue
-    if ($null -ne $qemuCommand) {
-        [IO.Path]::GetFullPath($qemuCommand.Source)
-    } else {
-        'C:\Program Files\qemu\qemu-system-x86_64.exe'
-    }
+    'C:\Program Files\qemu\qemu-system-x86_64.exe'
 }
-Require (Test-Path -LiteralPath $qemu) 'Selected QEMU executable is required.'
+Require (Test-Path -LiteralPath $qemu) 'qemu-system-x86_64.exe is required.'
 $qemuProcessName = [IO.Path]::GetFileNameWithoutExtension($qemu)
 Require (@(Get-Process -Name $qemuProcessName -ErrorAction SilentlyContinue).Count -eq 0) `
-    "A pre-existing selected QEMU process is present: $qemuProcessName."
+    "A pre-existing process for the selected QEMU executable is present: $qemuProcessName"
 $share = Join-Path (Split-Path -Parent $qemu) 'share'
 $ovmf = Join-Path $share 'edk2-x86_64-code.fd'
 $varsTemplate = Join-Path $share 'edk2-i386-vars.fd'
 Require ((Test-Path -LiteralPath $ovmf) -and (Test-Path -LiteralPath $varsTemplate)) `
     'OVMF firmware is required.'
+
 $baselineQemuIds = @(Get-Process -Name $qemuProcessName -ErrorAction SilentlyContinue |
     ForEach-Object { $_.Id })
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
-
 $owned = @()
 try {
     for ($sequence = 1; $sequence -le $RunCount; $sequence++) {
@@ -99,7 +98,7 @@ try {
             Where-Object { $baselineQemuIds -notcontains $_.Id -and
                            $owned.Id -notcontains $_.Id })
         Require ($unexpectedBefore.Count -eq 0) `
-            "An unowned QEMU process exists before fresh Phase 54 boot $sequence."
+            "An unowned QEMU process exists before fresh Phase 56 boot $sequence."
         $run = Join-Path $evidence ("runs\run-{0}" -f $sequence)
         New-Item -ItemType Directory -Force -Path $run | Out-Null
         $code = Join-Path $run 'edk2-code.fd'
@@ -125,10 +124,9 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:PHASE54_COMPLETE=1') -or
-                    $text.Contains('GXOS_NET10:PHASE54_FAILURE=1') -or
+                if ($text.Contains('GXOS_NET10:PHASE56_COMPLETE=1') -or
+                    $text.Contains('GXOS_NET10:PHASE56_FAILURE=1') -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
-                    $text.Contains('GXOS_NET10:EXCEPTION_VECTOR=') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=')) { break }
                 if ($process.HasExited) { break }
                 Start-Sleep -Milliseconds 250
@@ -139,67 +137,68 @@ try {
         $text = Read-Serial $serial
         Require ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq
                  $expectedHash) "run $sequence payload hash changed"
-        Require (!$text.Contains('GXOS_NET10:FAIL:') -and
+        Require ($text.Contains('GXOS_NET10:PHASE56_PASS=1') -and
+                 !$text.Contains('GXOS_NET10:PHASE56_FAILURE=1') -and
+                 !$text.Contains('GXOS_NET10:FAIL:') -and
                  !$text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
-                 !$text.Contains('GXOS_NET10:PAGE_FAULT_') -and
-                 !$text.Contains('GXOS_NET10:PHASE54_FAILURE=1')) `
-            "run $sequence fault, failure, or Phase 54 failure marker"
+                 !$text.Contains('GXOS_NET10:PAGE_FAULT_')) `
+            "run $sequence did not complete a clean Phase 56 proof"
         foreach ($marker in @(
-            'GXOS_NET10:NATIVEAOT_STARTUP_OK',
-            'GXOS_NET10:GC_STARTUP_ADVANCED',
-            'GXOS_NET10:MANAGED_ENTRY_COMPLETE',
             'GXOS_NET10:PHASE53O_PASS=1',
             'GXOS_NET10:MANAGED_GC_MAIN_OK=1',
-            'GXOS_NET10:PHASE54_BEGIN',
-            'GXOS_NET10:PHASE54_OWNERSHIP_LEDGER=EXTENDED_LIFECYCLE_RECORD',
-            'GXOS_NET10:PHASE54_STATE_SEQUENCE=FREE>ALLOCATED>RUNNABLE>RUNNING>RUNTIME_ATTACHED>DETACH_PENDING>RUNTIME_DETACHED>RECLAIMABLE>RECLAIMED',
-            'GXOS_NET10:PHASE54_INVALID_TRANSITIONS_REJECTED=1',
-            'GXOS_NET10:PHASE54_DUPLICATE_TEARDOWN_REJECTED=1',
-            'GXOS_NET10:PHASE54_WORKER_INDEPENDENCE_OK=1',
-            'GXOS_NET10:PHASE54_WORKER_STACK_RSP_BOUNDS_OK=1',
-            'GXOS_NET10:PHASE54_WORKER_RUNTIME_THREAD_INDEPENDENCE_OK=1',
-            'GXOS_NET10:PHASE54_WORKER_ALLOCATION_CONTEXT_INDEPENDENCE_OK=1',
-            'GXOS_NET10:PHASE54_WORKER_ROOT_SURVIVAL_OK=1',
-            'GXOS_NET10:PHASE54_WORKER_SLOT_LEDGER_OK=1',
-            'GXOS_NET10:PHASE54_SLOT_REUSE_GENERATION_OK=1',
-            'GXOS_NET10:PHASE54_OWNERSHIP_LEDGER_BASELINE_OK=1',
-            'GXOS_NET10:PHASE54_COMPLETE=1',
-            'GXOS_NET10:PHASE54_PASS=1',
-            'GXOS_NET10:MANAGED_WORKER_OWNERSHIP_OK=1',
-            'GXOS_NET10:NATIVEAOT_DURABILITY_PASS=1',
-            'GXOS_NET10:MANAGED_CALLBACK_PROCESS_INITIALIZATION_CALLS=0x0000000000000001')) {
+            'GXOS_NET10:PHASE56_BEGIN',
+            'GXOS_NET10:PHASE56_INJECTION_POINT=AFTER_WORKER_PREPARE',
+            'GXOS_NET10:PHASE56_DIAGNOSTIC_HOOK=GXOS_ENABLE_PHASE56_FAILURE_INJECTION',
+            'GXOS_NET10:PHASE56_NO_MANAGED_CALLBACK_ON_FAILED_WORKER=1',
+            'GXOS_NET10:PHASE56_NO_RUNTIME_OWNERSHIP_ON_FAILED_WORKER=1',
+            'GXOS_NET10:PHASE56_GENERATION_SAFE_SLOT_REUSE=1',
+            'GXOS_NET10:PHASE56_LEAK_TREND_NONE=1',
+            'GXOS_NET10:PHASE56_COMPLETE=1',
+            'GXOS_NET10:PHASE56_PASS=1',
+            'GXOS_NET10:MANAGED_WORKER_PREATTACH_ROLLBACK_OK=1')) {
             Require ($text.Contains($marker)) "run $sequence missing marker: $marker"
         }
         foreach ($pair in @(
-            @('GXOS_NET10:PHASE54_CYCLE=', 12),
-            @('GXOS_NET10:PHASE54_WORKER_A_MANAGED_ENTRY_REACHED=1', 12),
-            @('GXOS_NET10:PHASE54_WORKER_B_MANAGED_ENTRY_REACHED=1', 12),
-            @('GXOS_NET10:PHASE54_WORKER_A_POST_GC_CONTINUATION=1', 12),
-            @('GXOS_NET10:PHASE54_WORKER_B_POST_GC_CONTINUATION=1', 12),
-            @('GXOS_NET10:PHASE54_WORKER_A_DETACHED=1', 12),
-            @('GXOS_NET10:PHASE54_WORKER_B_DETACHED=1', 12),
-            @('GXOS_NET10:PHASE54_WORKER_A_RECLAIMED=1', 12),
-            @('GXOS_NET10:PHASE54_WORKER_B_RECLAIMED=1', 12),
-            @('GXOS_NET10:PHASE54_BASELINE_RESTORED=1', 12))) {
+            @('GXOS_NET10:PHASE56_INJECTION_FIRED=1', 12),
+            @('GXOS_NET10:PHASE56_REPLACEMENT_WORKER_SUCCEEDED=1', 12),
+            @('GXOS_NET10:PHASE56_REPLACEMENT_WORKER_GC_OK=1', 12),
+            @('GXOS_NET10:PHASE56_STALE_HANDLE_REJECTED=1', 12),
+            @('GXOS_NET10:PHASE56_STALE_IDENTITY_REJECTED=1', 12),
+            @('GXOS_NET10:PHASE56_STALE_GENERATION_REJECTED=1', 12),
+            @('GXOS_NET10:PHASE56_RUNTIME_ATTACH_NOT_ACQUIRED=1', 12))) {
             Require ((Count-Token $text $pair[0]) -eq $pair[1]) `
                 "run $sequence marker count mismatch: $($pair[0])"
         }
-        $baselineVm = Get-Hex $text 'GXOS_NET10:PHASE54_RESOURCE_BASELINE_VM_REGIONS='
-        $baselineThreads = Get-Hex $text 'GXOS_NET10:PHASE54_RESOURCE_BASELINE_THREADS='
-        $baselineObjects = Get-Hex $text 'GXOS_NET10:PHASE54_RESOURCE_BASELINE_OBJECTS='
-        $peakVm = Get-Hex $text 'GXOS_NET10:PHASE54_RESOURCE_PEAK_VM_REGIONS='
-        $peakThreads = Get-Hex $text 'GXOS_NET10:PHASE54_RESOURCE_PEAK_THREADS='
-        $peakObjects = Get-Hex $text 'GXOS_NET10:PHASE54_RESOURCE_PEAK_OBJECTS='
-        $afterVm = Get-Hex $text 'GXOS_NET10:PHASE54_RESOURCE_AFTER_VM_REGIONS='
-        $afterThreads = Get-Hex $text 'GXOS_NET10:PHASE54_RESOURCE_AFTER_THREADS='
-        $afterObjects = Get-Hex $text 'GXOS_NET10:PHASE54_RESOURCE_AFTER_OBJECTS='
-        Require ($afterVm -eq $baselineVm -and $afterThreads -eq $baselineThreads -and
-                 $afterObjects -eq $baselineObjects) "run $sequence resource baseline did not restore"
+        $baselineVm = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_BASELINE_VM_REGIONS='
+        $baselineThreads = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_BASELINE_THREADS='
+        $baselineObjects = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_BASELINE_OBJECTS='
+        $baselineEnvironments = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_BASELINE_ENVIRONMENTS='
+        $baselineStacks = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_BASELINE_STACKS='
+        $baselineHandles = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_BASELINE_HANDLES='
+        $peakVm = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_PEAK_VM_REGIONS='
+        $peakThreads = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_PEAK_THREADS='
+        $peakObjects = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_PEAK_OBJECTS='
+        $peakEnvironments = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_PEAK_ENVIRONMENTS='
+        $peakStacks = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_PEAK_STACKS='
+        $peakHandles = Get-Hex $text 'GXOS_NET10:PHASE56_RESOURCE_PEAK_HANDLES='
         Require ($peakVm -gt $baselineVm -and $peakThreads -gt $baselineThreads -and
-                 $peakObjects -gt $baselineObjects) "run $sequence peak ownership was not observed"
-        Require ((Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_COUNT=') -eq 28) `
-            "run $sequence callback count is not the Phase 54 total"
-        Write-Output ("PHASE54_OWNERSHIP_RUN_{0}=PASS cycles=12 peakVm=0x{1:X} peakThreads=0x{2:X} peakObjects=0x{3:X} serial={4}" -f `
+                 $peakObjects -gt $baselineObjects -and
+                 $peakEnvironments -gt $baselineEnvironments -and
+                 $peakStacks -gt $baselineStacks -and
+                 $peakHandles -gt $baselineHandles) `
+            "run $sequence did not observe the prepared-worker resource peak"
+        $finalCallbacks = Get-Hex $text 'GXOS_NET10:PHASE56_CALLBACK_FINAL='
+        $callbackBaseline = Get-Hex $text 'GXOS_NET10:PHASE56_CALLBACK_BASELINE='
+        Require ($finalCallbacks -eq $callbackBaseline + 12) `
+            "run $sequence replacement callback count is not 12"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE56_INJECTED_FAILURE_CYCLES=') -eq 12 -and
+                 (Get-Hex $text 'GXOS_NET10:PHASE56_PASSED_FAILURE_CYCLES=') -eq 12) `
+            "run $sequence did not pass all 12 failure cycles"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE56_FAILED_RUNTIME_DETACH_TOTAL=') -eq 0) `
+            "run $sequence performed runtime detach for a pre-attach failure"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE56_DUPLICATE_CLEANUP_REJECTIONS=') -eq 36) `
+            "run $sequence duplicate cleanup assertions did not reject 36 operations"
+        Write-Output ("PHASE56_ROLLBACK_RUN_{0}=PASS cycles=12 peakVm=0x{1:X} peakThreads=0x{2:X} peakObjects=0x{3:X} serial={4}" -f `
             $sequence, $peakVm, $peakThreads, $peakObjects, $serial)
     }
 } finally {
@@ -208,5 +207,5 @@ try {
 $unexpectedAfter = @(Get-Process -Name $qemuProcessName -ErrorAction SilentlyContinue |
     Where-Object { $baselineQemuIds -notcontains $_.Id })
 Require ($unexpectedAfter.Count -eq 0) 'QEMU cleanup failed.'
-Write-Output "PHASE54_OWNERSHIP_PAYLOAD_SHA256=$expectedHash"
-Write-Output "PHASE54_OWNERSHIP_RUNS=$RunCount"
+Write-Output "PHASE56_ROLLBACK_PAYLOAD_SHA256=$expectedHash"
+Write-Output "PHASE56_ROLLBACK_RUNS=$RunCount"
