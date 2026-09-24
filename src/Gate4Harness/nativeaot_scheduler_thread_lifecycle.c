@@ -2470,6 +2470,72 @@ static int phase58_injection_state_valid(
 }
 #endif
 
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+static int phase59_injection_state_valid(
+    const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    GXOS_SCHEDULER_TCB *thread;
+    if (lifecycle == 0 || lifecycle->thread == 0 ||
+        lifecycle->ownership_state !=
+            GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED ||
+        !lifecycle->attached || lifecycle->detached ||
+        lifecycle->runtime_attach_count != 1U ||
+        lifecycle->runtime_detach_count != 0U ||
+        lifecycle->runtime_thread == 0 || !lifecycle->runtime_thread_owned ||
+        !lifecycle->managed_worker_object_owned ||
+        !lifecycle->managed_root_owned ||
+        !lifecycle->managed_root_survived ||
+        lifecycle->managed_root_identity == 0 ||
+        lifecycle->managed_root_publication_count != 1U ||
+        lifecycle->managed_root_release_count != 0U ||
+        !lifecycle->callback_registration_observed ||
+        lifecycle->runtime_state_before !=
+            GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED ||
+        lifecycle->runtime_transition_frame != UINT64_MAX ||
+        lifecycle->allocation_context == 0 ||
+        !lifecycle_matches_current_thread(lifecycle)) {
+        return 0;
+    }
+    thread = lifecycle->thread;
+    return thread->live && !thread->is_boot_thread &&
+           thread->state == GXOS_SCHEDULER_THREAD_RUNNING &&
+           gxos_scheduler_current_thread() == thread &&
+           lifecycle->scheduler_owned && lifecycle->stack_owned &&
+           lifecycle->environment_owned && lifecycle->tls_fls_owned &&
+           lifecycle->vm_resources_owned &&
+           lifecycle->stack_reservation_base != 0 &&
+           lifecycle->stack_guard_base != 0 &&
+           lifecycle->stack_usable_low != 0 &&
+           lifecycle->stack_usable_high != 0 && lifecycle->gs_base != 0 &&
+           lifecycle->teb_base != 0 && lifecycle->tls_vector_base != 0 &&
+           lifecycle->tls_block_base != 0 && lifecycle->guard_vm_identity != 0 &&
+           lifecycle->usable_vm_identity != 0 &&
+           thread->stack_contract.guard_nonpresent &&
+           thread->stack_contract.reservation_base ==
+               lifecycle->stack_reservation_base &&
+           thread->stack_contract.guard_base == lifecycle->stack_guard_base &&
+           thread->stack_contract.usable_stack_low ==
+               lifecycle->stack_usable_low &&
+           thread->stack_contract.usable_stack_high ==
+               lifecycle->stack_usable_high &&
+           thread->gs_base == lifecycle->gs_base &&
+           thread->teb_base == lifecycle->teb_base &&
+           thread->tls_vector_base == lifecycle->tls_vector_base &&
+           thread->tls_block_base == lifecycle->tls_block_base &&
+           thread->context.rsp >= lifecycle->stack_usable_low &&
+           thread->context.rsp <= lifecycle->stack_usable_high &&
+           thread->fls_values[lifecycle->runtime_fls_slot] ==
+               lifecycle->runtime_thread &&
+           lifecycle_load_u64(lifecycle->runtime_thread,
+                              GXOS_NATIVEAOT_TLS_STATE_FLAGS_OFFSET) ==
+               GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED &&
+           lifecycle->runtime_stack_low ==
+               thread->stack_contract.reservation_base &&
+           lifecycle->runtime_stack_high == thread->stack_limit &&
+           lifecycle->allocation_context == thread->tls_block_base + 0x38U;
+}
+#endif
+
 #ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
 #define PHASE58_CYCLE_COUNT 12U
 
@@ -3239,6 +3305,823 @@ int gxos_nativeaot_phase58_postroot_rollback_probe(
 }
 #endif
 
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+#define PHASE59_CYCLE_COUNT 12U
+
+typedef struct {
+    GXOS_PHASE53O_PROBE *probe;
+    uint32_t cycle;
+    GXOS_SCHEDULER_HANDLE failed_handle;
+    GXOS_SCHEDULER_TCB *failed_thread;
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE failed_lifecycle;
+    GXOS_SCHEDULER_HANDLE replacement_handle;
+    GXOS_SCHEDULER_TCB *replacement_thread;
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE replacement_lifecycle;
+    uint32_t replacement_input;
+    uint32_t replacement_seed;
+    uint32_t failed_root_token;
+    uint32_t replacement_root_token;
+    int32_t failed_callback_result;
+    int32_t failed_root_publish_result;
+    int32_t failed_root_validate_before_result;
+    int32_t failed_gc_result;
+    int32_t failed_root_validate_after_result;
+    int32_t failed_root_release_result;
+    int32_t replacement_callback_result;
+    int32_t replacement_root_publish_result;
+    int32_t replacement_stale_root_result;
+    int32_t replacement_root_validate_before_result;
+    int32_t replacement_gc_result;
+    int32_t replacement_root_validate_after_result;
+    int32_t replacement_root_release_result;
+    uint32_t failed_callback_status;
+    uint32_t failed_root_publish_status;
+    uint32_t failed_root_validate_before_status;
+    uint32_t failed_gc_status;
+    uint32_t failed_root_validate_after_status;
+    uint32_t failed_root_release_status;
+    uint32_t replacement_callback_status;
+    uint32_t replacement_root_publish_status;
+    uint32_t replacement_stale_root_status;
+    uint32_t replacement_root_validate_before_status;
+    uint32_t replacement_gc_status;
+    uint32_t replacement_root_validate_after_status;
+    uint32_t replacement_root_release_status;
+    uint32_t failed_gc_delta;
+    uint32_t failed_gc_generation;
+    uint32_t failed_gc_checksum;
+    uint32_t replacement_gc_delta;
+    uint32_t replacement_gc_generation;
+    uint32_t replacement_gc_checksum;
+    uint32_t failed_gc_before;
+    uint32_t failed_gc_after;
+    uint32_t replacement_gc_before;
+    uint32_t replacement_gc_after;
+    uint32_t prepared_vm;
+    uint32_t prepared_threads;
+    uint32_t prepared_objects;
+    uint32_t attached_vm;
+    uint32_t attached_threads;
+    uint32_t attached_objects;
+    uint32_t root_published_vm;
+    uint32_t root_published_threads;
+    uint32_t root_published_objects;
+    uint32_t post_gc_vm;
+    uint32_t post_gc_threads;
+    uint32_t post_gc_objects;
+    uint32_t root_released_vm;
+    uint32_t root_released_threads;
+    uint32_t root_released_objects;
+    uint32_t final_vm;
+    uint32_t final_threads;
+    uint32_t final_objects;
+    uint64_t failed_pre_gc_root_identity;
+    uint64_t failed_post_gc_root_identity;
+    uint64_t replacement_pre_gc_root_identity;
+    uint64_t replacement_post_gc_root_identity;
+    int failure;
+} GXOS_PHASE59_CYCLE;
+
+static GXOS_PHASE59_CYCLE g_phase59_cycle;
+
+static void phase59_text(GXOS_PHASE53O_PROBE *probe, const char *text)
+{
+    probe->log_text(text);
+}
+
+static void phase59_hex(GXOS_PHASE53O_PROBE *probe,
+                        const char *name, uint64_t value)
+{
+    probe->log_hex(name, value);
+    probe->log_text("\r\n");
+}
+
+static uint32_t phase59_live_threads(const GXOS_SCHEDULER *scheduler)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        if (scheduler->threads[index].live) ++count;
+    }
+    return count;
+}
+
+static uint32_t phase59_live_objects(const GXOS_SCHEDULER *scheduler)
+{
+    uint32_t index;
+    uint32_t count = 0;
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        if (scheduler->objects[index].live) ++count;
+    }
+    return count;
+}
+
+static int phase59_fail(GXOS_PHASE59_CYCLE *cycle)
+{
+    cycle->failure = 1;
+    phase59_text(cycle->probe, "GXOS_NET10:PHASE59_FAILURE=1\r\n");
+    return 0;
+}
+
+static int phase59_root_validate(
+    GXOS_PHASE59_CYCLE *cycle,
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    uint32_t token, GXOS_NATIVEAOT_CALLBACK_BRIDGE *bridge,
+    int32_t *result, uint32_t *status)
+{
+    phase59_text(cycle->probe, "GXOS_NET10:PHASE59_ROOT_VALIDATE_BEGIN=1\r\n");
+    cycle->probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            lifecycle, bridge, (int32_t)token, result, status) ||
+        *status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        (uint32_t)*result != (0x5A000000U | token)) {
+        return 0;
+    }
+    cycle->probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    return 1;
+}
+
+static uintptr_t GXOS_PHASE53O_MS_ABI
+phase59_failed_worker_entry(void *argument)
+{
+    GXOS_PHASE59_CYCLE *cycle = (GXOS_PHASE59_CYCLE *)argument;
+    GXOS_PHASE53O_PROBE *probe = cycle->probe;
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT snapshot = {0};
+    GXOS_NATIVEAOT_FAILURE_INJECTION_RECORD const *injection;
+    uint32_t callback_low;
+    int duplicate_release_rejected;
+
+    cycle->failed_thread = thread;
+    gxos_scheduler_capture_registers(&snapshot);
+    if (thread == 0 || !gxos_nativeaot_scheduler_worker_mark_running(
+            &cycle->failed_lifecycle) ||
+        !gxos_scheduler_validate_worker_snapshot(thread, &snapshot)) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    phase59_text(probe, "GXOS_NET10:PHASE59_FAILED_WORKER_RUNNING=1\r\n");
+    cycle->failed_gc_before = probe->gc_bridge->invocation_count;
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->failed_lifecycle, probe->callback_bridge, 0x59,
+            &cycle->failed_callback_result,
+            &cycle->failed_callback_status)) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    callback_low = (uint32_t)cycle->failed_callback_result & 0xFFFFU;
+    cycle->attached_vm = *probe->vm_region_count;
+    cycle->attached_threads = phase59_live_threads(probe->scheduler);
+    cycle->attached_objects = phase59_live_objects(probe->scheduler);
+    if (cycle->failed_callback_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        callback_low != 0x5AU || cycle->failed_lifecycle.runtime_thread == 0 ||
+        cycle->failed_lifecycle.runtime_attach_count != 1U ||
+        cycle->failed_lifecycle.runtime_detach_count != 0U) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    phase59_text(probe, "GXOS_NET10:PHASE59_RUNTIME_ATTACH_SUCCEEDED=1\r\n");
+    phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_RUNTIME_THREAD=0x",
+                (uint64_t)(uintptr_t)cycle->failed_lifecycle.runtime_thread);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_FLS_AFTER_ATTACH=0x",
+                (uint64_t)gxos_scheduler_get_fls(probe->runtime_fls_slot));
+    phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_RUNTIME_ATTACH_COUNT=0x",
+                cycle->failed_lifecycle.runtime_attach_count);
+
+    cycle->failed_root_token = 0x5A00U | cycle->cycle;
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->failed_lifecycle, probe->managed_root_publish_bridge,
+            (int32_t)cycle->failed_root_token,
+            &cycle->failed_root_publish_result,
+            &cycle->failed_root_publish_status) ||
+        cycle->failed_root_publish_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        (uint32_t)cycle->failed_root_publish_result !=
+            (0x58000000U | cycle->failed_root_token) ||
+        !gxos_nativeaot_scheduler_worker_note_managed_root_published(
+            &cycle->failed_lifecycle, cycle->failed_root_token)) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    cycle->root_published_vm = *probe->vm_region_count;
+    cycle->root_published_threads = phase59_live_threads(probe->scheduler);
+    cycle->root_published_objects = phase59_live_objects(probe->scheduler);
+    cycle->failed_pre_gc_root_identity = cycle->failed_root_token;
+    if (!phase59_root_validate(
+            cycle, &cycle->failed_lifecycle, cycle->failed_root_token,
+            probe->managed_root_validate_bridge,
+            &cycle->failed_root_validate_before_result,
+            &cycle->failed_root_validate_before_status)) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    phase59_text(probe, "GXOS_NET10:PHASE59_ROOT_PUBLISHED=1\r\n");
+    phase59_hex(probe, "GXOS_NET10:PHASE59_PRE_GC_LOGICAL_ROOT_IDENTITY=0x",
+                cycle->failed_pre_gc_root_identity);
+
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->failed_lifecycle, probe->gc_bridge,
+            (int32_t)(0xD0U + cycle->cycle), &cycle->failed_gc_result,
+            &cycle->failed_gc_status) ||
+        cycle->failed_gc_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        !gxos_nativeaot_gc_result_valid(
+            cycle->failed_gc_result, 0xD0U + cycle->cycle,
+            &cycle->failed_gc_delta, &cycle->failed_gc_generation,
+            &cycle->failed_gc_checksum) || cycle->failed_gc_delta == 0U) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    if (!phase59_root_validate(
+            cycle, &cycle->failed_lifecycle, cycle->failed_root_token,
+            probe->managed_root_validate_bridge,
+            &cycle->failed_root_validate_after_result,
+            &cycle->failed_root_validate_after_status)) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    cycle->failed_post_gc_root_identity = cycle->failed_root_token;
+    cycle->failed_lifecycle.managed_root_survived = 1;
+    cycle->post_gc_vm = *probe->vm_region_count;
+    cycle->post_gc_threads = phase59_live_threads(probe->scheduler);
+    cycle->post_gc_objects = phase59_live_objects(probe->scheduler);
+    phase59_text(probe, "GXOS_NET10:PHASE59_GC_COMPLETED=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_ROOT_SURVIVAL_PROVEN=1\r\n");
+    phase59_hex(probe, "GXOS_NET10:PHASE59_POST_GC_LOGICAL_ROOT_IDENTITY=0x",
+                cycle->failed_post_gc_root_identity);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ALLOC_CONTEXT_PRE_GC=0x",
+                cycle->failed_lifecycle.allocation_context);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ALLOC_PTR_POST_GC=0x",
+                cycle->failed_lifecycle.alloc_ptr_after);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ALLOC_LIMIT_POST_GC=0x",
+                cycle->failed_lifecycle.alloc_limit_after);
+
+    if (!gxos_nativeaot_phase56_failure_arm(
+            GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_GC_ROOT_SURVIVAL,
+            &cycle->failed_lifecycle) ||
+        !gxos_nativeaot_phase56_failure_try_fire(&cycle->failed_lifecycle) ||
+        gxos_nativeaot_phase56_failure_try_fire(&cycle->failed_lifecycle)) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    injection = gxos_nativeaot_phase56_failure_record();
+    if (injection == 0 || injection->state !=
+            GXOS_NATIVEAOT_FAILURE_INJECTION_FIRED ||
+        injection->point !=
+            GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_GC_ROOT_SURVIVAL ||
+        injection->fire_count != 1U || injection->mismatch_count != 0U) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    phase59_text(probe, "GXOS_NET10:PHASE59_INJECTION_ARMED=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_INJECTION_FIRED=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_INTENTIONAL_FAILURE=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_NORMAL_POST_GC_CONTINUATION_SUPPRESSED=1\r\n");
+
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->failed_lifecycle, probe->managed_root_release_bridge,
+            (int32_t)cycle->failed_root_token,
+            &cycle->failed_root_release_result,
+            &cycle->failed_root_release_status) ||
+        cycle->failed_root_release_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        (uint32_t)cycle->failed_root_release_result !=
+            (0x59000000U | cycle->failed_root_token) ||
+        !gxos_nativeaot_scheduler_worker_note_managed_root_released(
+            &cycle->failed_lifecycle, cycle->failed_root_token)) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    cycle->root_released_vm = *probe->vm_region_count;
+    cycle->root_released_threads = phase59_live_threads(probe->scheduler);
+    cycle->root_released_objects = phase59_live_objects(probe->scheduler);
+    duplicate_release_rejected =
+        !gxos_nativeaot_scheduler_worker_note_managed_root_released(
+            &cycle->failed_lifecycle, cycle->failed_root_token);
+    if (!duplicate_release_rejected || cycle->failed_lifecycle.managed_root_owned ||
+        cycle->failed_lifecycle.managed_root_release_count != 1U) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    phase59_text(probe, "GXOS_NET10:PHASE59_ROOT_RELEASED=1\r\n");
+    phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_ROOT_RELEASE_COUNT=0x",
+                cycle->failed_lifecycle.managed_root_release_count);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ALLOC_CONTEXT_AFTER_ROOT_RELEASE=0x",
+                cycle->failed_lifecycle.allocation_context);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ALLOC_PTR_AFTER_ROOT_RELEASE=0x",
+                cycle->failed_lifecycle.alloc_ptr_after);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ALLOC_LIMIT_AFTER_ROOT_RELEASE=0x",
+                cycle->failed_lifecycle.alloc_limit_after);
+    phase59_text(probe, "GXOS_NET10:PHASE59_FAILED_ROOT_OWNED_AFTER_RELEASE=0\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_DUPLICATE_ROOT_RELEASE_REJECTED=1\r\n");
+    if (!gxos_nativeaot_scheduler_worker_detach(&cycle->failed_lifecycle) ||
+        cycle->failed_lifecycle.runtime_detach_count != 1U ||
+        gxos_scheduler_get_fls(probe->runtime_fls_slot) != 0) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ALLOC_PTR_AFTER_DETACH=0x",
+                cycle->failed_lifecycle.alloc_ptr_after_detach);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ALLOC_LIMIT_AFTER_DETACH=0x",
+                cycle->failed_lifecycle.alloc_limit_after_detach);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_RUNTIME_DETACH_COUNT=0x",
+                cycle->failed_lifecycle.runtime_detach_count);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_FLS_AFTER_DETACH=0x",
+                (uint64_t)gxos_scheduler_get_fls(probe->runtime_fls_slot));
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ALLOC_CONTEXT_AFTER_DETACH=0x",
+                cycle->failed_lifecycle.allocation_context);
+    phase59_text(probe, "GXOS_NET10:PHASE59_DETACH_EXECUTED=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_FLS_THREADSTORE_RUNTIME_STATE_CLEARED=1\r\n");
+    cycle->failed_gc_after = probe->gc_bridge->invocation_count;
+    return (uintptr_t)cycle->failed_callback_result;
+}
+
+static uintptr_t GXOS_PHASE53O_MS_ABI
+phase59_replacement_worker_entry(void *argument)
+{
+    GXOS_PHASE59_CYCLE *cycle = (GXOS_PHASE59_CYCLE *)argument;
+    GXOS_PHASE53O_PROBE *probe = cycle->probe;
+    GXOS_SCHEDULER_TCB *thread = gxos_scheduler_current_thread();
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT snapshot = {0};
+    uint32_t callback_low;
+    int good = 1;
+
+    cycle->replacement_thread = thread;
+    gxos_scheduler_capture_registers(&snapshot);
+    if (thread == 0 || !gxos_nativeaot_scheduler_worker_mark_running(
+            &cycle->replacement_lifecycle) ||
+        !gxos_scheduler_validate_worker_snapshot(thread, &snapshot)) {
+        return (uintptr_t)phase59_fail(cycle);
+    }
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->replacement_lifecycle, probe->callback_bridge,
+            (int32_t)cycle->replacement_input,
+            &cycle->replacement_callback_result,
+            &cycle->replacement_callback_status)) {
+        good = 0;
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    callback_low = (uint32_t)cycle->replacement_callback_result & 0xFFFFU;
+    if (cycle->replacement_callback_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        callback_low != cycle->replacement_input + 1U) {
+        good = 0;
+    }
+    phase59_hex(probe, "GXOS_NET10:PHASE59_REPLACEMENT_RUNTIME_THREAD=0x",
+                (uint64_t)(uintptr_t)cycle->replacement_lifecycle.runtime_thread);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_REPLACEMENT_RUNTIME_ATTACH_COUNT=0x",
+                cycle->replacement_lifecycle.runtime_attach_count);
+    cycle->replacement_root_token = 0x5B00U | cycle->cycle;
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->replacement_lifecycle, probe->managed_root_publish_bridge,
+            (int32_t)cycle->replacement_root_token,
+            &cycle->replacement_root_publish_result,
+            &cycle->replacement_root_publish_status) ||
+        cycle->replacement_root_publish_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        (uint32_t)cycle->replacement_root_publish_result !=
+            (0x58000000U | cycle->replacement_root_token) ||
+        !gxos_nativeaot_scheduler_worker_note_managed_root_published(
+            &cycle->replacement_lifecycle, cycle->replacement_root_token)) {
+        good = 0;
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    cycle->replacement_pre_gc_root_identity = cycle->replacement_root_token;
+    if (!phase59_root_validate(
+            cycle, &cycle->replacement_lifecycle,
+            cycle->replacement_root_token, probe->managed_root_validate_bridge,
+            &cycle->replacement_root_validate_before_result,
+            &cycle->replacement_root_validate_before_status)) {
+        good = 0;
+    }
+    cycle->replacement_gc_before = probe->gc_bridge->invocation_count;
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->replacement_lifecycle, probe->gc_bridge,
+            (int32_t)cycle->replacement_seed, &cycle->replacement_gc_result,
+            &cycle->replacement_gc_status) ||
+        cycle->replacement_gc_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        !gxos_nativeaot_gc_result_valid(
+            cycle->replacement_gc_result, cycle->replacement_seed,
+            &cycle->replacement_gc_delta, &cycle->replacement_gc_generation,
+            &cycle->replacement_gc_checksum) ||
+        cycle->replacement_gc_delta == 0U ||
+        !phase59_root_validate(
+            cycle, &cycle->replacement_lifecycle,
+            cycle->replacement_root_token, probe->managed_root_validate_bridge,
+            &cycle->replacement_root_validate_after_result,
+            &cycle->replacement_root_validate_after_status)) {
+        good = 0;
+    } else {
+        cycle->replacement_lifecycle.managed_root_survived = 1;
+        cycle->replacement_post_gc_root_identity =
+            cycle->replacement_root_token;
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    cycle->replacement_gc_after = probe->gc_bridge->invocation_count;
+    phase59_text(probe, "GXOS_NET10:PHASE59_REPLACEMENT_POST_GC_CONTINUATION=1\r\n");
+    probe->phase_in_managed(PHASE53O_PHASE_IN_MANAGED);
+    if (!gxos_nativeaot_scheduler_worker_invoke(
+            &cycle->replacement_lifecycle, probe->managed_root_release_bridge,
+            (int32_t)cycle->replacement_root_token,
+            &cycle->replacement_root_release_result,
+            &cycle->replacement_root_release_status) ||
+        cycle->replacement_root_release_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+        (uint32_t)cycle->replacement_root_release_result !=
+            (0x59000000U | cycle->replacement_root_token) ||
+        !gxos_nativeaot_scheduler_worker_note_managed_root_released(
+            &cycle->replacement_lifecycle, cycle->replacement_root_token) ||
+        !gxos_nativeaot_scheduler_worker_detach(
+            &cycle->replacement_lifecycle) ||
+        cycle->replacement_lifecycle.runtime_detach_count != 1U) {
+        good = 0;
+    }
+    probe->phase_after_managed(PHASE53O_PHASE_AFTER_MANAGED_RETURN);
+    if (!good) return (uintptr_t)phase59_fail(cycle);
+    phase59_text(probe, "GXOS_NET10:PHASE59_REPLACEMENT_ROOT_SURVIVED_GC=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_REPLACEMENT_DETACH=1\r\n");
+    phase59_hex(probe, "GXOS_NET10:PHASE59_REPLACEMENT_RUNTIME_DETACH_COUNT=0x",
+                cycle->replacement_lifecycle.runtime_detach_count);
+    return (uintptr_t)cycle->replacement_callback_result;
+}
+
+static int phase59_reclaim_worker(
+    GXOS_PHASE59_CYCLE *cycle, GXOS_SCHEDULER_HANDLE handle,
+    GXOS_SCHEDULER_TCB *thread,
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    GXOS_SCHEDULER *scheduler)
+{
+    if (cycle == 0 || scheduler == 0 || thread == 0 || lifecycle == 0 ||
+        lifecycle->runtime_detach_count != 1U || !lifecycle->detached ||
+        !gxos_scheduler_thread_is_terminated(thread)) {
+        return 0;
+    }
+    return gxos_nativeaot_scheduler_worker_note_reclaimable(lifecycle) &&
+           gxos_scheduler_close_handle(handle) &&
+           gxos_scheduler_collect(scheduler) &&
+           gxos_nativeaot_scheduler_worker_note_reclaimed(lifecycle) &&
+           thread->live == 0 && gxos_scheduler_thread_from_handle(handle) == 0;
+}
+
+static int phase59_failed_state_valid(const GXOS_PHASE59_CYCLE *cycle,
+                                      uint32_t baseline_threadstore)
+{
+    const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle;
+    const GXOS_SCHEDULER_TCB *thread;
+    if (cycle == 0) return 0;
+    lifecycle = &cycle->failed_lifecycle;
+    thread = cycle->failed_thread;
+    return thread != 0 && lifecycle->attached && lifecycle->detached &&
+           lifecycle->runtime_attach_count == 1U &&
+           lifecycle->runtime_detach_count == 1U &&
+           lifecycle->managed_root_identity == cycle->failed_root_token &&
+           lifecycle->managed_root_publication_count == 1U &&
+           lifecycle->managed_root_release_count == 1U &&
+           lifecycle->managed_root_owned == 0 && lifecycle->managed_root_survived &&
+           cycle->failed_pre_gc_root_identity == cycle->failed_post_gc_root_identity &&
+           lifecycle->ownership_state ==
+               GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_DETACHED &&
+           lifecycle->runtime_thread != 0 && !lifecycle->runtime_thread_owned &&
+           !lifecycle->tls_fls_owned && thread->live &&
+           thread->fls_values[lifecycle->runtime_fls_slot] == 0 &&
+           lifecycle->runtime_state_after ==
+               GXOS_NATIVEAOT_RUNTIME_THREAD_DETACHED &&
+           lifecycle->threadstore_after == baseline_threadstore;
+}
+
+static int phase59_replacement_state_valid(const GXOS_PHASE59_CYCLE *cycle)
+{
+    const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle;
+    if (cycle == 0) return 0;
+    lifecycle = &cycle->replacement_lifecycle;
+    return lifecycle->attached && lifecycle->detached &&
+           lifecycle->runtime_attach_count == 1U &&
+           lifecycle->runtime_detach_count == 1U &&
+           lifecycle->managed_root_identity == cycle->replacement_root_token &&
+           lifecycle->managed_root_publication_count == 1U &&
+           lifecycle->managed_root_release_count == 1U &&
+           lifecycle->managed_root_owned == 0 && lifecycle->managed_root_survived &&
+           cycle->replacement_pre_gc_root_identity ==
+               cycle->replacement_post_gc_root_identity &&
+           lifecycle->ownership_state ==
+               GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_DETACHED;
+}
+
+int gxos_nativeaot_phase59_postgc_rollback_probe(GXOS_PHASE53O_PROBE *probe)
+{
+    static GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE stale_lifecycle;
+    GXOS_NATIVEAOT_FAILURE_INJECTION_RECORD const *injection;
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT snapshot = {0};
+    uint32_t baseline_vm;
+    uint32_t baseline_threads;
+    uint32_t baseline_objects;
+    uint32_t baseline_threadstore;
+    uint32_t baseline_callbacks;
+    uint32_t baseline_gc_callbacks;
+    uint32_t baseline_root_publish;
+    uint32_t baseline_root_release;
+    uint32_t baseline_root_validate;
+    uint32_t injected = 0;
+    uint32_t passed = 0;
+    uint32_t failed_root_releases = 0;
+    uint32_t duplicate_root_rejections = 0;
+    uint32_t stale_root_rejections = 0;
+    uint32_t stale_handle_rejections = 0;
+    uint32_t stale_detach_rejections = 0;
+    uint32_t duplicate_detach_rejections = 0;
+    uint32_t stale_pre_gc_identity_rejections = 0;
+    uint32_t peak_vm = 0;
+    uint32_t peak_threads = 0;
+    uint32_t peak_objects = 0;
+    int same_slot = 1;
+
+    if (probe == 0 || probe->scheduler == 0 || probe->main_thread == 0 ||
+        probe->callback_bridge == 0 || probe->gc_bridge == 0 ||
+        probe->managed_root_publish_bridge == 0 ||
+        probe->managed_root_release_bridge == 0 ||
+        probe->managed_root_validate_bridge == 0 ||
+        probe->runtime_fls_cleanup == 0 || probe->vm_region_count == 0 ||
+        probe->log_text == 0 || probe->log_hex == 0 ||
+        probe->phase_in_managed == 0 || probe->phase_after_managed == 0 ||
+        probe->main_thread != gxos_scheduler_current_thread() ||
+        !probe->main_thread->is_boot_thread) {
+        return 0;
+    }
+    baseline_vm = *probe->vm_region_count;
+    baseline_threads = phase59_live_threads(probe->scheduler);
+    baseline_objects = phase59_live_objects(probe->scheduler);
+    baseline_threadstore = phase53o_threadstore_count(
+        probe->main_thread->fls_values[probe->runtime_fls_slot], 0);
+    baseline_callbacks = probe->callback_bridge->invocation_count;
+    baseline_gc_callbacks = probe->gc_bridge->invocation_count;
+    baseline_root_publish = probe->managed_root_publish_bridge->invocation_count;
+    baseline_root_release = probe->managed_root_release_bridge->invocation_count;
+    baseline_root_validate = probe->managed_root_validate_bridge->invocation_count;
+    phase59_text(probe, "GXOS_NET10:PHASE59_BEGIN\r\n");
+    phase59_text(probe,
+                 "GXOS_NET10:PHASE59_INJECTION_POINT=AFTER_GC_ROOT_SURVIVAL\r\n");
+    phase59_text(probe,
+                 "GXOS_NET10:PHASE59_DIAGNOSTIC_HOOK=GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_GC_ROOT_SURVIVAL\r\n");
+    phase59_text(probe,
+                 "GXOS_NET10:PHASE59_COMPILE_GATE=GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK\r\n");
+    phase59_text(probe,
+                 "GXOS_NET10:PHASE59_MANAGED_ROOT_AUTHORITY=MANAGED_STATIC_REFERENCE\r\n");
+    phase59_text(probe,
+                 "GXOS_NET10:PHASE59_ROOT_CLEANUP_AUTHORITY=MANAGED_ROOT_RELEASE_EXPORT\r\n");
+    phase59_text(probe,
+                 "GXOS_NET10:PHASE59_PHYSICAL_RELOCATION=NOT_MEASURED\r\n");
+    phase59_text(probe,
+                 "GXOS_NET10:PHASE59_RAW_MANAGED_ADDRESS_RETAINED=0\r\n");
+    phase59_hex(probe, "GXOS_NET10:PHASE59_RESOURCE_BASELINE_VM_REGIONS=0x", baseline_vm);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_RESOURCE_BASELINE_THREADS=0x", baseline_threads);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_RESOURCE_BASELINE_OBJECTS=0x", baseline_objects);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_RESOURCE_BASELINE_ROOTS=0x", 0);
+
+    for (uint32_t index = 0; index != PHASE59_CYCLE_COUNT; ++index) {
+        uint32_t old_slot;
+        uint32_t old_identity;
+        uint16_t old_generation;
+        int duplicate_detach_rejected;
+        int stale_root_rejected;
+        int stale_detach_rejected;
+        int old_handle_resume_rejected;
+        int old_handle_close_rejected;
+
+        g_phase59_cycle = (GXOS_PHASE59_CYCLE){0};
+        g_phase59_cycle.probe = probe;
+        g_phase59_cycle.cycle = index + 1U;
+        g_phase59_cycle.replacement_input = 0xA0U + index;
+        g_phase59_cycle.replacement_seed = 0xC0U + index;
+        if (!gxos_scheduler_create_suspended_thread(
+                probe->scheduler, phase59_failed_worker_entry, &g_phase59_cycle,
+                &g_phase59_cycle.failed_handle, &g_phase59_cycle.failed_thread) ||
+            !gxos_nativeaot_scheduler_worker_prepare(
+                &g_phase59_cycle.failed_lifecycle, probe->main_thread,
+                g_phase59_cycle.failed_thread, probe->tls_index,
+                probe->runtime_fls_slot, probe->runtime_fls_cleanup)) {
+            return 0;
+        }
+        g_phase59_cycle.prepared_vm = *probe->vm_region_count;
+        g_phase59_cycle.prepared_threads = phase59_live_threads(probe->scheduler);
+        g_phase59_cycle.prepared_objects = phase59_live_objects(probe->scheduler);
+        if (g_phase59_cycle.prepared_vm <= baseline_vm ||
+            g_phase59_cycle.prepared_threads <= baseline_threads ||
+            g_phase59_cycle.prepared_objects <= baseline_objects) return 0;
+        if (g_phase59_cycle.prepared_vm > peak_vm) peak_vm = g_phase59_cycle.prepared_vm;
+        if (g_phase59_cycle.prepared_threads > peak_threads) peak_threads = g_phase59_cycle.prepared_threads;
+        if (g_phase59_cycle.prepared_objects <= GXOS_SCHEDULER_MAX_OBJECTS &&
+            g_phase59_cycle.prepared_objects > peak_objects) {
+            peak_objects = g_phase59_cycle.prepared_objects;
+        }
+        phase59_hex(probe, "GXOS_NET10:PHASE59_PREPARED_VM_REGIONS=0x",
+                    g_phase59_cycle.prepared_vm);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_PREPARED_THREADS=0x",
+                    g_phase59_cycle.prepared_threads);
+        if (g_phase59_cycle.prepared_objects <= GXOS_SCHEDULER_MAX_OBJECTS) {
+            phase59_hex(probe, "GXOS_NET10:PHASE59_PREPARED_OBJECTS=0x",
+                        g_phase59_cycle.prepared_objects);
+        } else {
+            phase59_text(probe,
+                         "GXOS_NET10:PHASE59_PREPARED_OBJECT_CENSUS_DEFERRED=1\r\n");
+        }
+        phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_SLOT=0x",
+                    g_phase59_cycle.failed_lifecycle.scheduler_slot);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_IDENTITY=0x",
+                    g_phase59_cycle.failed_lifecycle.worker_identity);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_GENERATION=0x",
+                    g_phase59_cycle.failed_lifecycle.worker_generation);
+        phase59_text(probe, "GXOS_NET10:PHASE59_PREPARED=1\r\n");
+        if (!gxos_scheduler_resume_thread(g_phase59_cycle.failed_handle, 0) ||
+            !gxos_nativeaot_scheduler_worker_mark_runnable(
+                &g_phase59_cycle.failed_lifecycle)) return 0;
+        phase59_text(probe, "GXOS_NET10:PHASE59_WORKER_RESUMED=1\r\n");
+        gxos_scheduler_main_dispatch(&snapshot);
+        injection = gxos_nativeaot_phase56_failure_record();
+        if (gxos_scheduler_current_thread() != probe->main_thread ||
+            !gxos_scheduler_thread_is_terminated(g_phase59_cycle.failed_thread) ||
+            g_phase59_cycle.failure != 0 ||
+            injection == 0 || injection->point !=
+                GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_GC_ROOT_SURVIVAL ||
+            injection->state != GXOS_NATIVEAOT_FAILURE_INJECTION_FIRED ||
+            injection->fire_count != 1U || injection->mismatch_count != 0U ||
+            !phase59_failed_state_valid(&g_phase59_cycle, baseline_threadstore) ||
+            g_phase59_cycle.failed_gc_after - g_phase59_cycle.failed_gc_before != 1U) {
+            return 0;
+        }
+        if (g_phase59_cycle.attached_objects > peak_objects) {
+            peak_objects = g_phase59_cycle.attached_objects;
+        }
+        ++injected;
+        ++passed;
+        ++failed_root_releases;
+        phase59_text(probe, "GXOS_NET10:PHASE59_FAILED_GC_COMPLETED=1\r\n");
+        phase59_text(probe, "GXOS_NET10:PHASE59_FAILED_ROOT_SURVIVED_GC=1\r\n");
+        phase59_hex(probe, "GXOS_NET10:PHASE59_ATTACHED_VM_REGIONS=0x",
+                    g_phase59_cycle.attached_vm);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_ATTACHED_THREADS=0x",
+                    g_phase59_cycle.attached_threads);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_ATTACHED_OBJECTS=0x",
+                    g_phase59_cycle.attached_objects);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_ROOT_PUBLISHED_VM_REGIONS=0x",
+                    g_phase59_cycle.root_published_vm);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_ROOT_PUBLISHED_THREADS=0x",
+                    g_phase59_cycle.root_published_threads);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_ROOT_PUBLISHED_OBJECTS=0x",
+                    g_phase59_cycle.root_published_objects);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_POST_GC_VM_REGIONS=0x",
+                    g_phase59_cycle.post_gc_vm);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_POST_GC_THREADS=0x",
+                    g_phase59_cycle.post_gc_threads);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_POST_GC_OBJECTS=0x",
+                    g_phase59_cycle.post_gc_objects);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_ROOT_RELEASED_VM_REGIONS=0x",
+                    g_phase59_cycle.root_released_vm);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_ROOT_RELEASED_THREADS=0x",
+                    g_phase59_cycle.root_released_threads);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_ROOT_RELEASED_OBJECTS=0x",
+                    g_phase59_cycle.root_released_objects);
+        duplicate_detach_rejected = !gxos_nativeaot_scheduler_worker_detach(
+            &g_phase59_cycle.failed_lifecycle);
+        if (!duplicate_detach_rejected ||
+            !phase59_reclaim_worker(&g_phase59_cycle,
+                g_phase59_cycle.failed_handle, g_phase59_cycle.failed_thread,
+                &g_phase59_cycle.failed_lifecycle, probe->scheduler)) return 0;
+        ++duplicate_detach_rejections;
+        phase59_text(probe, "GXOS_NET10:PHASE59_DUPLICATE_DETACH_REJECTED=1\r\n");
+        phase59_text(probe, "GXOS_NET10:PHASE59_SCHEDULER_RECLAIMED=1\r\n");
+        old_slot = g_phase59_cycle.failed_lifecycle.scheduler_slot;
+        old_identity = g_phase59_cycle.failed_lifecycle.worker_identity;
+        old_generation = g_phase59_cycle.failed_lifecycle.worker_generation;
+        old_handle_resume_rejected = !gxos_scheduler_resume_thread(
+            g_phase59_cycle.failed_handle, 0);
+        old_handle_close_rejected = !gxos_scheduler_close_handle(
+            g_phase59_cycle.failed_handle);
+        if (!old_handle_resume_rejected || !old_handle_close_rejected ||
+            gxos_scheduler_thread_from_handle(g_phase59_cycle.failed_handle) != 0) return 0;
+        ++stale_handle_rejections;
+        if (!gxos_scheduler_create_suspended_thread(
+                probe->scheduler, phase59_replacement_worker_entry, &g_phase59_cycle,
+                &g_phase59_cycle.replacement_handle, &g_phase59_cycle.replacement_thread) ||
+            !gxos_nativeaot_scheduler_worker_prepare(
+                &g_phase59_cycle.replacement_lifecycle, probe->main_thread,
+                g_phase59_cycle.replacement_thread, probe->tls_index,
+                probe->runtime_fls_slot, probe->runtime_fls_cleanup)) return 0;
+        if (g_phase59_cycle.replacement_lifecycle.scheduler_slot != old_slot) same_slot = 0;
+        if (g_phase59_cycle.replacement_lifecycle.worker_identity == old_identity ||
+            g_phase59_cycle.replacement_lifecycle.worker_generation == old_generation) return 0;
+        phase59_hex(probe, "GXOS_NET10:PHASE59_REPLACEMENT_SLOT=0x",
+                    g_phase59_cycle.replacement_lifecycle.scheduler_slot);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_REPLACEMENT_IDENTITY=0x",
+                    g_phase59_cycle.replacement_lifecycle.worker_identity);
+        phase59_hex(probe, "GXOS_NET10:PHASE59_REPLACEMENT_GENERATION=0x",
+                    g_phase59_cycle.replacement_lifecycle.worker_generation);
+        phase59_text(probe, "GXOS_NET10:PHASE59_SAME_SLOT_REUSE=1\r\n");
+        stale_lifecycle = g_phase59_cycle.failed_lifecycle;
+        stale_lifecycle.ownership_state = GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED;
+        stale_lifecycle.attached = 1;
+        stale_lifecycle.detached = 0;
+        stale_lifecycle.managed_root_owned = 1;
+        stale_root_rejected = !gxos_nativeaot_scheduler_worker_note_managed_root_released(
+            &stale_lifecycle, g_phase59_cycle.failed_root_token);
+        ++stale_pre_gc_identity_rejections;
+        stale_lifecycle.ownership_state = GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED;
+        stale_lifecycle.detached = 0;
+        stale_lifecycle.managed_root_identity = g_phase59_cycle.failed_pre_gc_root_identity;
+        stale_detach_rejected = !gxos_nativeaot_scheduler_worker_detach(&stale_lifecycle);
+        if (!stale_root_rejected || !stale_detach_rejected ||
+            g_phase59_cycle.replacement_lifecycle.ownership_state !=
+                GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED ||
+            g_phase59_cycle.replacement_thread->state !=
+                GXOS_SCHEDULER_THREAD_CREATED_SUSPENDED) return 0;
+        ++stale_root_rejections;
+        ++stale_detach_rejections;
+        phase59_text(probe, "GXOS_NET10:PHASE59_STALE_HANDLE_REJECTED=1\r\n");
+        phase59_text(probe, "GXOS_NET10:PHASE59_STALE_IDENTITY_REJECTED=1\r\n");
+        phase59_text(probe, "GXOS_NET10:PHASE59_STALE_GENERATION_REJECTED=1\r\n");
+        phase59_text(probe, "GXOS_NET10:PHASE59_STALE_ROOT_REJECTED=1\r\n");
+        phase59_text(probe, "GXOS_NET10:PHASE59_STALE_PRE_GC_OBJECT_IDENTITY_REJECTED=1\r\n");
+        if (!phase53o_rehome_canary(probe, g_phase59_cycle.replacement_thread) ||
+            !gxos_scheduler_resume_thread(g_phase59_cycle.replacement_handle, 0) ||
+            !gxos_nativeaot_scheduler_worker_mark_runnable(
+                &g_phase59_cycle.replacement_lifecycle)) return 0;
+        for (uint32_t dispatches = 0; dispatches != 4U; ++dispatches) {
+            if (gxos_scheduler_thread_is_terminated(g_phase59_cycle.replacement_thread)) break;
+            if (gxos_scheduler_current_thread() != probe->main_thread ||
+                gxos_scheduler_runnable_count() == 0U) return 0;
+            gxos_scheduler_main_dispatch(&snapshot);
+        }
+        if (!gxos_scheduler_thread_is_terminated(g_phase59_cycle.replacement_thread) ||
+            g_phase59_cycle.failure != 0 ||
+            !phase59_replacement_state_valid(&g_phase59_cycle) ||
+            !phase59_reclaim_worker(&g_phase59_cycle,
+                g_phase59_cycle.replacement_handle, g_phase59_cycle.replacement_thread,
+                &g_phase59_cycle.replacement_lifecycle, probe->scheduler) ||
+            *probe->vm_region_count != baseline_vm ||
+            phase59_live_threads(probe->scheduler) != baseline_threads ||
+            phase59_live_objects(probe->scheduler) != baseline_objects ||
+            phase53o_threadstore_count(
+                probe->main_thread->fls_values[probe->runtime_fls_slot], 0) !=
+                baseline_threadstore) return 0;
+        ++duplicate_root_rejections;
+        g_phase59_cycle.final_vm = *probe->vm_region_count;
+        g_phase59_cycle.final_threads = phase59_live_threads(probe->scheduler);
+        g_phase59_cycle.final_objects = phase59_live_objects(probe->scheduler);
+        phase59_text(probe, "GXOS_NET10:PHASE59_REPLACEMENT_WORKER_SUCCEEDED=1\r\n");
+        phase59_text(probe, "GXOS_NET10:PHASE59_REPLACEMENT_GC=1\r\n");
+        phase59_text(probe, "GXOS_NET10:PHASE59_REPLACEMENT_RECLAIM=1\r\n");
+        phase59_text(probe, "GXOS_NET10:PHASE59_BASELINE_RESTORED=1\r\n");
+    }
+    injection = gxos_nativeaot_phase56_failure_record();
+    if (injection == 0 || injection->point !=
+            GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_GC_ROOT_SURVIVAL ||
+        injected != PHASE59_CYCLE_COUNT || passed != PHASE59_CYCLE_COUNT ||
+        failed_root_releases != PHASE59_CYCLE_COUNT ||
+        stale_root_rejections != PHASE59_CYCLE_COUNT ||
+        stale_handle_rejections != PHASE59_CYCLE_COUNT ||
+        stale_detach_rejections != PHASE59_CYCLE_COUNT ||
+        stale_pre_gc_identity_rejections != PHASE59_CYCLE_COUNT ||
+        duplicate_detach_rejections != PHASE59_CYCLE_COUNT || same_slot == 0 ||
+        probe->callback_bridge->invocation_count !=
+            baseline_callbacks + PHASE59_CYCLE_COUNT * 2U ||
+        probe->gc_bridge->invocation_count !=
+            baseline_gc_callbacks + PHASE59_CYCLE_COUNT * 2U ||
+        probe->managed_root_publish_bridge->invocation_count !=
+            baseline_root_publish + PHASE59_CYCLE_COUNT * 2U ||
+        probe->managed_root_release_bridge->invocation_count !=
+            baseline_root_release + PHASE59_CYCLE_COUNT * 2U ||
+        probe->managed_root_validate_bridge->invocation_count !=
+            baseline_root_validate + PHASE59_CYCLE_COUNT * 4U ||
+        *probe->vm_region_count != baseline_vm ||
+        phase59_live_threads(probe->scheduler) != baseline_threads ||
+        phase59_live_objects(probe->scheduler) != baseline_objects ||
+        phase53o_threadstore_count(
+            probe->main_thread->fls_values[probe->runtime_fls_slot], 0) !=
+            baseline_threadstore) return 0;
+    phase59_hex(probe, "GXOS_NET10:PHASE59_RESOURCE_PEAK_VM_REGIONS=0x", peak_vm);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_RESOURCE_PEAK_THREADS=0x", peak_threads);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_RESOURCE_PEAK_OBJECTS=0x", peak_objects);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_INJECTED_FAILURE_CYCLES=0x", injected);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_PASSED_FAILURE_CYCLES=0x", passed);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_ROOT_RELEASES=0x", failed_root_releases);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_DUPLICATE_ROOT_RELEASE_REJECTIONS=0x", duplicate_root_rejections);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_FAILED_CALLBACK_FINAL=0x",
+                probe->callback_bridge->invocation_count);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_GC_CALLBACK_FINAL=0x",
+                probe->gc_bridge->invocation_count);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ROOT_VALIDATE_FINAL=0x",
+                probe->managed_root_validate_bridge->invocation_count);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ROOT_PUBLICATION_TOTAL=0x",
+                probe->managed_root_publish_bridge->invocation_count -
+                    baseline_root_publish);
+    phase59_hex(probe, "GXOS_NET10:PHASE59_ROOT_RELEASE_TOTAL=0x",
+                probe->managed_root_release_bridge->invocation_count -
+                    baseline_root_release);
+    phase59_text(probe, "GXOS_NET10:PHASE59_ROOT_SURVIVAL_BEFORE_FAILURE=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_EXACTLY_ONE_ROOT_RELEASE=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_WRONG_GENERATION_ROOT_RELEASE_REJECTED=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_EXACTLY_ONE_DETACH=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_NO_DOUBLE_CLEANUP=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_GENERATION_SAFE_SLOT_REUSE=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_LEAK_TREND_NONE=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_COMPLETE=1\r\n");
+    phase59_text(probe, "GXOS_NET10:PHASE59_PASS=1\r\n");
+    return 1;
+}
+#endif
+
 int gxos_nativeaot_phase56_failure_arm(
     GXOS_NATIVEAOT_FAILURE_INJECTION_POINT point,
     const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
@@ -3254,6 +4137,10 @@ int gxos_nativeaot_phase56_failure_arm(
 #ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
         && (point != GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_MANAGED_ROOT ||
             !phase58_injection_state_valid(lifecycle))
+#endif
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+        && (point != GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_GC_ROOT_SURVIVAL ||
+            !phase59_injection_state_valid(lifecycle))
 #endif
         ) {
         g_phase56_failure_record.point = GXOS_NATIVEAOT_FAILURE_INJECTION_NONE;
@@ -3286,6 +4173,11 @@ int gxos_nativeaot_phase56_failure_try_fire(
                  GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_MANAGED_ROOT &&
              !phase58_injection_state_valid(lifecycle))
 #endif
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+         || (g_phase56_failure_record.point ==
+                 GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_GC_ROOT_SURVIVAL &&
+             !phase59_injection_state_valid(lifecycle))
+#endif
          || (g_phase56_failure_record.point !=
                  GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_WORKER_PREPARE
 #ifdef GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK
@@ -3295,6 +4187,10 @@ int gxos_nativeaot_phase56_failure_try_fire(
 #ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
              && g_phase56_failure_record.point !=
                     GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_MANAGED_ROOT
+#endif
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+             && g_phase56_failure_record.point !=
+                    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_GC_ROOT_SURVIVAL
 #endif
              )) ||
         lifecycle->scheduler_slot != g_phase56_failure_record.scheduler_slot ||

@@ -90,7 +90,9 @@
 #include "resume_thread.h"
 #endif
 
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+#define GXOS_NATIVEAOT_THREAD_START_RVA 0x35760U
+#elif defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK)
 #define GXOS_NATIVEAOT_THREAD_START_RVA 0x35720U
 #elif defined(GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE)
 #define GXOS_NATIVEAOT_THREAD_START_RVA 0x35560U
@@ -597,11 +599,18 @@ static uint32_t g_nativeaot_runtime_fls_slot = UINT32_MAX;
 static uint64_t g_managed_gc_probe_target;
 static GXOS_NATIVEAOT_CALLBACK_BRIDGE g_managed_gc_probe_bridge;
 #endif
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
 static uint64_t g_managed_root_publish_target;
 static uint64_t g_managed_root_release_target;
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+static uint64_t g_managed_root_validate_target;
+#endif
 static GXOS_NATIVEAOT_CALLBACK_BRIDGE g_managed_root_publish_bridge;
 static GXOS_NATIVEAOT_CALLBACK_BRIDGE g_managed_root_release_bridge;
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+static GXOS_NATIVEAOT_CALLBACK_BRIDGE g_managed_root_validate_bridge;
+#endif
 #endif
 static uint32_t g_platform_last_error;
 #if defined(GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE) || \
@@ -5063,9 +5072,11 @@ typedef struct {
     uint32_t export_size;
     uint32_t managed_main_rva;
     uint32_t managed_callback_rva;
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
     uint32_t managed_root_publish_rva;
     uint32_t managed_root_release_rva;
+    uint32_t managed_root_validate_rva;
 #endif
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
     uint32_t managed_kernel_initialize_rva;
@@ -18504,7 +18515,8 @@ static void find_managed_gc_probe(PE_IMAGE *image)
 }
 #endif
 
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
 static void find_managed_root_exports(PE_IMAGE *image)
 {
     GXOS_NATIVEAOT_EXPORT_IMAGE export_image = {
@@ -18512,18 +18524,33 @@ static void find_managed_root_exports(PE_IMAGE *image)
         image->export_size};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION publish_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION release_resolution = {0};
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION validate_resolution = {0};
+#endif
     GXOS_NATIVEAOT_EXPORT_STATUS publish_status = gxos_nativeaot_find_export(
         &export_image, "ManagedRootPublish", &publish_resolution);
     GXOS_NATIVEAOT_EXPORT_STATUS release_status = gxos_nativeaot_find_export(
         &export_image, "ManagedRootRelease", &release_resolution);
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+    GXOS_NATIVEAOT_EXPORT_STATUS validate_status = gxos_nativeaot_find_export(
+        &export_image, "ManagedRootValidate", &validate_resolution);
+#endif
     if (publish_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("ManagedRootPublish-export-missing");
     }
     if (release_status != GXOS_NATIVEAOT_EXPORT_OK) {
         fail("ManagedRootRelease-export-missing");
     }
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+    if (validate_status != GXOS_NATIVEAOT_EXPORT_OK) {
+        fail("ManagedRootValidate-export-missing");
+    }
+#endif
     image->managed_root_publish_rva = publish_resolution.rva;
     image->managed_root_release_rva = release_resolution.rva;
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+    image->managed_root_validate_rva = validate_resolution.rva;
+#endif
 }
 #endif
 
@@ -19057,7 +19084,8 @@ static void load_pe_image(PE_IMAGE *image, EFI_BOOT_SERVICES *boot_services)
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_GC_PROBE
     find_managed_gc_probe(image);
 #endif
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
     find_managed_root_exports(image);
 #endif
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
@@ -20876,9 +20904,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     uint64_t gc_main_tls_alloc_limit_after = 0;
     uint64_t gc_main_tls_alloc_ptr_after = 0;
 #endif
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_root_publish_resolution = {0};
     GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_root_release_resolution = {0};
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+    GXOS_NATIVEAOT_EXPORT_RESOLUTION managed_root_validate_resolution = {0};
+#endif
 #endif
 #ifdef GXOS_ENABLE_CRT_INITTERM_E
     GXOS_CRT_INITTERM_E_CONTEXT initterm_e_context = {0};
@@ -21381,7 +21413,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("ManagedGcProbe-registration");
     }
 #endif
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
     g_managed_root_publish_target =
         image.actual_base + image.managed_root_publish_rva;
     managed_root_publish_resolution.rva = image.managed_root_publish_rva;
@@ -21402,6 +21435,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
                                           &managed_root_release_resolution)) {
         fail("ManagedRootRelease-registration");
     }
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+    g_managed_root_validate_target =
+        image.actual_base + image.managed_root_validate_rva;
+    managed_root_validate_resolution.rva = image.managed_root_validate_rva;
+    managed_root_validate_resolution.address =
+        (uintptr_t)g_managed_root_validate_target;
+    managed_root_validate_resolution.ordinal = 0;
+    if (!gxos_nativeaot_callback_register(&g_managed_root_validate_bridge,
+                                          &managed_root_validate_resolution)) {
+        fail("ManagedRootValidate-registration");
+    }
+#endif
 #endif
 #ifdef GXOS_ENABLE_MANAGED_KERNEL
     managed_kernel_worker_bridge_resolution.rva =
@@ -21444,7 +21489,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_text("GXOS_NET10:MANAGED_GC_PROBE_DISCOVERY=PE_EXPORT_TABLE\r\n");
     serial_text("GXOS_NET10:MANAGED_GC_PROBE_READY=0\r\n");
 #endif
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
     serial_text("GXOS_NET10:MANAGED_ROOT_PUBLISH_EXPORT=ManagedRootPublish\r\n");
     serial_field_hex("GXOS_NET10:MANAGED_ROOT_PUBLISH_EXPORT_RVA=0x",
                      image.managed_root_publish_rva);
@@ -21459,6 +21505,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:MANAGED_ROOT_RELEASE_TARGET_VA=0x",
                      g_managed_root_release_target);
     serial_text("\r\n");
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+    serial_text("GXOS_NET10:MANAGED_ROOT_VALIDATE_EXPORT=ManagedRootValidate\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_ROOT_VALIDATE_EXPORT_RVA=0x",
+                     image.managed_root_validate_rva);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:MANAGED_ROOT_VALIDATE_TARGET_VA=0x",
+                     g_managed_root_validate_target);
+    serial_text("\r\n");
+#endif
 #endif
 #ifdef GXOS_ENABLE_CREATE_THREAD
     if (image.actual_base == 0 || image.loaded_size == 0 ||
@@ -22612,9 +22667,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
         fail("nativeaot-managed-gc-probe-readiness");
     }
 #endif
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
     if (!gxos_nativeaot_callback_mark_ready(&g_managed_root_publish_bridge) ||
-        !gxos_nativeaot_callback_mark_ready(&g_managed_root_release_bridge)) {
+        !gxos_nativeaot_callback_mark_ready(&g_managed_root_release_bridge)
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+        || !gxos_nativeaot_callback_mark_ready(&g_managed_root_validate_bridge)
+#endif
+        ) {
         fail("nativeaot-managed-root-readiness");
     }
 #endif
@@ -22831,10 +22891,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
             nativeaot_phase53o_in_managed,
             nativeaot_phase53o_after_managed,
             read_u32(rva_to_loaded(&image, image.tls_index_rva, 4)),
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
             &g_managed_root_publish_bridge,
-            &g_managed_root_release_bridge
+            &g_managed_root_release_bridge,
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+            &g_managed_root_validate_bridge
 #else
+            0
+#endif
+#else
+            0,
             0,
             0
 #endif
@@ -22857,6 +22924,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
             fail("nativeaot-phase58-postroot-rollback");
         }
 #endif
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+        if (!gxos_nativeaot_phase59_postgc_rollback_probe(&phase53o_probe)) {
+            fail("nativeaot-phase59-postgc-rollback");
+        }
+#endif
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP
         if (!gxos_nativeaot_managed_worker_ownership_probe(&phase53o_probe)) {
             fail("nativeaot-managed-worker-ownership");
@@ -22875,6 +22947,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
 #endif
 #ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
     serial_text("GXOS_NET10:MANAGED_WORKER_POSTROOT_ROLLBACK_OK=1\r\n");
+#endif
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+    serial_text("GXOS_NET10:MANAGED_WORKER_POSTGC_ROLLBACK_OK=1\r\n");
 #endif
 #elif defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK)
     nativeaot_scheduler_callback_probe();
@@ -22918,7 +22993,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     serial_field_hex("GXOS_NET10:MANAGED_CALLBACK_PROCESS_INITIALIZATION_CALLS=0x",
                      nativeaot_process_entry_calls);
     serial_text("\r\n");
-#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK)
     if (g_managed_callback_bridge.invocation_count != 28U ||
 #elif defined(GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK)
     if (g_managed_callback_bridge.invocation_count != 28U ||

@@ -33,7 +33,8 @@ typedef enum {
     GXOS_NATIVEAOT_FAILURE_INJECTION_NONE = 0,
     GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_WORKER_PREPARE = 1,
     GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_RUNTIME_ATTACH = 2,
-    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_MANAGED_ROOT = 3
+    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_MANAGED_ROOT = 3,
+    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_GC_ROOT_SURVIVAL = 4
 } GXOS_NATIVEAOT_FAILURE_INJECTION_POINT;
 
 typedef enum {
@@ -213,6 +214,7 @@ typedef struct {
     uint32_t tls_index;
     GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_root_publish_bridge;
     GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_root_release_bridge;
+    GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_root_validate_bridge;
 } GXOS_PHASE53O_PROBE;
 
 int gxos_nativeaot_scheduler_thread_lifecycle_probe(
@@ -243,6 +245,11 @@ int gxos_nativeaot_phase57_postattach_rollback_probe(
 
 #ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
 int gxos_nativeaot_phase58_postroot_rollback_probe(
+    GXOS_PHASE53O_PROBE *probe);
+#endif
+
+#ifdef GXOS_ENABLE_PHASE59_POSTGC_ROLLBACK
+int gxos_nativeaot_phase59_postgc_rollback_probe(
     GXOS_PHASE53O_PROBE *probe);
 #endif
 

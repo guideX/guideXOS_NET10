@@ -83,6 +83,23 @@ public static unsafe class ManagedEntry
         return unchecked((int)(0x59000000U | rootToken));
     }
 
+    // This is deliberately a validation-only companion to ManagedRootRelease.
+    // It proves that the same logical managed static root is still published
+    // after a real collection without exposing a managed pointer to native
+    // code or changing root ownership.
+    [UnmanagedCallersOnly(EntryPoint = "ManagedRootValidate")]
+    public static int ManagedRootValidate(int token)
+    {
+        uint rootToken = unchecked((uint)token);
+        Phase58ManagedRoot? root = s_phase58ManagedRoot;
+        if (rootToken == 0 || root is null || root.Token != rootToken)
+        {
+            return -2;
+        }
+
+        return unchecked((int)(0x5A000000U | rootToken));
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static int ForceManagedCollection()
     {
