@@ -60,11 +60,12 @@ Observed Phase 58 values were stable on all three boots:
 |---|---:|---:|---:|---:|
 | Baseline | 3 | 2 | D | 0 |
 | Prepared | 5 | 3 | E | 0 |
+| Runtime attached | 5 | 3 | E | 0 |
 | Root published | 5 | 3 | E | 1 |
-| Root released / detached | 3 | 2 | D | 0 |
-| Final reclaim | 3 | 2 | D | 0 |
+| Root released (pre-detach snapshot) | 5 | 3 | E | 0 |
+| Final after detach/reclaim | 3 | 2 | D | 0 |
 
-The `E` scheduler-object peak is not a managed heap object count. Managed-root identity and publication/release counts are the authoritative root evidence.
+The detach marker and FLS/ThreadStore cleanup were verified immediately after the root-release snapshot; the harness does not emit a separate post-detach/pre-reclaim resource census. The `E` scheduler-object peak is not a managed heap object count. Managed-root identity and publication/release counts are the authoritative root evidence.
 
 ## ABA and replacement proof
 
