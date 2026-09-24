@@ -24,6 +24,21 @@ public static unsafe class ManagedEntry
     private const int MarkerLength = 29;
     private static int s_managedCallbackCount;
 
+    // Phase 58 deliberately uses a managed static reference as the root
+    // authority.  Native code receives only the generation-scoped token; it
+    // never retains a managed object pointer or manufactures a GC handle.
+    private sealed class Phase58ManagedRoot
+    {
+        internal readonly uint Token;
+
+        internal Phase58ManagedRoot(uint token)
+        {
+            Token = token;
+        }
+    }
+
+    private static Phase58ManagedRoot? s_phase58ManagedRoot;
+
     private const int GcProbeRetainedLength = 8;
     private const int GcProbePressureAllocations = 4;
     private const int GcProbePressureLength = 64;
@@ -39,6 +54,33 @@ public static unsafe class ManagedEntry
 
         s_managedCallbackCount++;
         return (s_managedCallbackCount << 16) | (value + 1);
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "ManagedRootPublish")]
+    public static int ManagedRootPublish(int token)
+    {
+        uint rootToken = unchecked((uint)token);
+        if (rootToken == 0 || s_phase58ManagedRoot is not null)
+        {
+            return -1;
+        }
+
+        s_phase58ManagedRoot = new Phase58ManagedRoot(rootToken);
+        return unchecked((int)(0x58000000U | rootToken));
+    }
+
+    [UnmanagedCallersOnly(EntryPoint = "ManagedRootRelease")]
+    public static int ManagedRootRelease(int token)
+    {
+        uint rootToken = unchecked((uint)token);
+        Phase58ManagedRoot? root = s_phase58ManagedRoot;
+        if (rootToken == 0 || root is null || root.Token != rootToken)
+        {
+            return -2;
+        }
+
+        s_phase58ManagedRoot = null;
+        return unchecked((int)(0x59000000U | rootToken));
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

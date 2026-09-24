@@ -32,7 +32,8 @@ typedef void (GXOS_PHASE53O_MS_ABI *GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK)(
 typedef enum {
     GXOS_NATIVEAOT_FAILURE_INJECTION_NONE = 0,
     GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_WORKER_PREPARE = 1,
-    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_RUNTIME_ATTACH = 2
+    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_RUNTIME_ATTACH = 2,
+    GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_MANAGED_ROOT = 3
 } GXOS_NATIVEAOT_FAILURE_INJECTION_POINT;
 
 typedef enum {
@@ -80,11 +81,17 @@ typedef struct {
     uint8_t environment_owned;
     uint8_t tls_fls_owned;
     uint8_t runtime_thread_owned;
+    /* Existing Phase 57 callback-scope evidence; this is not a GC-root bit. */
     uint8_t managed_worker_object_owned;
+    /* Phase 58 actual managed static-root ownership ledger. */
+    uint8_t managed_root_owned;
     uint8_t managed_root_survived;
     uint8_t callback_registration_observed;
     uint8_t vm_resources_owned;
-    uint8_t reserved_ownership[3];
+    uint8_t reserved_ownership[2];
+    uint64_t managed_root_identity;
+    uint32_t managed_root_publication_count;
+    uint32_t managed_root_release_count;
     uint64_t stack_reservation_base;
     uint64_t stack_guard_base;
     uint64_t stack_usable_low;
@@ -152,6 +159,14 @@ int gxos_nativeaot_scheduler_worker_invoke(
     GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_bridge, int32_t input,
     int32_t *result, uint32_t *callback_status_out);
 
+int gxos_nativeaot_scheduler_worker_note_managed_root_published(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    uint64_t root_identity);
+
+int gxos_nativeaot_scheduler_worker_note_managed_root_released(
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    uint64_t root_identity);
+
 int gxos_nativeaot_scheduler_worker_detach(
     GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle);
 
@@ -196,6 +211,8 @@ typedef struct {
     GXOS_PHASE53O_SET_PHASE phase_in_managed;
     GXOS_PHASE53O_SET_PHASE phase_after_managed;
     uint32_t tls_index;
+    GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_root_publish_bridge;
+    GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_root_release_bridge;
 } GXOS_PHASE53O_PROBE;
 
 int gxos_nativeaot_scheduler_thread_lifecycle_probe(
@@ -221,6 +238,11 @@ int gxos_nativeaot_phase56_preattach_rollback_probe(
 
 #ifdef GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK
 int gxos_nativeaot_phase57_postattach_rollback_probe(
+    GXOS_PHASE53O_PROBE *probe);
+#endif
+
+#ifdef GXOS_ENABLE_PHASE58_POSTROOT_ROLLBACK
+int gxos_nativeaot_phase58_postroot_rollback_probe(
     GXOS_PHASE53O_PROBE *probe);
 #endif
 
