@@ -17,6 +17,7 @@ param(
     [switch]$EnablePhase57PostAttachRollback,
     [switch]$EnablePhase58PostRootRollback,
     [switch]$EnablePhase59PostGcRollback,
+    [switch]$EnablePhase60PostRootReleaseRollback,
     [switch]$EnablePhase53VGuardProbe,
     [switch]$EnableManagedKernelPhase27,
     [switch]$EnableManagedKernelPhase28,
@@ -67,15 +68,17 @@ $requiresCallbackPayload = $EnableNativeAotManagedCallback -or
     $EnableNativeAotSchedulerCallback -or $EnableNativeAotSchedulerThreadLifecycle -or
     $EnableNativeAotManagedWorkerOwnership -or $EnablePhase56PreAttachRollback -or
     $EnablePhase57PostAttachRollback -or $EnablePhase58PostRootRollback -or
-    $EnablePhase59PostGcRollback
+    $EnablePhase59PostGcRollback -or $EnablePhase60PostRootReleaseRollback
 $requiresAuthoritativePayload = $EnableNativeAotManagedGcProbe -or
     $EnableNativeAotSchedulerThreadLifecycle -or $EnableNativeAotManagedWorkerOwnership -or
     $EnablePhase56PreAttachRollback -or $EnablePhase57PostAttachRollback -or
-    $EnablePhase58PostRootRollback -or $EnablePhase59PostGcRollback
+    $EnablePhase58PostRootRollback -or $EnablePhase59PostGcRollback -or
+    $EnablePhase60PostRootReleaseRollback
 
 if (@($EnablePhase56PreAttachRollback, $EnablePhase57PostAttachRollback,
-      $EnablePhase58PostRootRollback, $EnablePhase59PostGcRollback).Where({ $_ }).Count -gt 1) {
-    throw 'Phase 56, Phase 57, Phase 58, and Phase 59 diagnostic injection points must be selected exclusively.'
+      $EnablePhase58PostRootRollback, $EnablePhase59PostGcRollback,
+      $EnablePhase60PostRootReleaseRollback).Where({ $_ }).Count -gt 1) {
+    throw 'Phase 56, Phase 57, Phase 58, Phase 59, and Phase 60 diagnostic injection points must be selected exclusively.'
 }
 
 if ($PayloadMode -eq 'ManagedKernel' -and
@@ -219,6 +222,24 @@ if ($EnablePhase59PostGcRollback -and -not $EnableNativeAotManagedGcProbe) {
 }
 if ($EnablePhase59PostGcRollback -and -not $EnableNativeAotSchedulerThreadLifecycle) {
     throw 'Phase 59 post-GC rollback validation requires -EnableNativeAotSchedulerThreadLifecycle.'
+}
+if ($EnablePhase60PostRootReleaseRollback -and $Scenario -ne 'NativeAotEventWait') {
+    throw 'Phase 60 post-root-release rollback validation requires the NativeAotEventWait scenario.'
+}
+if ($EnablePhase60PostRootReleaseRollback -and -not $EnableNativeAotStartup) {
+    throw 'Phase 60 post-root-release rollback validation requires -EnableNativeAotStartup.'
+}
+if ($EnablePhase60PostRootReleaseRollback -and -not $EnableNativeAotManagedCallback) {
+    throw 'Phase 60 post-root-release rollback validation requires -EnableNativeAotManagedCallback.'
+}
+if ($EnablePhase60PostRootReleaseRollback -and -not $EnableNativeAotSchedulerCallback) {
+    throw 'Phase 60 post-root-release rollback validation requires -EnableNativeAotSchedulerCallback.'
+}
+if ($EnablePhase60PostRootReleaseRollback -and -not $EnableNativeAotManagedGcProbe) {
+    throw 'Phase 60 post-root-release rollback validation requires -EnableNativeAotManagedGcProbe.'
+}
+if ($EnablePhase60PostRootReleaseRollback -and -not $EnableNativeAotSchedulerThreadLifecycle) {
+    throw 'Phase 60 post-root-release rollback validation requires -EnableNativeAotSchedulerThreadLifecycle.'
 }
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -389,7 +410,7 @@ if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
     $payloadSize = (Get-Item -LiteralPath $managedArtifact).Length
     if ($PayloadMode -eq 'ManagedKernel') {
         # ManagedKernel establishes its own payload identity for this phase.
-    } elseif ($EnablePhase59PostGcRollback) {
+    } elseif ($EnablePhase59PostGcRollback -or $EnablePhase60PostRootReleaseRollback) {
         if ($payloadHash -ne $phase59PayloadSha256 -or
             $payloadSize -ne $phase59PayloadSize) {
             throw "Phase 59 requires the captured post-GC payload. Hash=$payloadHash Size=$payloadSize"
@@ -449,7 +470,7 @@ Write-Output "MANAGED_PAYLOAD_STAGED_SHA256=$stagedPayloadHash"
 if ($requiresAuthoritativePayload -or $requiresCallbackPayload) {
     $stagedPayloadHash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant()
     $stagedPayloadSize = (Get-Item -LiteralPath $payload).Length
-    $expectedStagedHash = if ($EnablePhase59PostGcRollback) {
+    $expectedStagedHash = if ($EnablePhase59PostGcRollback -or $EnablePhase60PostRootReleaseRollback) {
         $phase59PayloadSha256
     } elseif ($EnablePhase58PostRootRollback) {
         $phase58PayloadSha256
@@ -464,7 +485,7 @@ if ($requiresAuthoritativePayload -or $requiresCallbackPayload) {
     } else {
         $callbackPayloadSha256
     }
-    $expectedStagedSize = if ($EnablePhase59PostGcRollback) {
+    $expectedStagedSize = if ($EnablePhase59PostGcRollback -or $EnablePhase60PostRootReleaseRollback) {
         $phase59PayloadSize
     } elseif ($EnablePhase58PostRootRollback) {
         $phase58PayloadSize
@@ -1365,7 +1386,7 @@ if ($Scenario -eq 'NativeAotEventWait' -or $Scenario -eq 'ManagedKernelPhase11')
 if ($EnableNativeAotSchedulerThreadLifecycle -or
     $EnableNativeAotManagedWorkerOwnership -or $EnablePhase56PreAttachRollback -or
     $EnablePhase57PostAttachRollback -or $EnablePhase58PostRootRollback -or
-    $EnablePhase59PostGcRollback -or
+    $EnablePhase59PostGcRollback -or $EnablePhase60PostRootReleaseRollback -or
     $PayloadMode -eq 'ManagedKernel') {
     # Phase 53P shares the Phase 53O attach/return/detach implementation with
     # the production managed driver worker; the diagnostic entry point remains
@@ -1403,6 +1424,12 @@ if ($EnablePhase59PostGcRollback) {
     # the Phase 59 point is the only executable point in this configuration.
     $gccArguments += '-DGXOS_ENABLE_PHASE56_FAILURE_INJECTION'
     $gccArguments += '-DGXOS_ENABLE_PHASE59_POSTGC_ROLLBACK'
+}
+if ($EnablePhase60PostRootReleaseRollback) {
+    # Reuse the Phase 56 single-shot, generation-aware injection mechanism;
+    # the Phase 60 point is the only executable point in this configuration.
+    $gccArguments += '-DGXOS_ENABLE_PHASE56_FAILURE_INJECTION'
+    $gccArguments += '-DGXOS_ENABLE_PHASE60_POSTROOTRELEASE_ROLLBACK'
 }
 if ($EnablePhase53VGuardProbe) {
     $gccArguments += '-DGXOS_ENABLE_PHASE53V_GUARD_PROBE'
