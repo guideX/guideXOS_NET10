@@ -53,8 +53,12 @@
 #endif
 #if defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE) || \
     defined(GXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP) || \
+    defined(GXOS_ENABLE_PHASE61_MANAGED_WORKER_API) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL)
 #include "nativeaot_scheduler_thread_lifecycle.h"
+#endif
+#ifdef GXOS_ENABLE_PHASE61_MANAGED_WORKER_API
+#include "nativeaot_managed_worker_api.h"
 #endif
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
@@ -22963,10 +22967,24 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
             fail("nativeaot-managed-worker-ownership");
         }
 #endif
+#ifdef GXOS_ENABLE_PHASE61_MANAGED_WORKER_API
+        {
+            GXOS_NATIVEAOT_MANAGED_WORKER_API managed_worker_api = {0};
+            if (!gxos_nativeaot_managed_worker_api_initialize(
+                    &managed_worker_api, &phase53o_probe) ||
+                !gxos_nativeaot_managed_worker_api_probe(
+                    &managed_worker_api)) {
+                fail("nativeaot-phase61-managed-worker-api");
+            }
+        }
+#endif
     }
     serial_text("GXOS_NET10:MANAGED_GC_WORKER_RETURN_OK=1\r\n");
 #ifdef GXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP
     serial_text("GXOS_NET10:MANAGED_WORKER_OWNERSHIP_OK=1\r\n");
+#endif
+#ifdef GXOS_ENABLE_PHASE61_MANAGED_WORKER_API
+    serial_text("GXOS_NET10:MANAGED_WORKER_API_OK=1\r\n");
 #endif
 #ifdef GXOS_ENABLE_PHASE56_PREATTACH_ROLLBACK
     serial_text("GXOS_NET10:MANAGED_WORKER_PREATTACH_ROLLBACK_OK=1\r\n");
@@ -23035,6 +23053,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tab
     if (g_managed_callback_bridge.invocation_count != 16U ||
 #elif defined(GXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP)
     if (g_managed_callback_bridge.invocation_count != 28U ||
+#elif defined(GXOS_ENABLE_PHASE61_MANAGED_WORKER_API)
+    if (g_managed_callback_bridge.invocation_count != 10U ||
 #elif defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE)
     if (g_managed_callback_bridge.invocation_count != 4U ||
 #elif defined(GXOS_ENABLE_NATIVEAOT_SCHEDULER_CALLBACK)
