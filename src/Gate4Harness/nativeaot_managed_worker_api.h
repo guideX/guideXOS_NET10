@@ -22,7 +22,9 @@ typedef enum {
     GXOS_NATIVEAOT_MANAGED_WORKER_STATE_RUNNING = 3,
     GXOS_NATIVEAOT_MANAGED_WORKER_STATE_COMPLETED = 4,
     GXOS_NATIVEAOT_MANAGED_WORKER_STATE_FAILED = 5,
-    GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CLOSED = 6
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CLOSED = 6,
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCEL_REQUESTED = 7,
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCELED = 8
 } GXOS_NATIVEAOT_MANAGED_WORKER_STATE;
 
 typedef enum {
@@ -39,7 +41,12 @@ typedef enum {
     GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CLOSE_BEFORE_COMPLETE = 10,
     GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_DUPLICATE_CLOSE = 11,
     GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_INTERNAL_FAILURE = 12,
-    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY = 13
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY = 13,
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCELED = 14,
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_REQUESTED = 15,
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_COMPLETED = 16,
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_CLOSED = 17,
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_UNSUPPORTED_STATE = 18
 } GXOS_NATIVEAOT_MANAGED_WORKER_STATUS;
 
 /* Fixed-size, caller-owned request.  The payload is reserved for future
@@ -92,7 +99,14 @@ typedef struct GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD {
     GXOS_NATIVEAOT_MANAGED_WORKER_STATE state;
     uint8_t active;
     uint8_t yielded;
-    uint8_t reserved[3];
+    uint8_t cancel_observed;
+    uint8_t cancel_checkpoint_open;
+    uint8_t cancel_checkpoint_passed;
+    uint8_t phase65_peer_yielded;
+    uint32_t cancel_requested;
+    uint32_t gc_invocation_count;
+    uint32_t root_survival_callback_count;
+    uint32_t post_gc_continuation_count;
 } GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD;
 
 /* The service context is private to the implementation.  Callers receive
@@ -130,6 +144,14 @@ gxos_nativeaot_managed_worker_api_submit(
     GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE handle,
     const GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST *request);
 
+/* Requests cooperative cancellation at the worker's next supported
+   checkpoint. Phase 65 currently exposes the post-root-publication,
+   pre-GC checkpoint for GC_CHECK workers. */
+GXOS_NATIVEAOT_MANAGED_WORKER_STATUS
+gxos_nativeaot_managed_worker_api_request_cancel(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api,
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE handle);
+
 GXOS_NATIVEAOT_MANAGED_WORKER_STATUS
 gxos_nativeaot_managed_worker_api_drive(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api,
@@ -160,6 +182,10 @@ int gxos_nativeaot_managed_worker_api_concurrent_probe(
 /* Diagnostic fixture only: validates exactly three live API workers, two
    independent managed roots, capacity rejection, and API attach rollback. */
 int gxos_nativeaot_managed_worker_api_capacity_three_probe(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api);
+
+/* Diagnostic fixture only: exercises bounded cooperative cancellation. */
+int gxos_nativeaot_managed_worker_api_cancellation_probe(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api);
 
 #endif

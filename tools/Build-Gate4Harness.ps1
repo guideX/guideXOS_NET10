@@ -16,6 +16,7 @@ param(
     [switch]$EnableNativeAotManagedWorkerApi,
     [switch]$EnablePhase62ConcurrentManagedWorkerApi,
     [switch]$EnablePhase64ManagedWorkerApi,
+    [switch]$EnablePhase65ManagedWorkerApi,
     [switch]$EnablePhase56PreAttachRollback,
     [switch]$EnablePhase57PostAttachRollback,
     [switch]$EnablePhase58PostRootRollback,
@@ -71,12 +72,14 @@ $requiresCallbackPayload = $EnableNativeAotManagedCallback -or
     $EnableNativeAotSchedulerCallback -or $EnableNativeAotSchedulerThreadLifecycle -or
     $EnableNativeAotManagedWorkerOwnership -or $EnableNativeAotManagedWorkerApi -or
     $EnablePhase62ConcurrentManagedWorkerApi -or $EnablePhase64ManagedWorkerApi -or
+    $EnablePhase65ManagedWorkerApi -or
     $EnablePhase56PreAttachRollback -or
     $EnablePhase57PostAttachRollback -or $EnablePhase58PostRootRollback -or
     $EnablePhase59PostGcRollback -or $EnablePhase60PostRootReleaseRollback
 $requiresAuthoritativePayload = $EnableNativeAotManagedGcProbe -or
     $EnableNativeAotSchedulerThreadLifecycle -or $EnableNativeAotManagedWorkerOwnership -or
     $EnableNativeAotManagedWorkerApi -or $EnablePhase62ConcurrentManagedWorkerApi -or
+    $EnablePhase64ManagedWorkerApi -or $EnablePhase65ManagedWorkerApi -or
     $EnablePhase56PreAttachRollback -or $EnablePhase57PostAttachRollback -or
     $EnablePhase58PostRootRollback -or $EnablePhase59PostGcRollback -or
     $EnablePhase60PostRootReleaseRollback
@@ -191,6 +194,11 @@ if ($EnablePhase64ManagedWorkerApi -and
     ($EnableNativeAotManagedWorkerApi -or $EnablePhase62ConcurrentManagedWorkerApi)) {
     throw 'Phase 64 managed-worker API must be selected without the Phase 61 or Phase 62 fixture.'
 }
+if ($EnablePhase65ManagedWorkerApi -and
+    ($EnableNativeAotManagedWorkerApi -or $EnablePhase62ConcurrentManagedWorkerApi -or
+     $EnablePhase64ManagedWorkerApi)) {
+    throw 'Phase 65 managed-worker cancellation must be selected without the Phase 61, 62, or 64 fixture.'
+}
 if ($EnablePhase64ManagedWorkerApi -and $Scenario -ne 'NativeAotEventWait') {
     throw 'Phase 64 managed worker API requires the NativeAotEventWait scenario.'
 }
@@ -208,6 +216,24 @@ if ($EnablePhase64ManagedWorkerApi -and -not $EnableNativeAotManagedGcProbe) {
 }
 if ($EnablePhase64ManagedWorkerApi -and -not $EnableNativeAotSchedulerThreadLifecycle) {
     throw 'Phase 64 managed worker API requires -EnableNativeAotSchedulerThreadLifecycle.'
+}
+if ($EnablePhase65ManagedWorkerApi -and $Scenario -ne 'NativeAotEventWait') {
+    throw 'Phase 65 managed worker cancellation requires the NativeAotEventWait scenario.'
+}
+if ($EnablePhase65ManagedWorkerApi -and -not $EnableNativeAotStartup) {
+    throw 'Phase 65 managed worker cancellation requires -EnableNativeAotStartup.'
+}
+if ($EnablePhase65ManagedWorkerApi -and -not $EnableNativeAotManagedCallback) {
+    throw 'Phase 65 managed worker cancellation requires -EnableNativeAotManagedCallback.'
+}
+if ($EnablePhase65ManagedWorkerApi -and -not $EnableNativeAotSchedulerCallback) {
+    throw 'Phase 65 managed worker cancellation requires -EnableNativeAotSchedulerCallback.'
+}
+if ($EnablePhase65ManagedWorkerApi -and -not $EnableNativeAotManagedGcProbe) {
+    throw 'Phase 65 managed worker cancellation requires -EnableNativeAotManagedGcProbe.'
+}
+if ($EnablePhase65ManagedWorkerApi -and -not $EnableNativeAotSchedulerThreadLifecycle) {
+    throw 'Phase 65 managed worker cancellation requires -EnableNativeAotSchedulerThreadLifecycle.'
 }
 if ($EnablePhase56PreAttachRollback -and $Scenario -ne 'NativeAotEventWait') {
     throw 'Phase 56 pre-attach rollback validation requires the NativeAotEventWait scenario.'
@@ -477,8 +503,8 @@ if ($Scenario -eq 'CreateEventW' -or $Scenario -eq 'CreateEventWDisabled' -or
     $payloadSize = (Get-Item -LiteralPath $managedArtifact).Length
     if ($PayloadMode -eq 'ManagedKernel') {
         # ManagedKernel establishes its own payload identity for this phase.
-    } elseif ($EnablePhase64ManagedWorkerApi) {
-        # Phase 64 deliberately uses a freshly rebuilt payload whose root-slot
+    } elseif ($EnablePhase64ManagedWorkerApi -or $EnablePhase65ManagedWorkerApi) {
+        # Phases 64 and 65 use the freshly rebuilt payload whose root-slot
         # implementation is newer than the accepted Phase 53O hashes.
     } elseif ($EnablePhase59PostGcRollback -or $EnablePhase60PostRootReleaseRollback) {
         if ($payloadHash -ne $phase59PayloadSha256 -or
@@ -517,7 +543,7 @@ $gccCommand = Get-Command gcc -ErrorAction SilentlyContinue
 if (-not $gccCommand) { throw 'gcc is required to build the freestanding UEFI harness.' }
 $objdumpCommand = Get-Command objdump -ErrorAction SilentlyContinue
 if (-not $objdumpCommand) { throw 'objdump is required to validate the UEFI harness image.' }
-if ($EnablePhase64ManagedWorkerApi) {
+if ($EnablePhase64ManagedWorkerApi -or $EnablePhase65ManagedWorkerApi) {
     $exportText = (& $objdumpCommand.Source '-p' $managedArtifact 2>&1 | Out-String)
     foreach ($exportName in @('ManagedRootPublish', 'ManagedRootRelease', 'ManagedRootValidate')) {
         if (-not $exportText.Contains($exportName)) {
@@ -546,7 +572,7 @@ Write-Output "MANAGED_PAYLOAD_STAGED_SIZE=$stagedPayloadSize"
 Write-Output "MANAGED_PAYLOAD_STAGED_SHA256=$stagedPayloadHash"
 
 if (($requiresAuthoritativePayload -or $requiresCallbackPayload) -and
-    -not $EnablePhase64ManagedWorkerApi) {
+    -not ($EnablePhase64ManagedWorkerApi -or $EnablePhase65ManagedWorkerApi)) {
     $stagedPayloadHash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant()
     $stagedPayloadSize = (Get-Item -LiteralPath $payload).Length
     $expectedStagedHash = if ($EnablePhase59PostGcRollback -or $EnablePhase60PostRootReleaseRollback) {
@@ -1467,7 +1493,7 @@ if ($EnableNativeAotSchedulerThreadLifecycle -or
     $EnablePhase57PostAttachRollback -or $EnablePhase58PostRootRollback -or
     $EnablePhase59PostGcRollback -or $EnablePhase60PostRootReleaseRollback -or
     $EnableNativeAotManagedWorkerApi -or $EnablePhase62ConcurrentManagedWorkerApi -or
-    $EnablePhase64ManagedWorkerApi -or
+    $EnablePhase64ManagedWorkerApi -or $EnablePhase65ManagedWorkerApi -or
     $PayloadMode -eq 'ManagedKernel') {
     # Phase 53P shares the Phase 53O attach/return/detach implementation with
     # the production managed driver worker; the diagnostic entry point remains
@@ -1495,6 +1521,12 @@ if ($EnablePhase62ConcurrentManagedWorkerApi) {
 if ($EnablePhase64ManagedWorkerApi) {
     $gccArguments += '-DGXOS_ENABLE_PHASE64_MANAGED_WORKER_API'
     $gccArguments += '-DGXOS_ENABLE_PHASE56_FAILURE_INJECTION'
+    $gccArguments += $managedWorkerApiSource
+}
+if ($EnablePhase65ManagedWorkerApi) {
+    $gccArguments += '-DGXOS_ENABLE_PHASE64_MANAGED_WORKER_API'
+    $gccArguments += '-DGXOS_ENABLE_PHASE56_FAILURE_INJECTION'
+    $gccArguments += '-DGXOS_ENABLE_PHASE65_MANAGED_WORKER_API'
     $gccArguments += $managedWorkerApiSource
 }
 if ($EnablePhase56PreAttachRollback) {
