@@ -1673,7 +1673,8 @@ static int phase56_injection_state_valid(
     return gxos_scheduler_thread_from_handle(published_handle) == thread;
 }
 
-#ifdef GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE64_MANAGED_WORKER_API)
 static int phase57_injection_state_valid(
     const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
 {
@@ -5053,7 +5054,8 @@ int gxos_nativeaot_phase56_failure_arm(
     g_phase56_failure_record.point = point;
     if ((point != GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_WORKER_PREPARE ||
          !phase56_injection_state_valid(lifecycle))
-#ifdef GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE64_MANAGED_WORKER_API)
         && (point != GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_RUNTIME_ATTACH ||
             !phase57_injection_state_valid(lifecycle))
 #endif
@@ -5090,7 +5092,8 @@ int gxos_nativeaot_phase56_failure_try_fire(
         ((g_phase56_failure_record.point ==
               GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_WORKER_PREPARE &&
           !phase56_injection_state_valid(lifecycle))
-#ifdef GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE64_MANAGED_WORKER_API)
          || (g_phase56_failure_record.point ==
                  GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_RUNTIME_ATTACH &&
              !phase57_injection_state_valid(lifecycle))
@@ -5112,7 +5115,8 @@ int gxos_nativeaot_phase56_failure_try_fire(
 #endif
          || (g_phase56_failure_record.point !=
                  GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_WORKER_PREPARE
-#ifdef GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK
+#if defined(GXOS_ENABLE_PHASE57_POSTATTACH_ROLLBACK) || \
+    defined(GXOS_ENABLE_PHASE64_MANAGED_WORKER_API)
              && g_phase56_failure_record.point !=
                     GXOS_NATIVEAOT_FAILURE_INJECTION_AFTER_RUNTIME_ATTACH
 #endif

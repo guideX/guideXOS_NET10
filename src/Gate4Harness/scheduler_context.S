@@ -380,7 +380,7 @@ gxos_scheduler_worker_yield:
     movdqu  %xmm13, 312(%rsp)
     movdqu  %xmm14, 328(%rsp)
     movdqu  %xmm15, 344(%rsp)
-    leaq    64(%rsp), %rdx
+    leaq    64(%rsp), %rcx
     call    gxos_scheduler_prepare_yield
     testl   %eax, %eax
     jz      gxos_scheduler_worker_yield_failed
@@ -441,7 +441,7 @@ gxos_scheduler_main_dispatch:
     movdqu  %xmm14, 328(%rsp)
     movdqu  %xmm15, 344(%rsp)
     call    gxos_scheduler_set_main_sentinels
-    leaq    64(%rsp), %rdx
+    leaq    64(%rsp), %rcx
     call    gxos_scheduler_prepare_yield
     testl   %eax, %eax
     jz      gxos_scheduler_main_dispatch_capture

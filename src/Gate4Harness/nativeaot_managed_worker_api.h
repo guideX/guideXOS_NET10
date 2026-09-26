@@ -7,7 +7,8 @@
 
 #define GXOS_NATIVEAOT_MANAGED_WORKER_API_VERSION 1U
 #define GXOS_NATIVEAOT_MANAGED_WORKER_API_PAYLOAD_MAX 16U
-#define GXOS_NATIVEAOT_MANAGED_WORKER_API_CAPACITY 2U
+#define GXOS_NATIVEAOT_MANAGED_WORKER_API_CAPACITY 3U
+#define GXOS_NATIVEAOT_MANAGED_WORKER_ROOT_CAPACITY 2U
 
 typedef enum {
     GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE = 1,
@@ -97,7 +98,7 @@ typedef struct GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD {
 /* The service context is private to the implementation.  Callers receive
    only aligned opaque storage; raw probes, scheduler handles, and TCB
    pointers never cross this public boundary. */
-#define GXOS_NATIVEAOT_MANAGED_WORKER_API_STORAGE_SIZE 1536U
+#define GXOS_NATIVEAOT_MANAGED_WORKER_API_STORAGE_SIZE 2048U
 typedef union {
     uintptr_t alignment;
     uint8_t bytes[GXOS_NATIVEAOT_MANAGED_WORKER_API_STORAGE_SIZE];
@@ -154,6 +155,11 @@ int gxos_nativeaot_managed_worker_api_probe(
 /* Diagnostic fixture only: proves two concurrently live API workers and
    preserves the Phase 61 sequential probe as a separate configuration. */
 int gxos_nativeaot_managed_worker_api_concurrent_probe(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api);
+
+/* Diagnostic fixture only: validates exactly three live API workers, two
+   independent managed roots, capacity rejection, and API attach rollback. */
+int gxos_nativeaot_managed_worker_api_capacity_three_probe(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api);
 
 #endif

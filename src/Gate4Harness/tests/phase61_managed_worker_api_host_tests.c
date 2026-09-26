@@ -42,18 +42,23 @@ int main(void)
     GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE handle = {2, 7, 4, 0};
     GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE different = {2, 7, 5, 0};
     GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE handle_b = {3, 8, 4, 0};
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE handle_c = {4, 9, 5, 0};
     GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST request_a;
     GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST request_b;
+    GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST request_c;
     GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD records[
         GXOS_NATIVEAOT_MANAGED_WORKER_API_CAPACITY] = {0};
     GXOS_NATIVEAOT_MANAGED_WORKER_RESULT result_a = {0};
     GXOS_NATIVEAOT_MANAGED_WORKER_RESULT result_b = {0};
+    GXOS_NATIVEAOT_MANAGED_WORKER_RESULT result_c = {0};
+    uint32_t root_slots[GXOS_NATIVEAOT_MANAGED_WORKER_ROOT_CAPACITY] = {0};
 
     CHECK(sizeof(GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST) == 32U);
     CHECK(sizeof(GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE) == 12U);
     CHECK(sizeof(GXOS_NATIVEAOT_MANAGED_WORKER_API) ==
           GXOS_NATIVEAOT_MANAGED_WORKER_API_STORAGE_SIZE);
-    CHECK(GXOS_NATIVEAOT_MANAGED_WORKER_API_CAPACITY == 2U);
+    CHECK(GXOS_NATIVEAOT_MANAGED_WORKER_API_CAPACITY == 3U);
+    CHECK(GXOS_NATIVEAOT_MANAGED_WORKER_ROOT_CAPACITY == 2U);
     CHECK(GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY == 13);
     CHECK(gxos_nativeaot_managed_worker_api_state_transition(
               GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CREATED,
@@ -112,27 +117,46 @@ int main(void)
     request_a.argument0 = 41U;
     request_b = valid_request(GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK);
     request_b.argument0 = 0x61U;
+    request_c = valid_request(GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK);
+    request_c.argument0 = 0xC3U;
     records[0].handle = handle;
     records[1].handle = handle_b;
+    records[2].handle = handle_c;
     records[0].request = request_a;
     records[1].request = request_b;
+    records[2].request = request_c;
     records[0].active = 1;
     records[1].active = 1;
+    records[2].active = 1;
     result_a.worker = records[0].handle;
     result_a.operation_id = request_a.operation_id;
     result_a.output0 = 42U;
     result_b.worker = records[1].handle;
     result_b.operation_id = request_b.operation_id;
     result_b.output0 = 1U;
+    result_b.output1 = 0xB2U;
+    result_c.worker = records[2].handle;
+    result_c.operation_id = request_c.operation_id;
+    result_c.output0 = 1U;
+    result_c.output1 = 0xC3U;
     CHECK(records[0].request.argument0 == 41U);
     CHECK(records[1].request.argument0 == 0x61U);
+    CHECK(records[2].request.argument0 == 0xC3U);
     CHECK(records[0].request.operation_id != records[1].request.operation_id);
     CHECK(records[0].handle.scheduler_slot != records[1].handle.scheduler_slot);
+    CHECK(records[1].handle.scheduler_slot != records[2].handle.scheduler_slot);
     CHECK(!gxos_nativeaot_managed_worker_api_handle_equal(
         records[0].handle, records[1].handle));
     CHECK(result_a.worker.worker_identity == records[0].handle.worker_identity);
     CHECK(result_b.worker.worker_identity == records[1].handle.worker_identity);
+    CHECK(result_c.worker.worker_identity == records[2].handle.worker_identity);
     CHECK(result_a.output0 != result_b.output0);
+    CHECK(result_b.output1 != result_c.output1);
+    root_slots[0] = 0xB2U;
+    root_slots[1] = 0xC3U;
+    CHECK(root_slots[0] != root_slots[1]);
+    root_slots[0] = 0;
+    CHECK(root_slots[0] == 0 && root_slots[1] == 0xC3U);
     CHECK(GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_DUPLICATE_SUBMIT !=
           GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK);
     CHECK(GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY !=
@@ -140,5 +164,6 @@ int main(void)
 
     (void)printf("PHASE61_MANAGED_WORKER_API_HOST_TEST=PASS\n");
     (void)printf("PHASE62_MANAGED_WORKER_API_HOST_TEST=PASS\n");
+    (void)printf("PHASE64_MANAGED_WORKER_API_HOST_TEST=PASS\n");
     return g_failures == 0 ? 0 : 1;
 }

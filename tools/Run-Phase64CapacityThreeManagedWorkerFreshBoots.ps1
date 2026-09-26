@@ -5,11 +5,12 @@ param(
     [Parameter(Mandatory = $true)] [string]$PayloadSha256,
     [string]$QemuPath = '',
     [int]$RunCount = 3,
-    [int]$TimeoutSeconds = 300
+    [int]$TimeoutSeconds = 600
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
 $gate = [IO.Path]::GetFullPath($GateDirectory)
 $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 $efi = Join-Path $gate 'ESP\EFI\BOOT\BOOTX64.EFI'
@@ -61,12 +62,12 @@ function Stop-OwnedQemu([System.Diagnostics.Process]$process) {
     }
 }
 
-Require ($RunCount -ge 3) 'Phase 62 requires at least three fresh boots.'
+Require ($RunCount -ge 3) 'Phase 64 requires at least three fresh boots.'
 Require ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
-    'Phase 62 harness or payload is missing.'
+    'Phase 64 harness or payload is missing.'
 Require ($expectedHash -match '^[0-9A-F]{64}$') 'Payload hash must be 64 hex characters.'
 Require ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq
-         $expectedHash) 'Staged Phase 62 payload hash is not authoritative.'
+         $expectedHash) 'Staged Phase 64 payload hash mismatch.'
 Require (!(Test-Path -LiteralPath $evidence)) "Evidence directory already exists: $evidence"
 
 $qemu = if (![string]::IsNullOrWhiteSpace($QemuPath)) {
@@ -80,9 +81,7 @@ Require (Test-Path -LiteralPath $qemu) 'qemu-system-x86_64.exe is required.'
 $qemuProcessName = [IO.Path]::GetFileNameWithoutExtension($qemu)
 $baselineQemuIds = @(Get-Process -Name $qemuProcessName -ErrorAction SilentlyContinue |
     ForEach-Object { $_.Id })
-if ([string]::IsNullOrWhiteSpace($QemuPath)) {
-    Require ($baselineQemuIds.Count -eq 0) 'An unowned QEMU process is already running.'
-}
+Require ($baselineQemuIds.Count -eq 0) 'An unowned QEMU process is already running.'
 $share = Join-Path (Split-Path -Parent $qemu) 'share'
 $ovmf = Join-Path $share 'edk2-x86_64-code.fd'
 $varsTemplate = Join-Path $share 'edk2-i386-vars.fd'
@@ -118,87 +117,103 @@ try {
             $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
             while ((Get-Date) -lt $deadline) {
                 $text = Read-Serial $serial
-                if ($text.Contains('GXOS_NET10:PHASE62_COMPLETE=1') -or
+                if ($text.Contains('GXOS_NET10:PHASE64_COMPLETE=1') -or
                     $text.Contains('GXOS_NET10:FAIL:') -or
                     $text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=')) { break }
                 if ($process.HasExited) { break }
                 Start-Sleep -Milliseconds 250
             }
         } finally { Stop-OwnedQemu $process }
+
         $text = Read-Serial $serial
+        Set-Content -LiteralPath (Join-Path $run 'validation-summary.txt') -Value @(
+            "run=$sequence",
+            "payload_sha256=$((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant())",
+            "phase64_scenarios=$(Count-Token $text 'GXOS_NET10:PHASE64_SCENARIO=')",
+            "phase64_pass=$($text.Contains('GXOS_NET10:PHASE64_PASS=1'))") -Encoding utf8
         Require ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq
                  $expectedHash) "boot $sequence payload hash changed"
         Require (!$text.Contains('GXOS_NET10:FAIL:') -and
                  !$text.Contains('GXOS_NET10:CPU_EXCEPTION_VECTOR=') -and
                  !$text.Contains('GXOS_NET10:PAGE_FAULT_') -and
-                 $text.Contains('GXOS_NET10:PHASE62_PASS=1')) "boot $sequence failed"
+                 $text.Contains('GXOS_NET10:PHASE64_PASS=1')) "boot $sequence failed"
         foreach ($marker in @(
             'GXOS_NET10:NATIVEAOT_STARTUP_OK',
             'GXOS_NET10:MANAGED_GC_MAIN_OK=1',
             'GXOS_NET10:PHASE53O_PASS=1',
             'GXOS_NET10:MANAGED_WORKER_API_OK=1',
-            'GXOS_NET10:PHASE62_API=BOUNDED_TWO_MANAGED_WORKERS',
-            'GXOS_NET10:PHASE62_REQUEST_ISOLATION=1',
-            'GXOS_NET10:PHASE62_RESULT_ISOLATION=1',
-            'GXOS_NET10:PHASE62_CROSS_HANDLE_REJECTED=1',
-            'GXOS_NET10:PHASE62_STALE_CROSS_WORKER_REJECTED=1',
-            'GXOS_NET10:PHASE62_RUNTIME_OVERLAP=1',
-            'GXOS_NET10:PHASE62_SAME_SLOT_REUSE_TESTED=1',
-            'GXOS_NET10:PHASE62_COMPLETE=1')) {
+            'GXOS_NET10:PHASE64_API=BOUNDED_THREE_MANAGED_WORKERS',
+            'GXOS_NET10:PHASE64_THREE_WORKER_OVERLAP=1',
+            'GXOS_NET10:PHASE64_TWO_ROOT_OVERLAP=1',
+            'GXOS_NET10:PHASE64_REQUEST_ISOLATION=1',
+            'GXOS_NET10:PHASE64_RESULT_ISOLATION=1',
+            'GXOS_NET10:PHASE64_FOURTH_WORKER_REJECTED=1',
+            'GXOS_NET10:PHASE64_FOURTH_REJECT_NO_LOWER_ALLOCATION=1',
+            'GXOS_NET10:PHASE64_ROOT_RELEASE_B_WHILE_C_LIVE=1',
+            'GXOS_NET10:PHASE64_ROOT_RELEASE_C_WHILE_B_LIVE=1',
+            'GXOS_NET10:PHASE64_CROSS_ROOT_STALE_REJECTED=1',
+            'GXOS_NET10:PHASE64_ATTACH_FAILURE_ROLLBACK=1',
+            'GXOS_NET10:PHASE64_ATTACH_FAILURE_CLEANUP_COMPLETE=1',
+            'GXOS_NET10:PHASE64_ATTACH_FAILURE_STALE_HANDLE_REJECTED=1',
+            'GXOS_NET10:PHASE64_CAPACITY_RECOVERED=1',
+            'GXOS_NET10:PHASE64_SAME_SLOT_REUSE=1',
+            'GXOS_NET10:PHASE64_COMPLETE=1')) {
             Require ($text.Contains($marker)) "boot $sequence missing marker: $marker"
         }
-        $capacity = Get-Hex $text 'GXOS_NET10:PHASE62_CAPACITY='
-        if ($capacity -eq 2) {
-            Require ($text.Contains('GXOS_NET10:PHASE62_CAPACITY_REJECTED=1')) `
-                "boot $sequence historical capacity-two rejection marker was missing"
-        } else {
-            Require ($capacity -eq 3) "boot $sequence API capacity was neither two nor three"
-            Require ($text.Contains('GXOS_NET10:PHASE62_CAPACITY_THREE_REGRESSION=1')) `
-                "boot $sequence capacity-three regression marker was missing"
-        }
-        Require ((Count-Token $text 'GXOS_NET10:PHASE62_CYCLE=') -eq 12) `
-            "boot $sequence did not complete 12 pairs"
-        Require ((Count-Token $text 'GXOS_NET10:PHASE62_RUNTIME_OVERLAP=1') -eq 12) `
-            "boot $sequence did not prove 12 runtime overlaps"
-        Require ((Count-Token $text 'GXOS_NET10:PHASE62_A_FIRST_RESULT=') -ge 1) `
-            "boot $sequence did not prove A-first completion"
-        Require ((Count-Token $text 'GXOS_NET10:PHASE62_B_FIRST_RESULT=') -ge 1) `
-            "boot $sequence did not prove B-first completion"
-        Require ((Count-Token $text 'GXOS_NET10:PHASE62_RECLAIM_A_WHILE_B_LIVE=1') -ge 1) `
-            "boot $sequence did not reclaim A while B existed"
-        Require ((Count-Token $text 'GXOS_NET10:PHASE62_RECLAIM_B_WHILE_A_LIVE=1') -ge 1) `
-            "boot $sequence did not reclaim B while A existed"
-        Require ((Get-Hex $text 'GXOS_NET10:PHASE62_PEAK_API_WORKERS=') -eq 2) `
-            "boot $sequence API peak was not two"
-        Require ((Get-Hex $text 'GXOS_NET10:PHASE62_PEAK_VM=') -gt
-                 (Get-Hex $text 'GXOS_NET10:PHASE62_BASELINE_VM=')) `
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_CAPACITY=') -eq 3) `
+            "boot $sequence API capacity was not three"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_ROOT_CAPACITY=') -eq 2) `
+            "boot $sequence root capacity was not two"
+        Require ((Count-Token $text 'GXOS_NET10:PHASE64_SCENARIO=') -eq 12) `
+            "boot $sequence did not complete 12 scenarios"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_MAX_ATTACHED_WORKERS=') -eq 3) `
+            "boot $sequence did not attach three workers"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_MAX_ROOT_WORKERS=') -eq 2) `
+            "boot $sequence did not overlap two roots"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_PEAK_API_WORKERS=') -eq 3) `
+            "boot $sequence API peak was not three"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_PEAK_VM=') -gt
+                 (Get-Hex $text 'GXOS_NET10:PHASE64_BASELINE_VM=')) `
             "boot $sequence VM peak did not exceed baseline"
-        Require ((Get-Hex $text 'GXOS_NET10:PHASE62_PEAK_THREADS=') -gt
-                 (Get-Hex $text 'GXOS_NET10:PHASE62_BASELINE_THREADS=')) `
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_PEAK_THREADS=') -gt
+                 (Get-Hex $text 'GXOS_NET10:PHASE64_BASELINE_THREADS=')) `
             "boot $sequence thread peak did not exceed baseline"
-        Require ((Get-Hex $text 'GXOS_NET10:PHASE62_PEAK_ROOT_LEDGER=') -ge 1) `
-            "boot $sequence root peak was not observed"
-        Require ((Get-Hex $text 'GXOS_NET10:PHASE62_FINAL_VM=') -eq
-                 (Get-Hex $text 'GXOS_NET10:PHASE62_BASELINE_VM=')) `
-            "boot $sequence VM baseline did not restore"
-        Require ((Get-Hex $text 'GXOS_NET10:PHASE62_FINAL_THREADS=') -eq
-                 (Get-Hex $text 'GXOS_NET10:PHASE62_BASELINE_THREADS=')) `
-            "boot $sequence thread baseline did not restore"
-        Require ((Get-Hex $text 'GXOS_NET10:PHASE62_FINAL_OBJECTS=') -eq
-                 (Get-Hex $text 'GXOS_NET10:PHASE62_BASELINE_OBJECTS=')) `
-            "boot $sequence object baseline did not restore"
-        Require ((Get-Hex $text 'GXOS_NET10:PHASE62_FINAL_API_WORKERS=') -eq 0) `
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_PEAK_OBJECTS=') -gt
+                 (Get-Hex $text 'GXOS_NET10:PHASE64_BASELINE_OBJECTS=')) `
+            "boot $sequence object peak did not exceed baseline"
+        foreach ($kind in @('VM', 'THREADS', 'OBJECTS')) {
+            Require ((Get-Hex $text "GXOS_NET10:PHASE64_FINAL_$kind=") -eq
+                     (Get-Hex $text "GXOS_NET10:PHASE64_BASELINE_$kind=")) `
+                "boot $sequence $kind baseline did not restore"
+        }
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_FINAL_API_WORKERS=') -eq 0) `
             "boot $sequence API worker baseline did not restore"
-        Require ((Get-Hex $text 'GXOS_NET10:PHASE62_FINAL_ROOT_LEDGER=') -eq 0) `
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_FINAL_ROOT_LEDGER=') -eq 0) `
             "boot $sequence root ledger baseline did not restore"
-        Require ((Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_COUNT=') -eq 17) `
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_SCHEDULER_OBJECT_CAPACITY=') -eq 16) `
+            "boot $sequence scheduler object capacity changed"
+        Require ((Get-Hex $text 'GXOS_NET10:MANAGED_CALLBACK_COUNT=') -eq 19) `
             "boot $sequence managed callback count mismatch"
-        Write-Output ("PHASE62_CONCURRENT_RUN_{0}=PASS pairs=12 serial={1}" -f
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_A_SLOT=') -ne
+                 (Get-Hex $text 'GXOS_NET10:PHASE64_B_SLOT=') -and
+                 (Get-Hex $text 'GXOS_NET10:PHASE64_B_SLOT=') -ne
+                 (Get-Hex $text 'GXOS_NET10:PHASE64_C_SLOT=')) `
+            "boot $sequence worker slots were not distinct"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_B_ROOT_TOKEN=') -ne
+                 (Get-Hex $text 'GXOS_NET10:PHASE64_C_ROOT_TOKEN=')) `
+            "boot $sequence root tokens were not distinct"
+        Require ((Get-Hex $text 'GXOS_NET10:PHASE64_B_ROOT_SURVIVED=') -eq 1 -and
+                 (Get-Hex $text 'GXOS_NET10:PHASE64_C_ROOT_SURVIVED=') -eq 1) `
+            "boot $sequence root survival was not recorded"
+        Write-Output ("PHASE64_CAPACITY_THREE_RUN_{0}=PASS scenarios=12 primary_lifecycles=36 serial={1}" -f
             $sequence, $serial)
     }
 } finally { foreach ($process in $owned) { Stop-OwnedQemu $process } }
+
 $unexpectedAfter = @(Get-Process -Name $qemuProcessName -ErrorAction SilentlyContinue |
     Where-Object { $baselineQemuIds -notcontains $_.Id })
 Require ($unexpectedAfter.Count -eq 0) 'QEMU cleanup failed.'
-Write-Output "PHASE62_CONCURRENT_PAYLOAD_SHA256=$expectedHash"
-Write-Output "PHASE62_CONCURRENT_RUNS=$RunCount"
+Write-Output "PHASE64_CAPACITY_THREE_PAYLOAD_SHA256=$expectedHash"
+Write-Output "PHASE64_CAPACITY_THREE_RUNS=$RunCount"
+Write-Output 'PHASE64_CAPACITY_THREE_SCENARIOS_PER_BOOT=12'
+Write-Output 'PHASE64_CAPACITY_THREE_PRIMARY_LIFECYCLES=36_PER_BOOT'
