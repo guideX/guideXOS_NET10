@@ -105,6 +105,19 @@ int gxos_nativeaot_scheduler_threadstore_count(uint64_t head,
     return (int)count;
 }
 
+static int lifecycle_threadstore_contains(uint64_t head, uint64_t target)
+{
+    uint32_t count = 0;
+    uint64_t current = head;
+    while (current != 0 && count != PHASE53O_THREADSTORE_MAX) {
+        if (current == target) return 1;
+        current = lifecycle_load_u64(
+            current, GXOS_NATIVEAOT_TLS_THREADSTORE_NEXT_OFFSET);
+        ++count;
+    }
+    return 0;
+}
+
 int gxos_nativeaot_scheduler_worker_prepare(
     GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
     GXOS_SCHEDULER_TCB *main_thread, GXOS_SCHEDULER_TCB *thread,
@@ -293,7 +306,10 @@ static int lifecycle_capture_attached(
            lifecycle->runtime_stack_high == thread->stack_limit &&
            thread->context.rsp >= lifecycle->runtime_stack_low &&
            thread->context.rsp <= lifecycle->runtime_stack_high &&
-           lifecycle->threadstore_after == lifecycle->threadstore_before + 1U;
+           (lifecycle->allow_shared_threadstore
+                ? lifecycle->threadstore_after > lifecycle->threadstore_before
+                : lifecycle->threadstore_after ==
+                      lifecycle->threadstore_before + 1U);
 }
 
 int gxos_nativeaot_scheduler_worker_attach(
@@ -475,7 +491,12 @@ int gxos_nativeaot_scheduler_worker_detach(
        state before scheduler reclaim. */
     if (lifecycle->runtime_state_after !=
             GXOS_NATIVEAOT_RUNTIME_THREAD_DETACHED ||
-        lifecycle->threadstore_after != lifecycle->threadstore_before ||
+        (lifecycle->allow_shared_threadstore
+             ? lifecycle->threadstore_after == 0U ||
+                   lifecycle_threadstore_contains(
+                       lifecycle->threadstore_head_after,
+                       lifecycle->runtime_thread)
+             : lifecycle->threadstore_after != lifecycle->threadstore_before) ||
         (lifecycle->managed_root_publication_count == 0U &&
          (lifecycle->alloc_limit_after_detach != 0 ||
           lifecycle->alloc_ptr_after_detach != 0))) {

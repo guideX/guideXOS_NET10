@@ -7,6 +7,7 @@
 
 #define GXOS_NATIVEAOT_MANAGED_WORKER_API_VERSION 1U
 #define GXOS_NATIVEAOT_MANAGED_WORKER_API_PAYLOAD_MAX 16U
+#define GXOS_NATIVEAOT_MANAGED_WORKER_API_CAPACITY 2U
 
 typedef enum {
     GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE = 1,
@@ -36,7 +37,8 @@ typedef enum {
     GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE = 9,
     GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CLOSE_BEFORE_COMPLETE = 10,
     GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_DUPLICATE_CLOSE = 11,
-    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_INTERNAL_FAILURE = 12
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_INTERNAL_FAILURE = 12,
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY = 13
 } GXOS_NATIVEAOT_MANAGED_WORKER_STATUS;
 
 /* Fixed-size, caller-owned request.  The payload is reserved for future
@@ -83,15 +85,19 @@ typedef struct GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD {
     GXOS_SCHEDULER_HANDLE scheduler_handle;
     GXOS_SCHEDULER_TCB *thread;
     GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE lifecycle;
+    void *owner_context;
+    uint64_t runtime_fls_value;
+    uint64_t runtime_tls_block_value;
     GXOS_NATIVEAOT_MANAGED_WORKER_STATE state;
     uint8_t active;
+    uint8_t yielded;
     uint8_t reserved[3];
 } GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD;
 
 /* The service context is private to the implementation.  Callers receive
    only aligned opaque storage; raw probes, scheduler handles, and TCB
    pointers never cross this public boundary. */
-#define GXOS_NATIVEAOT_MANAGED_WORKER_API_STORAGE_SIZE 768U
+#define GXOS_NATIVEAOT_MANAGED_WORKER_API_STORAGE_SIZE 1536U
 typedef union {
     uintptr_t alignment;
     uint8_t bytes[GXOS_NATIVEAOT_MANAGED_WORKER_API_STORAGE_SIZE];
@@ -143,6 +149,11 @@ gxos_nativeaot_managed_worker_api_close(
 /* Diagnostic fixture only: drives twelve sequential API calls while using
    the same production lifecycle and proves stale-generation rejection. */
 int gxos_nativeaot_managed_worker_api_probe(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api);
+
+/* Diagnostic fixture only: proves two concurrently live API workers and
+   preserves the Phase 61 sequential probe as a separate configuration. */
+int gxos_nativeaot_managed_worker_api_concurrent_probe(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api);
 
 #endif

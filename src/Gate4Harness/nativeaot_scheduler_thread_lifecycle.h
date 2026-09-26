@@ -134,6 +134,8 @@ typedef struct {
     uint64_t threadstore_head_after;
     uint32_t threadstore_before;
     uint32_t threadstore_after;
+    uint8_t allow_shared_threadstore;
+    uint8_t reserved_threadstore[3];
 } GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE;
 
 int gxos_nativeaot_scheduler_threadstore_count(uint64_t head,
