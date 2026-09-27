@@ -14,10 +14,17 @@ $project = Join-Path $root 'src\ManagedKernel\ManagedKernel.csproj'
 $publish = Join-Path $out 'publish'
 $binlog = Join-Path $out 'managed-kernel.binlog'
 $dotnet = Get-Command dotnet -ErrorAction Stop
-$sdkDirectory = Join-Path (Split-Path -Parent $dotnet.Source) 'sdk\10.0.400'
+$sdkRoot = Join-Path (Split-Path -Parent $dotnet.Source) 'sdk'
+$sdkDirectory = Get-ChildItem -LiteralPath $sdkRoot -Directory |
+    Where-Object { $_.Name -match '^10\.0\.\d+$' } |
+    Sort-Object { [Version]$_.Name } -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
+if ([string]::IsNullOrWhiteSpace($sdkDirectory)) {
+    throw "No installed .NET 10 SDK was found under $sdkRoot"
+}
 $msbuild = Join-Path $sdkDirectory 'MSBuild.dll'
 if (-not (Test-Path -LiteralPath $msbuild)) {
-    throw "The installed .NET 10.0.400 MSBuild entry point is missing: $msbuild"
+    throw "The installed .NET 10 SDK MSBuild entry point is missing: $msbuild"
 }
 
 New-Item -ItemType Directory -Force -Path $out,$publish | Out-Null
@@ -30,7 +37,7 @@ Push-Location $parent
 $previousDotnetHostPath = $env:DOTNET_HOST_PATH
 try {
     $env:DOTNET_HOST_PATH = $dotnet.Source
-    $sdkVersion = '10.0.400 (installed fallback; MSBuild 18.9.6 direct entry point)'
+    $sdkVersion = "$(Split-Path -Leaf $sdkDirectory) (installed fallback; direct MSBuild entry point)"
     $sdkInfo = & dotnet $msbuild '/version' 2>&1
     $sdkVersion | Set-Content -LiteralPath (Join-Path $out 'dotnet-version.log')
     $sdkInfo | Set-Content -LiteralPath (Join-Path $out 'dotnet-info.log')

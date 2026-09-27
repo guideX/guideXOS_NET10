@@ -190,6 +190,50 @@ int gxos_managed_kernel_interrupt_rearm_work(
     return pending;
 }
 
+int gxos_managed_kernel_interrupt_begin_service_stop(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
+    int discard_pending, uint64_t *discarded_out)
+{
+    uint64_t flags;
+    uint32_t index;
+    uint64_t discarded = 0;
+    if (discarded_out != 0) *discarded_out = 0;
+    if (!gxos_managed_kernel_interrupt_validate(context)) return 0;
+    flags = context->critical_enter(context->routes[0].hardware_context);
+    context->preserve_queue_on_unsubscribe = discard_pending ? 0U : 1U;
+    /* Close acceptance before disabling each device route. The IRQ-side
+       handler checks this gate before reading or publishing device data. */
+    for (index = 0; index != context->route_count; ++index) {
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route = &context->routes[index];
+        store_u32(&route->accepting_events, 0);
+    }
+    for (index = 0; index != context->route_count; ++index) {
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route = &context->routes[index];
+        if (load_u32(&route->hardware_enabled) != 0) {
+            if (!route->disable_hardware(route->hardware_context)) {
+                context->critical_leave(context->routes[0].hardware_context,
+                                        flags);
+                sync_legacy_route0(context);
+                return 0;
+            }
+            store_u32(&route->hardware_enabled, 0);
+        }
+    }
+    if (discard_pending) {
+        uint32_t read_index = load_u32(&context->read_index);
+        uint32_t write_index = load_u32(&context->write_index);
+        discarded = (uint32_t)(write_index - read_index);
+        store_u32(&context->read_index, write_index);
+        store_u32(&context->work_pending, 0);
+        __atomic_add_fetch(&context->shutdown_discarded_count, discarded,
+                           __ATOMIC_RELAXED);
+    }
+    context->critical_leave(context->routes[0].hardware_context, flags);
+    sync_legacy_route0(context);
+    if (discarded_out != 0) *discarded_out = discarded;
+    return 1;
+}
+
 static void enqueue_from_route(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
     const GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route,
@@ -199,8 +243,10 @@ static void enqueue_from_route(
     uint32_t write_index = load_u32(&context->write_index);
     uint32_t read_index = load_u32(&context->read_index);
     uint32_t next_index;
-    if ((uint32_t)(write_index - read_index) >=
+    if (load_u32(&route->accepting_events) == 0 ||
+        (uint32_t)(write_index - read_index) >=
         GX_MANAGED_KERNEL_INTERRUPT_QUEUE_CAPACITY) {
+        if (load_u32(&route->accepting_events) == 0) return;
         __atomic_add_fetch(&context->dropped_count, 1, __ATOMIC_RELAXED);
         return;
     }
@@ -256,7 +302,8 @@ void gxos_managed_kernel_interrupt_capture_route(
         route_index >= context->route_count) return;
     route = &context->routes[route_index];
     __atomic_add_fetch(&context->irq_entry_count, 1, __ATOMIC_RELAXED);
-    if (load_u32(&route->subscription_active) == 0) {
+    if (load_u32(&route->subscription_active) == 0 ||
+        load_u32(&route->accepting_events) == 0) {
         route->send_eoi(route->hardware_context);
         sync_legacy_route0(context);
         return;
@@ -334,6 +381,7 @@ static uint32_t subscribe_route(
     context->next_subscription_id = token;
     route->subscription_id = token;
     store_u32(&route->hardware_enabled, 1);
+    store_u32(&route->accepting_events, 1);
     store_u32(&route->subscription_active, 1);
     context->critical_leave(route->hardware_context, flags);
     *(uint64_t *)(uintptr_t)token_address = token;
@@ -387,15 +435,20 @@ static uint32_t unsubscribe_route(
         context->critical_leave(route->hardware_context, flags);
         return legacy_status ? GX_MANAGED_INVALID_STATE : GX_MANAGED_NOT_FOUND;
     }
-    if (!route->disable_hardware(route->hardware_context)) {
+    if (load_u32(&route->hardware_enabled) != 0 &&
+        !route->disable_hardware(route->hardware_context)) {
         context->critical_leave(route->hardware_context, flags);
         return GX_MANAGED_INVALID_STATE;
     }
     store_u32(&route->hardware_enabled, 0);
+    store_u32(&route->accepting_events, 0);
     store_u32(&route->subscription_active, 0);
-    if (active_route_count(context) == 0) {
+    if (active_route_count(context) == 0 &&
+        context->preserve_queue_on_unsubscribe == 0U) {
         store_u32(&context->read_index, load_u32(&context->write_index));
         store_u32(&context->work_pending, 0);
+    } else if (active_route_count(context) == 0) {
+        context->preserve_queue_on_unsubscribe = 0U;
     }
     context->critical_leave(route->hardware_context, flags);
     sync_legacy_route0(context);

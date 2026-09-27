@@ -196,6 +196,72 @@ int main(void)
                g_eoi_calls == 6,
            "post-unsubscribe interrupt is acknowledged without delivery");
 
+    result = gxos_managed_kernel_interrupt_subscribe_v1(
+        &context, context.event_type, context.device_kind, context.device_id,
+        (uintptr_t)&g_token, sizeof(g_token));
+    expect(result == GX_MANAGED_OK, "resubscribe opens a new route lifetime");
+    set_source("ABCD");
+    gxos_managed_kernel_interrupt_capture(&context);
+    {
+        uint64_t discarded = UINT64_MAX;
+        uint64_t dropped_before = context.dropped_count;
+        expect(gxos_managed_kernel_interrupt_begin_service_stop(
+                   &context, 0, &discarded) && discarded == 0 &&
+                   context.shutdown_discarded_count == 0 &&
+                   context.hardware_enabled == 0 &&
+                   context.routes[0].accepting_events == 0 &&
+                   context.write_index - context.read_index == 4,
+               "drain stop closes route and preserves the queued FIFO");
+        set_source("Z");
+        gxos_managed_kernel_interrupt_capture(&context);
+        expect(context.enqueued_count == 14 &&
+                   context.dropped_count == dropped_before &&
+                   gxos_managed_kernel_interrupt_unsubscribe_v1(
+                       &context, g_token) == GX_MANAGED_OK,
+               "drain gate rejects later delivery without overflow accounting");
+        memset(g_events, 0, sizeof(g_events));
+        g_drained = 0;
+        result = gxos_managed_kernel_interrupt_drain_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)g_events, sizeof(g_events), (uintptr_t)&g_drained,
+            sizeof(g_drained));
+        expect(result == GX_MANAGED_OK && g_drained == 4 &&
+                   g_events[0].PayloadByte == 'A' &&
+                   g_events[1].PayloadByte == 'B' &&
+                   g_events[2].PayloadByte == 'C' &&
+                   g_events[3].PayloadByte == 'D' &&
+                   context.write_index == context.read_index,
+               "drain after route disable preserves all queued records in order");
+    }
+
+    result = gxos_managed_kernel_interrupt_subscribe_v1(
+        &context, context.event_type, context.device_kind, context.device_id,
+        (uintptr_t)&g_token, sizeof(g_token));
+    expect(result == GX_MANAGED_OK, "route can be reused after drained shutdown");
+    set_source("WXYZ");
+    gxos_managed_kernel_interrupt_capture(&context);
+    {
+        uint64_t discarded = 0;
+        uint64_t dropped_before = context.dropped_count;
+        expect(gxos_managed_kernel_interrupt_begin_service_stop(
+                   &context, 1, &discarded) && discarded == 4 &&
+                   context.shutdown_discarded_count == 4 &&
+                   context.dropped_count == dropped_before &&
+                   context.write_index == context.read_index &&
+                   context.work_pending == 0,
+               "discard stop clears queued records with separate accounting");
+        expect(gxos_managed_kernel_interrupt_unsubscribe_v1(
+                   &context, g_token) == GX_MANAGED_OK,
+               "managed unsubscribe completes discard shutdown");
+        result = gxos_managed_kernel_interrupt_query_stats_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)&g_stats, sizeof(g_stats));
+        expect(result == GX_MANAGED_OK &&
+                   g_stats.DroppedCount == dropped_before &&
+                   context.shutdown_discarded_count == 4,
+               "overflow and shutdown discard counts remain distinct");
+    }
+
     if (g_failures != 0) {
         printf("MANAGED_KERNEL_INTERRUPT_NATIVE_HOST_TESTS=FAILED failures=%u\n",
                g_failures);

@@ -28,8 +28,13 @@ static int lifecycle_transition_allowed(
                 to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNABLE) ||
            (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNABLE &&
                 to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING) ||
-           (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING &&
-                to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED) ||
+            (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING &&
+                 to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED) ||
+            /* A running callback that proved no runtime ownership was
+               acquired may be reclaimed after it returns and the scheduler
+               has fully zeroed its TCB. */
+            (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING &&
+                 to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED) ||
            (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED &&
                 to == GXOS_NATIVEAOT_WORKER_OWNERSHIP_DETACH_PENDING) ||
            (from == GXOS_NATIVEAOT_WORKER_OWNERSHIP_DETACH_PENDING &&
@@ -240,23 +245,28 @@ int gxos_nativeaot_scheduler_worker_mark_running(
                                 GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING);
 }
 
-static int lifecycle_current_thread_is_active(
+static int lifecycle_current_thread_is_worker(
     const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
 {
     return lifecycle != 0 && lifecycle->thread != 0 &&
            lifecycle_matches_current_thread(lifecycle) &&
            gxos_scheduler_current_thread() == lifecycle->thread &&
-           lifecycle->thread->live && !lifecycle->thread->is_boot_thread &&
+           lifecycle->thread->live && !lifecycle->thread->is_boot_thread;
+}
+
+static int lifecycle_current_thread_is_active(
+    const GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+{
+    return lifecycle_current_thread_is_worker(lifecycle) &&
            lifecycle->runtime_fls_slot < GXOS_SCHEDULER_FLS_SLOTS &&
            lifecycle->thread->fls_values[lifecycle->runtime_fls_slot] != 0;
 }
 
 static int lifecycle_capture_attached(
-    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle)
+    GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE *lifecycle,
+    uint64_t runtime_thread)
 {
     GXOS_SCHEDULER_TCB *thread = lifecycle->thread;
-    uint64_t runtime_thread = thread->fls_values[
-        lifecycle->runtime_fls_slot];
     uint64_t main_thread = lifecycle->main_runtime_thread;
 
     lifecycle->runtime_thread = runtime_thread;
@@ -318,6 +328,12 @@ int gxos_nativeaot_scheduler_worker_attach(
     int32_t *result, uint32_t *callback_status_out)
 {
     uint32_t status;
+    uint64_t runtime_thread;
+    uint64_t worker_fls;
+    uint64_t threadstore_head;
+    uint64_t runtime_state;
+    int threadstore_contains_worker;
+    int captured;
     if (callback_status_out != 0) *callback_status_out = UINT32_MAX;
     if (lifecycle == 0 || managed_bridge == 0 || result == 0 ||
         lifecycle->attached || lifecycle->detached ||
@@ -328,25 +344,71 @@ int gxos_nativeaot_scheduler_worker_attach(
         gxos_scheduler_current_thread() != lifecycle->thread) {
         return 0;
     }
+    lifecycle->runtime_attach_attempted = 1U;
+    lifecycle->runtime_ownership_state =
+        GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_NOT_ATTEMPTED;
     status = (uint32_t)gxos_nativeaot_callback_invoke(
         managed_bridge, input, result);
     if (callback_status_out != 0) *callback_status_out = status;
+    runtime_thread = lifecycle->thread->tls_block_base + 0x30U;
+    worker_fls = lifecycle->thread->fls_values[lifecycle->runtime_fls_slot];
+    runtime_state = lifecycle_load_u64(
+        runtime_thread, GXOS_NATIVEAOT_TLS_STATE_FLAGS_OFFSET);
+    threadstore_head = lifecycle->main_thread->fls_values[
+        lifecycle->runtime_fls_slot];
+    threadstore_contains_worker = lifecycle_threadstore_contains(
+        threadstore_head, runtime_thread);
+
+    /* The reverse-P/Invoke can return failure after NativeAOT has already
+       published the runtime Thread. FLS + ATTACHED state establishes runtime
+       ownership even if later stack/ThreadStore validation fails. A missing
+       FLS value is still owned only when the attached Thread is present in
+       ThreadStore; that bounded partial-publication shape can be cleaned via
+       the same runtime FLS cleanup callback. Anything else is ambiguous and
+       must remain unreclaimed. */
+    if ((worker_fls == runtime_thread &&
+         runtime_state == GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED) ||
+        (worker_fls == 0 &&
+         runtime_state == GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED &&
+         threadstore_contains_worker)) {
+        lifecycle->runtime_ownership_state =
+            GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_ACQUIRED;
+        lifecycle->runtime_thread = runtime_thread;
+        lifecycle->runtime_thread_owned = 1U;
+        lifecycle->attached = 1U;
+        lifecycle->runtime_attach_count = 1U;
+        captured = lifecycle_capture_attached(lifecycle, runtime_thread);
+        if (!lifecycle_transition(
+                lifecycle,
+                GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED)) {
+            lifecycle->runtime_ownership_state =
+                GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS;
+            return 0;
+        }
+        if (status != GXOS_NATIVEAOT_CALLBACK_OK || !captured ||
+            managed_bridge->ready == 0) {
+            return 0;
+        }
+        lifecycle->managed_worker_object_owned = 1U;
+        lifecycle->callback_registration_observed = 1U;
+        return 1;
+    }
+
+    if (worker_fls == 0 &&
+        runtime_state != GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED &&
+        !threadstore_contains_worker) {
+        lifecycle->runtime_ownership_state =
+            GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_NOT_ACQUIRED;
+    } else {
+        lifecycle->runtime_ownership_state =
+            GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS;
+    }
     if (status != GXOS_NATIVEAOT_CALLBACK_OK ||
         !lifecycle_current_thread_is_active(lifecycle) ||
         managed_bridge->ready == 0) {
         return 0;
     }
-    if (!lifecycle_capture_attached(lifecycle) ||
-        !lifecycle_transition(
-            lifecycle, GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED)) {
-        return 0;
-    }
-    lifecycle->attached = 1;
-    lifecycle->runtime_attach_count = 1U;
-    lifecycle->runtime_thread_owned = 1;
-    lifecycle->managed_worker_object_owned = 1;
-    lifecycle->callback_registration_observed = 1;
-    return 1;
+    return 0;
 }
 
 int gxos_nativeaot_scheduler_worker_invoke(
@@ -448,10 +510,12 @@ int gxos_nativeaot_scheduler_worker_detach(
     uint64_t value;
     if (lifecycle == 0 || !lifecycle->attached || lifecycle->detached ||
         lifecycle->ownership_state != GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNTIME_ATTACHED ||
+        lifecycle->runtime_ownership_state !=
+            GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_ACQUIRED ||
         lifecycle->managed_root_owned ||
         lifecycle->managed_root_publication_count !=
             lifecycle->managed_root_release_count ||
-        !lifecycle_current_thread_is_active(lifecycle) ||
+        !lifecycle_current_thread_is_worker(lifecycle) ||
         lifecycle->runtime_fls_cleanup == 0) {
         if (lifecycle != 0 && lifecycle->ownership_transition_failures != UINT32_MAX) {
             ++lifecycle->ownership_transition_failures;
@@ -459,7 +523,18 @@ int gxos_nativeaot_scheduler_worker_detach(
         return 0;
     }
     value = lifecycle->thread->fls_values[lifecycle->runtime_fls_slot];
-    if (value != lifecycle->runtime_thread) return 0;
+    if (value != lifecycle->runtime_thread &&
+        !(value == 0 &&
+          lifecycle_load_u64(lifecycle->runtime_thread,
+                             GXOS_NATIVEAOT_TLS_STATE_FLAGS_OFFSET) ==
+              GXOS_NATIVEAOT_RUNTIME_THREAD_ATTACHED &&
+          lifecycle_threadstore_contains(
+              lifecycle->main_thread->fls_values[
+                  lifecycle->runtime_fls_slot],
+              lifecycle->runtime_thread))) {
+        return 0;
+    }
+    if (value == 0) value = lifecycle->runtime_thread;
     if (!lifecycle_transition(lifecycle,
                               GXOS_NATIVEAOT_WORKER_OWNERSHIP_DETACH_PENDING)) {
         return 0;
@@ -588,8 +663,14 @@ int gxos_nativeaot_scheduler_worker_note_pre_runtime_reclaimed(
 {
     GXOS_SCHEDULER_TCB *thread;
     if (lifecycle == 0 || lifecycle->thread == 0 ||
-        lifecycle->ownership_state !=
-            GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED ||
+        (lifecycle->ownership_state !=
+             GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED &&
+         lifecycle->ownership_state !=
+             GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING) ||
+        (lifecycle->runtime_ownership_state !=
+             GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_NOT_ATTEMPTED &&
+         lifecycle->runtime_ownership_state !=
+             GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_NOT_ACQUIRED) ||
         lifecycle->attached || lifecycle->detached ||
         lifecycle->runtime_thread != 0 || lifecycle->runtime_thread_owned ||
         lifecycle->managed_worker_object_owned ||

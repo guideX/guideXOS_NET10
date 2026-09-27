@@ -840,6 +840,20 @@ int gxos_nativeaot_managed_worker_api_initialize(
     return 1;
 }
 
+int gxos_nativeaot_managed_worker_api_allow_shared_threadstore(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api, int allow)
+{
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_CONTEXT *context = phase61_context(api);
+    uint32_t index;
+    if (context == 0) return 0;
+    for (index = 0; index != GXOS_NATIVEAOT_MANAGED_WORKER_API_CAPACITY;
+         ++index) {
+        if (context->records[index].active) return 0;
+    }
+    context->shared_threadstore_mode = allow != 0;
+    return 1;
+}
+
 static void phase61_discard_unstarted(
     GXOS_NATIVEAOT_MANAGED_WORKER_API_CONTEXT *context,
     GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD *record)
@@ -879,6 +893,14 @@ gxos_nativeaot_managed_worker_api_create(
     if (record == 0) {
         return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY;
     }
+    /* API records and persistent driver services share the scheduler's TCB
+       and object tables. Refuse one-shot admission before touching either
+       table when the concrete lower-layer cost cannot fit. A one-shot API
+       worker costs one TCB and one thread object; it has no separate wake
+       event. */
+    if (!gxos_scheduler_can_admit(context->probe->scheduler, 1U, 1U)) {
+        return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY;
+    }
     phase61_zero((uint8_t *)record, sizeof(*record));
     record->probe = context->probe;
     record->owner_context = context;
@@ -898,7 +920,8 @@ gxos_nativeaot_managed_worker_api_create(
         phase61_zero((uint8_t *)record, sizeof(*record));
         return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_INTERNAL_FAILURE;
     }
-    record->lifecycle.allow_shared_threadstore = context->concurrent_mode;
+    record->lifecycle.allow_shared_threadstore =
+        context->concurrent_mode || context->shared_threadstore_mode;
     record->scheduler_handle = scheduler_handle;
     record->thread = thread;
     record->handle.scheduler_slot = gxos_scheduler_thread_slot(thread);

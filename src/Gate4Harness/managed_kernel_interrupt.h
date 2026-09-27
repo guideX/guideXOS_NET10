@@ -27,6 +27,7 @@ typedef struct {
     uint64_t subscription_id;
     volatile uint32_t subscription_active;
     volatile uint32_t hardware_enabled;
+    volatile uint32_t accepting_events;
     GXOS_MANAGED_KERNEL_INTERRUPT_RANGE_VALIDATOR range_is_known;
     GXOS_MANAGED_KERNEL_INTERRUPT_CRITICAL_ENTER critical_enter;
     GXOS_MANAGED_KERNEL_INTERRUPT_CRITICAL_LEAVE critical_leave;
@@ -56,7 +57,9 @@ typedef struct {
     volatile uint64_t enqueued_count;
     volatile uint64_t drained_count;
     volatile uint64_t dropped_count;
+    volatile uint64_t shutdown_discarded_count;
     volatile uint32_t work_pending;
+    uint32_t preserve_queue_on_unsubscribe;
     volatile uint64_t wake_request_count;
     volatile uint32_t queue_high_water;
     uint32_t route_count;
@@ -115,6 +118,13 @@ void gxos_managed_kernel_interrupt_set_work_notification(
    means that another bounded activation must be scheduled. */
 int gxos_managed_kernel_interrupt_rearm_work(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context);
+
+/* Quiesce configured routes under their interrupt critical section. Drain
+   preserves already queued records; discard clears them and reports a
+   separate shutdown-discard count. */
+int gxos_managed_kernel_interrupt_begin_service_stop(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
+    int discard_pending, uint64_t *discarded_out);
 
 uint32_t GX_MANAGED_KERNEL_MS_ABI gxos_managed_kernel_interrupt_subscribe_v1(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,

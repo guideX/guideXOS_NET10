@@ -69,6 +69,15 @@ typedef enum {
     GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED = 8
 } GXOS_NATIVEAOT_WORKER_OWNERSHIP_STATE;
 
+/* Runtime ownership is derived from the worker's NativeAOT FLS value, thread
+   state and ThreadStore membership at the attach return boundary. */
+typedef enum {
+    GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_NOT_ATTEMPTED = 0,
+    GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_NOT_ACQUIRED = 1,
+    GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_ACQUIRED = 2,
+    GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS = 3
+} GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_STATE;
+
 typedef struct {
     GXOS_NATIVEAOT_WORKER_OWNERSHIP_STATE ownership_state;
     uint32_t ownership_transition_count;
@@ -90,7 +99,8 @@ typedef struct {
     uint8_t managed_root_survived;
     uint8_t callback_registration_observed;
     uint8_t vm_resources_owned;
-    uint8_t reserved_ownership[2];
+    uint8_t runtime_attach_attempted;
+    uint8_t runtime_ownership_state;
     uint64_t managed_root_identity;
     uint32_t managed_root_publication_count;
     uint32_t managed_root_release_count;

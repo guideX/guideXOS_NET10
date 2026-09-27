@@ -17,7 +17,8 @@ typedef struct {
     uint8_t concurrent_mode;
     uint8_t runtime_overlap_observed;
     uint8_t completion_count;
-    uint8_t reserved[5];
+    uint8_t shared_threadstore_mode;
+    uint8_t reserved[4];
     GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE completion_order[
         GXOS_NATIVEAOT_MANAGED_WORKER_API_CAPACITY];
     uint32_t peak_vm;

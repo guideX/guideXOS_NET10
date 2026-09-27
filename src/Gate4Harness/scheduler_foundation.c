@@ -790,6 +790,43 @@ int gxos_scheduler_adopt_boot_environment(GXOS_SCHEDULER *scheduler,
     return 1;
 }
 
+uint32_t gxos_scheduler_available_thread_slots(
+    const GXOS_SCHEDULER *scheduler)
+{
+    uint32_t index;
+    uint32_t available = 0;
+    if (scheduler == 0 || scheduler != g_scheduler || !scheduler->active) {
+        return 0;
+    }
+    for (index = 0; index != GXOS_SCHEDULER_MAX_THREADS; ++index) {
+        if (!scheduler->threads[index].live) ++available;
+    }
+    return available;
+}
+
+uint32_t gxos_scheduler_available_object_slots(
+    const GXOS_SCHEDULER *scheduler)
+{
+    uint32_t index;
+    uint32_t available = 0;
+    if (scheduler == 0 || scheduler != g_scheduler || !scheduler->active) {
+        return 0;
+    }
+    for (index = 0; index != GXOS_SCHEDULER_MAX_OBJECTS; ++index) {
+        if (!scheduler->objects[index].live) ++available;
+    }
+    return available;
+}
+
+int gxos_scheduler_can_admit(const GXOS_SCHEDULER *scheduler,
+                             uint32_t thread_count,
+                             uint32_t object_count)
+{
+    return scheduler != 0 && scheduler == g_scheduler && scheduler->active &&
+           gxos_scheduler_available_thread_slots(scheduler) >= thread_count &&
+           gxos_scheduler_available_object_slots(scheduler) >= object_count;
+}
+
 int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
                                 uint8_t manual_reset,
                                 uint8_t initial_signaled,

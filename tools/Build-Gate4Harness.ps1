@@ -14,6 +14,7 @@ param(
     [switch]$EnableNativeAotSchedulerThreadLifecycle,
     [switch]$EnableNativeAotManagedWorkerOwnership,
     [switch]$EnableNativeAotManagedWorkerApi,
+    [switch]$EnablePhase69PersistentServiceOwner,
     [switch]$EnablePhase62ConcurrentManagedWorkerApi,
     [switch]$EnablePhase64ManagedWorkerApi,
     [switch]$EnablePhase65ManagedWorkerApi,
@@ -99,6 +100,9 @@ if ($PayloadMode -eq 'ManagedKernel' -and
 }
 if ($PayloadMode -eq 'ManagedKernel' -and -not $EnableNativeAotStartup) {
     throw 'ManagedKernel payload selection requires -EnableNativeAotStartup.'
+}
+if ($EnablePhase69PersistentServiceOwner -and $PayloadMode -ne 'ManagedKernel') {
+    throw 'Phase 69 persistent service ownership requires -PayloadMode ManagedKernel.'
 }
 
 if ($EnableNativeAotManagedCallback -and $Scenario -ne 'NativeAotEventWait') {
@@ -382,6 +386,7 @@ $managedKernelDmaSource = Join-Path $root 'src\Gate4Harness\managed_kernel_dma.c
 $managedKernelSerialSource = Join-Path $root 'src\Gate4Harness\managed_kernel_serial.c'
 $managedKernelInterruptSource = Join-Path $root 'src\Gate4Harness\managed_kernel_interrupt.c'
 $managedKernelDriverWorkerSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_worker.c'
+$managedKernelDriverOwnerSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_service_owner.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
 $virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
@@ -476,6 +481,9 @@ if (-not (Test-Path -LiteralPath $managedKernelInterruptSource) -or
 }
 if (-not (Test-Path -LiteralPath $managedKernelDriverWorkerSource)) {
     throw "ManagedKernel driver-worker source not found: $managedKernelDriverWorkerSource"
+}
+if (-not (Test-Path -LiteralPath $managedKernelDriverOwnerSource)) {
+    throw "ManagedKernel driver-service owner source not found: $managedKernelDriverOwnerSource"
 }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
@@ -1539,9 +1547,12 @@ if ($EnableNativeAotSchedulerThreadLifecycle) {
 if ($EnableNativeAotManagedWorkerOwnership) {
     $gccArguments += '-DGXOS_ENABLE_NATIVEAOT_MANAGED_WORKER_OWNERSHIP'
 }
-if ($EnableNativeAotManagedWorkerApi) {
+if ($EnableNativeAotManagedWorkerApi -or $EnablePhase69PersistentServiceOwner) {
     $gccArguments += '-DGXOS_ENABLE_PHASE61_MANAGED_WORKER_API'
     $gccArguments += $managedWorkerApiSource
+}
+if ($EnablePhase69PersistentServiceOwner) {
+    $gccArguments += '-DGXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER'
 }
 if ($EnablePhase62ConcurrentManagedWorkerApi) {
     $gccArguments += '-DGXOS_ENABLE_PHASE62_MANAGED_WORKER_API'
@@ -1711,6 +1722,7 @@ if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelSerialSource
     $gccArguments += $managedKernelInterruptSource
     $gccArguments += $managedKernelDriverWorkerSource
+    $gccArguments += $managedKernelDriverOwnerSource
     if ($Scenario -notin @('NativeAotEventWait', 'ManagedKernelPhase11')) {
         # ManagedKernel is an allocation-enabled NativeAOT payload.  Keep its
         # startup/runtime import surface on the already-proven bounded harness

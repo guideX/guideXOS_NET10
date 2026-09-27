@@ -10,6 +10,43 @@
 #define GXOS_MANAGED_KERNEL_DRIVER_WORKER_MAX_BATCHES 4U
 #define GXOS_MANAGED_KERNEL_DRIVER_WORKER_STAGE_START 1U
 #define GXOS_MANAGED_KERNEL_DRIVER_WORKER_STAGE_DISPATCH 2U
+#define GXOS_MANAGED_KERNEL_DRIVER_WORKER_STAGE_STOP 3U
+#define GXOS_MANAGED_KERNEL_DRIVER_SERVICE_CAPACITY 1U
+
+typedef struct {
+    uint32_t identity;
+    uint32_t device_identity;
+    uint16_t generation;
+    uint16_t slot;
+} GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE;
+
+typedef enum {
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_FREE = 0,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_ALLOCATED = 1,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STARTING = 2,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RUNTIME_ATTACHED = 3,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RUNNING = 4,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_WAITING = 5,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STOP_REQUESTED = 6,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STOPPING = 7,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RUNTIME_DETACHED = 8,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RECLAIMABLE = 9,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RECLAIMED = 10,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_START_FAILED = 11,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED = 12
+} GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATE;
+
+typedef enum {
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN = 1,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DISCARD = 2
+} GXOS_MANAGED_KERNEL_DRIVER_SERVICE_SHUTDOWN_POLICY;
+
+typedef enum {
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_OK = 0,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_INVALID = 1,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_CAPACITY = 2,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_RESOURCE_FAILURE = 3
+} GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT;
 
 typedef void (*GXOS_MANAGED_KERNEL_DRIVER_WORKER_LOG_TEXT)(const char *text);
 typedef void (*GXOS_MANAGED_KERNEL_DRIVER_WORKER_LOG_HEX)(const char *name,
@@ -38,6 +75,20 @@ typedef struct {
     volatile uint32_t state;
     volatile uint32_t stop_requested;
     volatile uint32_t failure;
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATE service_state;
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE service_handle;
+    uint32_t service_identity;
+    uint32_t device_identity;
+    uint16_t service_generation;
+    uint32_t route_published;
+    uint32_t tcb_owned;
+    uint32_t thread_handle_owned;
+    uint32_t wake_event_owned;
+    uint32_t wake_event_handle_open;
+    uint32_t runtime_attach_attempted;
+    uint32_t managed_loop_entered;
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_SHUTDOWN_POLICY shutdown_policy;
+    uint64_t shutdown_discarded_count;
     uint8_t sleeping_marker_emitted;
     uint8_t wake_marker_emitted;
     uint16_t reserved;
@@ -61,7 +112,8 @@ typedef struct {
     uint64_t stale_context_offender;
 } GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT;
 
-int gxos_managed_kernel_driver_worker_initialize(
+GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT
+gxos_managed_kernel_driver_worker_initialize(
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
     GXOS_SCHEDULER *scheduler, GXOS_EVENT_API_CONTEXT *event_api,
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *interrupt,
@@ -71,16 +123,34 @@ int gxos_managed_kernel_driver_worker_initialize(
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_LOG_TEXT log_text,
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_LOG_HEX log_hex);
 
+int gxos_managed_kernel_driver_worker_publish_route(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE *handle_out);
+
+int gxos_managed_kernel_driver_worker_start(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle);
+
+int gxos_managed_kernel_driver_worker_request_stop(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_SHUTDOWN_POLICY policy);
+
 int gxos_managed_kernel_driver_worker_pump(
-    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context);
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle);
 
 int gxos_managed_kernel_driver_worker_stop(
-    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context);
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_SHUTDOWN_POLICY policy);
 
 int gxos_managed_kernel_driver_worker_destroy(
-    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context);
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle);
 
 int gxos_managed_kernel_driver_worker_is_running(
-    const GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context);
+    const GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle);
 
 #endif

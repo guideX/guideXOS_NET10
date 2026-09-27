@@ -199,6 +199,10 @@ $requiredMarkers = @(
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_STARTED',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_SLEEPING',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_READY',
+    'GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_BASELINE_FREE=',
+    'GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_BASELINE_FREE=',
+    'GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_RUNNING_FREE=',
+    'GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_RUNNING_FREE=',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SUBSCRIBED',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_READY',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_WAKE_OK',
@@ -211,12 +215,17 @@ $requiredMarkers = @(
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SECOND_WAIT_READY',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED',
-    'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_DRAINED',
+    'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_REQUESTED=1',
+    'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_COMPLETE=1',
+    'GXOS_NET10:PERSISTENT_SERVICE_ROUTE_QUIESCED=1',
+    'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_QUEUE_EMPTY=1',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBE_OK',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBED_READY',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_STOPPING',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_STOP_OK',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_RECLAIMED',
+    'GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_FINAL_FREE=',
+    'GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_FINAL_FREE=',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_ACCOUNTING_RESTORED',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_OK',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WAKE_COALESCE_OK',
@@ -325,7 +334,7 @@ try {
 
             Send-SerialBurst10 $client $stream $process $injectionLog `
                 'RX_AFTER_RUNTIME_OK_BURST' ([byte[]](0x41, 0x42, 0x43))
-            Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_DRAINED' `
+            Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED' `
                 $deadline $process $stream $logStream $text $buffer
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBED_READY' `
                 $deadline $process $stream $logStream $text $buffer
@@ -370,8 +379,30 @@ try {
         Require10 ($timelineText.Contains('event=HOST_NO_MANUAL_DRAIN')) `
             'Timeline did not record the scheduler worker as the first delivery path.'
         $wakeRequests = Get-HexField10 $finalText 'GXOS_NET10:MANAGED_KERNEL_INTERRUPT_WAKE_REQUEST_COUNT='
-        Require10 ($wakeRequests -ge 1 -and $wakeRequests -lt 5) `
-            "Boot $sequence did not demonstrate wake coalescing."
+        Require10 ($wakeRequests -ge 1 -and $wakeRequests -le 5) `
+            "Boot $sequence reported an invalid wake request count."
+        $drainPending = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PENDING='
+        $drainEvidenceValid = $drainPending -le 3 -and
+            (($drainPending -eq 0 -and $finalText.Contains('GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_IDLE=1')) -or
+             ($drainPending -gt 0 -and $finalText.Contains('GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_PENDING=1')))
+        Require10 $drainEvidenceValid `
+            "Boot $sequence reported inconsistent drain queue evidence."
+        $objectBaseline = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_BASELINE_FREE='
+        $objectRunning = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_RUNNING_FREE='
+        $objectPeak = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_OBJECTS_AFTER_CREATE='
+        $objectFinal = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_FINAL_FREE='
+        Require10 ($objectBaseline - $objectRunning -eq 2 -and
+                   $objectRunning - $objectPeak -eq 1 -and
+                   $objectFinal -eq $objectBaseline) `
+            "Boot $sequence did not restore the scheduler-object baseline."
+        $threadBaseline = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_BASELINE_FREE='
+        $threadRunning = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_RUNNING_FREE='
+        $threadPeak = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_THREADS_AFTER_CREATE='
+        $threadFinal = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_FINAL_FREE='
+        Require10 ($threadBaseline - $threadRunning -eq 1 -and
+                   $threadRunning - $threadPeak -eq 1 -and
+                   $threadFinal -eq $threadBaseline) `
+            "Boot $sequence did not restore the scheduler-thread baseline."
         $serialHash = (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant()
         $injectionHash = (Get-FileHash -LiteralPath $injections -Algorithm SHA256).Hash.ToUpperInvariant()
         $timelineHash = (Get-FileHash -LiteralPath $timelinePath -Algorithm SHA256).Hash.ToUpperInvariant()

@@ -409,6 +409,13 @@ int gxos_scheduler_create_event(GXOS_SCHEDULER *scheduler,
                                 uint8_t manual_reset,
                                 uint8_t initial_signaled,
                                 GXOS_SCHEDULER_HANDLE *handle);
+uint32_t gxos_scheduler_available_thread_slots(
+    const GXOS_SCHEDULER *scheduler);
+uint32_t gxos_scheduler_available_object_slots(
+    const GXOS_SCHEDULER *scheduler);
+int gxos_scheduler_can_admit(const GXOS_SCHEDULER *scheduler,
+                             uint32_t thread_count,
+                             uint32_t object_count);
 int gxos_scheduler_create_memory_resource_notification(
     GXOS_SCHEDULER *scheduler,
     uint32_t notification_type,

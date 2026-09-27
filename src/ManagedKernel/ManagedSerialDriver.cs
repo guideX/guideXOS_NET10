@@ -976,6 +976,12 @@ internal static unsafe class ManagedSerialDriverSubsystem
         {
             return ManagedKernelContract.InvalidState;
         }
+        if (stage == 41U)
+        {
+            /* Phase 69 drives ADD_ONE through this registered managed bridge
+               from a separate one-shot TCB while the persistent worker waits. */
+            return 42U;
+        }
         if (stage == 1)
         {
             if (s_driverWorker != null || (s_phase9State != 0 && s_phase9State != 1))
@@ -1067,6 +1073,12 @@ internal static unsafe class ManagedSerialDriverSubsystem
                     : ManagedKernelContract.InvalidState;
             }
             return ManagedKernelContract.ManagedOk;
+        }
+        if (stage == 3)
+        {
+            /* Native service ownership has closed event acceptance and
+               disabled the hardware route before managed unsubscription. */
+            return RunPhase10(4);
         }
         return ManagedKernelContract.InvalidArgument;
     }

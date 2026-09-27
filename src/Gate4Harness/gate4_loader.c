@@ -81,6 +81,9 @@ static GXOS_NATIVEAOT_MANAGED_WORKER_API g_phase66_managed_worker_api;
 #endif
 #ifdef GXOS_ENABLE_PHASE61_MANAGED_WORKER_API
 static GXOS_NATIVEAOT_MANAGED_WORKER_API g_phase61_managed_worker_api;
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+static GXOS_PHASE53O_PROBE g_phase61_managed_worker_probe;
+#endif
 #endif
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
@@ -604,6 +607,12 @@ enum {
 };
 
 static uint32_t g_phase;
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+static void GXOS_PHASE53O_MS_ABI phase69_worker_api_set_phase(uint32_t phase)
+{
+    g_phase = phase;
+}
+#endif
 #ifdef GXOS_ENABLE_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE
 static void GXOS_PHASE53O_MS_ABI nativeaot_phase53o_in_managed(
     uint32_t phase)
@@ -745,6 +754,8 @@ static GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT
     g_managed_kernel_interrupt_context;
 static GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT
     g_managed_kernel_driver_worker_context;
+static GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE
+    g_managed_kernel_driver_service_handle;
 static GXOS_NATIVEAOT_CALLBACK_BRIDGE
     g_managed_kernel_driver_worker_bridge;
 static uint32_t g_managed_kernel_runtime_fls_slot = UINT32_MAX;
@@ -1855,16 +1866,46 @@ static uint32_t EFIAPI managed_kernel_host_query_monotonic_time(
     int64_t frequency;
 
     if (requested_abi_version != GX_MANAGED_KERNEL_HOST_SERVICES_ABI_V1) {
+        serial_field_hex(
+            "GXOS_NET10:MANAGED_KERNEL_HOST_TIME_REJECTED_ABI=0x",
+            requested_abi_version);
+        serial_text("\r\n");
         return GX_MANAGED_UNSUPPORTED_ABI;
     }
     range_status = gxos_managed_kernel_host_validate_output_range(
         output_address, output_capacity,
         GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE);
-    if (range_status != GX_MANAGED_OK) return (uint32_t)range_status;
-    if (!gxos_perf_is_initialized() ||
-        !gxos_query_performance_counter(&ticks) ||
-        !gxos_query_performance_frequency(&frequency) ||
-        ticks < 0 || frequency <= 0) {
+    if (range_status != GX_MANAGED_OK) {
+        serial_field_hex(
+            "GXOS_NET10:MANAGED_KERNEL_HOST_TIME_REJECTED_RANGE=0x",
+            (uint32_t)range_status);
+        serial_text("\r\n");
+        return (uint32_t)range_status;
+    }
+    if (!gxos_perf_is_initialized()) {
+        serial_text(
+            "GXOS_NET10:MANAGED_KERNEL_HOST_TIME_REJECTED_PERF_UNINITIALIZED\r\n");
+        return GX_MANAGED_INVALID_STATE;
+    }
+    if (!gxos_query_performance_counter(&ticks)) {
+        serial_text(
+            "GXOS_NET10:MANAGED_KERNEL_HOST_TIME_REJECTED_COUNTER\r\n");
+        return GX_MANAGED_INVALID_STATE;
+    }
+    if (!gxos_query_performance_frequency(&frequency)) {
+        serial_text(
+            "GXOS_NET10:MANAGED_KERNEL_HOST_TIME_REJECTED_FREQUENCY\r\n");
+        return GX_MANAGED_INVALID_STATE;
+    }
+    if (ticks < 0 || frequency <= 0) {
+        serial_field_hex(
+            "GXOS_NET10:MANAGED_KERNEL_HOST_TIME_REJECTED_VALUES_TICKS=0x",
+            (uint64_t)ticks);
+        serial_text("\r\n");
+        serial_field_hex(
+            "GXOS_NET10:MANAGED_KERNEL_HOST_TIME_REJECTED_VALUES_FREQUENCY=0x",
+            (uint64_t)frequency);
+        serial_text("\r\n");
         return GX_MANAGED_INVALID_STATE;
     }
     result.Size = GX_MANAGED_KERNEL_MONOTONIC_TIME_V1_SIZE;
@@ -13234,11 +13275,20 @@ static void managed_kernel_host_services_make_valid(void)
         (uint64_t)(uintptr_t)managed_kernel_host_log_utf8;
 #ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE25_STANDALONE
 #ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE53
-    if (gxos_perf_is_initialized()) {
+    /* The ACPI PM timer fallback is only safely extendable while it is read
+       within half of its 24-bit wrap interval. ManagedKernel may leave this
+       optional service idle across longer startup/worker waits, so advertise
+       monotonic time only when the invariant TSC source can tolerate that. */
+    if (gxos_perf_is_initialized() &&
+        g_perf_source_code == GXOS_PERF_SOURCE_INVARIANT_TSC_CPUID_15) {
         g_managed_kernel_host_services.Capabilities |=
             GX_MANAGED_HOST_CAPABILITY_MONOTONIC_TIME;
         g_managed_kernel_host_services.MonotonicTimeAddress =
             (uint64_t)(uintptr_t)managed_kernel_host_query_monotonic_time;
+    } else if (gxos_perf_is_initialized() &&
+               g_perf_source_code == GXOS_PERF_SOURCE_ACPI_PM_TIMER) {
+        serial_text(
+            "GXOS_NET10:MANAGED_KERNEL_MONOTONIC_TIME_UNAVAILABLE=PM_TIMER_WRAP_INTERVAL\r\n");
     }
 #endif
 #endif
@@ -15014,7 +15064,8 @@ static int managed_kernel_interrupt_wait_for_worker_rearmed(
     for (iteration = 0; iteration != maximum_iterations; ++iteration) {
         managed_kernel_interrupt_enable_cpu();
         if (managed_kernel_interrupt_worker_rearmed(worker)) return 1;
-        if (gxos_managed_kernel_driver_worker_pump(worker)) continue;
+        if (gxos_managed_kernel_driver_worker_pump(
+                worker, g_managed_kernel_driver_service_handle)) continue;
         if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
             (void)boot_services->Stall(1000);
             continue;
@@ -15057,7 +15108,8 @@ static int managed_kernel_interrupt_wait_for_enqueued(
             return 1;
         }
         managed_kernel_interrupt_enable_cpu();
-        if (gxos_managed_kernel_driver_worker_pump(worker)) {
+        if (gxos_managed_kernel_driver_worker_pump(
+                worker, g_managed_kernel_driver_service_handle)) {
             continue;
         }
         {
@@ -15107,13 +15159,16 @@ static int managed_kernel_interrupt_wait_for_optional_burst(
             &g_managed_kernel_interrupt_context.enqueued_count,
             __ATOMIC_ACQUIRE);
         if (enqueued >= expected_count) {
-            if (!managed_kernel_interrupt_wait_for_enqueued(
-                    boot_services, worker, expected_count)) return 0;
+            /* Return as soon as the ISR has published the complete burst.
+               The caller requests DRAIN while these records are still
+               pending, so this proves stop-time dispatch rather than an
+               ordinary pre-stop worker activation. */
             *burst_observed = 1;
             return 1;
         }
         managed_kernel_interrupt_enable_cpu();
-        if (gxos_managed_kernel_driver_worker_pump(worker)) continue;
+        if (gxos_managed_kernel_driver_worker_pump(
+                worker, g_managed_kernel_driver_service_handle)) continue;
         if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
             managed_kernel_interrupt_enable_cpu();
             (void)boot_services->Stall(1000);
@@ -15168,18 +15223,21 @@ static void managed_kernel_phase9_interrupt(
     uint64_t baseline_committed;
     uint32_t baseline_regions;
     uint64_t irq_before_unsubscribe;
+    uint64_t enqueued_before_unsubscribe;
+    uint64_t drained_before_unsubscribe;
+    uint64_t pending_before_unsubscribe;
     uint32_t burst_observed;
-    /* Full Phase 10 includes the managed burst. Its teardown releases the
-       two native worker pages plus five pages retained by managed driver
-       activity; virtual reservation accounting covers the managed portion
-       separately. */
-    const uint32_t driver_arena_pages = 7U;
-    const uint32_t driver_arena_commitments = 2U;
-    const uint32_t driver_arena_reservations = 1U;
-    const uint32_t driver_arena_regions = 2U;
-    const uint64_t driver_arena_bytes = 0x7000ULL;
+    /* Teardown releases seven managed-driver pages plus the persistent
+       worker's sixteen-page usable stack. Its guard, stack, and driver arena
+       occupy two reservations and three tracked regions. */
+    const uint32_t driver_arena_pages = 23U;
+    const uint32_t driver_arena_commitments = 18U;
+    const uint32_t driver_arena_reservations = 2U;
+    const uint32_t driver_arena_regions = 3U;
+    const uint64_t driver_arena_bytes = 0x17000ULL;
     const uint64_t driver_arena_virtual_bytes = 0x5000ULL;
-    const uint64_t driver_arena_reserved_bytes = 0x2000ULL;
+    const uint64_t driver_arena_reserved_bytes = 0x13000ULL;
+    const uint64_t driver_arena_committed_bytes = 0x12000ULL;
 
     if (boot_services == 0 || install_interrupt_services == 0 ||
         install_input_services == 0 || run_phase9 == 0 ||
@@ -15246,21 +15304,52 @@ static void managed_kernel_phase9_interrupt(
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ACCOUNTING_BASELINE_COMMIT=0x",
                      baseline_commit);
     serial_text("\r\n");
-    if (!gxos_managed_kernel_driver_worker_initialize(
+    serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_BASELINE_FREE=0x",
+                     gxos_scheduler_available_object_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_BASELINE_FREE=0x",
+                     gxos_scheduler_available_thread_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    if (gxos_managed_kernel_driver_worker_initialize(
             &g_managed_kernel_driver_worker_context,
             &g_create_event_scheduler, &g_event_api_context,
             &g_managed_kernel_interrupt_context, worker_bridge,
             tls_index, runtime_fls_slot, runtime_fls_cleanup,
-            serial_text, serial_field_hex)) {
+            serial_text, serial_field_hex) !=
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_OK) {
         fail("managed-kernel-driver-worker-start");
     }
     serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_FRESH_RUNTIME_STATE_READY\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_TLS_READY=1\r\n");
     gxos_managed_kernel_interrupt_set_work_notification(
         &g_managed_kernel_interrupt_context,
         managed_kernel_driver_worker_notify,
         &g_managed_kernel_driver_worker_context);
-    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_READY\r\n");
     if (run_phase9(1) != GX_MANAGED_OK) fail("managed-kernel-interrupt-subscribe");
+    if (!gxos_managed_kernel_driver_worker_publish_route(
+            &g_managed_kernel_driver_worker_context,
+            &g_managed_kernel_driver_service_handle) ||
+        !gxos_managed_kernel_driver_worker_start(
+            &g_managed_kernel_driver_worker_context,
+            g_managed_kernel_driver_service_handle)) {
+        fail("managed-kernel-driver-worker-route-start");
+    }
+    if (!managed_kernel_interrupt_wait_for_worker_rearmed(
+            boot_services, &g_managed_kernel_driver_worker_context)) {
+        fail("managed-kernel-driver-worker-initial-idle");
+    }
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_INITIAL_IDLE=1\r\n");
+    serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_RUNNING_FREE=0x",
+                     gxos_scheduler_available_object_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_RUNNING_FREE=0x",
+                     gxos_scheduler_available_thread_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_READY\r\n");
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE11
     if (install_input_services(GX_MANAGED_KERNEL_INPUT_SERVICES_ABI_V1, 0,
                                (uintptr_t)&g_managed_kernel_keyboard_device) !=
@@ -15308,9 +15397,9 @@ static void managed_kernel_phase9_interrupt(
     serial_text("GXOS_NET10:MANAGED_KERNEL_INPUT_SERVICE_NATIVE_NEGATIVE_TESTS_OK\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_INPUT_SERVICES_INSTALLED\r\n");
 #endif
-    /* The worker is resumed before subscription, but its first scheduler
-       activation is deliberately caused by the first hardware notification.
-       This keeps the initial managed activation tied to real device work. */
+    /* Start the persistent service before advertising RX readiness. The
+       worker attaches once, then sleeps on its wake event while the boot
+       thread remains available for device interrupts and bounded dispatch. */
 
     restore_nativeaot_tls();
     managed_kernel_interrupt_enable_cpu();
@@ -15377,6 +15466,123 @@ static void managed_kernel_phase9_interrupt(
         serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SECOND_WAIT_NOT_READY\r\n");
         fail("managed-kernel-second-ready-invariant");
     }
+#ifdef GXOS_ENABLE_PHASE61_MANAGED_WORKER_API
+    {
+        GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE one_shot = {0};
+        GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE rejected = {0};
+        GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST request = {0};
+        GXOS_NATIVEAOT_MANAGED_WORKER_RESULT result = {0};
+        GXOS_NATIVEAOT_MANAGED_WORKER_RESULT closed_result = {0};
+        GXOS_NATIVEAOT_MANAGED_WORKER_STATUS api_status;
+        GXOS_SCHEDULER_TCB *service_tcb =
+            g_managed_kernel_driver_worker_context.thread;
+        GXOS_SCHEDULER_HANDLE service_wake =
+            g_managed_kernel_driver_worker_context.wake_event;
+        uint32_t next_identity_before_reject;
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+        g_phase61_managed_worker_probe = (GXOS_PHASE53O_PROBE){
+            .scheduler = &g_create_event_scheduler,
+            .main_thread = gxos_scheduler_current_thread(),
+            .callback_bridge = worker_bridge,
+            /* The bounded coexistence request uses ADD_ONE only. */
+            .gc_bridge = worker_bridge,
+            .runtime_fls_slot = runtime_fls_slot,
+            .runtime_fls_cleanup = runtime_fls_cleanup,
+            .main_tls_block = (uint64_t)g_tls_block,
+            .vm_region_count = &g_memory_vm_regions.live_count,
+            .log_text = serial_text,
+            .log_hex = serial_field_hex,
+            .phase_in_managed = phase69_worker_api_set_phase,
+            .phase_after_managed = phase69_worker_api_set_phase,
+            .tls_index = tls_index,
+            .managed_root_publish_bridge = 0,
+            .managed_root_release_bridge = 0,
+            .managed_root_validate_bridge = 0
+        };
+        if (!gxos_nativeaot_managed_worker_api_initialize(
+                &g_phase61_managed_worker_api,
+                &g_phase61_managed_worker_probe)) {
+            fail("managed-kernel-persistent-one-shot-api-init");
+        }
+#endif
+        if (!gxos_nativeaot_managed_worker_api_allow_shared_threadstore(
+                &g_phase61_managed_worker_api, 1) ||
+            !gxos_managed_kernel_driver_worker_is_running(
+                &g_managed_kernel_driver_worker_context,
+                g_managed_kernel_driver_service_handle) ||
+            gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+                1U ||
+            !gxos_scheduler_can_admit(&g_create_event_scheduler, 1U, 1U)) {
+            fail("managed-kernel-persistent-one-shot-admission-baseline");
+        }
+        api_status = gxos_nativeaot_managed_worker_api_create(
+            &g_phase61_managed_worker_api, &one_shot);
+        serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_CREATE_STATUS=0x",
+                         api_status);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_OBJECTS_AFTER_CREATE=0x",
+                         gxos_scheduler_available_object_slots(
+                             &g_create_event_scheduler));
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_THREADS_AFTER_CREATE=0x",
+                         gxos_scheduler_available_thread_slots(
+                             &g_create_event_scheduler));
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_IDENTITY=0x",
+                         one_shot.worker_identity);
+        serial_text("\r\n");
+        if (api_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+            gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+                0U) {
+            fail("managed-kernel-persistent-one-shot-create");
+        }
+        next_identity_before_reject = g_create_event_scheduler.next_identity;
+        api_status = gxos_nativeaot_managed_worker_api_create(
+            &g_phase61_managed_worker_api, &rejected);
+        if (api_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY ||
+            rejected.worker_identity != 0U ||
+            g_create_event_scheduler.next_identity !=
+                next_identity_before_reject ||
+            gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+                0U) {
+            fail("managed-kernel-persistent-one-shot-capacity-reject");
+        }
+        request.version = GXOS_NATIVEAOT_MANAGED_WORKER_API_VERSION;
+        request.size = sizeof(request);
+        request.operation_id = GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE;
+        request.argument0 = 41U;
+        if (gxos_nativeaot_managed_worker_api_submit(
+                &g_phase61_managed_worker_api, one_shot, &request) !=
+                GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+            gxos_nativeaot_managed_worker_api_drive(
+                &g_phase61_managed_worker_api, one_shot) !=
+                GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+            gxos_nativeaot_managed_worker_api_poll(
+                &g_phase61_managed_worker_api, one_shot, &result) !=
+                GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+            result.output0 != 42U || result.result_code != 0 ||
+            gxos_nativeaot_managed_worker_api_close(
+                &g_phase61_managed_worker_api, one_shot, &closed_result) !=
+                GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+            closed_result.output0 != 42U || service_tcb == 0 ||
+            service_tcb->live == 0U ||
+            g_managed_kernel_driver_worker_context.thread != service_tcb ||
+            g_managed_kernel_driver_worker_context.wake_event != service_wake ||
+            !gxos_managed_kernel_driver_worker_is_running(
+                &g_managed_kernel_driver_worker_context,
+                g_managed_kernel_driver_service_handle) ||
+            gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+                1U) {
+            fail("managed-kernel-persistent-one-shot-coexistence");
+        }
+        serial_text("GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_ADD_ONE_OK=1\r\n");
+        serial_text("GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_CAPACITY_REJECT_PREALLOC=1\r\n");
+        serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_RESULT=0x",
+                         result.output0);
+        serial_text("\r\n");
+        serial_text("GXOS_NET10:PERSISTENT_SERVICE_SURVIVED_ONE_SHOT=1\r\n");
+    }
+#endif
     /* The readiness marker is emitted only after the complete hardware,
        queue, and scheduler-worker path is re-armed. */
     managed_kernel_serial_interrupt_checkpoint("BEFORE_SECOND");
@@ -15464,7 +15670,6 @@ static void managed_kernel_phase9_interrupt(
     }
     if (burst_observed != 0U) {
         serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED\r\n");
-        serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_DRAINED\r\n");
     }
 
     /* Managed dispatch and the required burst may legitimately retain new
@@ -15519,32 +15724,78 @@ static void managed_kernel_phase9_interrupt(
 
     irq_before_unsubscribe = __atomic_load_n(
         &g_managed_kernel_interrupt_context.irq_entry_count, __ATOMIC_ACQUIRE);
-    activate_nativeaot_tls();
-    if (run_phase10(4) != GX_MANAGED_OK) {
-        restore_nativeaot_tls();
-        fail("managed-kernel-interrupt-unsubscribe");
+    enqueued_before_unsubscribe = __atomic_load_n(
+        &g_managed_kernel_interrupt_context.enqueued_count, __ATOMIC_ACQUIRE);
+    drained_before_unsubscribe = __atomic_load_n(
+        &g_managed_kernel_interrupt_context.drained_count, __ATOMIC_ACQUIRE);
+    pending_before_unsubscribe =
+        g_managed_kernel_interrupt_context.write_index -
+        g_managed_kernel_interrupt_context.read_index;
+    serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PENDING=0x",
+                     pending_before_unsubscribe);
+    serial_text("\r\n");
+    if (enqueued_before_unsubscribe - drained_before_unsubscribe !=
+        pending_before_unsubscribe) {
+        fail("managed-kernel-driver-worker-drain-precondition");
     }
-    restore_nativeaot_tls();
+    serial_text(pending_before_unsubscribe != 0U
+        ? "GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_PENDING=1\r\n"
+        : "GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_IDLE=1\r\n");
+    if (!gxos_managed_kernel_driver_worker_stop(
+            &g_managed_kernel_driver_worker_context,
+            g_managed_kernel_driver_service_handle,
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN)) {
+        fail("managed-kernel-driver-worker-drain-stop");
+    }
+    serial_text("GXOS_NET10:PERSISTENT_SERVICE_DRAIN_COMPLETE=1\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBED_READY\r\n");
     if (boot_services->Stall != 0 && EFI_ERROR(boot_services->Stall(1000000))) {
         fail("managed-kernel-interrupt-post-unsubscribe-stall");
     }
     if (g_managed_kernel_interrupt_context.subscription_active != 0 ||
         g_managed_kernel_interrupt_context.hardware_enabled != 0 ||
+        g_managed_kernel_interrupt_context.routes[0].accepting_events != 0U ||
+        g_managed_kernel_interrupt_context.read_index !=
+            g_managed_kernel_interrupt_context.write_index ||
+        g_managed_kernel_interrupt_context.shutdown_discarded_count != 0U ||
+        __atomic_load_n(&g_managed_kernel_interrupt_context.enqueued_count,
+                        __ATOMIC_ACQUIRE) != enqueued_before_unsubscribe ||
+        __atomic_load_n(&g_managed_kernel_interrupt_context.drained_count,
+                        __ATOMIC_ACQUIRE) != enqueued_before_unsubscribe ||
+        enqueued_before_unsubscribe - drained_before_unsubscribe !=
+            pending_before_unsubscribe ||
         __atomic_load_n(&g_managed_kernel_interrupt_context.irq_entry_count,
-                        __ATOMIC_ACQUIRE) != irq_before_unsubscribe) {
+                        __ATOMIC_ACQUIRE) - irq_before_unsubscribe != 0U) {
         fail("managed-kernel-interrupt-post-unsubscribe-delivery");
     }
+    serial_text("GXOS_NET10:PERSISTENT_SERVICE_ROUTE_QUIESCED=1\r\n");
+    serial_text("GXOS_NET10:PERSISTENT_SERVICE_DRAIN_QUEUE_EMPTY=1\r\n");
+    serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_DRAINED_COUNT=0x",
+                     __atomic_load_n(
+                         &g_managed_kernel_interrupt_context.drained_count,
+                         __ATOMIC_ACQUIRE));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_SHUTDOWN_DISCARDED=0x",
+                     g_managed_kernel_interrupt_context.shutdown_discarded_count);
+    serial_text("\r\n");
 
     gxos_managed_kernel_interrupt_set_work_notification(
         &g_managed_kernel_interrupt_context, 0, 0);
 
-    if (!gxos_managed_kernel_driver_worker_stop(
-            &g_managed_kernel_driver_worker_context) ||
-        !gxos_managed_kernel_driver_worker_destroy(
-            &g_managed_kernel_driver_worker_context)) {
+    if (!gxos_managed_kernel_driver_worker_destroy(
+            &g_managed_kernel_driver_worker_context,
+            g_managed_kernel_driver_service_handle)) {
         fail("managed-kernel-driver-worker-reclaim");
     }
+    serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_FINAL_FREE=0x",
+                     gxos_scheduler_available_object_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_FINAL_FREE=0x",
+                     gxos_scheduler_available_thread_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PERSISTENT_SERVICE_RESOURCES_RECLAIMED=1\r\n");
     activate_nativeaot_tls();
     if (run_phase10(5) != GX_MANAGED_OK) {
         restore_nativeaot_tls();
@@ -15642,7 +15893,7 @@ static void managed_kernel_phase9_interrupt(
         g_memory_virtual_arena.total_reserved_bytes !=
             baseline_reserved - driver_arena_reserved_bytes ||
         g_memory_virtual_arena.total_committed_bytes !=
-            baseline_committed - driver_arena_reserved_bytes ||
+            baseline_committed - driver_arena_committed_bytes ||
         g_memory_vm_regions.live_count != baseline_regions - driver_arena_regions) {
         fail("managed-kernel-interrupt-accounting-or-counters");
     }

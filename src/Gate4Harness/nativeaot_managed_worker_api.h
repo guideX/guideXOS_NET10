@@ -135,6 +135,12 @@ int gxos_nativeaot_managed_worker_api_initialize(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api,
     GXOS_PHASE53O_PROBE *probe);
 
+/* Allows a one-shot worker to share the established runtime ThreadStore with
+   an independently owned persistent service. This does not change API slot
+   capacity or scheduler admission. */
+int gxos_nativeaot_managed_worker_api_allow_shared_threadstore(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api, int allow);
+
 GXOS_NATIVEAOT_MANAGED_WORKER_STATUS
 gxos_nativeaot_managed_worker_api_create(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api,

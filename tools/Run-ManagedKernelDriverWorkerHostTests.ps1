@@ -12,10 +12,17 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 $out = [IO.Path]::GetFullPath($OutputDirectory)
 $project = Join-Path $root 'src\ManagedKernelDriverWorkerHostTests\ManagedKernelDriverWorkerHostTests.csproj'
 $dotnet = Get-Command dotnet -ErrorAction Stop
-$sdkDirectory = Join-Path (Split-Path -Parent $dotnet.Source) 'sdk\10.0.400'
+$sdkRoot = Join-Path (Split-Path -Parent $dotnet.Source) 'sdk'
+$sdkDirectory = Get-ChildItem -LiteralPath $sdkRoot -Directory |
+    Where-Object { $_.Name -match '^10\.0\.\d+$' } |
+    Sort-Object { [Version]$_.Name } -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
+if ([string]::IsNullOrWhiteSpace($sdkDirectory)) {
+    throw "No installed .NET 10 SDK was found under $sdkRoot"
+}
 $msbuild = Join-Path $sdkDirectory 'MSBuild.dll'
 if (-not (Test-Path -LiteralPath $msbuild)) {
-    throw "The installed .NET 10.0.400 MSBuild entry point is missing: $msbuild"
+    throw "The installed .NET 10 SDK MSBuild entry point is missing: $msbuild"
 }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 Push-Location (Split-Path -Parent $root)
