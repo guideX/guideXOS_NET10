@@ -102,6 +102,8 @@ typedef struct GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD {
     uint8_t cancel_observed;
     uint8_t cancel_checkpoint_open;
     uint8_t cancel_checkpoint_passed;
+    uint8_t cancel_checkpoint2_passed;
+    uint8_t cancel_observed_checkpoint;
     uint8_t phase65_peer_yielded;
     uint32_t cancel_requested;
     uint32_t gc_invocation_count;
@@ -145,8 +147,8 @@ gxos_nativeaot_managed_worker_api_submit(
     const GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST *request);
 
 /* Requests cooperative cancellation at the worker's next supported
-   checkpoint. Phase 65 currently exposes the post-root-publication,
-   pre-GC checkpoint for GC_CHECK workers. */
+   checkpoint. GC_CHECK workers support checkpoints after root publication
+   before GC and after GC/root-survival validation before normal continuation. */
 GXOS_NATIVEAOT_MANAGED_WORKER_STATUS
 gxos_nativeaot_managed_worker_api_request_cancel(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api,
@@ -186,6 +188,11 @@ int gxos_nativeaot_managed_worker_api_capacity_three_probe(
 
 /* Diagnostic fixture only: exercises bounded cooperative cancellation. */
 int gxos_nativeaot_managed_worker_api_cancellation_probe(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api);
+
+/* Diagnostic fixture only: exercises caller cancellation after GC/root
+   survival and before ordinary GC_CHECK continuation. */
+int gxos_nativeaot_managed_worker_api_post_gc_cancel_probe(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api);
 
 #endif

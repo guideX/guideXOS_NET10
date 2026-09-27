@@ -7,6 +7,8 @@
 #define GXOS_PHASE61_CYCLE_COUNT 12U
 #define GXOS_PHASE62_PAIR_COUNT 12U
 
+static volatile GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST phase66_d_request;
+
 _Static_assert(sizeof(GXOS_NATIVEAOT_MANAGED_WORKER_API_CONTEXT) <=
                    GXOS_NATIVEAOT_MANAGED_WORKER_API_STORAGE_SIZE,
                "Phase 61 opaque API storage is too small");
@@ -199,6 +201,9 @@ static GXOS_NATIVEAOT_MANAGED_WORKER_STATUS phase61_validate_active_handle(
     if (phase61_active_record(context, handle) != 0) {
         return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK;
     }
+    if (phase61_slot_has_different_active_handle(context, handle)) {
+        return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_STALE_HANDLE;
+    }
     if (phase61_known_stale_handle(context, handle)) {
         return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_STALE_HANDLE;
     }
@@ -224,6 +229,32 @@ static void phase61_mark_failed(
     record->result.result_code = -1;
     record->result.state = GXOS_NATIVEAOT_MANAGED_WORKER_STATE_FAILED;
     record->state = GXOS_NATIVEAOT_MANAGED_WORKER_STATE_FAILED;
+}
+
+int gxos_nativeaot_managed_worker_api_consume_cancel_checkpoint(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD *record,
+    uint8_t checkpoint_id)
+{
+    if (record == 0 || !record->cancel_checkpoint_open) return 0;
+    if (checkpoint_id == 1U) {
+        if (record->cancel_checkpoint_passed ||
+            record->cancel_checkpoint2_passed) return 0;
+        record->cancel_checkpoint_passed = 1;
+    } else if (checkpoint_id == 2U) {
+        if (!record->cancel_checkpoint_passed ||
+            record->cancel_checkpoint2_passed) return 0;
+        record->cancel_checkpoint_open = 0;
+        record->cancel_checkpoint2_passed = 1;
+    } else {
+        return 0;
+    }
+    if (__atomic_load_n(&record->cancel_requested, __ATOMIC_ACQUIRE) == 0U) {
+        return 0;
+    }
+    record->cancel_checkpoint_open = 0;
+    record->cancel_observed_checkpoint = checkpoint_id;
+    record->cancel_observed = 1;
+    return 1;
 }
 
 #ifdef GXOS_ENABLE_PHASE64_MANAGED_WORKER_API
@@ -341,7 +372,9 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
     GXOS_PHASE53O_PROBE *probe;
     GXOS_NATIVEAOT_CALLBACK_BRIDGE *bridge;
     int32_t managed_result = 0;
+    int32_t root_validate_result = 0;
     uint32_t callback_status = UINT32_MAX;
+    uint32_t root_validate_status = UINT32_MAX;
     uint32_t gc_delta = 0;
     uint32_t gc_generation = 0;
     uint32_t gc_checksum = 0;
@@ -350,6 +383,8 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
     int invoked = 0;
     int attach_failure_injected = 0;
     int phase64_gc = 0;
+    int phase66_target = 0;
+    int phase66_peer_c = 0;
     int canceled = 0;
     int good = 1;
 
@@ -380,6 +415,12 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
         phase64_gc = owner != 0 && owner->phase64_mode &&
             record->request.operation_id ==
                 GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK;
+        phase66_target = owner != 0 && owner->phase66_mode &&
+            gxos_nativeaot_managed_worker_api_handle_equal(
+                record->handle, owner->phase66_target);
+        phase66_peer_c = owner != 0 && owner->phase66_mode &&
+            gxos_nativeaot_managed_worker_api_handle_equal(
+                record->handle, owner->phase66_peer_c);
         root_token = phase64_gc ? phase64_root_token(record) : 0;
 
         if (phase64_gc) {
@@ -402,8 +443,9 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
             record->runtime_tls_block_value = gxos_scheduler_current_tls_block();
             phase64_update_overlap(owner);
 
-            /* This is the sole cancellation point: the per-worker root is
-               published and owned, while its GC_CHECK has not begun. */
+            /* Checkpoint 1 remains the established pre-GC cancellation point.
+               The acceptance window stays open after it passes and closes at
+               checkpoint 2, after GC/root-survival validation. */
             if (good) {
                 int is_target = owner != 0 && owner->phase65_mode &&
                     gxos_nativeaot_managed_worker_api_handle_equal(
@@ -413,16 +455,27 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
                         record->handle, owner->phase65_peer_c);
                 record->cancel_checkpoint_open = 1;
                 if (is_target) owner->phase65_checkpoint_ready = 1;
-                if (owner != 0 && owner->phase65_mode &&
+                if (phase66_target) {
+                    owner->phase66_checkpoint1_ready = 1;
+                    while (good && !owner->phase66_release_b_to_gc) {
+                        if (!gxos_scheduler_worker_yield()) good = 0;
+                    }
+                    owner->phase66_checkpoint1_ready = 0;
+                } else if (phase66_peer_c &&
+                           !owner->phase66_release_c_to_gc) {
+                    owner->phase66_peer_c_checkpoint1_ready = 1;
+                    while (good && !owner->phase66_release_c_to_gc) {
+                        if (!gxos_scheduler_worker_yield()) good = 0;
+                    }
+                    owner->phase66_peer_c_checkpoint1_ready = 0;
+                } else if (owner != 0 && owner->phase65_mode &&
                     (is_target || is_peer_c) &&
                     !gxos_scheduler_worker_yield()) {
                     good = 0;
                 }
-                record->cancel_checkpoint_open = 0;
-                record->cancel_checkpoint_passed = 1;
-                if (good && __atomic_load_n(&record->cancel_requested,
-                                             __ATOMIC_ACQUIRE) != 0U) {
-                    record->cancel_observed = 1;
+                if (good &&
+                    gxos_nativeaot_managed_worker_api_consume_cancel_checkpoint(
+                        record, 1U)) {
                     canceled = 1;
                     if (owner != 0 && owner->phase65_mode && is_target) {
                         owner->phase65_cancel_observed = 1;
@@ -529,8 +582,9 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
                     ((uint32_t)managed_result >> 16) & 0xFFFFU;
             }
         } else if (!canceled && !attach_failure_injected && good &&
+                   !phase64_gc &&
                    record->request.operation_id ==
-                       GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK) {
+                        GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK) {
             if (!invoked || !gxos_nativeaot_gc_result_valid(
                     managed_result, record->request.argument0, &gc_delta,
                     &gc_generation, &gc_checksum) || gc_delta == 0U) {
@@ -541,7 +595,9 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
                 record->result.output0 = gc_delta;
                 record->result.output1 = gc_checksum;
             }
-        } else if (!canceled && !attach_failure_injected && good) {
+        } else if (!canceled && !attach_failure_injected && good &&
+                   !(phase64_gc && record->request.operation_id ==
+                       GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK)) {
             good = 0;
         }
 
@@ -559,39 +615,79 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
                 }
             }
         }
-        if (!canceled && phase64_gc && good && owner != 0 &&
-            owner->phase65_mode &&
+        if (!canceled && good && owner != 0 && owner->phase66_mode &&
+            owner->phase66_hold_peer_a &&
             gxos_nativeaot_managed_worker_api_handle_equal(
-                record->handle, owner->phase65_peer_c)) {
-            owner->phase65_peer_c_held = 1;
-            while (!owner->phase65_release_peers) {
+                record->handle, owner->phase66_peer_a)) {
+            owner->phase66_peer_a_held = 1;
+            while (!owner->phase66_release_peer_a) {
                 if (!gxos_scheduler_worker_yield()) {
                     good = 0;
                     break;
                 }
             }
         }
-
         if (!canceled && phase64_gc && good) {
-            int32_t validate_result = 0;
-            uint32_t validate_status = UINT32_MAX;
+            int validate_invoked = 0;
             probe->phase_in_managed(GXOS_PHASE61_PHASE_IN_MANAGED);
-            if (probe->managed_root_validate_bridge == 0 ||
-                !gxos_nativeaot_scheduler_worker_invoke(
+            if (probe->managed_root_validate_bridge != 0) {
+                validate_invoked = gxos_nativeaot_scheduler_worker_invoke(
                     &record->lifecycle, probe->managed_root_validate_bridge,
-                    (int32_t)root_token, &validate_result,
-                    &validate_status) ||
-                validate_status != GXOS_NATIVEAOT_CALLBACK_OK ||
-                (uint32_t)validate_result != (0x5A000000U | root_token)) {
+                    (int32_t)root_token, &root_validate_result,
+                    &root_validate_status);
+            }
+            if (!validate_invoked ||
+                root_validate_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+                (uint32_t)root_validate_result !=
+                    (0x5A000000U | root_token)) {
                 good = 0;
             } else {
                 ++record->root_survival_callback_count;
+                record->lifecycle.managed_root_survived = 1;
             }
             probe->phase_after_managed(GXOS_PHASE61_PHASE_AFTER_MANAGED_RETURN);
             phase64_update_overlap(owner);
+        }
+
+        if (!canceled && phase64_gc && good) {
+            record->cancel_checkpoint_open = 1;
+            if (phase66_target) {
+                owner->phase66_checkpoint2_ready = 1;
+                while (good && !owner->phase66_release_b_after_gc) {
+                    if (!gxos_scheduler_worker_yield()) good = 0;
+                }
+                owner->phase66_checkpoint2_ready = 0;
+            } else if (phase66_peer_c &&
+                       !owner->phase66_release_peer_c_checkpoint2) {
+                owner->phase66_peer_c_checkpoint2_ready = 1;
+                while (good &&
+                       !owner->phase66_release_peer_c_checkpoint2) {
+                    if (!gxos_scheduler_worker_yield()) good = 0;
+                }
+                owner->phase66_peer_c_checkpoint2_ready = 0;
+            }
+            if (good &&
+                gxos_nativeaot_managed_worker_api_consume_cancel_checkpoint(
+                    record, 2U)) {
+                canceled = 1;
+                if (phase66_target) owner->phase66_cancel_observed = 1;
+                probe->phase_in_managed(GXOS_PHASE61_PHASE_IN_MANAGED);
+                if (!phase64_release_root(record, probe, root_token)) {
+                    good = 0;
+                }
+                if (good) phase64_note_root_release_peer(owner, record);
+                probe->phase_after_managed(
+                    GXOS_PHASE61_PHASE_AFTER_MANAGED_RETURN);
+                phase64_update_overlap(owner);
+            }
+        }
+
+        if (!canceled && phase64_gc && good) {
             if (owner != 0 && owner->stale_root_token != 0U) {
                 int32_t stale_result = 0;
                 uint32_t stale_status = UINT32_MAX;
+                int32_t duplicate_result = 0;
+                uint32_t duplicate_status = UINT32_MAX;
                 probe->phase_in_managed(GXOS_PHASE61_PHASE_IN_MANAGED);
                 if (!gxos_nativeaot_scheduler_worker_invoke(
                         &record->lifecycle,
@@ -603,8 +699,62 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
                     good = 0;
                 } else if (owner != 0) {
                     owner->phase64_stale_root_rejection = 1;
+                    owner->phase66_stale_root_cleanup_rejected = 1;
+                }
+                if (good && owner->phase66_mode &&
+                    !gxos_nativeaot_scheduler_worker_invoke(
+                        &record->lifecycle,
+                        probe->managed_root_release_bridge,
+                        (int32_t)owner->stale_root_token,
+                        &duplicate_result, &duplicate_status)) {
+                    good = 0;
+                } else if (good && owner->phase66_mode &&
+                           (duplicate_status != GXOS_NATIVEAOT_CALLBACK_OK ||
+                            duplicate_result != -2)) {
+                    good = 0;
+                } else if (good && owner->phase66_mode) {
+                    owner->phase66_duplicate_release_rejected = 1;
                 }
                 probe->phase_after_managed(GXOS_PHASE61_PHASE_AFTER_MANAGED_RETURN);
+            }
+        }
+
+        if (!canceled && !attach_failure_injected && good && phase64_gc &&
+            record->request.operation_id ==
+                GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK) {
+            if (!invoked || !gxos_nativeaot_gc_result_valid(
+                    managed_result, record->request.argument0, &gc_delta,
+                    &gc_generation, &gc_checksum) || gc_delta == 0U) {
+                good = 0;
+            } else {
+                ++record->post_gc_continuation_count;
+                record->result.output0 = gc_delta;
+                record->result.output1 = gc_checksum;
+            }
+        }
+
+        if (!canceled && phase64_gc && good && owner != 0 &&
+            owner->phase66_mode && phase66_peer_c &&
+            owner->phase66_release_peer_c_checkpoint2) {
+            owner->phase66_peer_c_held = 1;
+            while (!owner->phase66_release_peer_c_final) {
+                if (!gxos_scheduler_worker_yield()) {
+                    good = 0;
+                    break;
+                }
+            }
+        }
+
+        if (!canceled && phase64_gc && good && owner != 0 &&
+            owner->phase65_mode &&
+            gxos_nativeaot_managed_worker_api_handle_equal(
+                record->handle, owner->phase65_peer_c)) {
+            owner->phase65_peer_c_held = 1;
+            while (!owner->phase65_release_peers) {
+                if (!gxos_scheduler_worker_yield()) {
+                    good = 0;
+                    break;
+                }
             }
         }
 
@@ -847,7 +997,9 @@ gxos_nativeaot_managed_worker_api_request_cancel(
         context->probe->managed_root_publish_bridge == 0 ||
         !((record->state == GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED) ||
           (record->state == GXOS_NATIVEAOT_MANAGED_WORKER_STATE_RUNNING &&
-           record->cancel_checkpoint_open))) {
+           (!record->cancel_checkpoint_passed ||
+            record->cancel_checkpoint_open) &&
+           !record->cancel_checkpoint2_passed))) {
         return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_UNSUPPORTED_STATE;
     }
 
@@ -884,12 +1036,12 @@ gxos_nativeaot_managed_worker_api_drive(
         return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_INVALID_HANDLE;
     }
     if ((record->state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED &&
+         record->state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_RUNNING &&
          record->state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCEL_REQUESTED) ||
         gxos_scheduler_current_thread() != context->probe->main_thread) {
         return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_INVALID_STATE;
     }
-    for (dispatches = 0;
-         dispatches <= GXOS_NATIVEAOT_MANAGED_WORKER_API_CAPACITY;
+    for (dispatches = 0; dispatches != 64U;
          ++dispatches) {
         if (record->state == GXOS_NATIVEAOT_MANAGED_WORKER_STATE_COMPLETED ||
             record->state == GXOS_NATIVEAOT_MANAGED_WORKER_STATE_FAILED ||
@@ -907,6 +1059,26 @@ gxos_nativeaot_managed_worker_api_drive(
             if (target != 0 && target->cancel_checkpoint_open &&
                 __atomic_load_n(&target->cancel_requested,
                                 __ATOMIC_ACQUIRE) == 0U) {
+                return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE;
+            }
+        }
+        if (context->phase66_mode) {
+            if (gxos_nativeaot_managed_worker_api_handle_equal(
+                    handle, context->phase66_target) &&
+                ((context->phase66_checkpoint1_ready &&
+                  !context->phase66_release_b_to_gc) ||
+                 (context->phase66_checkpoint2_ready &&
+                  !context->phase66_release_b_after_gc))) {
+                return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE;
+            }
+            if (gxos_nativeaot_managed_worker_api_handle_equal(
+                    handle, context->phase66_peer_c) &&
+                ((context->phase66_peer_c_checkpoint1_ready &&
+                  !context->phase66_release_c_to_gc) ||
+                 (context->phase66_peer_c_checkpoint2_ready &&
+                  !context->phase66_release_peer_c_checkpoint2) ||
+                 (context->phase66_peer_c_held &&
+                  !context->phase66_release_peer_c_final))) {
                 return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE;
             }
         }
@@ -2419,6 +2591,7 @@ static int phase64_run_attach_failure(
 }
 
 #define GXOS_PHASE65_SCENARIO_COUNT 12U
+#define GXOS_PHASE66_SCENARIO_COUNT 12U
 
 static int phase65_run_scenario(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api,
@@ -2555,7 +2728,7 @@ static int phase65_run_scenario(
             "GXOS_NET10:PHASE65_B_CHECKPOINT_READY=1\r\n");
     }
 
-    wrong_generation = handles[1];
+    wrong_generation = context->phase65_target;
     wrong_generation.worker_generation =
         wrong_generation.worker_generation == UINT16_MAX
             ? 1U : (uint16_t)(wrong_generation.worker_generation + 1U);
@@ -3102,6 +3275,663 @@ int gxos_nativeaot_managed_worker_api_cancellation_probe(
     phase64_text(probe, "GXOS_NET10:PHASE65_C_GC_AND_ROOT_SURVIVAL=1\r\n");
     phase64_text(probe, "GXOS_NET10:PHASE65_COMPLETE=1\r\n");
     phase64_text(probe, "GXOS_NET10:PHASE65_PASS=1\r\n");
+    return 1;
+}
+
+static void phase66_record_peaks(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_CONTEXT *context,
+    GXOS_PHASE53O_PROBE *probe)
+{
+    phase64_update_peak(context, probe);
+    if (context->peak_api_workers > context->phase66_peak_api_workers)
+        context->phase66_peak_api_workers = context->peak_api_workers;
+    if (context->peak_vm > context->phase66_peak_vm)
+        context->phase66_peak_vm = context->peak_vm;
+    if (context->peak_threads > context->phase66_peak_threads)
+        context->phase66_peak_threads = context->peak_threads;
+    if (context->peak_objects > context->phase66_peak_objects)
+        context->phase66_peak_objects = context->peak_objects;
+    if (context->peak_roots > context->phase66_peak_roots)
+        context->phase66_peak_roots = context->peak_roots;
+}
+
+static int phase66_run_scenario(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api,
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_CONTEXT *context,
+    GXOS_PHASE53O_PROBE *probe, uint32_t cycle,
+    uint32_t baseline_vm, uint32_t baseline_threads,
+    uint32_t baseline_objects)
+{
+    static const uint8_t creation_orders[3][3] = {
+        {0U, 1U, 2U}, {2U, 0U, 1U}, {1U, 2U, 0U}
+    };
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE handles[4] = {{0}};
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE cancelled_b = {0};
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE rejected = {0};
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE wrong_generation;
+    GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST requests[4] = {{0}};
+    GXOS_NATIVEAOT_MANAGED_WORKER_RESULT result = {0};
+    GXOS_NATIVEAOT_MANAGED_WORKER_RESULT closed_result = {0};
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD *record_a;
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD *record_b;
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD *record_c;
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD *record_d;
+    uint8_t const *creation_order = creation_orders[cycle % 3U];
+    uint32_t expected_a = 0x41U + cycle;
+    uint32_t expected_b = 0xB2U + cycle;
+    uint32_t expected_c = 0xC3U + cycle;
+    uint32_t expected_d = 0xD1U + cycle;
+    uint32_t b_root_token;
+    uint32_t c_root_token;
+    uint32_t index;
+    uint32_t pattern = cycle % 3U;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS cancel_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS duplicate_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS invalid_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS wrong_generation_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS add_one_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS late_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS completed_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS completed_c_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS closed_cancel_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS request_validation_status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS stale_status;
+
+    context->phase66_checkpoint1_ready = 0;
+    context->phase66_checkpoint2_ready = 0;
+    context->phase66_peer_c_checkpoint1_ready = 0;
+    context->phase66_peer_c_checkpoint2_ready = 0;
+    context->phase66_release_b_to_gc = 0;
+    context->phase66_release_b_after_gc = 0;
+    context->phase66_release_c_to_gc = pattern == 2U;
+    context->phase66_release_peer_c_checkpoint2 = pattern != 2U;
+    context->phase66_release_peer_a = 0;
+    context->phase66_release_peer_c_final = 0;
+    context->phase66_hold_peer_a = pattern != 1U;
+    context->phase66_peer_a_held = 0;
+    context->phase66_peer_c_held = 0;
+    context->phase66_cancel_observed = 0;
+    context->phase66_duplicate_release_rejected = 0;
+    context->phase66_stale_root_cleanup_rejected = 0;
+    context->stale_root_token = 0;
+    context->phase64_stale_root_rejection = 0;
+    context->completion_count = 0;
+
+    for (index = 0; index != 3U; ++index) {
+        uint8_t role = creation_order[index];
+        if (!phase64_create_worker(api, &handles[role])) return 0;
+    }
+    record_a = phase61_active_record(context, handles[0]);
+    record_b = phase61_active_record(context, handles[1]);
+    record_c = phase61_active_record(context, handles[2]);
+    if (record_a == 0 || record_b == 0 || record_c == 0) return 0;
+    context->phase66_target = handles[1];
+    context->phase66_peer_a = handles[0];
+    context->phase66_peer_c = handles[2];
+    context->stale_root_token = phase64_root_token(record_b);
+
+    requests[0].version = GXOS_NATIVEAOT_MANAGED_WORKER_API_VERSION;
+    requests[0].size = sizeof(requests[0]);
+    requests[0].operation_id = GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE;
+    requests[0].argument0 = expected_a;
+    requests[1].version = GXOS_NATIVEAOT_MANAGED_WORKER_API_VERSION;
+    requests[1].size = sizeof(requests[1]);
+    requests[1].operation_id = GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK;
+    requests[1].argument0 = expected_b;
+    requests[2].version = GXOS_NATIVEAOT_MANAGED_WORKER_API_VERSION;
+    requests[2].size = sizeof(requests[2]);
+    requests[2].operation_id = GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK;
+    requests[2].argument0 = expected_c;
+    for (index = 0; index != 3U; ++index) {
+        if (gxos_nativeaot_managed_worker_api_submit(
+                api, handles[index], &requests[index]) !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK) return 0;
+        requests[index].argument0 ^= 0xFFU;
+    }
+
+    if (pattern == 2U) {
+        status = gxos_nativeaot_managed_worker_api_drive(
+            api, context->phase66_peer_c);
+        if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+            !context->phase66_peer_c_checkpoint2_ready ||
+            !record_c->lifecycle.managed_root_owned ||
+            !record_c->lifecycle.managed_root_survived) return 0;
+        status = gxos_nativeaot_managed_worker_api_drive(
+            api, context->phase66_target);
+        if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+            !context->phase66_checkpoint1_ready) return 0;
+    } else {
+        status = gxos_nativeaot_managed_worker_api_drive(
+            api, context->phase66_target);
+        if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+            !context->phase66_checkpoint1_ready) return 0;
+        status = gxos_nativeaot_managed_worker_api_drive(
+            api, context->phase66_peer_c);
+        if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+            !context->phase66_peer_c_checkpoint1_ready) return 0;
+    }
+    phase66_record_peaks(context, probe);
+    if (phase62_live_api_workers(context) != 3U ||
+        !record_b->lifecycle.attached || !record_c->lifecycle.attached ||
+        !record_b->lifecycle.managed_root_owned ||
+        !record_c->lifecycle.managed_root_owned ||
+        record_b->gc_invocation_count != 0U ||
+        record_c->lifecycle.managed_root_publication_count != 1U ||
+        record_b->lifecycle.managed_root_publication_count != 1U ||
+        phase64_root_ledger(context) != 2U ||
+        gxos_nativeaot_managed_worker_api_create(api, &rejected) !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY) return 0;
+    b_root_token = (uint32_t)record_b->lifecycle.managed_root_identity;
+    c_root_token = (uint32_t)record_c->lifecycle.managed_root_identity;
+    if (b_root_token == 0U || c_root_token == 0U ||
+        b_root_token == c_root_token || b_root_token !=
+            phase64_root_token(record_b) || c_root_token !=
+            phase64_root_token(record_c)) return 0;
+
+    if (cycle == 0U) {
+        phase64_checkpoint(context, probe,
+            "GXOS_NET10:PHASE66_ABC_LIVE_VM=0x",
+            "GXOS_NET10:PHASE66_ABC_LIVE_THREADS=0x",
+            "GXOS_NET10:PHASE66_ABC_LIVE_OBJECTS=0x",
+            "GXOS_NET10:PHASE66_ABC_LIVE_API_WORKERS=0x",
+            "GXOS_NET10:PHASE66_ROOTS_LIVE=0x", 2U);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_SLOT=0x",
+                    handles[1].scheduler_slot);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_IDENTITY=0x",
+                    handles[1].worker_identity);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_GENERATION=0x",
+                    handles[1].worker_generation);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_TCB=0x",
+                    (uintptr_t)record_b->thread);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_RUNTIME_THREAD=0x",
+                    record_b->lifecycle.runtime_thread);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_ROOT_TOKEN=0x", b_root_token);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_C_ROOT_TOKEN=0x", c_root_token);
+    }
+
+    if (pattern == 1U) {
+        record_a = phase61_active_record(context, context->phase66_peer_a);
+        if (record_a == 0 ||
+            record_a->result.status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+            record_a->state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_COMPLETED ||
+            !phase64_result_valid(record_a, &record_a->result) ||
+            record_a->result.output0 != expected_a + 1U ||
+            record_a->lifecycle.runtime_detach_count != 1U ||
+            !record_a->lifecycle.detached ||
+            record_b->gc_invocation_count != 0U ||
+            phase64_root_ledger(context) != 2U) return 0;
+    }
+
+    context->phase66_release_b_to_gc = 1;
+    status = gxos_nativeaot_managed_worker_api_drive(
+        api, context->phase66_target);
+    if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+        !context->phase66_checkpoint2_ready ||
+        !record_b->cancel_checkpoint_passed ||
+        record_b->cancel_checkpoint2_passed ||
+        !record_b->cancel_checkpoint_open ||
+        record_b->gc_invocation_count != 1U ||
+        record_b->root_survival_callback_count != 1U ||
+        !record_b->lifecycle.managed_root_survived ||
+        !record_b->lifecycle.managed_root_owned ||
+        record_b->lifecycle.managed_root_identity != b_root_token ||
+        record_b->cancel_requested != 0U ||
+        record_b->post_gc_continuation_count != 0U ||
+        phase64_root_ledger(context) != 2U ||
+        !record_c->lifecycle.managed_root_owned) return 0;
+
+    wrong_generation = handles[1];
+    wrong_generation.worker_generation =
+        wrong_generation.worker_generation == UINT16_MAX ? 1U :
+        (uint16_t)(wrong_generation.worker_generation + 1U);
+    invalid_status = gxos_nativeaot_managed_worker_api_request_cancel(api,
+        (GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE){0});
+    wrong_generation_status = gxos_nativeaot_managed_worker_api_request_cancel(
+        api, wrong_generation);
+    add_one_status = gxos_nativeaot_managed_worker_api_request_cancel(
+        api, context->phase66_peer_a);
+    if (invalid_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_INVALID_HANDLE ||
+        wrong_generation_status !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_STALE_HANDLE ||
+        add_one_status != (pattern == 1U
+            ? GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_COMPLETED
+            : GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_UNSUPPORTED_STATE)) {
+        return 0;
+    }
+
+    cancel_status = gxos_nativeaot_managed_worker_api_request_cancel(
+        api, context->phase66_target);
+    duplicate_status = gxos_nativeaot_managed_worker_api_request_cancel(
+        api, context->phase66_target);
+    if (cancel_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        duplicate_status !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_REQUESTED ||
+        record_b->cancel_requested != 1U ||
+        record_b->state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCEL_REQUESTED ||
+        record_b->gc_invocation_count != 1U ||
+        record_b->post_gc_continuation_count != 0U ||
+        phase64_root_ledger(context) != 2U) return 0;
+    phase66_record_peaks(context, probe);
+    if (cycle == 0U) {
+        phase64_checkpoint(context, probe,
+            "GXOS_NET10:PHASE66_CANCEL_REQUESTED_VM=0x",
+            "GXOS_NET10:PHASE66_CANCEL_REQUESTED_THREADS=0x",
+            "GXOS_NET10:PHASE66_CANCEL_REQUESTED_OBJECTS=0x",
+            "GXOS_NET10:PHASE66_CANCEL_REQUESTED_API_WORKERS=0x",
+            "GXOS_NET10:PHASE66_CANCEL_REQUESTED_ROOTS=0x", 2U);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_CANCEL_STATUS=0x", cancel_status);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_DUPLICATE_CANCEL_STATUS=0x",
+                    duplicate_status);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_GC_BEFORE_OBSERVE=0x",
+                    record_b->gc_invocation_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_ROOT_SURVIVAL=0x",
+                    record_b->lifecycle.managed_root_survived);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_CONTINUATION_BEFORE_CANCEL=0x",
+                    record_b->post_gc_continuation_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_INVALID_CANCEL_STATUS=0x",
+                    invalid_status);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_WRONG_GENERATION_STATUS=0x",
+                    wrong_generation_status);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_ADD_ONE_CANCEL_STATUS=0x",
+                    add_one_status);
+    }
+
+    context->phase66_release_b_after_gc = 1;
+    if (gxos_nativeaot_managed_worker_api_drive(
+            api, context->phase66_target) !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        !context->phase66_cancel_observed || !record_b->cancel_observed ||
+        record_b->cancel_observed_checkpoint != 2U ||
+        record_b->state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCELED ||
+        record_b->result.state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCELED ||
+        record_b->result.status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCELED ||
+        record_b->result.operation_id !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK ||
+        !gxos_nativeaot_managed_worker_api_handle_equal(
+            record_b->result.worker, context->phase66_target) ||
+        record_b->result.output0 != 0U || record_b->result.output1 != 0U ||
+        record_b->result.managed_result != 0 ||
+        record_b->gc_invocation_count != 1U ||
+        record_b->root_survival_callback_count != 1U ||
+        record_b->post_gc_continuation_count != 0U ||
+        record_b->lifecycle.managed_root_owned ||
+        record_b->lifecycle.managed_root_release_count != 1U ||
+        record_b->lifecycle.runtime_detach_count != 1U ||
+        !record_b->lifecycle.detached ||
+        record_b->thread->fls_values[probe->runtime_fls_slot] != 0U ||
+        record_b->thread->state != GXOS_SCHEDULER_THREAD_TERMINATED ||
+        phase64_root_ledger(context) != 1U ||
+        !record_c->lifecycle.managed_root_owned ||
+        !phase65_live_peer_valid(record_c,
+            GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK,
+            probe->runtime_fls_slot)) return 0;
+    if (pattern != 1U) {
+        if (!phase65_live_peer_valid(record_a,
+                GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE,
+                probe->runtime_fls_slot)) return 0;
+    } else if (record_a->result.output0 != expected_a + 1U ||
+               record_a->lifecycle.runtime_detach_count != 1U ||
+               !record_a->lifecycle.detached ||
+               record_a->thread->identity !=
+                   context->phase66_peer_a.worker_identity ||
+               record_a->thread->generation !=
+                   context->phase66_peer_a.worker_generation) {
+        return 0;
+    }
+    if (cycle == 0U) {
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_CHECKPOINT2_OBSERVED=0x",
+                    record_b->cancel_observed_checkpoint);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_CANCELED_GC_COUNT=0x",
+                    record_b->gc_invocation_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_ROOT_SURVIVAL_CALLBACKS=0x",
+                    record_b->root_survival_callback_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_POST_GC_CONTINUATION=0x",
+                    record_b->post_gc_continuation_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_ROOT_RELEASE_COUNT=0x",
+                    record_b->lifecycle.managed_root_release_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_DETACH_COUNT=0x",
+                    record_b->lifecycle.runtime_detach_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_FLS_CLEAN=0x",
+                    record_b->thread->fls_values[probe->runtime_fls_slot] == 0U);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_B_SCHEDULER_TERMINATED=0x",
+                    record_b->thread->state ==
+                        GXOS_SCHEDULER_THREAD_TERMINATED);
+        phase64_text(probe,
+            "GXOS_NET10:PHASE66_B_LOGICAL_ROOT_TOKEN_SURVIVED=1\r\n");
+        phase64_hex(probe, "GXOS_NET10:PHASE66_C_ROOT_STILL_LIVE=0x",
+                    record_c->lifecycle.managed_root_owned);
+        phase64_text(probe,
+            "GXOS_NET10:PHASE66_A_HEALTHY_PEER=1\r\n");
+        phase64_checkpoint(context, probe,
+            "GXOS_NET10:PHASE66_B_CANCELED_VM=0x",
+            "GXOS_NET10:PHASE66_B_CANCELED_THREADS=0x",
+            "GXOS_NET10:PHASE66_B_CANCELED_OBJECTS=0x",
+            "GXOS_NET10:PHASE66_B_CANCELED_API_WORKERS=0x",
+            "GXOS_NET10:PHASE66_B_CANCELED_ROOTS=0x", 1U);
+    }
+
+    if (gxos_nativeaot_managed_worker_api_poll(
+            api, context->phase66_target, &result) !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCELED ||
+        result.status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCELED ||
+        result.state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCELED ||
+        result.output0 != 0U || result.output1 != 0U ||
+        result.managed_result != 0 || result.operation_id !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_GC_CHECK) return 0;
+    cancelled_b = handles[1];
+    status = gxos_nativeaot_managed_worker_api_close(
+        api, context->phase66_target, &closed_result);
+    if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        closed_result.state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCELED ||
+        phase62_live_api_workers(context) != 2U ||
+        phase64_root_ledger(context) != 1U) return 0;
+    closed_cancel_status = gxos_nativeaot_managed_worker_api_request_cancel(
+        api, context->phase66_target);
+    if (closed_cancel_status !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_CLOSED)
+        return 0;
+    if (cycle == 0U) {
+        phase64_checkpoint(context, probe,
+            "GXOS_NET10:PHASE66_B_RECLAIMED_VM=0x",
+            "GXOS_NET10:PHASE66_B_RECLAIMED_THREADS=0x",
+            "GXOS_NET10:PHASE66_B_RECLAIMED_OBJECTS=0x",
+            "GXOS_NET10:PHASE66_B_RECLAIMED_API_WORKERS=0x",
+            "GXOS_NET10:PHASE66_B_RECLAIMED_ROOTS=0x", 1U);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_CLOSED_CANCEL_STATUS=0x",
+                    closed_cancel_status);
+    }
+
+    if (!phase64_create_worker(api, &handles[3])) return 0;
+    context->phase66_replacement = handles[3];
+    record_d = phase61_active_record(context, context->phase66_replacement);
+    if (record_d == 0 || context->phase66_replacement.scheduler_slot !=
+            cancelled_b.scheduler_slot ||
+        context->phase66_replacement.worker_identity ==
+            cancelled_b.worker_identity ||
+        context->phase66_replacement.worker_generation ==
+            cancelled_b.worker_generation ||
+        phase62_live_api_workers(context) != 3U ||
+        phase64_root_ledger(context) != 1U) return 0;
+    phase61_zero((uint8_t *)&phase66_d_request,
+                 sizeof(phase66_d_request));
+    phase66_d_request.version = GXOS_NATIVEAOT_MANAGED_WORKER_API_VERSION;
+    phase66_d_request.size = sizeof(phase66_d_request);
+    phase66_d_request.operation_id =
+        GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE;
+    phase66_d_request.argument0 = expected_d;
+    request_validation_status =
+        (GXOS_NATIVEAOT_MANAGED_WORKER_STATUS)
+            gxos_nativeaot_managed_worker_api_validate_request(
+                (const GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST *)(const void *)
+                    &phase66_d_request);
+    late_status = gxos_nativeaot_managed_worker_api_submit(
+        api, context->phase66_target,
+        (const GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST *)(const void *)
+            &phase66_d_request);
+    if (request_validation_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        late_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_STALE_HANDLE)
+        return 0;
+    stale_status = gxos_nativeaot_managed_worker_api_request_cancel(
+        api, context->phase66_target);
+    status = gxos_nativeaot_managed_worker_api_poll(
+        api, context->phase66_target, &result);
+    if (stale_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_STALE_HANDLE ||
+        status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_STALE_HANDLE) return 0;
+    if (cycle == 0U) {
+        phase64_hex(probe, "GXOS_NET10:PHASE66_STALE_B_CANCEL_STATUS=0x",
+                    stale_status);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_STALE_B_POLL_STATUS=0x",
+                    status);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_D_SLOT=0x",
+                    context->phase66_replacement.scheduler_slot);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_D_IDENTITY=0x",
+                    context->phase66_replacement.worker_identity);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_D_GENERATION=0x",
+                    context->phase66_replacement.worker_generation);
+        phase64_checkpoint(context, probe,
+            "GXOS_NET10:PHASE66_D_CREATED_VM=0x",
+            "GXOS_NET10:PHASE66_D_CREATED_THREADS=0x",
+            "GXOS_NET10:PHASE66_D_CREATED_OBJECTS=0x",
+            "GXOS_NET10:PHASE66_D_CREATED_API_WORKERS=0x",
+            "GXOS_NET10:PHASE66_D_CREATED_ROOTS=0x", 1U);
+    }
+
+    if (pattern == 0U) {
+        context->phase66_release_peer_a = 1;
+        status = gxos_nativeaot_managed_worker_api_drive(
+            api, context->phase66_peer_a);
+        if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK) return 0;
+    } else if (pattern == 1U) {
+        if (record_a->state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_COMPLETED)
+            return 0;
+    }
+    context->phase66_release_c_to_gc = 1;
+    context->phase66_release_peer_c_checkpoint2 = 1;
+    status = gxos_nativeaot_managed_worker_api_drive(
+        api, context->phase66_peer_c);
+    if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+        !context->phase66_peer_c_held ||
+        !record_c->cancel_checkpoint2_passed ||
+        record_c->cancel_checkpoint_open ||
+        record_c->gc_invocation_count != 1U ||
+        record_c->root_survival_callback_count != 1U ||
+        record_c->post_gc_continuation_count != 1U ||
+        !record_c->lifecycle.managed_root_survived ||
+        !record_c->lifecycle.managed_root_owned ||
+        record_c->lifecycle.managed_root_identity != c_root_token ||
+        !context->phase66_stale_root_cleanup_rejected ||
+        !context->phase66_duplicate_release_rejected ||
+        phase64_root_ledger(context) != 1U) return 0;
+    late_status = gxos_nativeaot_managed_worker_api_request_cancel(
+        api, context->phase66_peer_c);
+    if (late_status !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_UNSUPPORTED_STATE ||
+        record_c->cancel_requested != 0U ||
+        record_c->post_gc_continuation_count != 1U) return 0;
+    context->phase66_release_peer_c_final = 1;
+    status = gxos_nativeaot_managed_worker_api_drive(
+        api, context->phase66_peer_c);
+    if (status !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        !phase64_result_valid(record_c, &record_c->result) ||
+        record_c->result.status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        record_c->lifecycle.managed_root_release_count != 1U ||
+        record_c->lifecycle.runtime_detach_count != 1U ||
+        record_c->lifecycle.managed_root_owned ||
+        phase64_root_ledger(context) != 0U) return 0;
+
+    if (pattern == 2U) {
+        context->phase66_release_peer_a = 1;
+        if (gxos_nativeaot_managed_worker_api_drive(
+                api, context->phase66_peer_a) !=
+                GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK) return 0;
+    }
+
+    record_d = phase61_active_record(context, context->phase66_replacement);
+    if (record_d == 0) return 0;
+    status = gxos_nativeaot_managed_worker_api_submit(
+        api, context->phase66_replacement,
+        (const GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST *)(const void *)
+            &phase66_d_request);
+    if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK) return 0;
+    status = gxos_nativeaot_managed_worker_api_drive(
+        api, context->phase66_replacement);
+    record_d = phase61_active_record(context, context->phase66_replacement);
+    if (record_d == 0) return 0;
+    if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        !phase64_result_valid(record_d, &record_d->result) ||
+        record_d->result.output0 != expected_d + 1U) return 0;
+    completed_status = gxos_nativeaot_managed_worker_api_request_cancel(
+        api, context->phase66_replacement);
+    completed_c_status = gxos_nativeaot_managed_worker_api_request_cancel(
+        api, context->phase66_peer_c);
+    if (completed_status !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_COMPLETED ||
+        completed_c_status !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_COMPLETED)
+        return 0;
+
+    if (cycle == 0U) {
+        phase64_hex(probe, "GXOS_NET10:PHASE66_LATE_CANCEL_STATUS=0x",
+                    late_status);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_COMPLETED_CANCEL_STATUS=0x",
+                    completed_status);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_C_GC_COUNT=0x",
+                    record_c->gc_invocation_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_C_ROOT_SURVIVAL=0x",
+                    record_c->root_survival_callback_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_C_POST_GC_CONTINUATION=0x",
+                    record_c->post_gc_continuation_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_C_ROOT_RELEASE_COUNT=0x",
+                    record_c->lifecycle.managed_root_release_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_C_DETACH_COUNT=0x",
+                    record_c->lifecycle.runtime_detach_count);
+        phase64_text(probe,
+            "GXOS_NET10:PHASE66_DUPLICATE_B_ROOT_RELEASE_REJECTED=1\r\n");
+        phase64_text(probe,
+            "GXOS_NET10:PHASE66_STALE_B_ROOT_CLEANUP_REJECTED=1\r\n");
+    }
+
+    for (index = 0; index != 3U; ++index) {
+        uint32_t close_role = (cycle + index) % 3U;
+        GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE close_handle =
+            close_role == 0U ? record_a->handle :
+            (close_role == 1U ? record_c->handle :
+                context->phase66_replacement);
+        if (gxos_nativeaot_managed_worker_api_close(
+                api, close_handle, 0) !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK) return 0;
+    }
+    if (*probe->vm_region_count != baseline_vm ||
+        phase61_live_threads(probe->scheduler) != baseline_threads ||
+        phase61_live_objects(probe->scheduler) != baseline_objects ||
+        phase62_live_api_workers(context) != 0U ||
+        phase64_root_ledger(context) != 0U) return 0;
+    if (cycle == 0U) {
+        phase64_hex(probe, "GXOS_NET10:PHASE66_FINAL_VM=0x",
+                    *probe->vm_region_count);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_FINAL_THREADS=0x",
+                    phase61_live_threads(probe->scheduler));
+        phase64_hex(probe, "GXOS_NET10:PHASE66_FINAL_OBJECTS=0x",
+                    phase61_live_objects(probe->scheduler));
+        phase64_hex(probe, "GXOS_NET10:PHASE66_FINAL_API_WORKERS=0x",
+                    phase62_live_api_workers(context));
+        phase64_hex(probe, "GXOS_NET10:PHASE66_FINAL_ROOT_LEDGER=0x",
+                    phase64_root_ledger(context));
+        phase64_text(probe, "GXOS_NET10:PHASE66_D_RESULT=ADD_ONE_OK\r\n");
+    }
+    phase66_record_peaks(context, probe);
+    ++context->phase66_scenarios_passed;
+    return 1;
+}
+
+int gxos_nativeaot_managed_worker_api_post_gc_cancel_probe(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api)
+{
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_CONTEXT *context = phase61_context(api);
+    GXOS_PHASE53O_PROBE *probe;
+    uint32_t baseline_vm;
+    uint32_t baseline_threads;
+    uint32_t baseline_objects;
+    uint32_t cycle;
+    if (context == 0 || (probe = context->probe) == 0 ||
+        probe->log_text == 0 || probe->log_hex == 0 ||
+        probe->managed_root_publish_bridge == 0 ||
+        probe->managed_root_release_bridge == 0 ||
+        probe->managed_root_validate_bridge == 0) return 0;
+    context->phase64_mode = 1;
+    context->phase66_mode = 1;
+    context->concurrent_mode = 1;
+    baseline_vm = *probe->vm_region_count;
+    baseline_threads = phase61_live_threads(probe->scheduler);
+    baseline_objects = phase61_live_objects(probe->scheduler);
+    context->peak_vm = baseline_vm;
+    context->peak_threads = baseline_threads;
+    context->peak_objects = baseline_objects;
+    context->peak_api_workers = 0;
+    context->peak_roots = 0;
+    context->phase66_scenarios_passed = 0;
+    context->phase66_peak_api_workers = 0;
+    context->phase66_peak_vm = baseline_vm;
+    context->phase66_peak_threads = baseline_threads;
+    context->phase66_peak_objects = baseline_objects;
+    context->phase66_peak_roots = 0;
+    phase64_text(probe, "GXOS_NET10:PHASE66_BEGIN\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_API=POST_GC_COOPERATIVE_CANCELLATION\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_CHECKPOINTS=2\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_CHECKPOINT1=ROOT_PUBLISHED_BEFORE_GC\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_CHECKPOINT2=GC_ROOT_SURVIVED_BEFORE_CONTINUATION\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_CANCELLATION=COOPERATIVE_NO_ASYNC_PREEMPTION\r\n");
+    phase64_hex(probe, "GXOS_NET10:PHASE66_BASELINE_VM=0x", baseline_vm);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_BASELINE_THREADS=0x",
+                baseline_threads);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_BASELINE_OBJECTS=0x",
+                baseline_objects);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_BASELINE_API_WORKERS=0x", 0U);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_BASELINE_ROOT_LEDGER=0x", 0U);
+
+    for (cycle = 0; cycle != GXOS_PHASE66_SCENARIO_COUNT; ++cycle) {
+        if (!phase66_run_scenario(api, context, probe, cycle, baseline_vm,
+                                  baseline_threads, baseline_objects)) {
+            phase64_hex(probe, "GXOS_NET10:PHASE66_FAILED_SCENARIO=0x",
+                        cycle + 1U);
+            return 0;
+        }
+        phase64_hex(probe, "GXOS_NET10:PHASE66_ORDER_PATTERN=0x",
+                    (cycle % 3U) + 1U);
+        phase64_hex(probe, "GXOS_NET10:PHASE66_SCENARIO=0x", cycle + 1U);
+    }
+    phase64_hex(probe, "GXOS_NET10:PHASE66_CANCELLATION_SCENARIOS=0x",
+                GXOS_PHASE66_SCENARIO_COUNT);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_CANCELED_WORKERS=0x",
+                context->phase66_scenarios_passed);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_PEAK_VM=0x",
+                context->phase66_peak_vm);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_PEAK_THREADS=0x",
+                context->phase66_peak_threads);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_PEAK_OBJECTS=0x",
+                context->phase66_peak_objects);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_PEAK_API_WORKERS=0x",
+                context->phase66_peak_api_workers);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_PEAK_ROOT_LEDGER=0x",
+                context->phase66_peak_roots);
+    phase64_hex(probe, "GXOS_NET10:PHASE66_FINAL_API_WORKERS=0x",
+                phase62_live_api_workers(context));
+    phase64_hex(probe, "GXOS_NET10:PHASE66_FINAL_ROOT_LEDGER=0x",
+                phase64_root_ledger(context));
+    if (context->phase66_scenarios_passed != GXOS_PHASE66_SCENARIO_COUNT ||
+        context->phase66_peak_api_workers != 3U ||
+        context->phase66_peak_roots != 2U ||
+        *probe->vm_region_count != baseline_vm ||
+        phase61_live_threads(probe->scheduler) != baseline_threads ||
+        phase61_live_objects(probe->scheduler) != baseline_objects ||
+        phase62_live_api_workers(context) != 0U ||
+        phase64_root_ledger(context) != 0U) return 0;
+    phase64_text(probe, "GXOS_NET10:PHASE66_ROOT_TRANSITION=0>2>1>0\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_ORDERING_PATTERNS=A,B,C\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_CAPACITY_RECOVERY=1\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_SAME_SLOT_REUSE=1\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_PEER_ISOLATION=1\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_ROOT_CLEANUP_EXACTLY_ONCE=1\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_DETACH_EXACTLY_ONCE=1\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_MANAGED_ROOT_TOKENS_ONLY=1\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_COMPLETE=1\r\n");
+    phase64_text(probe,
+        "GXOS_NET10:PHASE66_PASS=1\r\n");
     return 1;
 }
 

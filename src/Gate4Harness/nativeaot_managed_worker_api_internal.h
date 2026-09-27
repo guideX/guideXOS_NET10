@@ -54,6 +54,40 @@ typedef struct {
     uint32_t phase65_peak_threads;
     uint32_t phase65_peak_objects;
     uint32_t phase65_peak_roots;
+    uint8_t phase66_mode;
+    uint8_t phase66_checkpoint1_ready;
+    uint8_t phase66_checkpoint2_ready;
+    uint8_t phase66_peer_c_checkpoint1_ready;
+    uint8_t phase66_peer_c_checkpoint2_ready;
+    uint8_t phase66_release_b_to_gc;
+    uint8_t phase66_release_b_after_gc;
+    uint8_t phase66_release_c_to_gc;
+    uint8_t phase66_release_peer_c_checkpoint2;
+    uint8_t phase66_release_peer_a;
+    uint8_t phase66_release_peer_c_final;
+    uint8_t phase66_hold_peer_a;
+    uint8_t phase66_peer_a_held;
+    uint8_t phase66_peer_c_held;
+    uint8_t phase66_cancel_observed;
+    uint8_t phase66_duplicate_release_rejected;
+    uint8_t phase66_stale_root_cleanup_rejected;
+    uint8_t phase66_reserved[2];
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE phase66_target;
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE phase66_peer_a;
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE phase66_peer_c;
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE phase66_replacement;
+    uint32_t phase66_scenarios_passed;
+    uint32_t phase66_peak_api_workers;
+    uint32_t phase66_peak_vm;
+    uint32_t phase66_peak_threads;
+    uint32_t phase66_peak_objects;
+    uint32_t phase66_peak_roots;
 } GXOS_NATIVEAOT_MANAGED_WORKER_API_CONTEXT;
+
+/* Shared production transition used by the worker and deterministic host
+   tests. checkpoint_id is intentionally bounded to the two supported points. */
+int gxos_nativeaot_managed_worker_api_consume_cancel_checkpoint(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD *record,
+    uint8_t checkpoint_id);
 
 #endif

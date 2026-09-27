@@ -214,18 +214,48 @@ int main(void)
               GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCEL_REQUESTED);
     CHECK(gxos_nativeaot_managed_worker_api_request_cancel(&api, handle_b) ==
           GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_REQUESTED);
-    context->records[1].cancel_checkpoint_open = 1;
+    context->records[1].cancel_requested = 0U;
     context->records[1].state = GXOS_NATIVEAOT_MANAGED_WORKER_STATE_RUNNING;
+    context->records[1].cancel_checkpoint_open = 1U;
+    CHECK(!gxos_nativeaot_managed_worker_api_consume_cancel_checkpoint(
+              &context->records[1], 1U));
+    CHECK(context->records[1].cancel_checkpoint_passed == 1U &&
+          context->records[1].cancel_checkpoint2_passed == 0U &&
+          context->records[1].cancel_checkpoint_open == 1U &&
+          context->records[1].cancel_observed == 0U);
+    CHECK(gxos_nativeaot_managed_worker_api_request_cancel(&api, handle_b) ==
+          GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK);
     CHECK(gxos_nativeaot_managed_worker_api_request_cancel(&api, handle_b) ==
           GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_ALREADY_REQUESTED);
+    CHECK(gxos_nativeaot_managed_worker_api_consume_cancel_checkpoint(
+              &context->records[1], 2U));
+    CHECK(context->records[1].cancel_checkpoint_passed == 1U &&
+          context->records[1].cancel_checkpoint2_passed == 1U &&
+          context->records[1].cancel_observed_checkpoint == 2U &&
+          context->records[1].cancel_checkpoint_open == 0U);
+    CHECK(!gxos_nativeaot_managed_worker_api_consume_cancel_checkpoint(
+              &context->records[1], 2U));
+    CHECK(!gxos_nativeaot_managed_worker_api_consume_cancel_checkpoint(
+              &context->records[1], 3U));
     CHECK(context->records[1].cancel_requested == 1U &&
           context->records[1].state ==
-              GXOS_NATIVEAOT_MANAGED_WORKER_STATE_RUNNING);
+              GXOS_NATIVEAOT_MANAGED_WORKER_STATE_CANCEL_REQUESTED);
     CHECK(context->records[0].state == GXOS_NATIVEAOT_MANAGED_WORKER_STATE_RUNNING &&
           context->records[0].request.operation_id ==
               GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE);
     context->records[2].state = GXOS_NATIVEAOT_MANAGED_WORKER_STATE_RUNNING;
-    context->records[2].cancel_checkpoint_passed = 1;
+    context->records[2].cancel_checkpoint_open = 1;
+    CHECK(gxos_nativeaot_managed_worker_api_request_cancel(&api, handle_c) ==
+          GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK);
+    CHECK(gxos_nativeaot_managed_worker_api_consume_cancel_checkpoint(
+              &context->records[2], 1U));
+    CHECK(context->records[2].cancel_observed_checkpoint == 1U &&
+          context->records[2].cancel_checkpoint_passed == 1U &&
+          context->records[2].cancel_checkpoint2_passed == 0U);
+    context->records[2].cancel_requested = 0U;
+    context->records[2].state = GXOS_NATIVEAOT_MANAGED_WORKER_STATE_RUNNING;
+    context->records[2].cancel_checkpoint_open = 0;
+    context->records[2].cancel_checkpoint2_passed = 1U;
     CHECK(gxos_nativeaot_managed_worker_api_request_cancel(&api, handle_c) ==
           GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CANCEL_UNSUPPORTED_STATE);
     context->records[2].state = GXOS_NATIVEAOT_MANAGED_WORKER_STATE_COMPLETED;
@@ -273,5 +303,6 @@ int main(void)
     (void)printf("PHASE62_MANAGED_WORKER_API_HOST_TEST=PASS\n");
     (void)printf("PHASE64_MANAGED_WORKER_API_HOST_TEST=PASS\n");
     (void)printf("PHASE65_MANAGED_WORKER_API_HOST_TEST=PASS\n");
+    (void)printf("PHASE66_MANAGED_WORKER_API_HOST_TEST=PASS\n");
     return g_failures == 0 ? 0 : 1;
 }

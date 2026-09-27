@@ -2,6 +2,7 @@
 param(
     [string]$BuildDirectory = '',
     [string]$PayloadPath = '',
+    [string]$QemuPath = '',
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 15
 )
@@ -32,16 +33,32 @@ if ($sourceHash -ne $expectedHash -or $builtHash -ne $expectedHash) {
 }
 
 $qemuCommand = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue
-$qemu = if ($null -ne $qemuCommand) { [IO.Path]::GetFullPath($qemuCommand.Source) } else { 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
+$qemu = if (![string]::IsNullOrWhiteSpace($QemuPath)) {
+    [IO.Path]::GetFullPath($QemuPath)
+} elseif ($null -ne $qemuCommand) {
+    [IO.Path]::GetFullPath($qemuCommand.Source)
+} else { 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
 if (-not (Test-Path -LiteralPath $qemu)) { throw "QEMU not found: $qemu" }
+$qemuName = Split-Path -Leaf $qemu
+$qemuPathComparison = [IO.Path]::GetFullPath($qemu)
+function Get-SelectedQemuProcesses {
+    return @(
+        Get-CimInstance Win32_Process -Filter "Name='$qemuName'" `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -and
+                [IO.Path]::GetFullPath($_.ExecutablePath).Equals(
+                    $qemuPathComparison,
+                    [StringComparison]::OrdinalIgnoreCase) }
+    )
+}
 $qemuShare = Join-Path (Split-Path -Parent $qemu) 'share'
 $ovmf = Join-Path $qemuShare 'edk2-x86_64-code.fd'
 $varsTemplate = Join-Path $qemuShare 'edk2-i386-vars.fd'
 if (-not (Test-Path -LiteralPath $ovmf) -or -not (Test-Path -LiteralPath $varsTemplate)) {
     throw "OVMF files not found under $qemuShare"
 }
-if (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count -ne 0) {
-    throw 'A pre-existing QEMU process is present.'
+if (@(Get-SelectedQemuProcesses).Count -ne 0) {
+    throw 'A process using the selected QEMU executable is already present.'
 }
 if ($RunCount -lt 3) { throw 'At least three fresh QEMU runs are required.' }
 
@@ -70,8 +87,8 @@ $ownedProcesses = @()
 
 try {
     for ($sequence = 1; $sequence -le $RunCount; $sequence++) {
-        if (@(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue).Count -ne 0) {
-            throw "QEMU process present before run $sequence."
+        if (@(Get-SelectedQemuProcesses).Count -ne 0) {
+            throw "A process using the selected QEMU executable is present before run $sequence."
         }
         $run = Join-Path $runRoot ('run-' + $sequence)
         New-Item -ItemType Directory -Path $run -Force | Out-Null
@@ -91,7 +108,9 @@ try {
             '-serial', "file:$serial", '-monitor', 'none', '-display', 'none',
             '-no-reboot', '-no-shutdown'
         )
-        $process = Start-Process -FilePath $qemu -ArgumentList $arguments -WorkingDirectory $buildDirectory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+        $process = Start-Process -FilePath $qemu -ArgumentList $arguments `
+            -WorkingDirectory $buildDirectory -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
         $ownedProcesses += $process
         $completed = $process.WaitForExit($TimeoutSeconds * 1000)
         if (-not $completed) {
