@@ -262,6 +262,33 @@ int main(void)
                "overflow and shutdown discard counts remain distinct");
     }
 
+    result = gxos_managed_kernel_interrupt_subscribe_v1(
+        &context, context.event_type, context.device_kind, context.device_id,
+        (uintptr_t)&g_token, sizeof(g_token));
+    expect(result == GX_MANAGED_OK, "route can be reused for failure recovery");
+    set_source("PQ");
+    gxos_managed_kernel_interrupt_capture(&context);
+    {
+        uint64_t recovery_discarded = UINT64_MAX;
+        uint64_t dropped_before = context.dropped_count;
+        expect(gxos_managed_kernel_interrupt_begin_service_failure(
+                   &context, &recovery_discarded) &&
+                   recovery_discarded == 2U &&
+                   context.recovery_discarded_count == 2U &&
+                   context.shutdown_discarded_count == 4U &&
+                   context.dropped_count == dropped_before &&
+                   context.read_index == context.write_index &&
+                   context.work_pending == 0U &&
+                   context.hardware_enabled == 0U &&
+                   context.routes[0].accepting_events == 0U,
+               "running failure closes route and accounts queue as recovery loss");
+        expect(gxos_managed_kernel_interrupt_unsubscribe_v1(
+                   &context, g_token) == GX_MANAGED_OK &&
+                   context.recovery_discarded_count == 2U &&
+                   context.shutdown_discarded_count == 4U,
+               "failed generation unsubscribe does not double count shutdown loss");
+    }
+
     if (g_failures != 0) {
         printf("MANAGED_KERNEL_INTERRUPT_NATIVE_HOST_TESTS=FAILED failures=%u\n",
                g_failures);

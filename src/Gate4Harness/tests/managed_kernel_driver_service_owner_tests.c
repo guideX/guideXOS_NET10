@@ -74,8 +74,64 @@ int main(void)
                !gxos_managed_kernel_driver_owner_is_current(&owner_b, stale) &&
                gxos_managed_kernel_driver_owner_is_current(&owner_b, second),
            "restart advances identity and generation and rejects stale handle");
-    expect(gxos_managed_kernel_driver_owner_release(&owner_b),
-           "replacement releases its service slot");
+    expect(gxos_managed_kernel_driver_owner_restart_budget(&owner_b) == 1U &&
+               gxos_managed_kernel_driver_owner_restart_state(&owner_b) ==
+                   GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED,
+           "new manual service episode starts with one automatic restart");
+    {
+        uint32_t budget_before = 0U;
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE restarted = {0};
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE another_failure;
+        expect(!gxos_managed_kernel_driver_owner_restart_begin(
+                   &owner_b, second,
+                   GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_NONE,
+                   &budget_before) &&
+                   gxos_managed_kernel_driver_owner_restart_budget(&owner_b) == 1U,
+               "non-recoverable and ordinary stop causes do not consume budget");
+        expect(gxos_managed_kernel_driver_owner_restart_begin(
+                   &owner_b, second,
+                   GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_RECOVERABLE_DISPATCH,
+                   &budget_before) && budget_before == 1U &&
+                   gxos_managed_kernel_driver_owner_restart_budget(&owner_b) == 0U &&
+                   gxos_managed_kernel_driver_owner_restart_state(&owner_b) ==
+                       GXOS_MANAGED_KERNEL_DRIVER_RESTART_ATTEMPTED,
+               "recoverable running failure consumes exactly one restart");
+        expect(gxos_managed_kernel_driver_owner_release(&owner_b) &&
+                   gxos_managed_kernel_driver_owner_claim(&owner_b) ==
+                       GXOS_MANAGED_KERNEL_DRIVER_OWNER_OK &&
+                   gxos_managed_kernel_driver_owner_publish(
+                       &owner_b, second.device_identity, &restarted) &&
+                   gxos_managed_kernel_driver_owner_restart_budget(&owner_b) == 0U,
+               "automatic replacement preserves device and spent budget");
+        expect(restarted.slot == second.slot &&
+                   restarted.device_identity == second.device_identity &&
+                   restarted.identity != second.identity &&
+                   restarted.generation != second.generation &&
+                   !gxos_managed_kernel_driver_owner_is_current(&owner_b, second) &&
+                   gxos_managed_kernel_driver_owner_restart_complete(&owner_b, 1) &&
+                   gxos_managed_kernel_driver_owner_restart_state(&owner_b) ==
+                       GXOS_MANAGED_KERNEL_DRIVER_RESTART_SUCCEEDED,
+               "replacement succeeds in a new generation and invalidates old handle");
+        another_failure = restarted;
+        expect(!gxos_managed_kernel_driver_owner_restart_begin(
+                   &owner_b, another_failure,
+                   GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_RECOVERABLE_DISPATCH,
+                   &budget_before) &&
+                   gxos_managed_kernel_driver_owner_restart_exhaust(
+                       &owner_b, another_failure) &&
+                   gxos_managed_kernel_driver_owner_restart_state(&owner_b) ==
+                       GXOS_MANAGED_KERNEL_DRIVER_RESTART_EXHAUSTED,
+               "second recoverable failure exhausts budget without retry");
+        expect(gxos_managed_kernel_driver_owner_release(&owner_b) &&
+                   gxos_managed_kernel_driver_owner_claim(&owner_b) ==
+                       GXOS_MANAGED_KERNEL_DRIVER_OWNER_OK &&
+                   gxos_managed_kernel_driver_owner_restart_budget(&owner_b) == 1U &&
+                   gxos_managed_kernel_driver_owner_restart_state(&owner_b) ==
+                       GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED,
+               "later explicit manual owner claim starts a fresh bounded episode");
+        expect(gxos_managed_kernel_driver_owner_release(&owner_b),
+               "fresh manual owner episode releases its slot");
+    }
 
     if (g_failures != 0) {
         printf("MANAGED_KERNEL_DRIVER_SERVICE_OWNER_HOST_TESTS=FAILED failures=%u\n",

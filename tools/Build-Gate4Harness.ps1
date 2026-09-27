@@ -17,6 +17,8 @@ param(
     [switch]$EnablePhase69PersistentServiceOwner,
     [ValidateSet('None', 'AttachFailureDiscard', 'IdleStop')]
     [string]$Phase69FixtureMode = 'None',
+    [ValidateSet('None', 'RecoverableRestart')]
+    [string]$Phase70FixtureMode = 'None',
     [switch]$EnablePhase62ConcurrentManagedWorkerApi,
     [switch]$EnablePhase64ManagedWorkerApi,
     [switch]$EnablePhase65ManagedWorkerApi,
@@ -106,6 +108,12 @@ if ($PayloadMode -eq 'ManagedKernel' -and -not $EnableNativeAotStartup) {
 if ($Phase69FixtureMode -ne 'None' -and
     ($PayloadMode -ne 'ManagedKernel' -or -not $EnablePhase69PersistentServiceOwner)) {
     throw 'Phase 69 guest fixtures require the ManagedKernel payload and persistent-service owner.'
+}
+if ($Phase70FixtureMode -ne 'None' -and
+    ($PayloadMode -ne 'ManagedKernel' -or
+     -not $EnablePhase69PersistentServiceOwner -or
+     $Phase69FixtureMode -ne 'None')) {
+    throw 'Phase 70 restart fixtures require the ManagedKernel persistent-service owner and cannot be combined with a Phase 69 fixture.'
 }
 if ($EnablePhase69PersistentServiceOwner -and $PayloadMode -ne 'ManagedKernel') {
     throw 'Phase 69 persistent service ownership requires -PayloadMode ManagedKernel.'
@@ -1566,6 +1574,9 @@ if ($Phase69FixtureMode -eq 'AttachFailureDiscard') {
 }
 if ($Phase69FixtureMode -eq 'IdleStop') {
     $gccArguments += '-DGXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE'
+}
+if ($Phase70FixtureMode -eq 'RecoverableRestart') {
+    $gccArguments += '-DGXOS_ENABLE_PHASE70_RESTART_FIXTURE'
 }
 if ($EnablePhase62ConcurrentManagedWorkerApi) {
     $gccArguments += '-DGXOS_ENABLE_PHASE62_MANAGED_WORKER_API'

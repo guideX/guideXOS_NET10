@@ -58,6 +58,7 @@ typedef struct {
     volatile uint64_t drained_count;
     volatile uint64_t dropped_count;
     volatile uint64_t shutdown_discarded_count;
+    volatile uint64_t recovery_discarded_count;
     volatile uint32_t work_pending;
     uint32_t preserve_queue_on_unsubscribe;
     volatile uint64_t wake_request_count;
@@ -125,6 +126,13 @@ int gxos_managed_kernel_interrupt_rearm_work(
 int gxos_managed_kernel_interrupt_begin_service_stop(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
     int discard_pending, uint64_t *discarded_out);
+
+/* A recoverable running-service failure closes event acceptance, disables
+   every configured route and discards queued old-generation records into
+   recovery_discarded_count, separate from ordinary shutdown accounting. */
+int gxos_managed_kernel_interrupt_begin_service_failure(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
+    uint64_t *discarded_out);
 
 uint32_t GX_MANAGED_KERNEL_MS_ABI gxos_managed_kernel_interrupt_subscribe_v1(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,

@@ -9,7 +9,8 @@ internal enum ManagedDriverWorkerState : uint
     Running = 2,
     Stopping = 3,
     Stopped = 4,
-    Destroyed = 5
+    Destroyed = 5,
+    Failed = 6
 }
 
 /* This object is deliberately narrower than Thread/Task.  Native scheduler
@@ -98,6 +99,20 @@ internal unsafe sealed class ManagedDriverWorker
     {
         if (_state != ManagedDriverWorkerState.Stopping) return false;
         _state = ManagedDriverWorkerState.Stopped;
+        return true;
+    }
+
+    internal bool Fail()
+    {
+        if (_state != ManagedDriverWorkerState.Running) return false;
+        _state = ManagedDriverWorkerState.Failed;
+        return true;
+    }
+
+    internal bool DestroyAfterFailure()
+    {
+        if (_state != ManagedDriverWorkerState.Failed) return false;
+        _state = ManagedDriverWorkerState.Destroyed;
         return true;
     }
 

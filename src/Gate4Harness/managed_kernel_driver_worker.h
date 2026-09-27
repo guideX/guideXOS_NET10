@@ -11,7 +11,11 @@
 #define GXOS_MANAGED_KERNEL_DRIVER_WORKER_STAGE_START 1U
 #define GXOS_MANAGED_KERNEL_DRIVER_WORKER_STAGE_DISPATCH 2U
 #define GXOS_MANAGED_KERNEL_DRIVER_WORKER_STAGE_STOP 3U
+#define GXOS_MANAGED_KERNEL_DRIVER_WORKER_STAGE_FAILURE_CLEANUP 4U
+#define GXOS_MANAGED_KERNEL_DRIVER_RESTART_PREPARE_STAGE 5U
+#define GXOS_MANAGED_KERNEL_DRIVER_RESTART_ABORT_STAGE 6U
 #define GXOS_MANAGED_KERNEL_DRIVER_SERVICE_CAPACITY 1U
+#define GXOS_MANAGED_KERNEL_DRIVER_RECOVERABLE_DISPATCH_FAILURE 0xF0700001U
 
 typedef struct {
     uint32_t identity;
@@ -33,8 +37,13 @@ typedef enum {
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RECLAIMABLE = 9,
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RECLAIMED = 10,
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_START_FAILED = 11,
-    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED = 12
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED = 12,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_FAILED = 13,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESTART_FAILED = 14
 } GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATE;
+
+typedef uint32_t (GX_MANAGED_KERNEL_MS_ABI
+                 *GXOS_MANAGED_KERNEL_DRIVER_RESTART_PREPARE)(uint32_t stage);
 
 typedef enum {
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN = 1,
@@ -77,6 +86,7 @@ typedef struct {
     volatile uint32_t failure;
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATE service_state;
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE service_handle;
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_PREPARE restart_prepare;
     uint32_t service_identity;
     uint32_t device_identity;
     uint16_t service_generation;
@@ -89,6 +99,7 @@ typedef struct {
     uint32_t managed_loop_entered;
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_SHUTDOWN_POLICY shutdown_policy;
     uint64_t shutdown_discarded_count;
+    uint64_t failure_discarded_count;
     uint8_t sleeping_marker_emitted;
     uint8_t wake_marker_emitted;
     uint16_t reserved;
@@ -110,6 +121,11 @@ typedef struct {
     uint64_t first_alloc_ptr_after;
     uint64_t main_alloc_ptr_at_first_allocation;
     uint64_t stale_context_offender;
+#ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
+    volatile uint32_t restart_failure_armed;
+    uint32_t restart_failure_after_dispatch;
+    uint32_t restart_failure_fired;
+#endif
 } GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT;
 
 GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT
@@ -118,6 +134,7 @@ gxos_managed_kernel_driver_worker_initialize(
     GXOS_SCHEDULER *scheduler, GXOS_EVENT_API_CONTEXT *event_api,
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *interrupt,
     GXOS_NATIVEAOT_CALLBACK_BRIDGE *managed_bridge,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_PREPARE restart_prepare,
     uint32_t tls_index, uint32_t runtime_fls_slot,
     GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup,
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_LOG_TEXT log_text,
@@ -139,6 +156,12 @@ int gxos_managed_kernel_driver_worker_request_stop(
 int gxos_managed_kernel_driver_worker_pump(
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle);
+
+/* Owner-facing pump updates the caller's opaque handle after an automatic
+   generation replacement. A stale handle remains rejected on later calls. */
+int gxos_managed_kernel_driver_worker_pump_current(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE *handle_inout);
 
 int gxos_managed_kernel_driver_worker_stop(
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,

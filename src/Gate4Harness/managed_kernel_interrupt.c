@@ -190,9 +190,9 @@ int gxos_managed_kernel_interrupt_rearm_work(
     return pending;
 }
 
-int gxos_managed_kernel_interrupt_begin_service_stop(
+static int begin_service_quiesce(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
-    int discard_pending, uint64_t *discarded_out)
+    int discard_pending, int recovery, uint64_t *discarded_out)
 {
     uint64_t flags;
     uint32_t index;
@@ -200,7 +200,10 @@ int gxos_managed_kernel_interrupt_begin_service_stop(
     if (discarded_out != 0) *discarded_out = 0;
     if (!gxos_managed_kernel_interrupt_validate(context)) return 0;
     flags = context->critical_enter(context->routes[0].hardware_context);
-    context->preserve_queue_on_unsubscribe = discard_pending ? 0U : 1U;
+    /* Recovery clears and accounts old records here. Keep unsubscribe from
+       applying the normal shutdown DISCARD path a second time. */
+    context->preserve_queue_on_unsubscribe =
+        recovery != 0 || !discard_pending ? 1U : 0U;
     /* Close acceptance before disabling each device route. The IRQ-side
        handler checks this gate before reading or publishing device data. */
     for (index = 0; index != context->route_count; ++index) {
@@ -225,13 +228,33 @@ int gxos_managed_kernel_interrupt_begin_service_stop(
         discarded = (uint32_t)(write_index - read_index);
         store_u32(&context->read_index, write_index);
         store_u32(&context->work_pending, 0);
-        __atomic_add_fetch(&context->shutdown_discarded_count, discarded,
-                           __ATOMIC_RELAXED);
+        if (recovery != 0) {
+            __atomic_add_fetch(&context->recovery_discarded_count, discarded,
+                               __ATOMIC_RELAXED);
+        } else {
+            __atomic_add_fetch(&context->shutdown_discarded_count, discarded,
+                               __ATOMIC_RELAXED);
+        }
     }
     context->critical_leave(context->routes[0].hardware_context, flags);
     sync_legacy_route0(context);
     if (discarded_out != 0) *discarded_out = discarded;
     return 1;
+}
+
+int gxos_managed_kernel_interrupt_begin_service_stop(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
+    int discard_pending, uint64_t *discarded_out)
+{
+    return begin_service_quiesce(context, discard_pending, 0,
+                                 discarded_out);
+}
+
+int gxos_managed_kernel_interrupt_begin_service_failure(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
+    uint64_t *discarded_out)
+{
+    return begin_service_quiesce(context, 1, 1, discarded_out);
 }
 
 static void enqueue_from_route(

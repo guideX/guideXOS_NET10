@@ -448,6 +448,7 @@ internal unsafe sealed class ManagedSerialDriver
 internal static unsafe class ManagedSerialDriverSubsystem
 {
     private const uint AbiVersionV1 = 1;
+    private const int Phase9RestartNeedsRuntimeActivity = 6;
     private const ulong KnownCapabilities =
         GxManagedKernelSerialServicesV1.CapabilityTransmit |
         GxManagedKernelSerialServicesV1.CapabilityQueryStatus;
@@ -964,6 +965,38 @@ internal static unsafe class ManagedSerialDriverSubsystem
             }
             return ManagedKernelContract.ManagedOk;
         }
+        if (stage == 5)
+        {
+            /* The serial driver and its receive sequence are device-global.
+               A replacement worker gets a fresh subscription while keeping
+               the monotonic device receive state. */
+            if (s_phase9State != 0 || driver.ReceiveCount == 0 ||
+                !driver.TrySubscribeReceive(dispatcher))
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            s_phase9State = Phase9RestartNeedsRuntimeActivity;
+            return KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RESTART_SUBSCRIBED\r\n"u8)
+                ? ManagedKernelContract.ManagedOk
+                : ManagedKernelContract.InvalidState;
+        }
+        if (stage == 6)
+        {
+            if (s_phase9State == 3)
+            {
+                if (!driver.TryUnsubscribeReceive(dispatcher))
+                {
+                    return ManagedKernelContract.InvalidState;
+                }
+                s_phase9State = 0;
+            }
+            else if (s_phase9State != 0)
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            return ManagedKernelContract.ManagedOk;
+        }
         return ManagedKernelContract.InvalidArgument;
     }
 
@@ -984,7 +1017,9 @@ internal static unsafe class ManagedSerialDriverSubsystem
         }
         if (stage == 1)
         {
-            if (s_driverWorker != null || (s_phase9State != 0 && s_phase9State != 1))
+            if (s_driverWorker != null || (s_phase9State != 0 &&
+                s_phase9State != 1 && s_phase9State != 3 &&
+                s_phase9State != Phase9RestartNeedsRuntimeActivity))
             {
                 return ManagedKernelContract.InvalidState;
             }
@@ -1004,7 +1039,8 @@ internal static unsafe class ManagedSerialDriverSubsystem
             uint rejected;
             if (s_driverWorker == null ||
                 (s_phase9State != 1 && s_phase9State != 2 &&
-                 s_phase9State != 3 && s_phase9State != 4) ||
+                 s_phase9State != 3 && s_phase9State != 4 &&
+                 s_phase9State != Phase9RestartNeedsRuntimeActivity) ||
                 !s_driverWorker.Dispatch(out delivered, out rejected))
             {
                 return ManagedKernelContract.InvalidState;
@@ -1018,6 +1054,19 @@ internal static unsafe class ManagedSerialDriverSubsystem
                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORK_DISPATCH_OK\r\n"u8))
             {
                 return ManagedKernelContract.InvalidState;
+            }
+            if (s_phase9State == Phase9RestartNeedsRuntimeActivity)
+            {
+                s_phase9State = 2;
+                if (RunPhase10(7) != ManagedKernelContract.ManagedOk)
+                {
+                    return ManagedKernelContract.InvalidState;
+                }
+                s_phase9State = 4;
+                return KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK\r\n"u8)
+                    ? ManagedKernelContract.ManagedOk
+                    : ManagedKernelContract.InvalidState;
             }
             if (s_keyboardDriver != null && s_phase11State == 1 &&
                 s_keyboardDriver.MakeCount == 1)
@@ -1080,6 +1129,12 @@ internal static unsafe class ManagedSerialDriverSubsystem
                disabled the hardware route before managed unsubscription. */
             return RunPhase10(4);
         }
+        if (stage == 4)
+        {
+            /* Native has closed the IRQ route and accounted queued records
+               before requesting generation-local managed cleanup. */
+            return RunPhase10(6);
+        }
         return ManagedKernelContract.InvalidArgument;
     }
 
@@ -1097,7 +1152,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
         {
             KernelMemoryRegion region = default;
             bool live = false;
-            bool valid = s_phase9State == 2 && driver.ReceiveCount == 1 &&
+            bool valid = s_phase9State == 2 && driver.ReceiveCount != 0 &&
                          worker.State == ManagedDriverWorkerState.Running &&
                          ManagedKernelContract.TryInvokeHostLog(
                              "GXOS_NET10:MANAGED_KERNEL_PHASE10_RUNTIME_ACTIVITY\r\n"u8) &&
@@ -1139,6 +1194,40 @@ internal static unsafe class ManagedSerialDriverSubsystem
             s_phase9State = 3;
             return ManagedKernelContract.ManagedOk;
         }
+        if (stage == 7)
+        {
+            uint receiveCount;
+            ulong receiveSequence;
+            byte receiveByte;
+            if (s_phase9State != 2 || worker.State != ManagedDriverWorkerState.Running ||
+                driver.DeviceId != GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1 ||
+                driver.ComIndex != GxManagedKernelSerialPlatformDeviceV1.ComIndex1 ||
+                driver.ReceiveCount == 0 || driver.LastReceiveSequence == 0 ||
+                dispatcher.SubscriptionId == 0)
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            receiveCount = driver.ReceiveCount;
+            receiveSequence = driver.LastReceiveSequence;
+            receiveByte = driver.LastReceiveByte;
+            GC.Collect();
+            GC.KeepAlive(worker);
+            GC.KeepAlive(driver);
+            if (worker.State != ManagedDriverWorkerState.Running ||
+                driver.DeviceId != GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1 ||
+                driver.ComIndex != GxManagedKernelSerialPlatformDeviceV1.ComIndex1 ||
+                driver.ReceiveCount != receiveCount ||
+                driver.LastReceiveSequence != receiveSequence ||
+                driver.LastReceiveByte != receiveByte ||
+                dispatcher.SubscriptionId == 0)
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            return KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_PHASE70_GENERATION_RUNTIME_ACTIVITY\r\n"u8)
+                ? ManagedKernelContract.ManagedOk
+                : ManagedKernelContract.InvalidState;
+        }
         if (stage == 4)
         {
             if (s_phase9State != 4 ||
@@ -1179,6 +1268,23 @@ internal static unsafe class ManagedSerialDriverSubsystem
                 return ManagedKernelContract.InvalidState;
             }
             return ManagedKernelContract.ManagedOk;
+        }
+        if (stage == 6)
+        {
+            if (worker.State != ManagedDriverWorkerState.Running ||
+                !driver.TryUnsubscribeReceive(dispatcher) || !worker.Fail() ||
+                !worker.DestroyAfterFailure())
+            {
+                return ManagedKernelContract.InvalidState;
+            }
+            s_driverWorker = null;
+            /* Phase-9 bookkeeping belongs to the service generation. The
+               serial driver's receive count and sequence remain device state. */
+            s_phase9State = 0;
+            return KernelLog.Write(
+                "GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_FAILED_STATE_RELEASED\r\n"u8)
+                ? ManagedKernelContract.ManagedOk
+                : ManagedKernelContract.InvalidState;
         }
         return ManagedKernelContract.InvalidArgument;
     }
