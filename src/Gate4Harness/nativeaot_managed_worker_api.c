@@ -7,6 +7,11 @@
 #define GXOS_PHASE61_CYCLE_COUNT 12U
 #define GXOS_PHASE62_PAIR_COUNT 12U
 
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+static GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE phase69_held_worker;
+static uint32_t phase69_worker_hold_active;
+#endif
+
 static volatile GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST phase66_d_request;
 
 _Static_assert(sizeof(GXOS_NATIVEAOT_MANAGED_WORKER_API_CONTEXT) <=
@@ -387,6 +392,17 @@ static uintptr_t GXOS_PHASE53O_MS_ABI phase61_worker_entry(void *argument)
     int phase66_peer_c = 0;
     int canceled = 0;
     int good = 1;
+
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+    while (record != 0 && phase69_worker_hold_active != 0U &&
+           gxos_nativeaot_managed_worker_api_handle_equal(
+               record->handle, phase69_held_worker)) {
+        if (!gxos_scheduler_worker_yield()) {
+            phase61_mark_failed(record);
+            return 0;
+        }
+    }
+#endif
 
     if (record == 0 ||
         (record->state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED &&
@@ -978,6 +994,35 @@ gxos_nativeaot_managed_worker_api_submit(
     record->result.state = GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED;
     return GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK;
 }
+
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+int gxos_nativeaot_managed_worker_api_phase69_hold_submitted(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api,
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE handle, int hold)
+{
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_CONTEXT *context = phase61_context(api);
+    GXOS_NATIVEAOT_MANAGED_WORKER_API_RECORD *record =
+        phase61_active_record(context, handle);
+    if (context == 0 || record == 0) return 0;
+    if (hold) {
+        if (record->state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED ||
+            phase69_worker_hold_active != 0U) {
+            return 0;
+        }
+        phase69_held_worker = handle;
+        phase69_worker_hold_active = 1U;
+        return 1;
+    }
+    if (phase69_worker_hold_active == 0U ||
+        !gxos_nativeaot_managed_worker_api_handle_equal(
+            phase69_held_worker, handle)) {
+        return 0;
+    }
+    phase69_worker_hold_active = 0U;
+    phase69_held_worker = (GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE){0};
+    return 1;
+}
+#endif
 
 GXOS_NATIVEAOT_MANAGED_WORKER_STATUS
 gxos_nativeaot_managed_worker_api_request_cancel(

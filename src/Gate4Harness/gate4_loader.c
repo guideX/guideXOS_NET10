@@ -83,7 +83,20 @@ static GXOS_NATIVEAOT_MANAGED_WORKER_API g_phase66_managed_worker_api;
 static GXOS_NATIVEAOT_MANAGED_WORKER_API g_phase61_managed_worker_api;
 #ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
 static GXOS_PHASE53O_PROBE g_phase61_managed_worker_probe;
+static GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE
+    g_phase69_shutdown_one_shot_handle;
+static volatile GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST
+    g_phase69_shutdown_one_shot_request;
+static uint32_t g_phase69_shutdown_one_shot_submitted;
 #endif
+#endif
+#ifdef GXOS_ENABLE_PHASE69_ATTACH_FAILURE_FIXTURE
+static struct {
+    uint32_t identity;
+    uint16_t generation;
+    uint16_t armed;
+    uint32_t fire_count;
+} g_phase69_attach_failure_injection;
 #endif
 #if defined(GXOS_ENABLE_SYNTHETIC_SCHEDULER_PROOF) || \
     defined(GXOS_ENABLE_CREATE_EVENT_W) || \
@@ -758,6 +771,43 @@ static GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE
     g_managed_kernel_driver_service_handle;
 static GXOS_NATIVEAOT_CALLBACK_BRIDGE
     g_managed_kernel_driver_worker_bridge;
+#ifdef GXOS_ENABLE_PHASE69_ATTACH_FAILURE_FIXTURE
+static uint32_t g_phase69_attach_baseline_free_objects;
+static uint32_t g_phase69_attach_baseline_free_threads;
+static uint32_t g_phase69_attach_baseline_vm_regions;
+static uint32_t g_phase69_attach_baseline_reservations;
+static uint32_t g_phase69_attach_baseline_commitments;
+static uint32_t g_phase69_attach_baseline_live_allocations;
+static uint64_t g_phase69_attach_baseline_physical_bytes;
+static uint64_t g_phase69_attach_baseline_commit_bytes;
+static uint64_t g_phase69_attach_baseline_virtual_bytes;
+static uint64_t g_phase69_attach_baseline_reserved_bytes;
+static uint64_t g_phase69_attach_baseline_committed_bytes;
+static uint32_t g_phase69_attach_baseline_threadstore;
+#endif
+#ifdef GXOS_ENABLE_PHASE69_DISCARD_FIXTURE
+static uint32_t g_phase69_discard_fixture_remaining;
+static uint8_t g_phase69_discard_fixture_next;
+
+static int phase69_discard_fixture_capture(
+    void *context, uint8_t *payload_byte, uint32_t *status)
+{
+    (void)context;
+    if (payload_byte == 0 || status == 0 ||
+        g_phase69_discard_fixture_remaining == 0U) {
+        return 0;
+    }
+    *payload_byte = g_phase69_discard_fixture_next++;
+    *status = 0x69U;
+    --g_phase69_discard_fixture_remaining;
+    return 1;
+}
+
+static void phase69_discard_fixture_eoi(void *context)
+{
+    (void)context;
+}
+#endif
 static uint32_t g_managed_kernel_runtime_fls_slot = UINT32_MAX;
 static GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK
     g_managed_kernel_runtime_fls_cleanup;
@@ -15139,6 +15189,7 @@ static int managed_kernel_interrupt_wait_for_enqueued(
     return 0;
 }
 
+#ifndef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
 static int managed_kernel_interrupt_wait_for_optional_burst(
     EFI_BOOT_SERVICES *boot_services,
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker,
@@ -15167,8 +15218,15 @@ static int managed_kernel_interrupt_wait_for_optional_burst(
             return 1;
         }
         managed_kernel_interrupt_enable_cpu();
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+        /* Leave the runnable service worker undispatched until stop is
+           requested. This keeps the complete producer burst in the FIFO so
+           the Phase 69 DRAIN path is exercised deterministically instead of
+           racing a pre-stop worker activation. */
+#else
         if (gxos_managed_kernel_driver_worker_pump(
                 worker, g_managed_kernel_driver_service_handle)) continue;
+#endif
         if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
             managed_kernel_interrupt_enable_cpu();
             (void)boot_services->Stall(1000);
@@ -15193,6 +15251,495 @@ static int managed_kernel_interrupt_wait_for_optional_burst(
         2U;
 #endif
 }
+#endif
+
+#ifdef GXOS_ENABLE_PHASE69_ATTACH_FAILURE_FIXTURE
+static void managed_kernel_phase69_attach_failure_replacement(
+    GXOS_NATIVEAOT_CALLBACK_BRIDGE *worker_bridge,
+    uint32_t tls_index, uint32_t runtime_fls_slot,
+    GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup)
+{
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker =
+        &g_managed_kernel_driver_worker_context;
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE failed_handle = {0};
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE replacement_handle = {0};
+    GXOS_NATIVEAOT_CALLBACK_BRIDGE unregistered_bridge = {0};
+    GXOS_SCHEDULER_TCB *failed_thread;
+    uint32_t guard = 0;
+    uint32_t threadstore_during;
+
+    if (worker_bridge == 0 || worker->service_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_ALLOCATED ||
+        worker->thread == 0 || worker->service_handle.identity == 0U ||
+        worker->service_handle.generation == 0U ||
+        g_phase69_attach_baseline_free_objects < 2U ||
+        g_phase69_attach_baseline_free_threads < 1U) {
+        fail("phase69-attach-failure-fixture-precondition");
+    }
+    failed_handle = worker->service_handle;
+    if (failed_handle.slot != 0U || failed_handle.device_identity == 0U ||
+        g_phase69_attach_failure_injection.armed != 0U ||
+        g_phase69_attach_failure_injection.fire_count != 0U) {
+        fail("phase69-attach-failure-fixture-handle");
+    }
+    g_phase69_attach_failure_injection.identity = failed_handle.identity;
+    g_phase69_attach_failure_injection.generation = failed_handle.generation;
+    g_phase69_attach_failure_injection.armed = 1U;
+    serial_text("GXOS_NET10:PHASE69_ATTACH_FAILURE_FIXTURE_BEGIN=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_ATTACH_FAILURE_INJECTION_POINT=UNREGISTERED_CALLBACK_BEFORE_RUNTIME_OWNERSHIP\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_FAILURE_ARMED_IDENTITY=0x",
+                     failed_handle.identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_FAILURE_ARMED_GENERATION=0x",
+                     failed_handle.generation);
+    serial_text("\r\n");
+    unregistered_bridge.ready = 1U;
+    worker->managed_bridge = &unregistered_bridge;
+    if (!gxos_managed_kernel_driver_worker_publish_route(
+            worker, &failed_handle) ||
+        !gxos_managed_kernel_driver_worker_start(worker, failed_handle)) {
+        fail("phase69-attach-failure-fixture-start");
+    }
+    failed_thread = worker->thread;
+    while (!gxos_scheduler_thread_is_terminated(failed_thread) &&
+           guard++ != 16U) {
+        if (!gxos_managed_kernel_driver_worker_pump(worker, failed_handle)) {
+            fail("phase69-attach-failure-fixture-pump");
+        }
+    }
+    if (!gxos_scheduler_thread_is_terminated(failed_thread) ||
+        worker->state != GXOS_MANAGED_KERNEL_DRIVER_WORKER_STOPPED ||
+        worker->service_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_START_FAILED ||
+        worker->nativeaot_lifecycle.runtime_attach_attempted != 1U ||
+        worker->nativeaot_lifecycle.runtime_ownership_state !=
+            GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_NOT_ACQUIRED ||
+        worker->nativeaot_lifecycle.attached != 0U ||
+        worker->nativeaot_lifecycle.runtime_attach_count != 0U ||
+        worker->nativeaot_lifecycle.runtime_detach_count != 0U ||
+        worker->last_callback_status !=
+            GXOS_NATIVEAOT_CALLBACK_NOT_REGISTERED ||
+        unregistered_bridge.invocation_count != 0U ||
+        failed_thread->fls_values[runtime_fls_slot] != 0U ||
+        failed_thread->stack_contract.reservation_base == 0U ||
+        worker->tcb_owned == 0U || worker->thread_handle_owned == 0U ||
+        worker->wake_event_owned == 0U ||
+        g_phase69_attach_failure_injection.armed == 0U ||
+        g_phase69_attach_failure_injection.identity != failed_handle.identity ||
+        g_phase69_attach_failure_injection.generation !=
+            failed_handle.generation ||
+        g_phase69_attach_failure_injection.fire_count != 0U) {
+        fail("phase69-attach-failure-fixture-ownership");
+    }
+    g_phase69_attach_failure_injection.armed = 0U;
+    ++g_phase69_attach_failure_injection.fire_count;
+    threadstore_during =
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+            gxos_scheduler_current_thread()->fls_values[runtime_fls_slot], 0);
+    if (threadstore_during != g_phase69_attach_baseline_threadstore ||
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
+            g_phase69_attach_baseline_free_threads - 1U ||
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+            g_phase69_attach_baseline_free_objects - 2U ||
+        g_memory_vm_regions.live_count <= g_phase69_attach_baseline_vm_regions ||
+        g_memory_virtual_arena.reservation_count <=
+            g_phase69_attach_baseline_reservations ||
+        g_memory_virtual_arena.commitment_count <=
+            g_phase69_attach_baseline_commitments) {
+        fail("phase69-attach-failure-fixture-resources-live");
+    }
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_FAILURE_INJECTION_FIRE_COUNT=0x",
+                     g_phase69_attach_failure_injection.fire_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE69_ATTACH_FAILURE_INJECTION_FIRED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_SERVICE_SLOT=0x",
+                     failed_handle.slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_SERVICE_IDENTITY=0x",
+                     failed_handle.identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_SERVICE_GENERATION=0x",
+                     failed_handle.generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_CALLBACK_STATUS=0x",
+                     worker->last_callback_status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_RUNTIME_OWNERSHIP=0x",
+                     worker->nativeaot_lifecycle.runtime_ownership_state);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE69_FAILED_RUNTIME_ACQUIRED=0\r\n");
+    serial_text("GXOS_NET10:PHASE69_FAILED_RUNTIME_ATTACH_ATTEMPTED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_RUNTIME_ATTACH_COUNT=0x",
+                     worker->nativeaot_lifecycle.runtime_attach_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_RUNTIME_DETACH_COUNT=0x",
+                     worker->nativeaot_lifecycle.runtime_detach_count);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE69_FAILED_THREAD_HANDLE_OPEN_DURING=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_FAILED_WAKE_EVENT_OPEN_DURING=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_FAILED_STACK_RESERVED_DURING=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_FAILED_THREAD_TERMINATED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_TCB_SLOTS_FREE=0x",
+                     gxos_scheduler_available_thread_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_OBJECT_SLOTS_FREE=0x",
+                     gxos_scheduler_available_object_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_VM_REGIONS=0x",
+                     g_memory_vm_regions.live_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_RESERVATIONS=0x",
+                     g_memory_virtual_arena.reservation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_COMMITMENTS=0x",
+                     g_memory_virtual_arena.commitment_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_THREADSTORE=0x",
+                     threadstore_during);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_LIVE_ALLOCATIONS=0x",
+                     g_memory_ledger.live_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_PHYSICAL_BYTES=0x",
+                     g_memory_ledger.physical_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_COMMIT_BYTES=0x",
+                     g_memory_ledger.commit_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_VIRTUAL_BYTES=0x",
+                     g_memory_ledger.virtual_reservation_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_RESERVED_BYTES=0x",
+                     g_memory_virtual_arena.total_reserved_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_COMMITTED_BYTES=0x",
+                     g_memory_virtual_arena.total_committed_bytes);
+    serial_text("\r\n");
+    if (g_phase69_attach_failure_injection.fire_count != 1U ||
+        g_phase69_attach_failure_injection.armed != 0U ||
+        !gxos_managed_kernel_driver_worker_destroy(worker, failed_handle)) {
+        fail("phase69-attach-failure-fixture-cleanup");
+    }
+    threadstore_during =
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+            gxos_scheduler_current_thread()->fls_values[runtime_fls_slot], 0);
+    if (worker->tcb_owned != 0U || worker->thread_handle_owned != 0U ||
+        worker->wake_event_owned != 0U || worker->thread != 0 ||
+        worker->worker_handle != 0 || worker->wake_event != 0 ||
+        worker->nativeaot_lifecycle.ownership_state !=
+            GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED ||
+        worker->nativeaot_lifecycle.runtime_detach_count != 0U ||
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
+            g_phase69_attach_baseline_free_threads ||
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+            g_phase69_attach_baseline_free_objects ||
+        g_memory_vm_regions.live_count != g_phase69_attach_baseline_vm_regions ||
+        g_memory_virtual_arena.reservation_count !=
+            g_phase69_attach_baseline_reservations ||
+        g_memory_virtual_arena.commitment_count !=
+            g_phase69_attach_baseline_commitments ||
+        g_memory_ledger.live_count !=
+            g_phase69_attach_baseline_live_allocations ||
+        g_memory_ledger.physical_bytes !=
+            g_phase69_attach_baseline_physical_bytes ||
+        g_memory_ledger.commit_bytes != g_phase69_attach_baseline_commit_bytes ||
+        g_memory_ledger.virtual_reservation_bytes !=
+            g_phase69_attach_baseline_virtual_bytes ||
+        g_memory_virtual_arena.total_reserved_bytes !=
+            g_phase69_attach_baseline_reserved_bytes ||
+        g_memory_virtual_arena.total_committed_bytes !=
+            g_phase69_attach_baseline_committed_bytes ||
+        threadstore_during != g_phase69_attach_baseline_threadstore) {
+        fail("phase69-attach-failure-fixture-resource-baseline");
+    }
+    serial_text("GXOS_NET10:PHASE69_FAILED_TCB_HANDLE_EVENT_VM_RECLAIMED=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_FAILED_OWNER_SLOT_RELEASED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_THREADSTORE=0x",
+                     threadstore_during);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_LIVE_ALLOCATIONS=0x",
+                     g_memory_ledger.live_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_PHYSICAL_BYTES=0x",
+                     g_memory_ledger.physical_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_COMMIT_BYTES=0x",
+                     g_memory_ledger.commit_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_VIRTUAL_BYTES=0x",
+                     g_memory_ledger.virtual_reservation_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_RESERVATIONS=0x",
+                     g_memory_virtual_arena.reservation_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_COMMITMENTS=0x",
+                     g_memory_virtual_arena.commitment_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_RESERVED_BYTES=0x",
+                     g_memory_virtual_arena.total_reserved_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_COMMITTED_BYTES=0x",
+                     g_memory_virtual_arena.total_committed_bytes);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE69_FAILED_START_BASELINE_RESTORED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_THREAD_SLOTS_FREE=0x",
+                     gxos_scheduler_available_thread_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_OBJECT_SLOTS_FREE=0x",
+                     gxos_scheduler_available_object_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_VM_REGIONS=0x",
+                     g_memory_vm_regions.live_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FAILED_FINAL_THREADSTORE=0x",
+                     threadstore_during);
+    serial_text("\r\n");
+
+    if (gxos_managed_kernel_driver_worker_initialize(
+            worker, &g_create_event_scheduler, &g_event_api_context,
+            &g_managed_kernel_interrupt_context, worker_bridge,
+            tls_index, runtime_fls_slot, runtime_fls_cleanup,
+            serial_text, serial_field_hex) !=
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_OK) {
+        fail("phase69-healthy-replacement-initialize");
+    }
+    replacement_handle = worker->service_handle;
+    if (replacement_handle.slot != failed_handle.slot ||
+        replacement_handle.identity == failed_handle.identity ||
+        replacement_handle.generation == failed_handle.generation ||
+        gxos_managed_kernel_driver_worker_request_stop(
+            worker, failed_handle,
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN) ||
+        worker->stop_requested != 0U || worker->thread == 0 ||
+        !worker->thread->live || !worker->wake_event_owned) {
+        fail("phase69-stale-failed-service-handle");
+    }
+    serial_text("GXOS_NET10:PHASE69_SAME_SLOT_REUSED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_REPLACEMENT_SERVICE_SLOT=0x",
+                     replacement_handle.slot);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_REPLACEMENT_SERVICE_IDENTITY=0x",
+                     replacement_handle.identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_REPLACEMENT_SERVICE_GENERATION=0x",
+                     replacement_handle.generation);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE69_STALE_FAILED_STOP_REJECTED=1\r\n");
+    if (!gxos_managed_kernel_driver_worker_publish_route(
+            worker, &g_managed_kernel_driver_service_handle) ||
+        g_managed_kernel_driver_service_handle.identity !=
+            replacement_handle.identity ||
+        !gxos_managed_kernel_driver_worker_start(
+            worker, replacement_handle)) {
+        fail("phase69-healthy-replacement-start");
+    }
+    serial_text("GXOS_NET10:PHASE69_HEALTHY_REPLACEMENT_STARTED=1\r\n");
+}
+#endif
+
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+static void managed_kernel_phase69_submit_shutdown_one_shot(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *service,
+    uint32_t object_slots_baseline, uint32_t thread_slots_baseline)
+{
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE rejected = {0};
+    GXOS_NATIVEAOT_MANAGED_WORKER_RESULT result = {0};
+    GXOS_SCHEDULER_TCB *service_thread;
+    GXOS_SCHEDULER_HANDLE service_wake;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS status;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS submit_status =
+        GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_INVALID_STATE;
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS poll_status =
+        GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_INVALID_STATE;
+    uint32_t held_for_service_stop = 0U;
+    uint32_t next_identity_before_reject;
+
+    if (service == 0 || g_phase69_shutdown_one_shot_submitted != 0U ||
+        !gxos_managed_kernel_driver_worker_is_running(
+            service, g_managed_kernel_driver_service_handle) ||
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+            object_slots_baseline - 2U ||
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
+            thread_slots_baseline - 1U) {
+        fail("phase69-shutdown-one-shot-admission");
+    }
+    service_thread = service->thread;
+    service_wake = service->wake_event;
+    status = gxos_nativeaot_managed_worker_api_create(
+        &g_phase61_managed_worker_api,
+        &g_phase69_shutdown_one_shot_handle);
+    g_phase69_shutdown_one_shot_request.version =
+        GXOS_NATIVEAOT_MANAGED_WORKER_API_VERSION;
+    g_phase69_shutdown_one_shot_request.size =
+        sizeof(g_phase69_shutdown_one_shot_request);
+    g_phase69_shutdown_one_shot_request.operation_id =
+        GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE;
+    g_phase69_shutdown_one_shot_request.argument0 = 41U;
+    if (status == GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK &&
+        g_phase69_shutdown_one_shot_handle.worker_identity != 0U) {
+        submit_status = gxos_nativeaot_managed_worker_api_submit(
+            &g_phase61_managed_worker_api,
+            g_phase69_shutdown_one_shot_handle,
+            (const GXOS_NATIVEAOT_MANAGED_WORKER_REQUEST *)(const void *)
+                &g_phase69_shutdown_one_shot_request);
+        if (submit_status == GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK) {
+            held_for_service_stop =
+                (uint32_t)gxos_nativeaot_managed_worker_api_phase69_hold_submitted(
+                    &g_phase61_managed_worker_api,
+                    g_phase69_shutdown_one_shot_handle, 1);
+            if (held_for_service_stop != 0U) {
+                poll_status = gxos_nativeaot_managed_worker_api_poll(
+                    &g_phase61_managed_worker_api,
+                    g_phase69_shutdown_one_shot_handle, &result);
+            }
+        }
+    }
+    serial_field_hex("GXOS_NET10:PHASE69_SHUTDOWN_ONE_SHOT_CREATE_STATUS=0x",
+                     status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_SHUTDOWN_ONE_SHOT_SUBMIT_STATUS=0x",
+                     submit_status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_SHUTDOWN_ONE_SHOT_POLL_STATUS=0x",
+                     poll_status);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_SHUTDOWN_ONE_SHOT_STATE=0x",
+                     result.state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_SHUTDOWN_ONE_SHOT_OBJECTS_FREE=0x",
+                     gxos_scheduler_available_object_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_SHUTDOWN_ONE_SHOT_THREADS_FREE=0x",
+                     gxos_scheduler_available_thread_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        g_phase69_shutdown_one_shot_handle.worker_identity == 0U ||
+        submit_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        held_for_service_stop == 0U ||
+        poll_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+        result.state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED ||
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler) != 0U ||
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
+            thread_slots_baseline - 2U) {
+        fail("phase69-shutdown-one-shot-submit");
+    }
+    g_phase69_shutdown_one_shot_submitted = 1U;
+    serial_field_hex("GXOS_NET10:PHASE69_SCHEDULER_OBJECT_CAPACITY=0x",
+                     GXOS_SCHEDULER_MAX_OBJECTS);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_SCHEDULER_OBJECTS_USED_AT_COEXISTENCE=0x",
+                     GXOS_SCHEDULER_MAX_OBJECTS -
+                         gxos_scheduler_available_object_slots(
+                             &g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_SCHEDULER_THREADS_FREE_AT_COEXISTENCE=0x",
+                     gxos_scheduler_available_thread_slots(
+                         &g_create_event_scheduler));
+    serial_text("\r\n");
+    next_identity_before_reject = g_create_event_scheduler.next_identity;
+    status = gxos_nativeaot_managed_worker_api_create(
+        &g_phase61_managed_worker_api, &rejected);
+    if (status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_CAPACITY ||
+        rejected.worker_identity != 0U ||
+        g_create_event_scheduler.next_identity != next_identity_before_reject ||
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler) != 0U ||
+        service->thread != service_thread || service_thread == 0 ||
+        service_thread->live == 0U || service->wake_event != service_wake ||
+        service->wake_event_owned == 0U || service->stop_requested != 0U ||
+        !gxos_managed_kernel_driver_worker_is_running(
+            service, g_managed_kernel_driver_service_handle) ||
+        gxos_nativeaot_managed_worker_api_poll(
+            &g_phase61_managed_worker_api,
+            g_phase69_shutdown_one_shot_handle, &result) !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE) {
+        fail("phase69-joint-admission-reject-before-allocation");
+    }
+    serial_text("GXOS_NET10:PHASE69_ONE_SHOT_SUBMITTED_LIVE_BEFORE_SERVICE_STOP=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_ONE_SHOT_HELD_PENDING_FOR_SERVICE_STOP=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_JOINT_ADMISSION_REJECTED_BEFORE_ALLOCATION=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_REJECTED_ADMISSION_NO_TCB_OR_WAKE_EVENT=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ONE_SHOT_PENDING_IDENTITY=0x",
+                     g_phase69_shutdown_one_shot_handle.worker_identity);
+    serial_text("\r\n");
+}
+
+static void managed_kernel_phase69_finish_shutdown_one_shot(
+    uint32_t object_slots_baseline, uint32_t thread_slots_baseline,
+    uint32_t threadstore_baseline)
+{
+    GXOS_NATIVEAOT_MANAGED_WORKER_RESULT pending = {0};
+    GXOS_NATIVEAOT_MANAGED_WORKER_RESULT result = {0};
+    GXOS_NATIVEAOT_MANAGED_WORKER_STATUS poll_status;
+    uint32_t threadstore_final;
+    if (g_phase69_shutdown_one_shot_submitted == 0U ||
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+            object_slots_baseline - 1U ||
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
+            thread_slots_baseline - 1U) {
+        fail("phase69-one-shot-service-stop-resource-preservation");
+    }
+    poll_status = gxos_nativeaot_managed_worker_api_poll(
+            &g_phase61_managed_worker_api,
+            g_phase69_shutdown_one_shot_handle, &pending);
+    if (poll_status != GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+        pending.state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED) {
+        fail("phase69-one-shot-remains-pending-after-service-stop");
+    }
+    serial_text("GXOS_NET10:PHASE69_ONE_SHOT_STILL_SUBMITTED_AFTER_SERVICE_STOP=1\r\n");
+    if (!gxos_nativeaot_managed_worker_api_phase69_hold_submitted(
+            &g_phase61_managed_worker_api,
+            g_phase69_shutdown_one_shot_handle, 0) ||
+        gxos_nativeaot_managed_worker_api_drive(
+            &g_phase61_managed_worker_api,
+            g_phase69_shutdown_one_shot_handle) !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK) {
+        fail("phase69-one-shot-release-after-service-stop");
+    }
+    if (
+        gxos_nativeaot_managed_worker_api_poll(
+            &g_phase61_managed_worker_api,
+            g_phase69_shutdown_one_shot_handle, &result) !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        result.state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_COMPLETED ||
+        result.output0 != 42U || result.result_code != 0 ||
+        gxos_nativeaot_managed_worker_api_close(
+            &g_phase61_managed_worker_api,
+            g_phase69_shutdown_one_shot_handle, &pending) !=
+            GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_OK ||
+        pending.output0 != 42U || pending.result_code != 0 ||
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+            object_slots_baseline ||
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
+            thread_slots_baseline) {
+        fail("phase69-one-shot-survives-service-stop");
+    }
+    threadstore_final =
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+            g_phase61_managed_worker_probe.main_thread->fls_values[
+                g_phase61_managed_worker_probe.runtime_fls_slot], 0);
+    if (threadstore_final != threadstore_baseline) {
+        fail("phase69-threadstore-final-baseline");
+    }
+    g_phase69_shutdown_one_shot_submitted = 0U;
+    g_phase69_shutdown_one_shot_handle =
+        (GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE){0};
+    serial_text("GXOS_NET10:PHASE69_ONE_SHOT_SURVIVED_SERVICE_STOP=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_ONE_SHOT_ADD_ONE_41_TO_42=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ONE_SHOT_RESULT_AFTER_SERVICE_STOP=0x",
+                     pending.output0);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE69_ONE_SHOT_RECLAIMED_AFTER_SERVICE_STOP=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_THREADSTORE_FINAL=0x",
+                     threadstore_final);
+    serial_text("\r\n");
+}
+#endif
 
 static void managed_kernel_phase9_interrupt(
     EFI_BOOT_SERVICES *boot_services,
@@ -15227,6 +15774,25 @@ static void managed_kernel_phase9_interrupt(
     uint64_t drained_before_unsubscribe;
     uint64_t pending_before_unsubscribe;
     uint32_t burst_observed;
+    uint64_t phase69_dropped_before_stop = 0;
+    uint64_t phase69_shutdown_discarded_before_stop = 0;
+#if defined(GXOS_ENABLE_PHASE69_DISCARD_FIXTURE) || \
+    defined(GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE)
+    uint64_t phase69_dispatch_before_stop = 0;
+#endif
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_SHUTDOWN_POLICY phase69_shutdown_policy =
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN;
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+    uint32_t phase69_dispatch_identity = 0;
+    uint16_t phase69_dispatch_generation = 0;
+    uint32_t phase69_scheduler_object_baseline = 0;
+    uint32_t phase69_scheduler_thread_baseline = 0;
+    uint32_t phase69_threadstore_baseline = 0;
+#ifdef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
+    uint64_t phase69_scheduler_dispatch_before_stop = 0;
+    uint32_t phase69_idle_sleep_before_stop = 0;
+#endif
+#endif
     /* Teardown releases seven managed-driver pages plus the persistent
        worker's sixteen-page usable stack. Its guard, stack, and driver arena
        occupy two reservations and three tracked regions. */
@@ -15305,13 +15871,93 @@ static void managed_kernel_phase9_interrupt(
                      baseline_commit);
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_BASELINE_FREE=0x",
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+                     (phase69_scheduler_object_baseline =
+                         gxos_scheduler_available_object_slots(
+                             &g_create_event_scheduler)));
+#else
                      gxos_scheduler_available_object_slots(
                          &g_create_event_scheduler));
+#endif
     serial_text("\r\n");
     serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_BASELINE_FREE=0x",
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+                     (phase69_scheduler_thread_baseline =
+                         gxos_scheduler_available_thread_slots(
+                             &g_create_event_scheduler)));
+#else
                      gxos_scheduler_available_thread_slots(
                          &g_create_event_scheduler));
+#endif
     serial_text("\r\n");
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+    phase69_threadstore_baseline =
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+            gxos_scheduler_current_thread()->fls_values[runtime_fls_slot], 0);
+    serial_field_hex("GXOS_NET10:PHASE69_THREADSTORE_BASELINE=0x",
+                     phase69_threadstore_baseline);
+    serial_text("\r\n");
+#endif
+#ifdef GXOS_ENABLE_PHASE69_ATTACH_FAILURE_FIXTURE
+    g_phase69_attach_baseline_free_objects =
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler);
+    g_phase69_attach_baseline_free_threads =
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler);
+    g_phase69_attach_baseline_vm_regions = g_memory_vm_regions.live_count;
+    g_phase69_attach_baseline_reservations =
+        g_memory_virtual_arena.reservation_count;
+    g_phase69_attach_baseline_commitments =
+        g_memory_virtual_arena.commitment_count;
+    g_phase69_attach_baseline_live_allocations = g_memory_ledger.live_count;
+    g_phase69_attach_baseline_physical_bytes = g_memory_ledger.physical_bytes;
+    g_phase69_attach_baseline_commit_bytes = g_memory_ledger.commit_bytes;
+    g_phase69_attach_baseline_virtual_bytes =
+        g_memory_ledger.virtual_reservation_bytes;
+    g_phase69_attach_baseline_reserved_bytes =
+        g_memory_virtual_arena.total_reserved_bytes;
+    g_phase69_attach_baseline_committed_bytes =
+        g_memory_virtual_arena.total_committed_bytes;
+    g_phase69_attach_baseline_threadstore =
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+            gxos_scheduler_current_thread()->fls_values[runtime_fls_slot], 0);
+    serial_text("GXOS_NET10:PHASE69_ATTACH_BASELINE_OWNER_SLOTS_FREE=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_OBJECT_SLOTS_FREE=0x",
+                     g_phase69_attach_baseline_free_objects);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_THREAD_SLOTS_FREE=0x",
+                     g_phase69_attach_baseline_free_threads);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_THREADSTORE=0x",
+                     g_phase69_attach_baseline_threadstore);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_VM_REGIONS=0x",
+                     g_phase69_attach_baseline_vm_regions);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_LIVE_ALLOCATIONS=0x",
+                     g_phase69_attach_baseline_live_allocations);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_PHYSICAL_BYTES=0x",
+                     g_phase69_attach_baseline_physical_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_COMMIT_BYTES=0x",
+                     g_phase69_attach_baseline_commit_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_VIRTUAL_BYTES=0x",
+                     g_phase69_attach_baseline_virtual_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_RESERVATIONS=0x",
+                     g_phase69_attach_baseline_reservations);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_COMMITMENTS=0x",
+                     g_phase69_attach_baseline_commitments);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_RESERVED_BYTES=0x",
+                     g_phase69_attach_baseline_reserved_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_ATTACH_BASELINE_COMMITTED_BYTES=0x",
+                     g_phase69_attach_baseline_committed_bytes);
+    serial_text("\r\n");
+#endif
     if (gxos_managed_kernel_driver_worker_initialize(
             &g_managed_kernel_driver_worker_context,
             &g_create_event_scheduler, &g_event_api_context,
@@ -15328,6 +15974,10 @@ static void managed_kernel_phase9_interrupt(
         managed_kernel_driver_worker_notify,
         &g_managed_kernel_driver_worker_context);
     if (run_phase9(1) != GX_MANAGED_OK) fail("managed-kernel-interrupt-subscribe");
+#ifdef GXOS_ENABLE_PHASE69_ATTACH_FAILURE_FIXTURE
+    managed_kernel_phase69_attach_failure_replacement(
+        worker_bridge, tls_index, runtime_fls_slot, runtime_fls_cleanup);
+#else
     if (!gxos_managed_kernel_driver_worker_publish_route(
             &g_managed_kernel_driver_worker_context,
             &g_managed_kernel_driver_service_handle) ||
@@ -15336,10 +15986,30 @@ static void managed_kernel_phase9_interrupt(
             g_managed_kernel_driver_service_handle)) {
         fail("managed-kernel-driver-worker-route-start");
     }
+#endif
     if (!managed_kernel_interrupt_wait_for_worker_rearmed(
             boot_services, &g_managed_kernel_driver_worker_context)) {
         fail("managed-kernel-driver-worker-initial-idle");
     }
+#ifdef GXOS_ENABLE_PHASE69_ATTACH_FAILURE_FIXTURE
+    if (!g_managed_kernel_driver_worker_context.nativeaot_lifecycle.attached ||
+        g_managed_kernel_driver_worker_context.nativeaot_lifecycle
+                .runtime_ownership_state !=
+            GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_ACQUIRED ||
+        g_managed_kernel_driver_worker_context.nativeaot_lifecycle
+                .runtime_attach_count != 1U ||
+        g_managed_kernel_driver_worker_context.nativeaot_lifecycle
+                .runtime_detach_count != 0U) {
+        fail("phase69-healthy-replacement-runtime-attach");
+    }
+    serial_text("GXOS_NET10:PHASE69_HEALTHY_REPLACEMENT_RUNTIME_ATTACH=1\r\n");
+#endif
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+    phase69_dispatch_identity =
+        g_managed_kernel_driver_worker_context.service_handle.identity;
+    phase69_dispatch_generation =
+        g_managed_kernel_driver_worker_context.service_handle.generation;
+#endif
     serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_INITIAL_IDLE=1\r\n");
     serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_RUNNING_FREE=0x",
                      gxos_scheduler_available_object_slots(
@@ -15416,6 +16086,21 @@ static void managed_kernel_phase9_interrupt(
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_ENQUEUED\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_DRAINED\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_NATIVE_OK\r\n");
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+    if (g_managed_kernel_driver_worker_context.service_handle.identity !=
+            phase69_dispatch_identity ||
+        g_managed_kernel_driver_worker_context.service_handle.generation !=
+            phase69_dispatch_generation ||
+        g_managed_kernel_driver_worker_context.service_handle.slot != 0U) {
+        fail("phase69-first-dispatch-owner-identity");
+    }
+    serial_field_hex("GXOS_NET10:PHASE69_FIRST_DISPATCH_IDENTITY=0x",
+                     phase69_dispatch_identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_FIRST_DISPATCH_GENERATION=0x",
+                     phase69_dispatch_generation);
+    serial_text("\r\n");
+#endif
 
     /* The required runtime/GC proof may retain NativeAOT heap pages. Capture
        that intentional post-runtime footprint before the second receive and
@@ -15597,6 +16282,24 @@ static void managed_kernel_phase9_interrupt(
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_ENQUEUED\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_DRAINED\r\n");
 
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+    if (g_managed_kernel_driver_worker_context.service_handle.identity !=
+            phase69_dispatch_identity ||
+        g_managed_kernel_driver_worker_context.service_handle.generation !=
+            phase69_dispatch_generation ||
+        g_managed_kernel_driver_worker_context.service_handle.slot != 0U ||
+        g_managed_kernel_driver_worker_context.managed_dispatch_count < 2U) {
+        fail("phase69-persistent-managed-state-across-events");
+    }
+    serial_text("GXOS_NET10:PHASE69_PERSISTENT_STATE_ACROSS_REAL_EVENTS=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_SECOND_DISPATCH_IDENTITY=0x",
+                     g_managed_kernel_driver_worker_context.service_handle.identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_SECOND_DISPATCH_GENERATION=0x",
+                     g_managed_kernel_driver_worker_context.service_handle.generation);
+    serial_text("\r\n");
+#endif
+
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE11
     activate_nativeaot_tls();
     if (run_phase11(1) != GX_MANAGED_OK) {
@@ -15663,11 +16366,23 @@ static void managed_kernel_phase9_interrupt(
 #endif
 
     managed_kernel_serial_interrupt_checkpoint("BEFORE_BURST");
+#ifdef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
+    if (!managed_kernel_interrupt_wait_for_worker_rearmed(
+            boot_services, &g_managed_kernel_driver_worker_context) ||
+        g_managed_kernel_interrupt_context.read_index !=
+            g_managed_kernel_interrupt_context.write_index ||
+        g_managed_kernel_interrupt_context.work_pending != 0U) {
+        fail("phase69-idle-stop-precondition");
+    }
+    burst_observed = 0U;
+    serial_text("GXOS_NET10:PHASE69_IDLE_STOP_READY=1\r\n");
+#else
     if (!managed_kernel_interrupt_wait_for_optional_burst(
             boot_services, &g_managed_kernel_driver_worker_context,
             &burst_observed)) {
         fail("managed-kernel-serial-rx-timeout-optional-burst");
     }
+#endif
     if (burst_observed != 0U) {
         serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED\r\n");
     }
@@ -15722,6 +16437,39 @@ static void managed_kernel_phase9_interrupt(
         baseline_regions);
     serial_text("\r\n");
 
+    phase69_shutdown_policy =
+#ifdef GXOS_ENABLE_PHASE69_DISCARD_FIXTURE
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DISCARD;
+#else
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN;
+#endif
+#ifdef GXOS_ENABLE_PHASE69_DISCARD_FIXTURE
+    {
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route =
+            &g_managed_kernel_interrupt_context.routes[0];
+        GXOS_MANAGED_KERNEL_INTERRUPT_SOURCE saved_capture =
+            route->capture_source;
+        GXOS_MANAGED_KERNEL_INTERRUPT_EOI saved_eoi = route->send_eoi;
+        uint64_t interrupt_flags = managed_kernel_interrupt_enter(0);
+        g_phase69_discard_fixture_remaining = 3U;
+        g_phase69_discard_fixture_next = (uint8_t)'X';
+        route->capture_source = phase69_discard_fixture_capture;
+        route->send_eoi = phase69_discard_fixture_eoi;
+        gxos_managed_kernel_interrupt_capture_route(
+            &g_managed_kernel_interrupt_context, 0U);
+        route->capture_source = saved_capture;
+        route->send_eoi = saved_eoi;
+        managed_kernel_interrupt_leave(0, interrupt_flags);
+        pending_before_unsubscribe =
+            g_managed_kernel_interrupt_context.write_index -
+            g_managed_kernel_interrupt_context.read_index;
+        if (g_phase69_discard_fixture_remaining != 0U ||
+            pending_before_unsubscribe < 3U) {
+            fail("phase69-discard-fixture-event-enqueue");
+        }
+        serial_text("GXOS_NET10:PHASE69_DISCARD_FIXTURE_EVENTS_ENQUEUED=3\r\n");
+    }
+#endif
     irq_before_unsubscribe = __atomic_load_n(
         &g_managed_kernel_interrupt_context.irq_entry_count, __ATOMIC_ACQUIRE);
     enqueued_before_unsubscribe = __atomic_load_n(
@@ -15731,6 +16479,22 @@ static void managed_kernel_phase9_interrupt(
     pending_before_unsubscribe =
         g_managed_kernel_interrupt_context.write_index -
         g_managed_kernel_interrupt_context.read_index;
+    phase69_dropped_before_stop = __atomic_load_n(
+        &g_managed_kernel_interrupt_context.dropped_count, __ATOMIC_ACQUIRE);
+    phase69_shutdown_discarded_before_stop = __atomic_load_n(
+        &g_managed_kernel_interrupt_context.shutdown_discarded_count,
+        __ATOMIC_ACQUIRE);
+#if defined(GXOS_ENABLE_PHASE69_DISCARD_FIXTURE) || \
+    defined(GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE)
+    phase69_dispatch_before_stop =
+        g_managed_kernel_driver_worker_context.managed_dispatch_count;
+#endif
+#ifdef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+    phase69_scheduler_dispatch_before_stop =
+        g_managed_kernel_driver_worker_context.scheduler_dispatch_count;
+#endif
+#endif
     serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PENDING=0x",
                      pending_before_unsubscribe);
     serial_text("\r\n");
@@ -15741,13 +16505,144 @@ static void managed_kernel_phase9_interrupt(
     serial_text(pending_before_unsubscribe != 0U
         ? "GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_PENDING=1\r\n"
         : "GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_IDLE=1\r\n");
+#ifdef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
+    {
+        GXOS_SCHEDULER_EVENT *idle_event = gxos_scheduler_event_from_handle(
+            g_managed_kernel_driver_worker_context.wake_event);
+        if (pending_before_unsubscribe != 0U ||
+            g_managed_kernel_interrupt_context.work_pending != 0U ||
+            g_managed_kernel_driver_worker_context.thread == 0 ||
+            g_managed_kernel_driver_worker_context.thread->state !=
+                GXOS_SCHEDULER_THREAD_BLOCKED || idle_event == 0 ||
+            idle_event->manual_reset != 0U || idle_event->signaled != 0U ||
+            idle_event->waiter_count != 1U) {
+            fail("phase69-idle-stop-worker-not-blocked");
+        }
+        phase69_idle_sleep_before_stop =
+            g_managed_kernel_driver_worker_context.sleep_count;
+        serial_text("GXOS_NET10:PHASE69_IDLE_STOP_QUEUE_EMPTY=1\r\n");
+        serial_text("GXOS_NET10:PHASE69_IDLE_STOP_WORKER_BLOCKED=1\r\n");
+    }
+#endif
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+    managed_kernel_phase69_submit_shutdown_one_shot(
+        &g_managed_kernel_driver_worker_context,
+        phase69_scheduler_object_baseline,
+        phase69_scheduler_thread_baseline);
+#endif
+    if (!gxos_managed_kernel_driver_worker_request_stop(
+            &g_managed_kernel_driver_worker_context,
+            g_managed_kernel_driver_service_handle,
+            phase69_shutdown_policy)) {
+        fail("managed-kernel-driver-worker-request-stop");
+    }
+    if (g_managed_kernel_interrupt_context.routes[0].accepting_events != 0U ||
+        g_managed_kernel_interrupt_context.routes[0].hardware_enabled != 0U ||
+        g_managed_kernel_driver_worker_context.thread == 0 ||
+        g_managed_kernel_driver_worker_context.thread->state ==
+            GXOS_SCHEDULER_THREAD_BLOCKED) {
+        fail("phase69-stop-route-disable-before-worker-exit");
+    }
+    if (phase69_shutdown_policy ==
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN &&
+        (g_managed_kernel_interrupt_context.write_index -
+             g_managed_kernel_interrupt_context.read_index !=
+             pending_before_unsubscribe ||
+         g_managed_kernel_interrupt_context.shutdown_discarded_count !=
+             phase69_shutdown_discarded_before_stop)) {
+        fail("phase69-drain-preserves-queued-records");
+    }
+#ifdef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
+    {
+        GXOS_SCHEDULER_EVENT *idle_event = gxos_scheduler_event_from_handle(
+            g_managed_kernel_driver_worker_context.wake_event);
+        if (idle_event == 0 ||
+            idle_event->waiter_count != 0U ||
+            g_managed_kernel_driver_worker_context.thread->runnable_queued == 0U) {
+            fail("phase69-idle-stop-wake-not-delivered");
+        }
+        serial_text("GXOS_NET10:PHASE69_IDLE_STOP_WAKE_DELIVERED=1\r\n");
+    }
+#endif
+    serial_text("GXOS_NET10:PHASE69_ROUTE_ACCEPTANCE_CLOSED_BEFORE_HARDWARE_STOP=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_HARDWARE_ROUTES_DISABLED_BEFORE_WORKER_EXIT=1\r\n");
     if (!gxos_managed_kernel_driver_worker_stop(
             &g_managed_kernel_driver_worker_context,
             g_managed_kernel_driver_service_handle,
-            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN)) {
-        fail("managed-kernel-driver-worker-drain-stop");
+            phase69_shutdown_policy)) {
+        fail("managed-kernel-driver-worker-stop");
     }
+    if (g_managed_kernel_driver_worker_context.nativeaot_lifecycle
+            .runtime_detach_count != 1U ||
+        !g_managed_kernel_driver_worker_context.nativeaot_lifecycle.detached ||
+        g_managed_kernel_driver_worker_context.service_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RUNTIME_DETACHED) {
+        fail("phase69-service-detach-once");
+    }
+#ifdef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
+    if (g_managed_kernel_driver_worker_context.sleep_count !=
+            phase69_idle_sleep_before_stop ||
+        g_managed_kernel_driver_worker_context.managed_dispatch_count !=
+            phase69_dispatch_before_stop ||
+        g_managed_kernel_driver_worker_context.scheduler_dispatch_count -
+            phase69_scheduler_dispatch_before_stop > 2U) {
+        fail("phase69-idle-stop-no-busy-loop");
+    }
+    serial_text("GXOS_NET10:PHASE69_IDLE_STOP_WORKER_EXITED=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_IDLE_STOP_NO_BUSY_LOOP=1\r\n");
+#endif
+#ifdef GXOS_ENABLE_PHASE69_DISCARD_FIXTURE
+    if (g_managed_kernel_interrupt_context.read_index !=
+            g_managed_kernel_interrupt_context.write_index ||
+        __atomic_load_n(&g_managed_kernel_interrupt_context.drained_count,
+                        __ATOMIC_ACQUIRE) != drained_before_unsubscribe ||
+        __atomic_load_n(&g_managed_kernel_interrupt_context.dropped_count,
+                        __ATOMIC_ACQUIRE) != phase69_dropped_before_stop ||
+        __atomic_load_n(
+            &g_managed_kernel_interrupt_context.shutdown_discarded_count,
+            __ATOMIC_ACQUIRE) - phase69_shutdown_discarded_before_stop !=
+            pending_before_unsubscribe ||
+        g_managed_kernel_driver_worker_context.managed_dispatch_count !=
+            phase69_dispatch_before_stop) {
+        fail("phase69-discard-suppresses-managed-dispatch");
+    }
+    serial_field_hex("GXOS_NET10:PHASE69_DISCARD_QUEUED_BEFORE=0x",
+                     pending_before_unsubscribe);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_DISCARD_RECORDS_COUNT=0x",
+                     __atomic_load_n(
+                         &g_managed_kernel_interrupt_context.shutdown_discarded_count,
+                         __ATOMIC_ACQUIRE) -
+                         phase69_shutdown_discarded_before_stop);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_DISCARD_DISPATCH_COUNT_BEFORE=0x",
+                     phase69_dispatch_before_stop);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_DISCARD_DISPATCH_COUNT_AFTER=0x",
+                     g_managed_kernel_driver_worker_context.managed_dispatch_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_DISCARD_DROPPED_BEFORE=0x",
+                     phase69_dropped_before_stop);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_DISCARD_DROPPED_AFTER=0x",
+                     __atomic_load_n(
+                         &g_managed_kernel_interrupt_context.dropped_count,
+                         __ATOMIC_ACQUIRE));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_DISCARD_SHUTDOWN_BEFORE=0x",
+                     phase69_shutdown_discarded_before_stop);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE69_DISCARD_SHUTDOWN_AFTER=0x",
+                     __atomic_load_n(
+                         &g_managed_kernel_interrupt_context.shutdown_discarded_count,
+                         __ATOMIC_ACQUIRE));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE69_DISCARD_QUEUE_EMPTY=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_DISCARD_MANAGED_DISPATCH_SUPPRESSED=1\r\n");
+    serial_text("GXOS_NET10:PERSISTENT_SERVICE_DISCARD_COMPLETE=1\r\n");
+#else
     serial_text("GXOS_NET10:PERSISTENT_SERVICE_DRAIN_COMPLETE=1\r\n");
+#endif
     serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBED_READY\r\n");
     if (boot_services->Stall != 0 && EFI_ERROR(boot_services->Stall(1000000))) {
         fail("managed-kernel-interrupt-post-unsubscribe-stall");
@@ -15757,13 +16652,30 @@ static void managed_kernel_phase9_interrupt(
         g_managed_kernel_interrupt_context.routes[0].accepting_events != 0U ||
         g_managed_kernel_interrupt_context.read_index !=
             g_managed_kernel_interrupt_context.write_index ||
-        g_managed_kernel_interrupt_context.shutdown_discarded_count != 0U ||
+        (phase69_shutdown_policy ==
+             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN &&
+         g_managed_kernel_interrupt_context.shutdown_discarded_count !=
+             phase69_shutdown_discarded_before_stop) ||
         __atomic_load_n(&g_managed_kernel_interrupt_context.enqueued_count,
                         __ATOMIC_ACQUIRE) != enqueued_before_unsubscribe ||
-        __atomic_load_n(&g_managed_kernel_interrupt_context.drained_count,
-                        __ATOMIC_ACQUIRE) != enqueued_before_unsubscribe ||
-        enqueued_before_unsubscribe - drained_before_unsubscribe !=
-            pending_before_unsubscribe ||
+        (phase69_shutdown_policy ==
+             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN &&
+         __atomic_load_n(&g_managed_kernel_interrupt_context.drained_count,
+                         __ATOMIC_ACQUIRE) != enqueued_before_unsubscribe) ||
+        (phase69_shutdown_policy ==
+             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DISCARD &&
+         (__atomic_load_n(&g_managed_kernel_interrupt_context.drained_count,
+                          __ATOMIC_ACQUIRE) != drained_before_unsubscribe ||
+          __atomic_load_n(&g_managed_kernel_interrupt_context.dropped_count,
+                          __ATOMIC_ACQUIRE) != phase69_dropped_before_stop ||
+          __atomic_load_n(
+              &g_managed_kernel_interrupt_context.shutdown_discarded_count,
+              __ATOMIC_ACQUIRE) - phase69_shutdown_discarded_before_stop !=
+              pending_before_unsubscribe)) ||
+        (phase69_shutdown_policy ==
+             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN &&
+         enqueued_before_unsubscribe - drained_before_unsubscribe !=
+             pending_before_unsubscribe) ||
         __atomic_load_n(&g_managed_kernel_interrupt_context.irq_entry_count,
                         __ATOMIC_ACQUIRE) - irq_before_unsubscribe != 0U) {
         fail("managed-kernel-interrupt-post-unsubscribe-delivery");
@@ -15787,6 +16699,25 @@ static void managed_kernel_phase9_interrupt(
             g_managed_kernel_driver_service_handle)) {
         fail("managed-kernel-driver-worker-reclaim");
     }
+#ifdef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
+    if (g_managed_kernel_driver_worker_context.thread != 0 ||
+        g_managed_kernel_driver_worker_context.wake_event != 0 ||
+        g_managed_kernel_driver_worker_context.tcb_owned != 0U ||
+        g_managed_kernel_driver_worker_context.wake_event_owned != 0U ||
+        g_managed_kernel_driver_worker_context.nativeaot_lifecycle
+                .runtime_detach_count != 1U ||
+        !g_managed_kernel_driver_worker_context.nativeaot_lifecycle.detached) {
+        fail("phase69-idle-stop-reclaim");
+    }
+    serial_text("GXOS_NET10:PHASE69_IDLE_STOP_DETACHED_ONCE=1\r\n");
+    serial_text("GXOS_NET10:PHASE69_IDLE_STOP_EVENT_AND_TCB_RECLAIMED=1\r\n");
+#endif
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+    managed_kernel_phase69_finish_shutdown_one_shot(
+        phase69_scheduler_object_baseline,
+        phase69_scheduler_thread_baseline,
+        phase69_threadstore_baseline);
+#endif
     serial_field_hex("GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_FINAL_FREE=0x",
                      gxos_scheduler_available_object_slots(
                          &g_create_event_scheduler));
@@ -15865,12 +16796,23 @@ static void managed_kernel_phase9_interrupt(
             2U ||
 #endif
         stats.SerialIsrCount != stats.EnqueuedCount ||
+#ifdef GXOS_ENABLE_PHASE69_DISCARD_FIXTURE
+        stats.EnqueuedCount != 8U ||
+        stats.DrainedCount + g_managed_kernel_interrupt_context
+                .shutdown_discarded_count != stats.EnqueuedCount ||
+        g_managed_kernel_interrupt_context.shutdown_discarded_count !=
+            pending_before_unsubscribe ||
+#elif defined(GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE)
+        stats.EnqueuedCount != 2U || stats.DrainedCount != 2U ||
+        g_managed_kernel_interrupt_context.shutdown_discarded_count != 0U ||
+#else
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE11
         (stats.EnqueuedCount != 6 && stats.EnqueuedCount != 9) ||
 #else
         (stats.EnqueuedCount != 2 && stats.EnqueuedCount != 5) ||
 #endif
         stats.DrainedCount != stats.EnqueuedCount ||
+#endif
         stats.DroppedCount != 0 || stats.SubscriptionActive != 0 ||
         stats.HardwareEnabled != 0 ||
         baseline_live < driver_arena_pages ||

@@ -1,102 +1,107 @@
-# Phase 69 — Persistent Managed Service Owner
+# Phase 69 - Persistent Managed Service Owner
 
-Date: 2026-09-27  
-Repository: `D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration`  
-Branch: `nativeaot-managed-kernel-integration`
+Date: 2026-09-27
+Repository: D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration
+Branch: nativeaot-managed-kernel-integration
+Starting HEAD: 8a537465023127d04936f2cb70760d58f2470c46 (Add persistent service owner)
 
 ## Result
 
-**Outcome C — Phase 69 acceptance is not claimed.** The ownership implementation now distinguishes runtime ownership from attach callback success and quarantines ambiguous state. Normal attach, repeated real serial dispatch, one-shot coexistence, pending-event DRAIN, detach, and resource restoration passed. The service-specific injected attach-failure/replacement path and guest DISCARD path were not demonstrated in this run, so the full acceptance criterion remains open.
+**Outcome A - Phase 69 fully validated.** The service-boundary attach-failure cleanup, healthy replacement, stale-handle rejection, guest DISCARD, idle stop, normal pending-event DRAIN, one-shot survival across service shutdown, and final resource restoration all passed. Relevant host and guest regressions passed. No Phase 70 work was started.
 
-No commit or push was made. The requested Outcome A/B gate for those operations was not met. No Phase 70 work was started.
+The attach-failure fixture proves Case A only: the runtime attach wrapper was entered, the callback bridge was deliberately unregistered, and authoritative FLS, runtime-thread, and ThreadStore evidence showed that runtime ownership was not acquired. The service owner safely reclaimed that known pre-runtime state. This build does not invent a post-acquire/pre-running failure point; Phase 57 guest rollback and the Phase 64 host suite cover the lower-layer acquired-runtime detach behavior.
+
+The closeout also corrected a nondeterministic proof setup. The optional-burst wait previously dispatched the runnable worker while waiting for the final IRQs, so one run could drain the queue before the stop request. For Phase 69 owner builds, the wait now leaves that worker runnable but undispatched until stop; other configurations retain their prior dispatch behavior. The final normal proof then passed 3/3 with three records pending at shutdown on every boot. An extra ThreadStore peak counter was removed because it did not represent the service attach peak; the direct 2-to-3-to-2 service markers and final baseline check remain.
 
 ## Owner and handle
 
-`managed_kernel_driver_service_owner.c` contains a bounded static owner slot with capacity one. The owner slot retains only its native owner context and current value handle; callers receive no TCB, runtime `Thread*`, wake-event pointer, or managed object address.
+The bounded static owner has capacity one. It retains its native owner context and current value handle; callers receive no TCB, runtime Thread pointer, wake-event pointer, or managed object address. The handle contains slot, identity, generation, and device identity. Slot reuse advances identity and generation, invalidating stale handles.
 
-The internal service handle contains `{slot:uint16, identity:uint32, generation:uint16, device_identity:uint32}`. Slot 0 is the COM1 device identity 1. A handle is accepted only when all values match the live singleton owner. Release invalidates it; reusing the slot advances identity and generation. The owner host test passed same-slot reuse and stale-handle rejection.
+The worker context owns the scheduler TCB and stack, scheduler thread handle, wake event and public handle, route relationship, managed callback bridge, stop policy, and NativeAOT lifecycle evidence. The interrupt queue remains static storage: IRQ handlers produce records, the persistent worker consumes them, and shutdown DISCARD clears only records still pending.
 
-The worker context owns the scheduler TCB and stack, scheduler thread handle, wake event and its public handle, interrupt route relationship, managed callback bridge, stop policy, and NativeAOT lifecycle evidence. The queue ring remains static storage in the interrupt context: IRQ handlers produce, the persistent worker consumes, and the interrupt shutdown operation clears it only for DISCARD.
+Lifecycle evidence distinguishes NOT_ATTEMPTED, NOT_ACQUIRED, ACQUIRED, and AMBIGUOUS. A failed callback result alone does not determine ownership. Known acquired runtime state uses exactly-once detach; ambiguous state is quarantined; only known NOT_ATTEMPTED or NOT_ACQUIRED state may use pre-runtime reclaim.
 
-Lifecycle values are `Free`, `Allocated`, `Starting`, `RuntimeAttached`, `Running`, `Waiting`, `StopRequested`, `Stopping`, `RuntimeDetached`, `Reclaimable`, `Reclaimed`, `StartFailed`, and `Quarantined`.
+## Service-boundary attach failure and replacement
 
-## Admission and coexistence
+The AttachFailureDiscard fixture runs through the actual persistent-service owner. It arms the failed service identity/generation and supplies a ready but unregistered callback bridge. The worker reaches the attach wrapper, which reports CALLBACK_NOT_REGISTERED before runtime Thread/FLS/ThreadStore publication.
 
-Creation reserves the owner slot and checks `gxos_scheduler_can_admit(scheduler, 1, 2)` before publishing an identity or allocating the TCB and event. The known cost is one TCB and two scheduler objects: the thread handle and wake event. The VM stack reservation is acquired by the scheduler's existing thread-creation path; this change does not add a separate VM forecast.
+Guest evidence:
 
-QEMU measured the scheduler-object budget as follows:
+- Failed service: slot 0, identity 1, generation 1; runtime attach attempted, ownership NOT_ACQUIRED, attach count 0, detach count 0.
+- During the failed start, the service TCB, thread handle, wake event, stack, and VM resources remained owned; ThreadStore stayed at 2.
+- Cleanup restored the captured owner, scheduler object/thread, ThreadStore, VM, reservation, commitment, and memory-ledger baselines. The failed handle was invalidated.
+- Replacement reused slot 0 with identity 2 and generation 2. Stop through the stale failed handle was rejected without stopping or reclaiming the replacement.
+- The replacement attached successfully once and dispatched later real serial IRQ events.
 
-| State | Free objects | Used of 16 | Free TCB slots |
-| --- | ---: | ---: | ---: |
-| Baseline | 3 | 13 | 4 |
-| Persistent service | 1 | 15 | 3 |
-| Service plus one-shot worker | 0 | 16 | 2 |
-| After reclaim | 3 | 13 | 4 |
+The injection is intentionally limited to the known pre-runtime case. The attach implementation has no authoritative guest seam between runtime ownership publication and service Running state, so this report makes no service-boundary Case B claim. Current-source Phase 57 guest rollback and Phase 64 host coverage passed for lower-layer acquired ownership and detach.
 
-The service plus one-shot `ADD_ONE(41)` returned 42. A second one-shot creation was rejected for capacity before identity allocation. The live service TCB and wake event remained valid during the one-shot operation. The persistent service is not the one-shot managed-worker API and does not consume one of its logical API slots unless the implementation deliberately shares lower-level capacity. Here, it shares scheduler TCB/object capacity only.
+## DRAIN, DISCARD, idle stop, and one-shot coexistence
 
-## Attach ownership and reclamation
+Normal DRAIN used the real COM1 serial IRQ4 route. Across three fresh boots, the same service identity/generation handled repeated events, including the post-GC event and a three-byte burst. Each boot reached stop with 3 records pending, then completed with 5 enqueued, 5 drained, 0 overflow drops, 0 shutdown discards, and an empty queue. Route acceptance closed and hardware routes were disabled before worker exit; no post-stop IRQ delivery was observed.
 
-The lifecycle layer records `NOT_ATTEMPTED`, `NOT_ACQUIRED`, `ACQUIRED`, or `AMBIGUOUS` from worker FLS, NativeAOT runtime-thread state, and ThreadStore membership. A failed callback return is not treated as proof that runtime ownership was absent. Evidence of acquisition follows the normal exactly-once detach path; ambiguous evidence is quarantined and is not reclaimed by pretending it detached. Pre-runtime reclaim is allowed only when the authoritative lifecycle state is `NOT_ATTEMPTED` or `NOT_ACQUIRED` and scheduler collection has zeroed the TCB.
+Guest DISCARD had 6 records queued at stop: the pending serial burst plus three bounded fixture-captured records. It discarded all 6, drained no additional records, left overflow drops at 0, kept managed dispatch count at 2 before and after stop, and ended with an empty queue. Total accounting was 8 enqueued, 2 drained, 6 shutdown-discarded, 0 dropped.
 
-In the passing normal QEMU boots, the worker attached once, ThreadStore count changed from 2 to 3, detach restored it to 2, and reclaim preserved 2. The Phase 56 and Phase 57 host tests passed. Dedicated Phase 56/57 guest gates were built from the current source, but their fresh-boot runners stopped before launch because another QEMU process was active; that process belonged to a different workspace and was left untouched. Therefore the service's own startup-failure injection and healthy replacement remain unproven in guest execution.
+IdleStop began with an empty queue and a blocked service worker waiting on its unsignaled auto-reset event. Stop woke the waiter; the worker exited and detached once without a busy loop. The event and TCB were reclaimed and the scheduler returned to baseline.
 
-## Event and shutdown behavior
+The service plus a pending ADD_ONE(41) one-shot occupied all 16 scheduler objects. A second one-shot create was rejected for capacity before identity, TCB, or wake-event allocation. The first remained SUBMITTED after service stop and completed as 42 only after service shutdown/reclaim. Final scheduler free counts returned to 3 objects and 4 TCB slots; ThreadStore returned to its baseline count of 2. The one-shot API contract outside the Phase 69 build remains unchanged.
 
-The QEMU input source was the real COM1 serial IRQ4 path. Each of three fresh boots observed the initial RX event, another RX event after managed runtime/GC activity, and a three-byte burst. The same service stayed attached while idle and dispatched later events through the same managed subsystem.
+Normal service teardown resource comparison:
 
-The queue capacity is 8. Worker dispatch drains up to 4 events per batch and yields after at most 4 batches. Full-queue overflow increments `dropped_count`. Shutdown DISCARD increments the separate `shutdown_discarded_count`; it does not change overflow accounting.
+| Metric | Before service stop | After reclaim |
+| --- | ---: | ---: |
+| Memory-ledger live allocations | 254 | 231 |
+| Physical bytes | 0x1C9C80 | 0x1B2C80 |
+| Committed bytes | 0x1BCC80 | 0x1A5C80 |
+| Virtual reservation bytes | 0xA000 | 0x5000 |
+| VM reservations | 10 | 8 |
+| VM commitments | 193 | 175 |
+| Total reserved bytes | 0xFEB8000 | 0xFEA5000 |
+| Total committed bytes | 0xC1000 | 0xAF000 |
+| VM regions | 10 | 7 |
 
-Normal stop closes route acceptance under the interrupt critical section, disables hardware routes, signals the wake event, drains queued records, invokes managed unsubscribe/stop, detaches NativeAOT, collects the TCB, closes its thread handle, and destroys the wake event. Each fresh QEMU boot requested DRAIN with 3 records pending and finished with 5 enqueued, 5 drained, 0 overflow drops, an empty queue, and 0 shutdown discards. Post-stop route quiescence and no later IRQ delivery were checked. This demonstrates pending-event DRAIN, not a separate stop-while-idle trial.
-
-The native interrupt host test passed both DRAIN ordering and DISCARD clearing/accounting; its discard fixture cleared 4 queued records while leaving the drop counter unchanged. A guest DISCARD lifecycle run was not completed, so guest-level worker exit/detach after DISCARD remains open.
-
-## Resource evidence
-
-The guest teardown baseline immediately before service shutdown was:
-
-- Memory-ledger live allocations: 254
-- Physical bytes: `0x1C9C80`
-- Committed bytes: `0x1BCC80`
-- Virtual reservation bytes: `0xA000`
-- VM reservations / commitments: 10 / 193
-- Total reserved / committed bytes: `0xFEB8000` / `0xC1000`
-- VM regions: 10
-
-After the managed-driver and worker teardown, the guest reported 231 live allocations, `0x1B2C80` physical bytes, `0x1A5C80` committed bytes, `0x5000` virtual reservation bytes, 8 reservations, 175 commitments, `0xFEA5000` total reserved bytes, `0xAF000` total committed bytes, and 7 regions. This is the expected release of the 23-page driver arena/worker-stack footprint (18 commitments, 2 reservations, 3 regions). It is not a peak-only-service measurement.
+This is a 23-page release of the driver arena/worker-stack footprint, including 2 reservations and 3 regions. The attach-failure fixture separately measured its own startup baseline and exact restoration.
 
 ## Validation
 
 Passed:
 
-- `Run-ManagedKernelDriverServiceOwnerHostTests.ps1`
-- `Run-ManagedKernelInterruptNativeHostTests.ps1`
-- `Run-ManagedKernelDriverWorkerHostTests.ps1`
-- Phase 56, 57, 59, and 60 host rollback tests
-- Phase 61 host runner, including its Phase 61/62/64/65/66 cases
-- C11 `-Wall -Wextra -Werror -fsyntax-only` on the changed C owner, worker, interrupt, lifecycle, API, and scheduler sources
-- Normal ManagedKernel EFI build and 3 fresh QEMU boots
-- SyntheticScheduler build and 3 fresh scheduler-proof QEMU boots
+- ManagedKernel normal, IdleStop, and AttachFailureDiscard EFI builds from the final source and payload.
+- Normal ManagedKernel guest: 3/3 fresh boots with pending-event DRAIN.
+- IdleStop guest: 1/1 fresh boot.
+- Service attach-failure, same-slot replacement, stale-handle rejection, and DISCARD guest: 1/1 fresh boot.
+- SyntheticScheduler build and scheduler proof: 3/3 fresh boots, EXPECTED_HALT.
+- Current-source Phase 56 pre-attach rollback guest: 3/3 fresh boots, 12 cycles each.
+- Current-source Phase 57 post-attach rollback guest: 3/3 fresh boots, 12 cycles each.
+- Host suites: Phase 56, 57, 59, and 60 rollback; service owner; native interrupt; worker; and the Phase 61 host runner covering Phases 61, 62, 64, 65, and 66.
+- PowerShell parse for Build-Gate4Harness.ps1 and Run-ManagedKernelPhase10FreshBoots.ps1; final gate builds compile the current C source; git diff --check passed.
 
-The Phase 69 guest emitted the production-worker GC-survival/post-GC dispatch markers. It did not emit `MANAGED_GC_MAIN_OK=1` or `PHASE53O_PASS=1` in this configuration; those exact markers are not claimed here. The SyntheticScheduler proof establishes the independent scheduler-core path, where the persistent ManagedKernel service is not enabled.
+Two unrelated QEMU sessions were left running and untouched. The project private QEMU copies were used for Phase 56/57, and a private temporary QEMU copy was used for SyntheticScheduler; each runner cleaned up only the process it started. The ordinary Phase 69 image was built without the attach-failure or DISCARD fixture macros. Those hooks are enabled only by the AttachFailureDiscard fixture mode. The SyntheticScheduler proof covers shared scheduler-core behavior; it does not enable the persistent ManagedKernel service. This closeout does not claim standalone MANAGED_GC_MAIN_OK or PHASE53O_PASS markers.
 
-The worker host-test runner originally hard-coded SDK 10.0.400, absent on this host. It now selects the highest installed .NET 10 SDK, matching `Build-ManagedKernel.ps1`; the runner then passed.
+The private temporary QEMU copy is outside the repository and has no active process. Its removal command was blocked by automatic review policy, so it remains at C:\Users\guideX\AppData\Local\Temp\gxos-phase69-private-qemu-4eee673f726d4788babd5cfec539b6df.
 
-### Build and guest artifacts
+## Final build artifacts
 
-- ManagedKernel payload: 4,790,784 bytes, SHA-256 `70978459A4BF07F21C5523CF07D78B92E2E8514D084501EB673D40E367A235E2`
-- Normal EFI image: `artifacts/phase69-normal-final11/ESP/EFI/BOOT/BOOTX64.EFI`, SHA-256 `65AFBDDDC691EB87ACCB9643900D52B5A5FCC543509DFC6B55F9C4428420E882`
-- Three normal boot logs: `artifacts/phase69-qemu-normal-final11/runs/run-{1,2,3}/serial.log`
-- Normal serial-log SHA-256 values: run 1 `2510BFB0604878706AF07D205861DD42C9AB6F0E61C895E29BB3BBD1B40DCBD2`; run 2 `E60041D3663D66C39EBCC458B3A421F8506E07F3FE82E15FABFB6A7E4E29120E`; run 3 `A2A97BC61CC1244BAD6A8DBA971D27D32A29C416CD590C96A6E7C99E0AFADAF5`
-- SyntheticScheduler EFI image: `artifacts/phase69-synthetic-build-final2/ESP/EFI/BOOT/BOOTX64.EFI`, SHA-256 `26988BDA6037481D4FE31CE67E4B1690F8C10786BE43140810AEB57E18E63946`
-- Three scheduler-proof logs: `artifacts/phase69-synthetic-build-final2/synthetic-runs-20260927-080625-802/run-{1,2,3}/serial.log`
+| Artifact | Size | SHA-256 |
+| --- | ---: | --- |
+| ManagedKernel payload | 4,790,784 | 864478D68989FB5596C0B81B0DF24E27B37DF6C472AB96FF0811084E6ECAAFD2 |
+| Normal Phase 69 EFI | 746,015 | 4E4C58F51911387C33405CBD0C82120ABA4317F217F7146A4B135E0B430B9F75 |
+| IdleStop EFI | 747,039 | B8B6A7262763DAAB8AD8DDB00B652166610F64B9781D66B0C717869CF6E46A6F |
+| AttachFailureDiscard EFI | 759,283 | D261F3A73622E03BB748BA555A296589CA94BEA095E534D5628C35CE3BBF45E2 |
+| SyntheticScheduler EFI | 155,658 | 26988BDA6037481D4FE31CE67E4B1690F8C10786BE43140810AEB57E18E63946 |
+| Phase 56 rollback EFI | 576,384 | F940FA9A434AFB2C1D6A9F9AF17B965FC6791D53CE01E2D2285EA9B46D2C49EF |
+| Phase 57 rollback EFI | 579,587 | A22A98F7FCB12A6B90BAEC086519BB20059D37356A7B6DE7AD33818F7B7660A2 |
 
-## Regressions and remaining work
+## Guest evidence
 
-Host regression status: Phase 66, 65, 64, 62, and 61 passed in the common API host runner; Phases 60 and 59 passed; Phase 57 and Phase 56 passed; owner, interrupt, and worker host suites passed. Phase 54 and Phase 53O were not separately rerun as guest diagnostics in this turn. Phase 65/66 guest suites were not rebuilt or rerun in this turn.
+All paths below are under artifacts/:
 
-The next bounded Phase 69 validation step is to rerun the prepared Phase 56 and Phase 57 guest gates after the unrelated QEMU process exits, then add a service-boundary fixture for injected attach failure, replacement, and guest DISCARD. Until those pass, this report does not accept Phase 69.
+- Normal 3/3 logs: phase69-closeout-normal-boots-final3/runs/run-{1,2,3}/serial.log. SHA-256: 1448FE8AC5FF0E91FFAD21F97FF665A0319BA4E735CD54EC40E5BF5C35FA217C; 8CA8B07D269E9792AF584FA68AF666E46E52617ACB04149F84254B36B805971E; BB473DA644849F9CC7758963BD521F7680D96DF2EE1C9C6EB03C305D6E06301E.
+- IdleStop log: phase69-closeout-idle-boots-final3/runs/run-1/serial.log. SHA-256 88CDA6F0E4BC44F09F50639EB2D504F21CF7339A9BA6A6BCA454CE8D4DC5B225.
+- AttachFailureDiscard log: phase69-closeout-attach-discard-boots-final3/runs/run-1/serial.log. SHA-256 30A7DEA2939AFBC55334FFC4729D0A822FCADB64DA631BB01D88D86E064089F6.
+- SyntheticScheduler logs: phase69-closeout-synthetic/synthetic-runs-20260927-125413-670/run-{1,2,3}/serial.log. Each SHA-256 29FCA73B1A46099CA212D1CFB9CD344A21D6AD490DDC620404108B55D59524F1.
+- Phase 56 logs: phase69-closeout-phase56-boots/runs/run-{1,2,3}/serial.log.
+- Phase 57 logs: phase69-closeout-phase57-boots/runs/run-{1,2,3}/serial.log.
 
 ## Git state
 
-Starting state was clean at `c6c6fe878de11c99d088033077c88fa7e57f0366` (`Document driver dispatch service boundary`), on `nativeaot-managed-kernel-integration`, tracking `origin/nativeaot-managed-kernel-integration`, with live starting divergence 0 ahead / 0 behind. The pasted prompt expected 2 ahead / 0 behind; live repository state was treated as authoritative. No remotes, credentials, branches, worktrees, stash, reset, rebase, history rewrite, or force-push operations were performed. No commit or push was attempted because the validation outcome is not A or B.
+The live checkout began clean at 8a537465023127d04936f2cb70760d58f2470c46 on nativeaot-managed-kernel-integration, tracking origin/nativeaot-managed-kernel-integration with 0 ahead and 0 behind. The implementation, validation report, and this closeout are to be committed together under the Outcome A workflow. No reset, stash, discard, revert, branch switch, worktree creation, rebase, history rewrite, or unrelated QEMU termination was used.

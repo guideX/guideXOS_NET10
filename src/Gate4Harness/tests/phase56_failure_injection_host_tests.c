@@ -47,6 +47,39 @@ int main(void)
     CHECK(!gxos_nativeaot_scheduler_worker_note_pre_runtime_reclaimed(
               &lifecycle));
 
+    lifecycle = (GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE){0};
+    lifecycle.thread = &reclaimed_thread;
+    lifecycle.ownership_state = GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING;
+    lifecycle.runtime_ownership_state =
+        GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_NOT_ACQUIRED;
+    lifecycle.scheduler_owned = 1U;
+    lifecycle.stack_owned = 1U;
+    lifecycle.vm_resources_owned = 1U;
+    CHECK(gxos_nativeaot_scheduler_worker_note_pre_runtime_reclaimed(
+              &lifecycle));
+    CHECK(lifecycle.ownership_state ==
+              GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED);
+    CHECK(lifecycle.scheduler_owned == 0 && lifecycle.stack_owned == 0 &&
+          lifecycle.vm_resources_owned == 0);
+
+    lifecycle = (GXOS_NATIVEAOT_SCHEDULER_THREAD_LIFECYCLE){0};
+    lifecycle.thread = &reclaimed_thread;
+    lifecycle.ownership_state = GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING;
+    lifecycle.runtime_ownership_state =
+        GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS;
+    lifecycle.scheduler_owned = 1U;
+    lifecycle.stack_owned = 1U;
+    lifecycle.vm_resources_owned = 1U;
+    CHECK(!gxos_nativeaot_scheduler_worker_note_pre_runtime_reclaimed(
+              &lifecycle));
+    CHECK(lifecycle.ownership_state ==
+              GXOS_NATIVEAOT_WORKER_OWNERSHIP_RUNNING);
+    CHECK(lifecycle.runtime_ownership_state ==
+              GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS);
+    CHECK(lifecycle.scheduler_owned == 1 && lifecycle.stack_owned == 1 &&
+          lifecycle.vm_resources_owned == 1);
+    CHECK(lifecycle.ownership_transition_failures == 1U);
+
     invalid.thread = &reclaimed_thread;
     invalid.ownership_state = GXOS_NATIVEAOT_WORKER_OWNERSHIP_ALLOCATED;
     CHECK(!gxos_nativeaot_phase56_failure_arm(

@@ -141,6 +141,14 @@ int gxos_nativeaot_managed_worker_api_initialize(
 int gxos_nativeaot_managed_worker_api_allow_shared_threadstore(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api, int allow);
 
+#ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
+/* Phase 69 guest closeout seam: keep one submitted TCB runnable but parked
+   until the persistent service has completed shutdown. */
+int gxos_nativeaot_managed_worker_api_phase69_hold_submitted(
+    GXOS_NATIVEAOT_MANAGED_WORKER_API *api,
+    GXOS_NATIVEAOT_MANAGED_WORKER_HANDLE handle, int hold);
+#endif
+
 GXOS_NATIVEAOT_MANAGED_WORKER_STATUS
 gxos_nativeaot_managed_worker_api_create(
     GXOS_NATIVEAOT_MANAGED_WORKER_API *api,

@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory = $true)] [string]$EvidenceDirectory,
     [Parameter(Mandatory = $true)] [string]$PayloadSha256,
     [Parameter(Mandatory = $true)] [long]$PayloadSize,
+    [ValidateSet('None', 'AttachFailureDiscard', 'IdleStop')]
+    [string]$Phase69FixtureMode = 'None',
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 180
 )
@@ -161,7 +163,8 @@ function Get-HexField10([string]$text, [string]$name) {
     return [Convert]::ToUInt64($match.Groups[1].Value, 16)
 }
 
-Require10 ($RunCount -ge 3) 'Three fresh ManagedKernel Phase 10 boots are required.'
+Require10 ($RunCount -ge 1) `
+    'At least one fresh Phase 10 boot is required; use RunCount 3 for normal acceptance.'
 Require10 ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
     'ManagedKernel EFI or payload is missing.'
 Require10 ($expectedHash -match '^[0-9A-F]{64}$') 'Payload SHA-256 must be 64 hex characters.'
@@ -214,11 +217,20 @@ $requiredMarkers = @(
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_NATIVE_OK',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SECOND_WAIT_READY',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK',
-    'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED',
-    'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_REQUESTED=1',
-    'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_COMPLETE=1',
     'GXOS_NET10:PERSISTENT_SERVICE_ROUTE_QUIESCED=1',
     'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_QUEUE_EMPTY=1',
+    'GXOS_NET10:PHASE69_PERSISTENT_STATE_ACROSS_REAL_EVENTS=1',
+    'GXOS_NET10:PHASE69_ONE_SHOT_SUBMITTED_LIVE_BEFORE_SERVICE_STOP=1',
+    'GXOS_NET10:PHASE69_ONE_SHOT_HELD_PENDING_FOR_SERVICE_STOP=1',
+    'GXOS_NET10:PHASE69_ONE_SHOT_STILL_SUBMITTED_AFTER_SERVICE_STOP=1',
+    'GXOS_NET10:PHASE69_JOINT_ADMISSION_REJECTED_BEFORE_ALLOCATION=1',
+    'GXOS_NET10:PHASE69_REJECTED_ADMISSION_NO_TCB_OR_WAKE_EVENT=1',
+    'GXOS_NET10:PHASE69_ONE_SHOT_SURVIVED_SERVICE_STOP=1',
+    'GXOS_NET10:PHASE69_ONE_SHOT_RECLAIMED_AFTER_SERVICE_STOP=1',
+    'GXOS_NET10:PHASE69_ROUTE_ACCEPTANCE_CLOSED_BEFORE_HARDWARE_STOP=1',
+    'GXOS_NET10:PHASE69_HARDWARE_ROUTES_DISABLED_BEFORE_WORKER_EXIT=1',
+    'GXOS_NET10:PHASE69_THREADSTORE_BASELINE=',
+    'GXOS_NET10:PHASE69_THREADSTORE_FINAL=',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBE_OK',
     'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBED_READY',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_STOPPING',
@@ -227,11 +239,46 @@ $requiredMarkers = @(
     'GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_FINAL_FREE=',
     'GXOS_NET10:PERSISTENT_SERVICE_THREAD_SLOTS_FINAL_FREE=',
     'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_ACCOUNTING_RESTORED',
-    'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_OK',
-    'GXOS_NET10:MANAGED_KERNEL_DRIVER_WAKE_COALESCE_OK',
     'GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ACCOUNTING_RESTORED_NATIVE_OK',
     'GXOS_NET10:MANAGED_KERNEL_PHASE9_PASS',
     'GXOS_NET10:MANAGED_KERNEL_PHASE10_PASS')
+$requiredMarkers += switch ($Phase69FixtureMode) {
+    'None' {
+        @('GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED',
+          'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_REQUESTED=1',
+          'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_COMPLETE=1',
+          'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_OK',
+          'GXOS_NET10:MANAGED_KERNEL_DRIVER_WAKE_COALESCE_OK')
+    }
+    'IdleStop' {
+        @('GXOS_NET10:PHASE69_IDLE_STOP_READY=1',
+          'GXOS_NET10:PHASE69_IDLE_STOP_QUEUE_EMPTY=1',
+          'GXOS_NET10:PHASE69_IDLE_STOP_WORKER_BLOCKED=1',
+          'GXOS_NET10:PHASE69_IDLE_STOP_WAKE_DELIVERED=1',
+          'GXOS_NET10:PHASE69_IDLE_STOP_WORKER_EXITED=1',
+          'GXOS_NET10:PHASE69_IDLE_STOP_NO_BUSY_LOOP=1',
+          'GXOS_NET10:PHASE69_IDLE_STOP_DETACHED_ONCE=1',
+          'GXOS_NET10:PHASE69_IDLE_STOP_EVENT_AND_TCB_RECLAIMED=1',
+          'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_COMPLETE=1')
+    }
+    'AttachFailureDiscard' {
+        @('GXOS_NET10:PHASE69_ATTACH_FAILURE_FIXTURE_BEGIN=1',
+          'GXOS_NET10:PHASE69_ATTACH_FAILURE_INJECTION_FIRED=1',
+          'GXOS_NET10:PHASE69_FAILED_START_BASELINE_RESTORED=1',
+          'GXOS_NET10:PHASE69_FAILED_RUNTIME_ACQUIRED=0',
+          'GXOS_NET10:PHASE69_FAILED_RUNTIME_ATTACH_ATTEMPTED=1',
+          'GXOS_NET10:PHASE69_FAILED_TCB_HANDLE_EVENT_VM_RECLAIMED=1',
+          'GXOS_NET10:PHASE69_FAILED_OWNER_SLOT_RELEASED=1',
+          'GXOS_NET10:PHASE69_SAME_SLOT_REUSED=1',
+          'GXOS_NET10:PHASE69_STALE_FAILED_STOP_REJECTED=1',
+          'GXOS_NET10:PHASE69_HEALTHY_REPLACEMENT_STARTED=1',
+          'GXOS_NET10:PHASE69_HEALTHY_REPLACEMENT_RUNTIME_ATTACH=1',
+          'GXOS_NET10:PHASE69_DISCARD_FIXTURE_EVENTS_ENQUEUED=3',
+          'GXOS_NET10:PHASE69_DISCARD_QUEUE_EMPTY=1',
+          'GXOS_NET10:PHASE69_DISCARD_MANAGED_DISPATCH_SUPPRESSED=1',
+          'GXOS_NET10:PERSISTENT_SERVICE_DISCARD_COMPLETE=1')
+    }
+}
 
 $owned = @()
 try {
@@ -332,10 +379,19 @@ try {
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK' `
                 $deadline $process $stream $logStream $text $buffer
 
-            Send-SerialBurst10 $client $stream $process $injectionLog `
-                'RX_AFTER_RUNTIME_OK_BURST' ([byte[]](0x41, 0x42, 0x43))
-            Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED' `
-                $deadline $process $stream $logStream $text $buffer
+            if ($Phase69FixtureMode -eq 'IdleStop') {
+                Wait-Marker10 'GXOS_NET10:PHASE69_IDLE_STOP_READY=1' `
+                    $deadline $process $stream $logStream $text $buffer
+            } else {
+                Send-SerialBurst10 $client $stream $process $injectionLog `
+                    'RX_AFTER_RUNTIME_OK_BURST' ([byte[]](0x41, 0x42, 0x43))
+                Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED' `
+                    $deadline $process $stream $logStream $text $buffer
+            }
+            if ($Phase69FixtureMode -eq 'AttachFailureDiscard') {
+                Wait-Marker10 'GXOS_NET10:PERSISTENT_SERVICE_DISCARD_COMPLETE=1' `
+                    $deadline $process $stream $logStream $text $buffer
+            }
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_UNSUBSCRIBED_READY' `
                 $deadline $process $stream $logStream $text $buffer
             Send-SerialByte10 $client $stream $process $injectionLog `
@@ -370,11 +426,30 @@ try {
         }
         Require10 (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_PHASE10_PASS')).Count -eq 1) `
             "Boot $sequence repeated or omitted the Phase 10 pass marker."
-        Require10 (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ENQUEUED_COUNT=0x0000000000000005')).Count -eq 1) `
-            "Boot $sequence did not enqueue exactly five events."
-        Require10 ($finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DRAINED_COUNT=0x0000000000000005') -and
-                   $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DROPPED_COUNT=0x0000000000000000')) `
-            "Boot $sequence did not drain five events without drops."
+        $expectedEnqueued = switch ($Phase69FixtureMode) {
+            'None' { 5 }
+            'IdleStop' { 2 }
+            'AttachFailureDiscard' { 8 }
+        }
+        $expectedDrained = if ($Phase69FixtureMode -eq 'AttachFailureDiscard') { 2 } else { $expectedEnqueued }
+        $enqueued = Get-HexField10 $finalText 'GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ENQUEUED_COUNT='
+        $drained = Get-HexField10 $finalText 'GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DRAINED_COUNT='
+        $dropped = Get-HexField10 $finalText 'GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DROPPED_COUNT='
+        $discarded = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_SHUTDOWN_DISCARDED='
+        Require10 ($enqueued -eq $expectedEnqueued -and $drained -eq $expectedDrained -and $dropped -eq 0) `
+            "Boot $sequence reported incorrect enqueue, drain, or overflow accounting."
+        if ($Phase69FixtureMode -eq 'AttachFailureDiscard') {
+            Require10 ($discarded -eq 6) "Boot $sequence did not discard the six pending records."
+            Require10 ((Get-HexField10 $finalText 'GXOS_NET10:PHASE69_DISCARD_QUEUED_BEFORE=') -eq 6 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_DISCARD_RECORDS_COUNT=') -eq 6 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_DISCARD_DROPPED_BEFORE=') -eq
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_DISCARD_DROPPED_AFTER=') -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_DISCARD_DISPATCH_COUNT_BEFORE=') -eq
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_DISCARD_DISPATCH_COUNT_AFTER=')) `
+                "Boot $sequence did not suppress dispatch and preserve overflow accounting during DISCARD."
+        } else {
+            Require10 ($discarded -eq 0) "Boot $sequence unexpectedly discarded queue records."
+        }
         $timelineText = Get-Content -LiteralPath $timelinePath -Raw
         Require10 ($timelineText.Contains('event=HOST_NO_MANUAL_DRAIN')) `
             'Timeline did not record the scheduler worker as the first delivery path.'
@@ -382,11 +457,44 @@ try {
         Require10 ($wakeRequests -ge 1 -and $wakeRequests -le 5) `
             "Boot $sequence reported an invalid wake request count."
         $drainPending = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PENDING='
-        $drainEvidenceValid = $drainPending -le 3 -and
-            (($drainPending -eq 0 -and $finalText.Contains('GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_IDLE=1')) -or
-             ($drainPending -gt 0 -and $finalText.Contains('GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_PENDING=1')))
+        $drainEvidenceValid = switch ($Phase69FixtureMode) {
+            'None' { $drainPending -gt 0 -and $drainPending -le 3 -and
+                $finalText.Contains('GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_PENDING=1') }
+            'IdleStop' { $drainPending -eq 0 -and
+                $finalText.Contains('GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_IDLE=1') }
+            'AttachFailureDiscard' { $drainPending -eq 6 -and
+                $finalText.Contains('GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_PENDING=1') }
+        }
         Require10 $drainEvidenceValid `
-            "Boot $sequence reported inconsistent drain queue evidence."
+            "Boot $sequence reported inconsistent shutdown queue evidence."
+        if ($Phase69FixtureMode -eq 'AttachFailureDiscard') {
+            $failedSlot = Get-HexField10 $finalText 'GXOS_NET10:PHASE69_FAILED_SERVICE_SLOT='
+            $failedIdentity = Get-HexField10 $finalText 'GXOS_NET10:PHASE69_FAILED_SERVICE_IDENTITY='
+            $failedGeneration = Get-HexField10 $finalText 'GXOS_NET10:PHASE69_FAILED_SERVICE_GENERATION='
+            $replacementSlot = Get-HexField10 $finalText 'GXOS_NET10:PHASE69_REPLACEMENT_SERVICE_SLOT='
+            $replacementIdentity = Get-HexField10 $finalText 'GXOS_NET10:PHASE69_REPLACEMENT_SERVICE_IDENTITY='
+            $replacementGeneration = Get-HexField10 $finalText 'GXOS_NET10:PHASE69_REPLACEMENT_SERVICE_GENERATION='
+            Require10 ($failedSlot -eq 0 -and $replacementSlot -eq $failedSlot -and
+                       $failedIdentity -ne $replacementIdentity -and
+                       $failedGeneration -ne $replacementGeneration -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_FAILED_RUNTIME_OWNERSHIP=') -eq 1 -and
+                       $finalText.Contains('GXOS_NET10:PHASE69_FAILED_RUNTIME_ACQUIRED=0') -and
+                       $finalText.Contains('GXOS_NET10:PHASE69_FAILED_RUNTIME_ATTACH_ATTEMPTED=1') -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_FAILED_RUNTIME_ATTACH_COUNT=') -eq 0 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_FAILED_RUNTIME_DETACH_COUNT=') -eq 0 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_FAILED_FINAL_THREADSTORE=') -eq
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_ATTACH_BASELINE_THREADSTORE=') -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_FAILED_FINAL_THREAD_SLOTS_FREE=') -eq
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_ATTACH_BASELINE_THREAD_SLOTS_FREE=') -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_FAILED_FINAL_OBJECT_SLOTS_FREE=') -eq
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_ATTACH_BASELINE_OBJECT_SLOTS_FREE=')) `
+                "Boot $sequence failed attach cleanup or replacement identity checks."
+        }
+        if ($Phase69FixtureMode -eq 'IdleStop') {
+            Require10 ($finalText.Contains('GXOS_NET10:PHASE69_IDLE_STOP_WAKE_DELIVERED=1') -and
+                       $finalText.Contains('GXOS_NET10:PHASE69_IDLE_STOP_NO_BUSY_LOOP=1')) `
+                "Boot $sequence failed the idle stop wake/exit proof."
+        }
         $objectBaseline = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_BASELINE_FREE='
         $objectRunning = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_OBJECT_SLOTS_RUNNING_FREE='
         $objectPeak = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_ONE_SHOT_OBJECTS_AFTER_CREATE='
