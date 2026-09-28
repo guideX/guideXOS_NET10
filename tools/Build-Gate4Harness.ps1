@@ -19,6 +19,7 @@ param(
     [string]$Phase69FixtureMode = 'None',
     [ValidateSet('None', 'RecoverableRestart', 'ReplacementAdmissionFailure')]
     [string]$Phase70FixtureMode = 'None',
+    [switch]$EnablePhase72ExplicitRestartFixture,
     [switch]$EnablePhase62ConcurrentManagedWorkerApi,
     [switch]$EnablePhase64ManagedWorkerApi,
     [switch]$EnablePhase65ManagedWorkerApi,
@@ -114,6 +115,13 @@ if ($Phase70FixtureMode -ne 'None' -and
      -not $EnablePhase69PersistentServiceOwner -or
      $Phase69FixtureMode -ne 'None')) {
     throw 'Phase 70 restart fixtures require the ManagedKernel persistent-service owner and cannot be combined with a Phase 69 fixture.'
+}
+if ($EnablePhase72ExplicitRestartFixture -and
+    ($PayloadMode -ne 'ManagedKernel' -or
+     -not $EnablePhase69PersistentServiceOwner -or
+     $Phase70FixtureMode -ne 'ReplacementAdmissionFailure' -or
+     $Phase69FixtureMode -ne 'None')) {
+    throw 'Phase 72 explicit-restart fixture requires the ManagedKernel service owner and Phase 71 replacement-admission failure fixture.'
 }
 if ($EnablePhase69PersistentServiceOwner -and $PayloadMode -ne 'ManagedKernel') {
     throw 'Phase 69 persistent service ownership requires -PayloadMode ManagedKernel.'
@@ -401,6 +409,7 @@ $managedKernelSerialSource = Join-Path $root 'src\Gate4Harness\managed_kernel_se
 $managedKernelInterruptSource = Join-Path $root 'src\Gate4Harness\managed_kernel_interrupt.c'
 $managedKernelDriverWorkerSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_worker.c'
 $managedKernelDriverOwnerSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_service_owner.c'
+$managedKernelDriverStatusSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_service_status.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
 $virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
@@ -498,6 +507,9 @@ if (-not (Test-Path -LiteralPath $managedKernelDriverWorkerSource)) {
 }
 if (-not (Test-Path -LiteralPath $managedKernelDriverOwnerSource)) {
     throw "ManagedKernel driver-service owner source not found: $managedKernelDriverOwnerSource"
+}
+if (-not (Test-Path -LiteralPath $managedKernelDriverStatusSource)) {
+    throw "ManagedKernel driver-service status source not found: $managedKernelDriverStatusSource"
 }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
@@ -1581,6 +1593,9 @@ if ($Phase70FixtureMode -in @('RecoverableRestart', 'ReplacementAdmissionFailure
 if ($Phase70FixtureMode -eq 'ReplacementAdmissionFailure') {
     $gccArguments += '-DGXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE'
 }
+if ($EnablePhase72ExplicitRestartFixture) {
+    $gccArguments += '-DGXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE'
+}
 if ($EnablePhase62ConcurrentManagedWorkerApi) {
     $gccArguments += '-DGXOS_ENABLE_PHASE62_MANAGED_WORKER_API'
     $gccArguments += $managedWorkerApiSource
@@ -1750,6 +1765,7 @@ if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelInterruptSource
     $gccArguments += $managedKernelDriverWorkerSource
     $gccArguments += $managedKernelDriverOwnerSource
+    $gccArguments += $managedKernelDriverStatusSource
     if ($Scenario -notin @('NativeAotEventWait', 'ManagedKernelPhase11')) {
         # ManagedKernel is an allocation-enabled NativeAOT payload.  Keep its
         # startup/runtime import surface on the already-proven bounded harness

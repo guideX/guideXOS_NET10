@@ -61,6 +61,7 @@ typedef struct {
     volatile uint64_t recovery_discarded_count;
     volatile uint32_t work_pending;
     uint32_t preserve_queue_on_unsubscribe;
+    volatile uint32_t defer_service_route_activation;
     volatile uint64_t wake_request_count;
     volatile uint32_t queue_high_water;
     uint32_t route_count;
@@ -133,6 +134,13 @@ int gxos_managed_kernel_interrupt_begin_service_stop(
 int gxos_managed_kernel_interrupt_begin_service_failure(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
     uint64_t *discarded_out);
+
+/* A replacement subscription may be published while the service is starting,
+   then activated only after the managed worker's start stage succeeds. */
+int gxos_managed_kernel_interrupt_defer_service_route_activation(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context, int defer);
+int gxos_managed_kernel_interrupt_resume_service_routes(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context);
 
 uint32_t GX_MANAGED_KERNEL_MS_ABI gxos_managed_kernel_interrupt_subscribe_v1(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,

@@ -8,6 +8,7 @@ param(
     [string]$Phase69FixtureMode = 'None',
     [ValidateSet('None', 'RecoverableRestart', 'ReplacementAdmissionFailure')]
     [string]$Phase70FixtureMode = 'None',
+    [switch]$EnablePhase72ExplicitRestartFixture,
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 180
 )
@@ -19,6 +20,11 @@ $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 $efi = Join-Path $gate 'ESP\EFI\BOOT\BOOTX64.EFI'
 $payload = Join-Path $gate 'ESP\GXOS\gxos-managed-kernel.dll'
 $expectedHash = $PayloadSha256.ToUpperInvariant()
+
+if ($EnablePhase72ExplicitRestartFixture -and
+    $Phase70FixtureMode -ne 'ReplacementAdmissionFailure') {
+    throw 'Phase 72 acceptance requires the Phase 71 replacement-admission failure fixture.'
+}
 
 function Require10([bool]$condition, [string]$message) {
     if (!$condition) { throw $message }
@@ -337,6 +343,46 @@ $requiredMarkers += switch ($Phase70FixtureMode) {
           'GXOS_NET10:PHASE69_ONE_SHOT_HELD_PENDING_FOR_SERVICE_STOP=1')
     }
 }
+if ($EnablePhase72ExplicitRestartFixture) {
+    $requiredMarkers = @($requiredMarkers | Where-Object {
+        $_ -ne 'GXOS_NET10:PHASE71_MANUAL_NEW_EPISODE=1'
+    })
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE72_STATUS_WHILE_RUNNING=1',
+        'GXOS_NET10:PHASE72_RESTART_WHILE_RUNNING_REJECTED=1',
+        'GXOS_NET10:PHASE72_STATUS_BEFORE_EXPLICIT_RESTART=1',
+        'GXOS_NET10:PHASE72_STALE_RESTART_REQUEST_REJECTED=1',
+        'GXOS_NET10:PHASE72_EXPLICIT_ADMISSION_FAILURE_CONTAINED=1',
+        'GXOS_NET10:PHASE72_EXPLICIT_RESTART_ACCEPTED=1',
+        'GXOS_NET10:PHASE72_NEW_EPISODE=1',
+        'GXOS_NET10:PHASE72_NEW_GENERATION_READY=1',
+        'GXOS_NET10:PHASE72_STATUS_AFTER_RESTART_HEALTHY=1',
+        'GXOS_NET10:PHASE72_OLD_HANDLE_STOP_REJECTED=1',
+        'GXOS_NET10:PHASE72_OLD_RESTART_REQUEST_REJECTED=1',
+        'GXOS_NET10:PHASE72_ONE_SHOT_REMAINS_PENDING_AFTER_RESTART=1',
+        'GXOS_NET10:PHASE72_REAL_COM1_EVENT_MANAGED_DISPATCHED=1',
+        'GXOS_NET10:PHASE72_STATUS_WHILE_STOPPING=1',
+        'GXOS_NET10:PHASE72_STATUS_AFTER_DRAIN=1',
+        'GXOS_NET10:PHASE72_STATUS_AFTER_NORMAL_STOP=1',
+        'GXOS_NET10:PHASE72_RESOURCE_BASELINE_RESTORED=1',
+        'GXOS_NET10:PHASE72_QUARANTINE_RESTART_REJECTED=1',
+        'GXOS_NET10:PHASE72_ONE_SHOT_ADD_ONE_41_TO_42=1',
+        'GXOS_NET10:PHASE72_PRE_STATE=',
+        'GXOS_NET10:PHASE72_PRE_DEVICE=',
+        'GXOS_NET10:PHASE72_PRE_CURRENT_VALID=',
+        'GXOS_NET10:PHASE72_PRE_ROUTE_ENABLED=',
+        'GXOS_NET10:PHASE72_PRE_FAILURE_REASON=',
+        'GXOS_NET10:PHASE72_PRE_LAST_FAILED_IDENTITY=',
+        'GXOS_NET10:PHASE72_PRE_LAST_FAILED_GENERATION=',
+        'GXOS_NET10:PHASE72_PRE_BUDGET=',
+        'GXOS_NET10:PHASE72_PRE_ELIGIBLE=',
+        'GXOS_NET10:PHASE72_EXPLICIT_FAILURE_RESULT=',
+        'GXOS_NET10:PHASE72_BUDGET_AFTER_EXPLICIT_FAILURE=',
+        'GXOS_NET10:PHASE72_POST_CURRENT_IDENTITY=',
+        'GXOS_NET10:PHASE72_POST_CURRENT_GENERATION=',
+        'GXOS_NET10:PHASE72_POST_BUDGET=',
+        'GXOS_NET10:PHASE72_POST_LAST_FAILURE=')
+}
 $requiredMarkers += switch ($Phase69FixtureMode) {
     'None' {
         $markers = @('GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED',
@@ -630,6 +676,29 @@ try {
                        (Get-HexField10 $finalText 'GXOS_NET10:PHASE70_THREADSTORE_FINAL=') -eq
                            (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_THREADSTORE_BASELINE=')) `
                 "Boot $sequence failed replacement admission containment or manual-episode checks."
+            if ($EnablePhase72ExplicitRestartFixture) {
+                $phase72Identity = Get-HexField10 $finalText 'GXOS_NET10:PHASE72_POST_CURRENT_IDENTITY='
+                $phase72Generation = Get-HexField10 $finalText 'GXOS_NET10:PHASE72_POST_CURRENT_GENERATION='
+                Require10 ((Get-HexField10 $finalText 'GXOS_NET10:PHASE72_PRE_STATE=') -eq 14 -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_PRE_DEVICE=') -eq 1 -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_PRE_CURRENT_VALID=') -eq 0 -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_PRE_ROUTE_ENABLED=') -eq 0 -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_PRE_FAILURE_REASON=') -eq 3 -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_PRE_LAST_FAILED_IDENTITY=') -eq $oldIdentity -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_PRE_LAST_FAILED_GENERATION=') -eq $oldGeneration -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_PRE_BUDGET=') -eq 0 -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_PRE_ELIGIBLE=') -eq 1 -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_EXPLICIT_FAILURE_RESULT=') -eq 6 -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_BUDGET_AFTER_EXPLICIT_FAILURE=') -eq 1 -and
+                           $phase72Identity -ne $oldIdentity -and
+                           $phase72Generation -gt $oldGeneration -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_POST_BUDGET=') -eq 1 -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE72_POST_LAST_FAILURE=') -eq 1 -and
+                           $finalText.Contains('GXOS_NET10:PHASE70_ONE_SHOT_SURVIVED_RESTART_RESULT_42=1') -and
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE70_THREADSTORE_FINAL=') -eq
+                               (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_THREADSTORE_BASELINE=')) `
+                    "Boot $sequence failed Phase 72 health, explicit restart, event, one-shot, or reclaim checks."
+            }
         } else {
             Require10 ($discarded -eq 0) "Boot $sequence unexpectedly discarded queue records."
         }
@@ -695,12 +764,15 @@ try {
                     $objectBaseline - 3 -and
                 $objectFinal -eq $objectBaseline
         } elseif ($Phase70FixtureMode -eq 'ReplacementAdmissionFailure') {
+            $expectedManualStartObjectsFree = if ($EnablePhase72ExplicitRestartFixture) {
+                $objectBaseline - 3
+            } else { $objectBaseline - 2 }
             $objectBaseline - $objectRunning -eq 2 -and
                 $objectRunning - $objectPeak -eq 1 -and
                 (Get-HexField10 $finalText 'GXOS_NET10:PHASE71_OBJECTS_FREE_AFTER_FAILURE=') -eq
                     $objectBaseline - 1 -and
                 (Get-HexField10 $finalText 'GXOS_NET10:PHASE71_OBJECTS_FREE_AFTER_MANUAL_START=') -eq
-                    $objectBaseline - 2 -and
+                    $expectedManualStartObjectsFree -and
                 $objectFinal -eq $objectBaseline
         } else {
             $objectBaseline - $objectRunning -eq 2 -and

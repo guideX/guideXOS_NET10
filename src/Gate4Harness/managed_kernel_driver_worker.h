@@ -57,6 +57,54 @@ typedef enum {
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_RESOURCE_FAILURE = 3
 } GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT;
 
+typedef enum {
+    GXOS_MANAGED_KERNEL_DRIVER_FAILURE_NONE = 0,
+    GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH = 1,
+    GXOS_MANAGED_KERNEL_DRIVER_FAILURE_RUNNING_DISPATCH = 2,
+    GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AUTOMATIC_REPLACEMENT_ADMISSION = 3,
+    GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP = 4
+} GXOS_MANAGED_KERNEL_DRIVER_FAILURE_REASON;
+
+typedef enum {
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK = 0,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_INVALID_ARGUMENT = 1,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_INVALID_STATE = 2,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_IN_PROGRESS = 3,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_QUARANTINED = 4,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_STALE = 5,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_CAPACITY = 6,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_START_FAILURE = 7,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_RESOURCE_FAILURE = 8
+} GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT;
+
+#define GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_VERSION 1U
+
+/* Bounded value-only snapshot. It intentionally contains no runtime, TCB,
+   stack, event, or managed-object pointers. */
+typedef struct {
+    uint32_t structure_size;
+    uint32_t version;
+    uint32_t service_slot;
+    uint32_t device_identity;
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATE owner_state;
+    uint32_t current_service_valid;
+    uint32_t current_service_identity;
+    uint16_t current_generation;
+    uint16_t reserved0;
+    uint32_t route_enabled;
+    uint32_t runtime_attached;
+    GXOS_MANAGED_KERNEL_DRIVER_FAILURE_REASON last_failure_reason;
+    uint32_t last_failed_identity;
+    uint16_t last_failed_generation;
+    uint16_t reserved1;
+    uint32_t last_failed_device_identity;
+    uint32_t restart_budget_remaining;
+    uint32_t automatic_restart_attempts;
+    uint32_t restart_failed;
+    uint32_t explicit_restart_allowed;
+    uint32_t explicit_restart_in_progress;
+} GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_V1;
+
 typedef void (*GXOS_MANAGED_KERNEL_DRIVER_WORKER_LOG_TEXT)(const char *text);
 typedef void (*GXOS_MANAGED_KERNEL_DRIVER_WORKER_LOG_HEX)(const char *name,
                                                            uint64_t value);
@@ -97,6 +145,11 @@ typedef struct {
     uint32_t wake_event_handle_open;
     uint32_t runtime_attach_attempted;
     uint32_t managed_loop_entered;
+    GXOS_MANAGED_KERNEL_DRIVER_FAILURE_REASON last_failure_reason;
+    uint32_t last_failed_identity;
+    uint16_t last_failed_generation;
+    uint16_t reserved_failure;
+    uint32_t last_failed_device_identity;
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_SHUTDOWN_POLICY shutdown_policy;
     uint64_t shutdown_discarded_count;
     uint64_t failure_discarded_count;
@@ -182,5 +235,24 @@ int gxos_managed_kernel_driver_worker_destroy(
 int gxos_managed_kernel_driver_worker_is_running(
     const GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle);
+
+/* Control API for the single persistent service. Status is read-only and may
+   be queried from an active scheduler thread; it copies lifecycle and route
+   state under the interrupt context's existing critical section. */
+GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT
+gxos_managed_kernel_driver_service_get_status(
+    const GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_V1 *status_out);
+
+/* Call from the scheduler boot thread. Explicit recovery is accepted from
+   RESTART_FAILED only. The expected identity tuple binds the request to the
+   failed episode observed by the caller. */
+GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT
+gxos_managed_kernel_driver_service_restart(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    uint32_t expected_failed_identity,
+    uint16_t expected_failed_generation,
+    uint32_t expected_device_identity,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE *new_handle_out);
 
 #endif

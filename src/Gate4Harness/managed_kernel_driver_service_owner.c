@@ -5,10 +5,12 @@ typedef struct GXOS_MANAGED_KERNEL_DRIVER_OWNER_SLOT {
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle;
     uint32_t last_identity;
     uint16_t last_generation;
+    uint32_t last_device_identity;
     const void *restart_owner_context;
     uint32_t restart_budget_remaining;
     GXOS_MANAGED_KERNEL_DRIVER_RESTART_STATE restart_state;
     uint32_t restart_in_progress;
+    uint32_t manual_restart_in_progress;
 } GXOS_MANAGED_KERNEL_DRIVER_OWNER_SLOT;
 
 static GXOS_MANAGED_KERNEL_DRIVER_OWNER_SLOT g_owner_slot;
@@ -28,13 +30,18 @@ static uint16_t next_generation(uint16_t previous)
 int gxos_managed_kernel_driver_owner_claim(const void *owner_context)
 {
     if (owner_context == 0) return GXOS_MANAGED_KERNEL_DRIVER_OWNER_INVALID;
+    if (g_owner_slot.manual_restart_in_progress != 0U &&
+        g_owner_slot.restart_owner_context != owner_context) {
+        return GXOS_MANAGED_KERNEL_DRIVER_OWNER_CAPACITY;
+    }
     if (g_owner_slot.owner_context != 0) {
         return GXOS_MANAGED_KERNEL_DRIVER_OWNER_CAPACITY;
     }
     g_owner_slot.owner_context = owner_context;
     g_owner_slot.handle = (GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE){0};
-    if (g_owner_slot.restart_in_progress == 0U ||
-        g_owner_slot.restart_owner_context != owner_context) {
+    if (g_owner_slot.manual_restart_in_progress == 0U &&
+        (g_owner_slot.restart_in_progress == 0U ||
+         g_owner_slot.restart_owner_context != owner_context)) {
         g_owner_slot.restart_owner_context = owner_context;
         g_owner_slot.restart_budget_remaining =
             GXOS_MANAGED_KERNEL_DRIVER_AUTOMATIC_RESTART_BUDGET;
@@ -64,6 +71,7 @@ int gxos_managed_kernel_driver_owner_publish(
     handle.device_identity = device_identity;
     handle.slot = 0U;
     g_owner_slot.handle = handle;
+    g_owner_slot.last_device_identity = device_identity;
     *handle_out = handle;
     return 1;
 }
@@ -101,6 +109,7 @@ int gxos_managed_kernel_driver_owner_restart_begin(
     if (cause != GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_RECOVERABLE_DISPATCH ||
         !gxos_managed_kernel_driver_owner_is_current(owner_context, handle) ||
         g_owner_slot.restart_owner_context != owner_context ||
+        g_owner_slot.manual_restart_in_progress != 0U ||
         g_owner_slot.restart_in_progress != 0U ||
         g_owner_slot.restart_budget_remaining == 0U ||
         g_owner_slot.restart_state !=
@@ -139,6 +148,7 @@ int gxos_managed_kernel_driver_owner_restart_exhaust(
 {
     if (!gxos_managed_kernel_driver_owner_is_current(owner_context, handle) ||
         g_owner_slot.restart_owner_context != owner_context ||
+        g_owner_slot.manual_restart_in_progress != 0U ||
         g_owner_slot.restart_in_progress != 0U ||
         g_owner_slot.restart_budget_remaining != 0U ||
         (g_owner_slot.restart_state !=
@@ -166,4 +176,61 @@ gxos_managed_kernel_driver_owner_restart_state(const void *owner_context)
            g_owner_slot.restart_owner_context == owner_context
         ? g_owner_slot.restart_state
         : GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED;
+}
+
+int gxos_managed_kernel_driver_owner_manual_restart_begin(
+    const void *owner_context, uint32_t expected_identity,
+    uint16_t expected_generation, uint32_t expected_device_identity)
+{
+    if (owner_context == 0 || expected_identity == 0U ||
+        expected_generation == 0U || expected_device_identity == 0U) {
+        return GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_INVALID;
+    }
+    if (g_owner_slot.owner_context != 0 ||
+        g_owner_slot.restart_in_progress != 0U ||
+        g_owner_slot.manual_restart_in_progress != 0U) {
+        return GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_BUSY;
+    }
+    if (g_owner_slot.restart_owner_context != owner_context ||
+        g_owner_slot.last_identity != expected_identity ||
+        g_owner_slot.last_generation != expected_generation ||
+        g_owner_slot.last_device_identity != expected_device_identity) {
+        return GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_STALE;
+    }
+    if (g_owner_slot.restart_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_FAILED &&
+        g_owner_slot.restart_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_EXHAUSTED) {
+        return GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_STATE;
+    }
+    g_owner_slot.manual_restart_in_progress = 1U;
+    g_owner_slot.restart_budget_remaining =
+        GXOS_MANAGED_KERNEL_DRIVER_AUTOMATIC_RESTART_BUDGET;
+    g_owner_slot.restart_state =
+        GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED;
+    return GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_OK;
+}
+
+int gxos_managed_kernel_driver_owner_manual_restart_complete(
+    const void *owner_context, int succeeded)
+{
+    if (owner_context == 0 ||
+        g_owner_slot.restart_owner_context != owner_context ||
+        g_owner_slot.manual_restart_in_progress == 0U ||
+        g_owner_slot.restart_in_progress != 0U) {
+        return 0;
+    }
+    g_owner_slot.restart_state = succeeded
+        ? GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED
+        : GXOS_MANAGED_KERNEL_DRIVER_RESTART_FAILED;
+    g_owner_slot.manual_restart_in_progress = 0U;
+    return 1;
+}
+
+int gxos_managed_kernel_driver_owner_manual_restart_in_progress(
+    const void *owner_context)
+{
+    return owner_context != 0 &&
+           g_owner_slot.restart_owner_context == owner_context &&
+           g_owner_slot.manual_restart_in_progress != 0U;
 }

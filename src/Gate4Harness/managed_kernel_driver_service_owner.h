@@ -9,6 +9,14 @@ enum {
     GXOS_MANAGED_KERNEL_DRIVER_OWNER_INVALID = 3
 };
 
+enum {
+    GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_OK = 0,
+    GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_INVALID = 1,
+    GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_BUSY = 2,
+    GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_STALE = 3,
+    GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_STATE = 4
+};
+
 typedef enum GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE {
     GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_NONE = 0,
     GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_RECOVERABLE_DISPATCH = 1
@@ -48,5 +56,12 @@ uint32_t gxos_managed_kernel_driver_owner_restart_budget(
     const void *owner_context);
 GXOS_MANAGED_KERNEL_DRIVER_RESTART_STATE
 gxos_managed_kernel_driver_owner_restart_state(const void *owner_context);
+int gxos_managed_kernel_driver_owner_manual_restart_begin(
+    const void *owner_context, uint32_t expected_identity,
+    uint16_t expected_generation, uint32_t expected_device_identity);
+int gxos_managed_kernel_driver_owner_manual_restart_complete(
+    const void *owner_context, int succeeded);
+int gxos_managed_kernel_driver_owner_manual_restart_in_progress(
+    const void *owner_context);
 
 #endif

@@ -257,6 +257,76 @@ int gxos_managed_kernel_interrupt_begin_service_failure(
     return begin_service_quiesce(context, 1, 1, discarded_out);
 }
 
+int gxos_managed_kernel_interrupt_defer_service_route_activation(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context, int defer)
+{
+    if (!gxos_managed_kernel_interrupt_validate(context)) return 0;
+    __atomic_store_n(&context->defer_service_route_activation,
+                     defer != 0 ? 1U : 0U, __ATOMIC_RELEASE);
+    return 1;
+}
+
+int gxos_managed_kernel_interrupt_resume_service_routes(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context)
+{
+    uint64_t flags;
+    uint32_t index;
+    int has_subscription = 0;
+    int enabled_all = 1;
+    if (!gxos_managed_kernel_interrupt_validate(context)) return 0;
+    flags = context->critical_enter(context->routes[0].hardware_context);
+    for (index = 0; index != context->route_count; ++index) {
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route = &context->routes[index];
+        if (load_u32(&route->subscription_active) != 0U) {
+            has_subscription = 1;
+            store_u32(&route->accepting_events, 0U);
+        }
+    }
+    if (!has_subscription) {
+        context->critical_leave(context->routes[0].hardware_context, flags);
+        sync_legacy_route0(context);
+        return 0;
+    }
+    for (index = 0; index != context->route_count; ++index) {
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route = &context->routes[index];
+        if (load_u32(&route->subscription_active) == 0U ||
+            load_u32(&route->hardware_enabled) != 0U) {
+            continue;
+        }
+        if (!route->enable_hardware(route->hardware_context)) {
+            enabled_all = 0;
+            break;
+        }
+        store_u32(&route->hardware_enabled, 1U);
+    }
+    if (!enabled_all) {
+        /* Keep acceptance closed and return all successfully enabled routes to
+           the disabled state before reporting failure to the owner. */
+        for (index = 0; index != context->route_count; ++index) {
+            GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route =
+                &context->routes[index];
+            if (load_u32(&route->hardware_enabled) != 0U) {
+                if (route->disable_hardware(route->hardware_context)) {
+                    store_u32(&route->hardware_enabled, 0U);
+                }
+            }
+            store_u32(&route->accepting_events, 0U);
+        }
+        context->critical_leave(context->routes[0].hardware_context, flags);
+        sync_legacy_route0(context);
+        return 0;
+    }
+    for (index = 0; index != context->route_count; ++index) {
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route = &context->routes[index];
+        if (load_u32(&route->subscription_active) != 0U) {
+            store_u32(&route->accepting_events, 1U);
+        }
+    }
+    context->critical_leave(context->routes[0].hardware_context, flags);
+    sync_legacy_route0(context);
+    return 1;
+}
+
 static void enqueue_from_route(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
     const GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route,
@@ -377,6 +447,7 @@ static uint32_t subscribe_route(
     GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route;
     uint64_t flags;
     uint64_t token;
+    uint32_t defer_activation;
     if (!gxos_managed_kernel_interrupt_validate(context) ||
         route_index >= context->route_count ||
         !route_matches(&context->routes[route_index], event_type, device_kind,
@@ -397,14 +468,17 @@ static uint32_t subscribe_route(
     }
     token = context->next_subscription_id + 1U;
     if (token == 0) token = 1;
-    if (!route->enable_hardware(route->hardware_context)) {
+    defer_activation = __atomic_load_n(
+        &context->defer_service_route_activation, __ATOMIC_ACQUIRE);
+    if (defer_activation == 0U &&
+        !route->enable_hardware(route->hardware_context)) {
         context->critical_leave(route->hardware_context, flags);
         return GX_MANAGED_INVALID_STATE;
     }
     context->next_subscription_id = token;
     route->subscription_id = token;
-    store_u32(&route->hardware_enabled, 1);
-    store_u32(&route->accepting_events, 1);
+    store_u32(&route->hardware_enabled, defer_activation == 0U ? 1U : 0U);
+    store_u32(&route->accepting_events, defer_activation == 0U ? 1U : 0U);
     store_u32(&route->subscription_active, 1);
     context->critical_leave(route->hardware_context, flags);
     *(uint64_t *)(uintptr_t)token_address = token;

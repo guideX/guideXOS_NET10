@@ -15917,6 +15917,9 @@ static void managed_kernel_phase70_prepare_restart(
 {
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker =
         &g_managed_kernel_driver_worker_context;
+#ifdef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_V1 status = {0};
+#endif
     g_phase61_managed_worker_probe = (GXOS_PHASE53O_PROBE){
         .scheduler = &g_create_event_scheduler,
         .main_thread = gxos_scheduler_current_thread(),
@@ -15955,6 +15958,40 @@ static void managed_kernel_phase70_prepare_restart(
             GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED) {
         fail("phase70-restart-fixture-precondition");
     }
+#ifdef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
+    {
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE rejected_handle = {0};
+        GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT restart_result;
+        GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT status_result =
+            gxos_managed_kernel_driver_service_get_status(worker, &status);
+        if (status_result !=
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+            status.version != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_VERSION ||
+            status.owner_state != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_WAITING ||
+            status.current_service_valid == 0U ||
+            status.current_service_identity != worker->service_handle.identity ||
+            status.current_generation != worker->service_handle.generation ||
+            status.device_identity != worker->service_handle.device_identity ||
+            status.route_enabled == 0U || status.runtime_attached == 0U ||
+            status.explicit_restart_allowed != 0U) {
+            fail("phase72-running-service-status");
+        }
+        restart_result = gxos_managed_kernel_driver_service_restart(
+            worker, worker->service_handle.identity,
+            worker->service_handle.generation,
+            worker->service_handle.device_identity, &rejected_handle);
+        if (restart_result !=
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_INVALID_STATE ||
+            rejected_handle.identity != 0U ||
+            !gxos_managed_kernel_driver_worker_is_running(
+                worker, g_managed_kernel_driver_service_handle) ||
+            gxos_managed_kernel_driver_owner_restart_budget(worker) != 1U) {
+            fail("phase72-restart-while-running-rejected");
+        }
+        serial_text("GXOS_NET10:PHASE72_STATUS_WHILE_RUNNING=1\r\n");
+        serial_text("GXOS_NET10:PHASE72_RESTART_WHILE_RUNNING_REJECTED=1\r\n");
+    }
+#endif
     g_phase70_restart_evidence.old_service = worker->service_handle;
     g_phase70_restart_evidence.old_thread_handle = worker->worker_handle;
     g_phase70_restart_evidence.old_wake_event = worker->wake_event;
@@ -16225,12 +16262,19 @@ static int managed_kernel_phase71_wait_for_restart_failure(
         GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_RECOVERABLE_DISPATCH;
     uint32_t budget_before = UINT32_MAX;
     uint32_t iteration;
+#ifndef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
     uint32_t tls_index;
     uint32_t runtime_fls_slot;
     GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup;
-    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE manual_handle = {0};
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT initialize_result;
     uint32_t manual_prepare_result;
+#endif
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE manual_handle = {0};
+#ifdef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_V1 status = {0};
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT restart_result;
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE stale_restart_handle = {0};
+#endif
 
     if (boot_services == 0 || g_phase70_restart_evidence.prepared == 0U) {
         return 0;
@@ -16374,15 +16418,32 @@ static int managed_kernel_phase71_wait_for_restart_failure(
         worker->nativeaot_lifecycle.runtime_detach_count);
     serial_text("\r\n");
 
+#ifndef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
     managed_kernel_phase70_finish_one_shot_after_service_stop(
         g_phase70_restart_evidence.scheduler_object_baseline,
         g_phase70_restart_evidence.scheduler_thread_baseline,
         g_phase70_restart_evidence.threadstore_baseline);
     serial_text("GXOS_NET10:PHASE71_ONE_SHOT_SURVIVED_FAILED_RESTART_RESULT_42=1\r\n");
+#else
+    {
+        GXOS_NATIVEAOT_MANAGED_WORKER_RESULT pending = {0};
+        if (gxos_nativeaot_managed_worker_api_poll(
+                &g_phase61_managed_worker_api,
+                g_phase69_shutdown_one_shot_handle, &pending) !=
+                GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+            pending.state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED ||
+            pending.operation_id != GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE ||
+            pending.result_code != 0) {
+            return 0;
+        }
+        serial_text("GXOS_NET10:PHASE72_ONE_SHOT_PENDING_BEFORE_RESTART=1\r\n");
+    }
+#endif
     /* Keep the authoritative value-only handle in static fixture evidence
        across managed one-shot execution; refresh the local snapshot before
        comparing it with the later manual generation. */
     old_handle = g_phase70_restart_evidence.old_service;
+#ifndef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
     if (gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
             g_phase70_restart_evidence.scheduler_object_baseline ||
         gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
@@ -16394,7 +16455,21 @@ static int managed_kernel_phase71_wait_for_restart_failure(
         return 0;
     }
     serial_text("GXOS_NET10:PHASE71_FAILED_RESTART_BASELINE_RESTORED=1\r\n");
+#else
+    if (gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+            g_phase70_restart_evidence.scheduler_object_baseline - 1U ||
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
+            g_phase70_restart_evidence.scheduler_thread_baseline - 1U ||
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+            worker->nativeaot_lifecycle.main_thread->fls_values[
+                worker->nativeaot_lifecycle.runtime_fls_slot], 0) !=
+            g_phase70_restart_evidence.threadstore_baseline) {
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE72_OLD_SERVICE_RESOURCES_RECLAIMED_ONE_SHOT_LIVE=1\r\n");
+#endif
 
+#ifndef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
     tls_index = worker->nativeaot_lifecycle.tls_index;
     runtime_fls_slot = worker->nativeaot_lifecycle.runtime_fls_slot;
     runtime_fls_cleanup = worker->nativeaot_lifecycle.runtime_fls_cleanup;
@@ -16472,6 +16547,182 @@ static int managed_kernel_phase71_wait_for_restart_failure(
     serial_text("\r\n");
     serial_text("GXOS_NET10:PHASE71_MANUAL_COM1_ROUTE_ENABLED=1\r\n");
     serial_text("GXOS_NET10:PHASE71_MANUAL_SERVICE_READY=1\r\n");
+#else
+    if (gxos_managed_kernel_driver_service_get_status(worker, &status) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+        status.version != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_VERSION ||
+        status.owner_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESTART_FAILED ||
+        status.device_identity != old_handle.device_identity ||
+        status.current_service_valid != 0U ||
+        status.current_service_identity != 0U || status.current_generation != 0U ||
+        status.route_enabled != 0U || status.runtime_attached != 0U ||
+        status.last_failure_reason !=
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AUTOMATIC_REPLACEMENT_ADMISSION ||
+        status.last_failed_identity != old_handle.identity ||
+        status.last_failed_generation != old_handle.generation ||
+        status.last_failed_device_identity != old_handle.device_identity ||
+        status.restart_budget_remaining != 0U ||
+        status.automatic_restart_attempts != 1U || status.restart_failed == 0U ||
+        status.explicit_restart_allowed == 0U ||
+        gxos_managed_kernel_driver_owner_restart_state(worker) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_FAILED) {
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE72_STATUS_BEFORE_EXPLICIT_RESTART=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_PRE_STATE=0x", status.owner_state);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_PRE_DEVICE=0x", status.device_identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_PRE_CURRENT_VALID=0x",
+                     status.current_service_valid);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_PRE_ROUTE_ENABLED=0x",
+                     status.route_enabled);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_PRE_FAILURE_REASON=0x",
+                     status.last_failure_reason);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_PRE_LAST_FAILED_IDENTITY=0x",
+                     status.last_failed_identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_PRE_LAST_FAILED_GENERATION=0x",
+                     status.last_failed_generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_PRE_BUDGET=0x",
+                     status.restart_budget_remaining);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_PRE_ELIGIBLE=0x",
+                     status.explicit_restart_allowed);
+    serial_text("\r\n");
+
+    restart_result = gxos_managed_kernel_driver_service_restart(
+        worker, old_handle.identity + 1U, old_handle.generation,
+        old_handle.device_identity, &manual_handle);
+    if (restart_result != GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_STALE ||
+        manual_handle.identity != 0U ||
+        gxos_managed_kernel_driver_owner_restart_budget(worker) != 0U) {
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE72_STALE_RESTART_REQUEST_REJECTED=1\r\n");
+
+    worker->restart_admission_failure_armed = 1U;
+    restart_result = gxos_managed_kernel_driver_service_restart(
+        worker, old_handle.identity, old_handle.generation,
+        old_handle.device_identity, &manual_handle);
+    if (restart_result != GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_CAPACITY ||
+        manual_handle.identity != 0U ||
+        worker->service_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESTART_FAILED ||
+        worker->state != GXOS_MANAGED_KERNEL_DRIVER_WORKER_DESTROYED ||
+        worker->service_handle.identity != 0U || worker->thread != 0 ||
+        worker->wake_event != 0U || worker->tcb_owned != 0U ||
+        worker->wake_event_owned != 0U || worker->route_published != 0U ||
+        gxos_managed_kernel_driver_owner_restart_budget(worker) != 1U ||
+        gxos_managed_kernel_driver_owner_restart_state(worker) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_FAILED ||
+        g_managed_kernel_interrupt_context.routes[0].subscription_active != 0U ||
+        g_managed_kernel_interrupt_context.routes[0].hardware_enabled != 0U ||
+        g_managed_kernel_interrupt_context.routes[0].accepting_events != 0U ||
+        worker->restart_admission_failure_attempts != 2U ||
+        gxos_managed_kernel_driver_service_get_status(worker, &status) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+        status.last_failure_reason !=
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH ||
+        status.route_enabled != 0U || status.current_service_valid != 0U ||
+        status.restart_budget_remaining != 1U ||
+        status.explicit_restart_allowed == 0U) {
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE72_EXPLICIT_ADMISSION_FAILURE_CONTAINED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_EXPLICIT_FAILURE_RESULT=0x",
+                     restart_result);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE72_BUDGET_AFTER_EXPLICIT_FAILURE=0x",
+                     status.restart_budget_remaining);
+    serial_text("\r\n");
+
+    restart_result = gxos_managed_kernel_driver_service_restart(
+        worker, old_handle.identity, old_handle.generation,
+        old_handle.device_identity, &manual_handle);
+    if (restart_result != GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+        manual_handle.identity == 0U || manual_handle.generation == 0U ||
+        manual_handle.identity == old_handle.identity ||
+        manual_handle.generation <= old_handle.generation ||
+        manual_handle.device_identity != old_handle.device_identity ||
+        gxos_managed_kernel_driver_owner_restart_budget(worker) != 1U ||
+        gxos_managed_kernel_driver_owner_restart_state(worker) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED ||
+        !worker->nativeaot_lifecycle.attached ||
+        worker->nativeaot_lifecycle.runtime_attach_count != 1U ||
+        worker->nativeaot_lifecycle.runtime_detach_count != 0U ||
+        !gxos_managed_kernel_driver_worker_is_running(worker, manual_handle) ||
+        g_managed_kernel_interrupt_context.routes[0].subscription_active == 0U ||
+        g_managed_kernel_interrupt_context.routes[0].hardware_enabled == 0U ||
+        g_managed_kernel_interrupt_context.routes[0].accepting_events == 0U) {
+        return 0;
+    }
+    g_managed_kernel_driver_service_handle = manual_handle;
+    if (gxos_managed_kernel_driver_service_get_status(worker, &status) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+        status.owner_state != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_WAITING ||
+        status.current_service_valid == 0U ||
+        status.current_service_identity != manual_handle.identity ||
+        status.current_generation != manual_handle.generation ||
+        status.device_identity != old_handle.device_identity ||
+        status.route_enabled == 0U || status.runtime_attached == 0U ||
+        status.restart_budget_remaining != 1U ||
+        status.automatic_restart_attempts != 0U ||
+        status.explicit_restart_allowed != 0U ||
+        status.last_failure_reason !=
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH ||
+        status.last_failed_identity != old_handle.identity ||
+        status.last_failed_generation != old_handle.generation) {
+        return 0;
+    }
+    {
+        GXOS_NATIVEAOT_MANAGED_WORKER_RESULT pending = {0};
+        if (gxos_nativeaot_managed_worker_api_poll(
+                &g_phase61_managed_worker_api,
+                g_phase69_shutdown_one_shot_handle, &pending) !=
+                GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+            pending.state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED ||
+            pending.operation_id != GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE ||
+            pending.result_code != 0) {
+            return 0;
+        }
+    }
+    if (gxos_managed_kernel_driver_worker_request_stop(
+            worker, old_handle, GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN) ||
+        gxos_managed_kernel_driver_worker_pump(worker, old_handle) ||
+        gxos_managed_kernel_driver_service_restart(
+            worker, old_handle.identity, old_handle.generation,
+            old_handle.device_identity, &stale_restart_handle) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_INVALID_STATE ||
+        stale_restart_handle.identity != 0U) {
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE72_EXPLICIT_RESTART_ACCEPTED=1\r\n");
+    serial_text("GXOS_NET10:PHASE72_NEW_EPISODE=1\r\n");
+    serial_text("GXOS_NET10:PHASE72_NEW_GENERATION_READY=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_MANUAL_IDENTITY=0x",
+                     manual_handle.identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_MANUAL_GENERATION=0x",
+                     manual_handle.generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_MANUAL_RESTART_BUDGET=0x",
+                     status.restart_budget_remaining);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_OBJECTS_FREE_AFTER_MANUAL_START=0x",
+                     gxos_scheduler_available_object_slots(&g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_THREADS_FREE_AFTER_MANUAL_START=0x",
+                     gxos_scheduler_available_thread_slots(&g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE71_MANUAL_COM1_ROUTE_ENABLED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_MANUAL_SERVICE_READY=1\r\n");
+#endif
     return 1;
 }
 #endif
@@ -17049,10 +17300,82 @@ static void managed_kernel_phase9_interrupt(
         managed_kernel_serial_interrupt_checkpoint("MANUAL_EPISODE_EVENT_TIMEOUT");
         fail("phase71-manual-episode-real-com1-event");
     }
+#ifdef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
+    {
+        GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker =
+            &g_managed_kernel_driver_worker_context;
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_V1 status = {0};
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE rejected_restart = {0};
+        GXOS_NATIVEAOT_MANAGED_WORKER_RESULT pending = {0};
+        if (gxos_managed_kernel_driver_service_get_status(worker, &status) !=
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+            status.owner_state != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_WAITING ||
+            status.current_service_valid == 0U ||
+            status.current_service_identity != worker->service_handle.identity ||
+            status.current_generation != worker->service_handle.generation ||
+            status.device_identity != worker->service_handle.device_identity ||
+            status.route_enabled == 0U || status.runtime_attached == 0U ||
+            status.restart_budget_remaining != 1U ||
+            status.automatic_restart_attempts != 0U ||
+            status.explicit_restart_allowed != 0U ||
+            status.last_failure_reason !=
+                GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH ||
+            status.last_failed_identity !=
+                g_phase70_restart_evidence.old_service.identity ||
+            status.last_failed_generation !=
+                g_phase70_restart_evidence.old_service.generation) {
+            fail("phase72-status-after-explicit-restart-event");
+        }
+        if (gxos_managed_kernel_driver_service_restart(
+                worker, g_phase70_restart_evidence.old_service.identity,
+                g_phase70_restart_evidence.old_service.generation,
+                g_phase70_restart_evidence.old_service.device_identity,
+                &rejected_restart) !=
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_INVALID_STATE ||
+            rejected_restart.identity != 0U ||
+            gxos_managed_kernel_driver_worker_request_stop(
+                worker, g_phase70_restart_evidence.old_service,
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN) ||
+            gxos_managed_kernel_driver_worker_pump(
+                worker, g_phase70_restart_evidence.old_service) ||
+            !gxos_managed_kernel_driver_worker_is_running(
+                worker, worker->service_handle)) {
+            fail("phase72-old-generation-stop-restart-rejected");
+        }
+        if (gxos_nativeaot_managed_worker_api_poll(
+                &g_phase61_managed_worker_api,
+                g_phase69_shutdown_one_shot_handle, &pending) !=
+                GXOS_NATIVEAOT_MANAGED_WORKER_STATUS_NOT_COMPLETE ||
+            pending.state != GXOS_NATIVEAOT_MANAGED_WORKER_STATE_SUBMITTED ||
+            pending.operation_id != GXOS_NATIVEAOT_MANAGED_WORKER_OPERATION_ADD_ONE ||
+            pending.result_code != 0) {
+            fail("phase72-one-shot-survives-explicit-restart");
+        }
+        serial_text("GXOS_NET10:PHASE72_STATUS_AFTER_RESTART_HEALTHY=1\r\n");
+        serial_text("GXOS_NET10:PHASE72_OLD_HANDLE_STOP_REJECTED=1\r\n");
+        serial_text("GXOS_NET10:PHASE72_OLD_RESTART_REQUEST_REJECTED=1\r\n");
+        serial_text("GXOS_NET10:PHASE72_ONE_SHOT_REMAINS_PENDING_AFTER_RESTART=1\r\n");
+        serial_field_hex("GXOS_NET10:PHASE72_POST_CURRENT_IDENTITY=0x",
+                         status.current_service_identity);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PHASE72_POST_CURRENT_GENERATION=0x",
+                         status.current_generation);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PHASE72_POST_BUDGET=0x",
+                         status.restart_budget_remaining);
+        serial_text("\r\n");
+        serial_field_hex("GXOS_NET10:PHASE72_POST_LAST_FAILURE=0x",
+                         status.last_failure_reason);
+        serial_text("\r\n");
+    }
+#endif
     serial_text("GXOS_NET10:PHASE71_MANUAL_COM1_EVENT_DISPATCHED=1\r\n");
     serial_field_hex("GXOS_NET10:PHASE71_MANUAL_MANAGED_DISPATCHES=0x",
         g_managed_kernel_driver_worker_context.managed_dispatch_count);
     serial_text("\r\n");
+#ifdef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
+    serial_text("GXOS_NET10:PHASE72_REAL_COM1_EVENT_MANAGED_DISPATCHED=1\r\n");
+#endif
 #else
     if (!managed_kernel_phase70_wait_for_restart(boot_services)) {
         managed_kernel_serial_interrupt_checkpoint("RESTART_TIMEOUT");
@@ -17349,6 +17672,22 @@ static void managed_kernel_phase9_interrupt(
             phase69_shutdown_policy)) {
         fail("managed-kernel-driver-worker-request-stop");
     }
+#ifdef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
+    {
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_V1 status = {0};
+        if (gxos_managed_kernel_driver_service_get_status(
+                &g_managed_kernel_driver_worker_context, &status) !=
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+            status.owner_state != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STOPPING ||
+            status.route_enabled != 0U || status.runtime_attached == 0U ||
+            status.explicit_restart_allowed != 0U ||
+            status.last_failure_reason !=
+                GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH) {
+            fail("phase72-status-while-stopping");
+        }
+        serial_text("GXOS_NET10:PHASE72_STATUS_WHILE_STOPPING=1\r\n");
+    }
+#endif
     if (g_managed_kernel_interrupt_context.routes[0].accepting_events != 0U ||
         g_managed_kernel_interrupt_context.routes[0].hardware_enabled != 0U ||
         g_managed_kernel_driver_worker_context.thread == 0 ||
@@ -17385,6 +17724,24 @@ static void managed_kernel_phase9_interrupt(
             phase69_shutdown_policy)) {
         fail("managed-kernel-driver-worker-stop");
     }
+#ifdef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
+    {
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_V1 status = {0};
+        if (gxos_managed_kernel_driver_service_get_status(
+                &g_managed_kernel_driver_worker_context, &status) !=
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+            status.owner_state !=
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RUNTIME_DETACHED ||
+            status.current_service_valid == 0U || status.route_enabled != 0U ||
+            status.runtime_attached != 0U ||
+            status.explicit_restart_allowed != 0U ||
+            status.last_failure_reason !=
+                GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH) {
+            fail("phase72-status-after-drain-stop");
+        }
+        serial_text("GXOS_NET10:PHASE72_STATUS_AFTER_DRAIN=1\r\n");
+    }
+#endif
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
 #ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
     if (g_managed_kernel_driver_worker_context.service_handle.identity == 0U ||
@@ -17535,12 +17892,52 @@ static void managed_kernel_phase9_interrupt(
             g_managed_kernel_driver_service_handle)) {
         fail("managed-kernel-driver-worker-reclaim");
     }
+#ifdef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
+    {
+        GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker =
+            &g_managed_kernel_driver_worker_context;
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_V1 status = {0};
+        if (gxos_managed_kernel_driver_service_get_status(worker, &status) !=
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+            status.owner_state != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RECLAIMED ||
+            status.current_service_valid != 0U || status.route_enabled != 0U ||
+            status.runtime_attached != 0U || status.explicit_restart_allowed != 0U ||
+            status.last_failure_reason !=
+                GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH) {
+            fail("phase72-status-after-destroy");
+        }
+        worker->service_state = GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED;
+        worker->nativeaot_lifecycle.runtime_ownership_state =
+            GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS;
+        if (gxos_managed_kernel_driver_service_restart(
+                worker, status.last_failed_identity,
+                status.last_failed_generation,
+                status.last_failed_device_identity,
+                &(GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE){0}) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_QUARANTINED) {
+            fail("phase72-quarantine-restart-rejected");
+        }
+        worker->service_state = GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RECLAIMED;
+        worker->nativeaot_lifecycle.runtime_ownership_state =
+            GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED;
+        serial_text("GXOS_NET10:PHASE72_STATUS_AFTER_NORMAL_STOP=1\r\n");
+        serial_text("GXOS_NET10:PHASE72_QUARANTINE_RESTART_REJECTED=1\r\n");
+    }
+#endif
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
 #ifndef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
     managed_kernel_phase70_finish_one_shot_after_service_stop(
         g_phase70_restart_evidence.scheduler_object_baseline,
         g_phase70_restart_evidence.scheduler_thread_baseline,
         g_phase70_restart_evidence.threadstore_baseline);
+#elif defined(GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE)
+    managed_kernel_phase70_finish_one_shot_after_service_stop(
+        g_phase70_restart_evidence.scheduler_object_baseline,
+        g_phase70_restart_evidence.scheduler_thread_baseline,
+        g_phase70_restart_evidence.threadstore_baseline);
+    serial_text("GXOS_NET10:PHASE71_ONE_SHOT_SURVIVED_FAILED_RESTART_RESULT_42=1\r\n");
+    serial_text("GXOS_NET10:PHASE72_ONE_SHOT_ADD_ONE_41_TO_42=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_FAILED_RESTART_BASELINE_RESTORED=1\r\n");
 #endif
 #endif
 #ifdef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
@@ -17649,7 +18046,8 @@ static void managed_kernel_phase9_interrupt(
                      g_memory_vm_regions.live_count);
     serial_text("\r\n");
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
-#ifndef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+#if !defined(GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE) || \
+    defined(GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE)
     if (baseline_live <
             g_phase70_restart_evidence.one_shot_memory_after.live_pages -
                 g_phase70_restart_evidence.one_shot_memory_before.live_pages ||
@@ -17762,6 +18160,9 @@ static void managed_kernel_phase9_interrupt(
         g_memory_vm_regions.live_count != baseline_regions - driver_arena_regions) {
         fail("managed-kernel-interrupt-accounting-or-counters");
     }
+#ifdef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
+    serial_text("GXOS_NET10:PHASE72_RESOURCE_BASELINE_RESTORED=1\r\n");
+#endif
     serial_field_hex("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ACCOUNTING_AFTER_LIVE=0x",
                      g_memory_ledger.live_count);
     serial_text("\r\n");

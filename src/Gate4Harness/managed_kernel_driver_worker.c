@@ -41,6 +41,22 @@ static void worker_log_hex(GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
     }
 }
 
+static void worker_record_failure(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_FAILURE_REASON reason,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle)
+{
+    if (context == 0 || reason == GXOS_MANAGED_KERNEL_DRIVER_FAILURE_NONE) {
+        return;
+    }
+    context->last_failure_reason = reason;
+    if (handle.identity != 0U && handle.generation != 0U) {
+        context->last_failed_identity = handle.identity;
+        context->last_failed_generation = handle.generation;
+        context->last_failed_device_identity = handle.device_identity;
+    }
+}
+
 static int worker_service_handle_valid(
     const GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE handle)
@@ -278,12 +294,18 @@ static int worker_handle_recoverable_dispatch_failure(
         return 0;
     }
     context->failure = cause;
+    worker_record_failure(context,
+        GXOS_MANAGED_KERNEL_DRIVER_FAILURE_RUNNING_DISPATCH,
+        context->service_handle);
     worker_log_hex(context,
         "GXOS_NET10:PERSISTENT_SERVICE_FAILURE_CAUSE=0x", cause);
     if (!gxos_managed_kernel_interrupt_begin_service_failure(
             context->interrupt, &discarded)) {
         context->service_state =
             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED;
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+            context->service_handle);
         worker_log(context,
             "GXOS_NET10:PERSISTENT_SERVICE_FAILURE_ROUTE_DISABLE_FAILED=1\r\n");
         return 0;
@@ -349,6 +371,9 @@ static uintptr_t GXOS_SCHEDULER_MS_ABI worker_entry(void *argument)
         context->failure = 1;
         context->service_state =
             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED;
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+            context->service_handle);
         goto worker_complete;
     }
     context->service_state = GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STARTING;
@@ -363,12 +388,21 @@ static uintptr_t GXOS_SCHEDULER_MS_ABI worker_entry(void *argument)
             GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS) {
             context->service_state =
                 GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED;
+            worker_record_failure(context,
+                GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+                context->service_handle);
         } else if (context->nativeaot_lifecycle.attached) {
             context->service_state =
                 GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RUNTIME_ATTACHED;
+            worker_record_failure(context,
+                GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH,
+                context->service_handle);
         } else {
             context->service_state =
                 GXOS_MANAGED_KERNEL_DRIVER_SERVICE_START_FAILED;
+            worker_record_failure(context,
+                GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH,
+                context->service_handle);
         }
         goto worker_complete;
     }
@@ -383,10 +417,24 @@ static uintptr_t GXOS_SCHEDULER_MS_ABI worker_entry(void *argument)
         GXOS_MANAGED_KERNEL_DRIVER_WORKER_STAGE_START);
     if (status != GX_MANAGED_OK) {
         context->failure = status;
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH,
+            context->service_handle);
         goto worker_complete;
     }
     if (!worker_record_first_allocation(context)) {
         context->failure = 1;
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH,
+            context->service_handle);
+        goto worker_complete;
+    }
+    if (!gxos_managed_kernel_interrupt_resume_service_routes(
+            context->interrupt)) {
+        context->failure = 1U;
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH,
+            context->service_handle);
         goto worker_complete;
     }
     context->state = GXOS_MANAGED_KERNEL_DRIVER_WORKER_RUNNING;
@@ -472,6 +520,9 @@ static uintptr_t GXOS_SCHEDULER_MS_ABI worker_entry(void *argument)
                     }
                 } else {
                     context->failure = status;
+                    worker_record_failure(context,
+                        GXOS_MANAGED_KERNEL_DRIVER_FAILURE_RUNNING_DISPATCH,
+                        context->service_handle);
                 }
                 break;
             }
@@ -528,6 +579,9 @@ worker_complete:
                 &context->nativeaot_lifecycle)) {
             context->service_state =
                 GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED;
+            worker_record_failure(context,
+                GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+                context->service_handle);
             worker_log_hex(context,
                 "GXOS_NET10:PRODUCTION_WORKER_DETACH_FAILURE_STATE=0x",
                 context->nativeaot_lifecycle.runtime_state_after);
@@ -567,6 +621,19 @@ worker_complete:
                 GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS
                 ? GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED
                 : GXOS_MANAGED_KERNEL_DRIVER_SERVICE_START_FAILED;
+    }
+    if (context->service_state ==
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED) {
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+            context->service_handle);
+    } else if (context->failure != 0U && context->last_failure_reason ==
+                   GXOS_MANAGED_KERNEL_DRIVER_FAILURE_NONE) {
+        worker_record_failure(context,
+            context->managed_loop_entered != 0U
+                ? GXOS_MANAGED_KERNEL_DRIVER_FAILURE_RUNNING_DISPATCH
+                : GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH,
+            context->service_handle);
     }
     context->state = GXOS_MANAGED_KERNEL_DRIVER_WORKER_STOPPED;
     worker_log(context,
@@ -795,8 +862,6 @@ int gxos_managed_kernel_driver_worker_publish_route(
     }
     route = &context->interrupt->routes[0];
     if (__atomic_load_n(&route->subscription_active, __ATOMIC_ACQUIRE) == 0U ||
-        __atomic_load_n(&route->hardware_enabled, __ATOMIC_ACQUIRE) == 0U ||
-        __atomic_load_n(&route->accepting_events, __ATOMIC_ACQUIRE) == 0U ||
         route->device_id != context->device_identity) {
         return 0;
     }
@@ -852,6 +917,9 @@ static int worker_abort_replacement(
             context->interrupt, &discarded)) {
         context->service_state =
             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED;
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+            context->service_handle);
         return 0;
     }
     context->failure_discarded_count += discarded;
@@ -859,6 +927,9 @@ static int worker_abort_replacement(
             GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS) {
         context->service_state =
             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED;
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+            context->service_handle);
         return 0;
     }
     if (context->restart_prepare == 0 ||
@@ -866,6 +937,9 @@ static int worker_abort_replacement(
             GXOS_MANAGED_KERNEL_DRIVER_RESTART_ABORT_STAGE) != GX_MANAGED_OK) {
         context->service_state =
             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED;
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+            context->service_handle);
         return 0;
     }
     if (context->service_state ==
@@ -1058,6 +1132,9 @@ static int worker_automatic_restart_after_failure(
         log_text, log_hex);
     if (initialize_result != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_OK) {
         (void)gxos_managed_kernel_driver_owner_restart_complete(context, 0);
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AUTOMATIC_REPLACEMENT_ADMISSION,
+            failed_handle);
         context->service_state =
             GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESTART_FAILED;
         worker_log_hex(context,
@@ -1083,14 +1160,31 @@ static int worker_automatic_restart_after_failure(
     worker_log_hex(context,
         "GXOS_NET10:PERSISTENT_SERVICE_THREADS_FREE_AFTER_ADMISSION=0x",
         gxos_scheduler_available_thread_slots(scheduler));
-    if (restart_prepare == 0 || restart_prepare(
-            GXOS_MANAGED_KERNEL_DRIVER_RESTART_PREPARE_STAGE) != GX_MANAGED_OK) {
+    if (restart_prepare == 0 ||
+        !gxos_managed_kernel_interrupt_defer_service_route_activation(
+            context->interrupt, 1)) {
         worker_log(context,
             "GXOS_NET10:PERSISTENT_SERVICE_RESTART_PREPARE_FAILED=1\r\n");
         (void)worker_abort_replacement(context);
         (void)gxos_managed_kernel_driver_owner_restart_complete(context, 0);
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH, failed_handle);
         return 0;
     }
+    if (restart_prepare(GXOS_MANAGED_KERNEL_DRIVER_RESTART_PREPARE_STAGE) !=
+        GX_MANAGED_OK) {
+        (void)gxos_managed_kernel_interrupt_defer_service_route_activation(
+            context->interrupt, 0);
+        worker_log(context,
+            "GXOS_NET10:PERSISTENT_SERVICE_RESTART_PREPARE_FAILED=1\r\n");
+        (void)worker_abort_replacement(context);
+        (void)gxos_managed_kernel_driver_owner_restart_complete(context, 0);
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH, failed_handle);
+        return 0;
+    }
+    (void)gxos_managed_kernel_interrupt_defer_service_route_activation(
+        context->interrupt, 0);
     if (!gxos_managed_kernel_driver_worker_publish_route(
             context, &replacement_handle) ||
         !gxos_managed_kernel_driver_worker_start(context, replacement_handle)) {
@@ -1377,4 +1471,217 @@ int gxos_managed_kernel_driver_worker_is_running(
 {
     return worker_service_handle_valid(context, handle) && context->state ==
         GXOS_MANAGED_KERNEL_DRIVER_WORKER_RUNNING;
+}
+
+static GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT
+worker_explicit_restart_failure(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE failed_handle,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE attempted_handle,
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT result)
+{
+    if (context->service_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED) {
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_START_ATTACH,
+            attempted_handle.identity != 0U ? attempted_handle : failed_handle);
+        context->service_state =
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESTART_FAILED;
+    } else {
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+            attempted_handle.identity != 0U ? attempted_handle : failed_handle);
+        result = GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_QUARANTINED;
+    }
+    (void)gxos_managed_kernel_driver_owner_manual_restart_complete(
+        context, 0);
+    return result;
+}
+
+GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT
+gxos_managed_kernel_driver_service_restart(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *context,
+    uint32_t expected_failed_identity,
+    uint16_t expected_failed_generation,
+    uint32_t expected_device_identity,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE *new_handle_out)
+{
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_STATUS_V1 before = {0};
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE failed_handle = {0};
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE attempted_handle = {0};
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT status_result;
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT initialize_result;
+    GXOS_SCHEDULER_REGISTER_SNAPSHOT snapshot;
+    uint32_t tls_index;
+    uint32_t runtime_fls_slot;
+    GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup;
+    uint32_t guard = 0U;
+    int ready;
+    int manual_begin_result;
+
+    if (new_handle_out != 0) {
+        *new_handle_out = (GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE){0};
+    }
+    if (context == 0 || new_handle_out == 0 ||
+        expected_failed_identity == 0U || expected_failed_generation == 0U ||
+        expected_device_identity == 0U) {
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_INVALID_ARGUMENT;
+    }
+    if (gxos_managed_kernel_driver_owner_manual_restart_in_progress(context)) {
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_IN_PROGRESS;
+    }
+    status_result = gxos_managed_kernel_driver_service_get_status(
+        context, &before);
+    if (status_result != GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK) {
+        return status_result;
+    }
+    if (context->service_state ==
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED ||
+        context->nativeaot_lifecycle.runtime_ownership_state ==
+            GXOS_NATIVEAOT_RUNTIME_OWNERSHIP_AMBIGUOUS) {
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_QUARANTINED;
+    }
+    if (context->service_state !=
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESTART_FAILED) {
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_INVALID_STATE;
+    }
+    if (before.last_failed_identity != expected_failed_identity ||
+        before.last_failed_generation != expected_failed_generation ||
+        before.last_failed_device_identity != expected_device_identity) {
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_STALE;
+    }
+    if (before.explicit_restart_allowed == 0U ||
+        context->restart_prepare == 0) {
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_INVALID_STATE;
+    }
+    failed_handle.identity = expected_failed_identity;
+    failed_handle.generation = expected_failed_generation;
+    failed_handle.device_identity = expected_device_identity;
+    failed_handle.slot = 0U;
+
+    manual_begin_result = gxos_managed_kernel_driver_owner_manual_restart_begin(
+        context, expected_failed_identity, expected_failed_generation,
+        expected_device_identity);
+    if (manual_begin_result == GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_BUSY) {
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_IN_PROGRESS;
+    }
+    if (manual_begin_result == GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_STALE) {
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_STALE;
+    }
+    if (manual_begin_result != GXOS_MANAGED_KERNEL_DRIVER_OWNER_RESTART_OK) {
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_INVALID_STATE;
+    }
+
+    tls_index = context->nativeaot_lifecycle.tls_index;
+    runtime_fls_slot = context->nativeaot_lifecycle.runtime_fls_slot;
+    runtime_fls_cleanup = context->nativeaot_lifecycle.runtime_fls_cleanup;
+    initialize_result = gxos_managed_kernel_driver_worker_initialize(
+        context, context->scheduler, context->event_api, context->interrupt,
+        context->managed_bridge, context->restart_prepare, tls_index,
+        runtime_fls_slot, runtime_fls_cleanup, context->log_text,
+        context->log_hex);
+    if (initialize_result != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_OK) {
+        GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT result =
+            initialize_result == GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_CAPACITY
+                ? GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_CAPACITY
+                : (initialize_result ==
+                       GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_RESOURCE_FAILURE
+                    ? GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_RESOURCE_FAILURE
+                    : GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_START_FAILURE);
+        return worker_explicit_restart_failure(
+            context, failed_handle, attempted_handle, result);
+    }
+    attempted_handle = context->service_handle;
+    if (attempted_handle.identity == expected_failed_identity ||
+        attempted_handle.generation == expected_failed_generation ||
+        attempted_handle.device_identity != expected_device_identity) {
+        return worker_explicit_restart_failure(
+            context, failed_handle, attempted_handle,
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_START_FAILURE);
+    }
+
+    if (!gxos_managed_kernel_interrupt_defer_service_route_activation(
+            context->interrupt, 1)) {
+        if (context->service_state !=
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED &&
+            !worker_abort_replacement(context)) {
+            return worker_explicit_restart_failure(
+                context, failed_handle, attempted_handle,
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_RESOURCE_FAILURE);
+        }
+        return worker_explicit_restart_failure(
+            context, failed_handle, attempted_handle,
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_START_FAILURE);
+    }
+    if (context->restart_prepare(
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_PREPARE_STAGE) != GX_MANAGED_OK) {
+        (void)gxos_managed_kernel_interrupt_defer_service_route_activation(
+            context->interrupt, 0);
+        if (context->service_state !=
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED &&
+            !worker_abort_replacement(context)) {
+            return worker_explicit_restart_failure(
+                context, failed_handle, attempted_handle,
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_RESOURCE_FAILURE);
+        }
+        return worker_explicit_restart_failure(
+            context, failed_handle, attempted_handle,
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_START_FAILURE);
+    }
+    (void)gxos_managed_kernel_interrupt_defer_service_route_activation(
+        context->interrupt, 0);
+    if (!gxos_managed_kernel_driver_worker_publish_route(
+            context, &attempted_handle) ||
+        !gxos_managed_kernel_driver_worker_start(context, attempted_handle)) {
+        if (context->service_state !=
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED &&
+            !worker_abort_replacement(context)) {
+            return worker_explicit_restart_failure(
+                context, failed_handle, attempted_handle,
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_RESOURCE_FAILURE);
+        }
+        return worker_explicit_restart_failure(
+            context, failed_handle, attempted_handle,
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_START_FAILURE);
+    }
+
+    while (guard++ != 32U && context->service_state !=
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_WAITING &&
+            context->service_state !=
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED &&
+            context->state != GXOS_MANAGED_KERNEL_DRIVER_WORKER_STOPPED) {
+        gxos_scheduler_main_dispatch(&snapshot);
+    }
+    ready = context->service_state ==
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_WAITING &&
+            context->state == GXOS_MANAGED_KERNEL_DRIVER_WORKER_RUNNING &&
+            context->nativeaot_lifecycle.attached &&
+            context->nativeaot_lifecycle.runtime_attach_count == 1U &&
+            context->nativeaot_lifecycle.runtime_detach_count == 0U &&
+            context->managed_loop_entered != 0U && context->failure == 0U &&
+            context->service_handle.identity == attempted_handle.identity &&
+            context->service_handle.generation == attempted_handle.generation;
+    if (!ready) {
+        if (context->service_state !=
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED &&
+            !worker_abort_replacement(context)) {
+            return worker_explicit_restart_failure(
+                context, failed_handle, attempted_handle,
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_RESOURCE_FAILURE);
+        }
+        return worker_explicit_restart_failure(
+            context, failed_handle, attempted_handle,
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_START_FAILURE);
+    }
+    if (!gxos_managed_kernel_driver_owner_manual_restart_complete(
+            context, 1)) {
+        context->service_state =
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_QUARANTINED;
+        worker_record_failure(context,
+            GXOS_MANAGED_KERNEL_DRIVER_FAILURE_AMBIGUOUS_RUNTIME_OWNERSHIP,
+            attempted_handle);
+        return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_QUARANTINED;
+    }
+    *new_handle_out = context->service_handle;
+    return GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK;
 }

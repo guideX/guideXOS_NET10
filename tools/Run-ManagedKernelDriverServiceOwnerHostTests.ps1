@@ -11,6 +11,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 }
 $out = [IO.Path]::GetFullPath($OutputDirectory)
 $exe = Join-Path $out 'managed_kernel_driver_service_owner_tests.exe'
+$statusExe = Join-Path $out 'managed_kernel_driver_service_status_tests.exe'
 $gcc = Get-Command gcc -ErrorAction Stop
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $gccArguments = @(
@@ -25,4 +26,19 @@ if ($LASTEXITCODE -ne 0) {
 & $exe
 if ($LASTEXITCODE -ne 0) {
     throw "ManagedKernel service owner host tests failed (exit $LASTEXITCODE)."
+}
+$statusArguments = @(
+    '-std=c11', '-Wall', '-Wextra', '-Werror',
+    '-Isrc\Gate4Harness',
+    'src\Gate4Harness\tests\managed_kernel_driver_service_status_tests.c',
+    'src\Gate4Harness\managed_kernel_driver_service_status.c',
+    'src\Gate4Harness\managed_kernel_driver_service_owner.c',
+    '-o', $statusExe)
+& $gcc.Source @statusArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "ManagedKernel service status host test build failed (exit $LASTEXITCODE)."
+}
+& $statusExe
+if ($LASTEXITCODE -ne 0) {
+    throw "ManagedKernel service status host tests failed (exit $LASTEXITCODE)."
 }
