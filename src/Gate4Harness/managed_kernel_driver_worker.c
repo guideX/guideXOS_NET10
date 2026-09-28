@@ -621,6 +621,7 @@ gxos_managed_kernel_driver_worker_initialize(
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_LOG_HEX log_hex)
 {
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE no_handle = {0};
+    int scheduler_admission_available;
     if (context == 0 || scheduler == 0 || event_api == 0 ||
         interrupt == 0 || managed_bridge == 0 || runtime_fls_cleanup == 0 ||
         (context->state != GXOS_MANAGED_KERNEL_DRIVER_WORKER_FREE &&
@@ -679,7 +680,40 @@ gxos_managed_kernel_driver_worker_initialize(
     context->restart_failure_armed = 0U;
     context->restart_failure_after_dispatch = 0U;
 #endif
-    if (!gxos_scheduler_can_admit(scheduler, 1U, 2U)) {
+    scheduler_admission_available =
+        gxos_scheduler_can_admit(scheduler, 1U, 2U);
+#ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+    if (context->restart_admission_failure_armed != 0U) {
+        __atomic_store_n(&context->restart_admission_failure_armed, 0U,
+                         __ATOMIC_RELEASE);
+        ++context->restart_admission_failure_attempts;
+        context->restart_admission_failure_fired = 1U;
+        context->restart_admission_failure_result =
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_CAPACITY;
+        context->restart_admission_natural_result =
+            scheduler_admission_available != 0 ? 1U : 0U;
+        worker_log(context,
+            "GXOS_NET10:PHASE71_ADMISSION_FAILURE_INJECTION_FIRED=1\r\n");
+        worker_log_hex(context,
+            "GXOS_NET10:PHASE71_ADMISSION_NATURAL_RESULT=0x",
+            context->restart_admission_natural_result);
+        scheduler_admission_available = 0;
+    }
+#endif
+    if (!scheduler_admission_available) {
+#ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+        if (context->restart_admission_failure_fired != 0U) {
+            worker_log_hex(context,
+                "GXOS_NET10:PHASE71_ADMISSION_STATUS=0x",
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_CAPACITY);
+            worker_log_hex(context,
+                "GXOS_NET10:PHASE71_ADMISSION_OBJECTS_FREE=0x",
+                gxos_scheduler_available_object_slots(scheduler));
+            worker_log_hex(context,
+                "GXOS_NET10:PHASE71_ADMISSION_THREADS_FREE=0x",
+                gxos_scheduler_available_thread_slots(scheduler));
+        }
+#endif
         context->service_state = GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RECLAIMED;
         worker_release_owner_slot(context);
         return GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_CAPACITY;
@@ -1029,6 +1063,18 @@ static int worker_automatic_restart_after_failure(
         worker_log_hex(context,
             "GXOS_NET10:PERSISTENT_SERVICE_RESTART_ADMISSION_RESULT=0x",
             initialize_result);
+#ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+        if (context->restart_admission_failure_fired != 0U) {
+            worker_log_hex(context,
+                "GXOS_NET10:PHASE71_RESTART_BUDGET_AFTER_FAILURE=0x",
+                gxos_managed_kernel_driver_owner_restart_budget(context));
+            worker_log_hex(context,
+                "GXOS_NET10:PHASE71_RESTART_STATE_AFTER_FAILURE=0x",
+                gxos_managed_kernel_driver_owner_restart_state(context));
+            worker_log(context,
+                "GXOS_NET10:PHASE71_REPLACEMENT_IDENTITY_PUBLISHED=0\r\n");
+        }
+#endif
         return 0;
     }
     worker_log_hex(context,

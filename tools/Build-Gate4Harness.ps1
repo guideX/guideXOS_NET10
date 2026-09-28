@@ -17,7 +17,7 @@ param(
     [switch]$EnablePhase69PersistentServiceOwner,
     [ValidateSet('None', 'AttachFailureDiscard', 'IdleStop')]
     [string]$Phase69FixtureMode = 'None',
-    [ValidateSet('None', 'RecoverableRestart')]
+    [ValidateSet('None', 'RecoverableRestart', 'ReplacementAdmissionFailure')]
     [string]$Phase70FixtureMode = 'None',
     [switch]$EnablePhase62ConcurrentManagedWorkerApi,
     [switch]$EnablePhase64ManagedWorkerApi,
@@ -1575,8 +1575,11 @@ if ($Phase69FixtureMode -eq 'AttachFailureDiscard') {
 if ($Phase69FixtureMode -eq 'IdleStop') {
     $gccArguments += '-DGXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE'
 }
-if ($Phase70FixtureMode -eq 'RecoverableRestart') {
+if ($Phase70FixtureMode -in @('RecoverableRestart', 'ReplacementAdmissionFailure')) {
     $gccArguments += '-DGXOS_ENABLE_PHASE70_RESTART_FIXTURE'
+}
+if ($Phase70FixtureMode -eq 'ReplacementAdmissionFailure') {
+    $gccArguments += '-DGXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE'
 }
 if ($EnablePhase62ConcurrentManagedWorkerApi) {
     $gccArguments += '-DGXOS_ENABLE_PHASE62_MANAGED_WORKER_API'

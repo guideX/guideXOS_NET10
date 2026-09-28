@@ -6,7 +6,7 @@ param(
     [Parameter(Mandatory = $true)] [long]$PayloadSize,
     [ValidateSet('None', 'AttachFailureDiscard', 'IdleStop')]
     [string]$Phase69FixtureMode = 'None',
-    [ValidateSet('None', 'RecoverableRestart')]
+    [ValidateSet('None', 'RecoverableRestart', 'ReplacementAdmissionFailure')]
     [string]$Phase70FixtureMode = 'None',
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 180
@@ -286,6 +286,56 @@ $requiredMarkers += switch ($Phase70FixtureMode) {
           'GXOS_NET10:PERSISTENT_SERVICE_RESTART_SUCCEEDED=1',
           'GXOS_NET10:PHASE69_ONE_SHOT_HELD_PENDING_FOR_SERVICE_STOP=1')
     }
+    'ReplacementAdmissionFailure' {
+        @('GXOS_NET10:PHASE70_RESTART_FIXTURE_BEGIN=1',
+          'GXOS_NET10:PHASE70_FAILURE_POINT=AFTER_SECOND_MANAGED_DISPATCH_RETURN',
+          'GXOS_NET10:PHASE70_RECOVERABLE_FAILURE_INJECTED=1',
+          'GXOS_NET10:PHASE71_GENERATION1_OPERATIONAL=1',
+          'GXOS_NET10:PHASE71_GENERATION1_REAL_COM1_EVENT=1',
+          'GXOS_NET10:PHASE71_ADMISSION_FAILURE_ARMED_AFTER_INITIAL_START=1',
+          'GXOS_NET10:PHASE71_ADMISSION_FAILURE_INJECTION_FIRED=1',
+          'GXOS_NET10:PHASE71_ADMISSION_NATURAL_RESULT=',
+          'GXOS_NET10:PHASE71_ADMISSION_STATUS=',
+          'GXOS_NET10:PHASE71_OLD_GENERATION_FULLY_RECLAIMED=1',
+          'GXOS_NET10:PHASE71_REPLACEMENT_ADMISSION_ATTEMPTED=1',
+          'GXOS_NET10:PHASE71_REPLACEMENT_ADMISSION_STATUS=',
+          'GXOS_NET10:PHASE71_REPLACEMENT_IDENTITY_ALLOCATED=0',
+          'GXOS_NET10:PHASE71_REPLACEMENT_TCB_ALLOCATED=0',
+          'GXOS_NET10:PHASE71_REPLACEMENT_WAKE_EVENT_ALLOCATED=0',
+          'GXOS_NET10:PHASE71_REPLACEMENT_RUNTIME_ATTACHED=0',
+          'GXOS_NET10:PHASE71_ROUTE_REENABLED=0',
+          'GXOS_NET10:PHASE71_NO_PARTIAL_REPLACEMENT=1',
+          'GXOS_NET10:PHASE71_NO_SECOND_AUTOMATIC_RETRY=1',
+          'GXOS_NET10:PHASE71_RESTART_BUDGET_EXHAUSTED=1',
+          'GXOS_NET10:PHASE71_OWNER_STATE_RESTART_FAILED=1',
+          'GXOS_NET10:PHASE71_ROUTE_DISABLED=1',
+          'GXOS_NET10:PHASE71_OLD_HANDLE_REJECTED=1',
+          'GXOS_NET10:PHASE71_OLD_STOP_REJECTED=1',
+          'GXOS_NET10:PHASE71_OLD_WAKE_AUTHORITY_REJECTED=1',
+          'GXOS_NET10:PHASE71_QUEUE_COUNT_AT_FAILURE=',
+          'GXOS_NET10:PHASE71_RECOVERY_DISCARDED=',
+          'GXOS_NET10:PHASE71_OVERFLOW_ACCOUNTING_UNCHANGED=1',
+          'GXOS_NET10:PHASE71_SHUTDOWN_DISCARD_ACCOUNTING_UNCHANGED=1',
+          'GXOS_NET10:PHASE71_ONE_SHOT_SURVIVED_FAILED_RESTART_RESULT_42=1',
+          'GXOS_NET10:PHASE71_FAILED_RESTART_BASELINE_RESTORED=1',
+          'GXOS_NET10:PHASE71_MANUAL_NEW_EPISODE=1',
+          'GXOS_NET10:PHASE71_MANUAL_IDENTITY=',
+          'GXOS_NET10:PHASE71_MANUAL_GENERATION=',
+          'GXOS_NET10:PHASE71_MANUAL_RESTART_BUDGET=',
+          'GXOS_NET10:PHASE71_MANUAL_COM1_ROUTE_ENABLED=1',
+          'GXOS_NET10:PHASE71_MANUAL_SERVICE_READY=1',
+          'GXOS_NET10:PHASE71_MANUAL_COM1_EVENT_DISPATCHED=1',
+          'GXOS_NET10:PHASE71_MANUAL_MANAGED_DISPATCHES=',
+          'GXOS_NET10:PHASE71_MANUAL_NORMAL_DRAIN_NO_RESTART=1',
+          'GXOS_NET10:PHASE70_THREADSTORE_FINAL=',
+          'GXOS_NET10:PERSISTENT_SERVICE_FAILURE_CAUSE=',
+          'GXOS_NET10:PERSISTENT_SERVICE_RESTART_BUDGET_BEFORE=',
+          'GXOS_NET10:PERSISTENT_SERVICE_RESTART_BUDGET_AFTER=',
+          'GXOS_NET10:PERSISTENT_SERVICE_RESTART_DECISION=ATTEMPT',
+          'GXOS_NET10:PERSISTENT_SERVICE_OLD_GENERATION_RECLAIMED=1',
+          'GXOS_NET10:PERSISTENT_SERVICE_RESTART_ADMISSION_RESULT=',
+          'GXOS_NET10:PHASE69_ONE_SHOT_HELD_PENDING_FOR_SERVICE_STOP=1')
+    }
 }
 $requiredMarkers += switch ($Phase69FixtureMode) {
     'None' {
@@ -446,6 +496,13 @@ try {
                     'PHASE70_REPLACEMENT_READY' 0x54
                 Wait-Marker10 'GXOS_NET10:PHASE70_POST_RESTART_REAL_EVENT_DISPATCHED=1' `
                     $deadline $process $stream $logStream $text $buffer
+            } elseif ($Phase70FixtureMode -eq 'ReplacementAdmissionFailure') {
+                Wait-Marker10 'GXOS_NET10:PHASE71_MANUAL_SERVICE_READY=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                Send-SerialByte10 $client $stream $process $injectionLog `
+                    'PHASE71_MANUAL_SERVICE_READY' 0x54
+                Wait-Marker10 'GXOS_NET10:PHASE71_MANUAL_COM1_EVENT_DISPATCHED=1' `
+                    $deadline $process $stream $logStream $text $buffer
             } else {
                 Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK' `
                     $deadline $process $stream $logStream $text $buffer
@@ -457,7 +514,9 @@ try {
             } else {
                 Send-SerialBurst10 $client $stream $process $injectionLog `
                     $(if ($Phase70FixtureMode -eq 'RecoverableRestart') {
-                        'PHASE70_POST_RESTART_EVENT' } else {
+                        'PHASE70_POST_RESTART_EVENT' } elseif (
+                        $Phase70FixtureMode -eq 'ReplacementAdmissionFailure') {
+                        'PHASE71_MANUAL_COM1_EVENT' } else {
                         'RX_AFTER_RUNTIME_OK_BURST'}) ([byte[]](0x41, 0x42, 0x43))
                 Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED' `
                     $deadline $process $stream $logStream $text $buffer
@@ -500,7 +559,8 @@ try {
         }
         Require10 (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_PHASE10_PASS')).Count -eq 1) `
             "Boot $sequence repeated or omitted the Phase 10 pass marker."
-        $expectedEnqueued = if ($Phase70FixtureMode -eq 'RecoverableRestart') {
+        $expectedEnqueued = if ($Phase70FixtureMode -in @(
+                'RecoverableRestart', 'ReplacementAdmissionFailure')) {
             6
         } else {
             switch ($Phase69FixtureMode) {
@@ -548,6 +608,28 @@ try {
                        (Get-HexField10 $finalText 'GXOS_NET10:PHASE70_THREADSTORE_FINAL=') -eq
                            (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_THREADSTORE_BASELINE=')) `
                 "Boot $sequence failed restart budget, generation, device, runtime, or event checks."
+        } elseif ($Phase70FixtureMode -eq 'ReplacementAdmissionFailure') {
+            $failurePending = Get-HexField10 $finalText 'GXOS_NET10:PHASE71_QUEUE_COUNT_AT_FAILURE='
+            $recoveryDiscarded = Get-HexField10 $finalText 'GXOS_NET10:PHASE71_RECOVERY_DISCARDED='
+            $oldIdentity = Get-HexField10 $finalText 'GXOS_NET10:PHASE70_OLD_SERVICE_IDENTITY='
+            $oldGeneration = Get-HexField10 $finalText 'GXOS_NET10:PHASE70_OLD_SERVICE_GENERATION='
+            $deviceIdentity = Get-HexField10 $finalText 'GXOS_NET10:PHASE70_DEVICE_IDENTITY='
+            $manualIdentity = Get-HexField10 $finalText 'GXOS_NET10:PHASE71_MANUAL_IDENTITY='
+            $manualGeneration = Get-HexField10 $finalText 'GXOS_NET10:PHASE71_MANUAL_GENERATION='
+            Require10 ($discarded -eq 0 -and $failurePending -eq 0 -and
+                       $recoveryDiscarded -eq 0 -and $deviceIdentity -eq 1 -and
+                       $manualIdentity -ne $oldIdentity -and
+                       $manualGeneration -gt $oldGeneration -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE70_RESTART_BUDGET_BEFORE_FAILURE=') -eq 1 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE71_RESTART_BUDGET_AFTER_FAILURE=') -eq 0 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE71_ADMISSION_STATUS=') -eq 2 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_OLD_RUNTIME_ATTACH_COUNT_AFTER=') -eq 1 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_OLD_RUNTIME_DETACH_COUNT_AFTER=') -eq 1 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE71_MANUAL_RESTART_BUDGET=') -eq 1 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE71_MANUAL_MANAGED_DISPATCHES=') -eq 1 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE70_THREADSTORE_FINAL=') -eq
+                           (Get-HexField10 $finalText 'GXOS_NET10:PHASE69_THREADSTORE_BASELINE=')) `
+                "Boot $sequence failed replacement admission containment or manual-episode checks."
         } else {
             Require10 ($discarded -eq 0) "Boot $sequence unexpectedly discarded queue records."
         }
@@ -558,7 +640,8 @@ try {
         Require10 ($wakeRequests -ge 1 -and $wakeRequests -le 5) `
             "Boot $sequence reported an invalid wake request count."
         $drainPending = Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PENDING='
-        $drainEvidenceValid = if ($Phase70FixtureMode -eq 'RecoverableRestart') {
+        $drainEvidenceValid = if ($Phase70FixtureMode -in @(
+                'RecoverableRestart', 'ReplacementAdmissionFailure')) {
             $drainPending -eq 3 -and
                 $finalText.Contains('GXOS_NET10:PERSISTENT_SERVICE_DRAIN_PRECONDITION_PENDING=1')
         } else { switch ($Phase69FixtureMode) {
@@ -610,6 +693,14 @@ try {
                     $objectBaseline - 1 -and
                 (Get-HexField10 $finalText 'GXOS_NET10:PERSISTENT_SERVICE_OBJECTS_FREE_REPLACEMENT_RUNNING=') -eq
                     $objectBaseline - 3 -and
+                $objectFinal -eq $objectBaseline
+        } elseif ($Phase70FixtureMode -eq 'ReplacementAdmissionFailure') {
+            $objectBaseline - $objectRunning -eq 2 -and
+                $objectRunning - $objectPeak -eq 1 -and
+                (Get-HexField10 $finalText 'GXOS_NET10:PHASE71_OBJECTS_FREE_AFTER_FAILURE=') -eq
+                    $objectBaseline - 1 -and
+                (Get-HexField10 $finalText 'GXOS_NET10:PHASE71_OBJECTS_FREE_AFTER_MANUAL_START=') -eq
+                    $objectBaseline - 2 -and
                 $objectFinal -eq $objectBaseline
         } else {
             $objectBaseline - $objectRunning -eq 2 -and

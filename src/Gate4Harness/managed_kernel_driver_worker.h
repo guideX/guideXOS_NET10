@@ -126,6 +126,13 @@ typedef struct {
     uint32_t restart_failure_after_dispatch;
     uint32_t restart_failure_fired;
 #endif
+#ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+    volatile uint32_t restart_admission_failure_armed;
+    uint32_t restart_admission_failure_attempts;
+    uint32_t restart_admission_failure_fired;
+    uint32_t restart_admission_natural_result;
+    uint32_t restart_admission_failure_result;
+#endif
 } GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT;
 
 GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT

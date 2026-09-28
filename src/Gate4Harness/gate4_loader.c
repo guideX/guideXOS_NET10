@@ -15802,6 +15802,7 @@ static void managed_kernel_phase69_finish_shutdown_one_shot(
 #endif
 
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
+#ifndef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
 static void managed_kernel_phase70_validate_one_shot_pending_after_restart(
     uint32_t object_slots_baseline, uint32_t thread_slots_baseline)
 {
@@ -15831,6 +15832,7 @@ static void managed_kernel_phase70_validate_one_shot_pending_after_restart(
     serial_text("GXOS_NET10:PHASE70_ONE_SHOT_PENDING_HANDLE_VALID_AFTER_RESTART=1\r\n");
     serial_text("GXOS_NET10:PHASE70_REPLACEMENT_ADMITTED_WITH_ONE_SHOT_LIVE=1\r\n");
 }
+#endif
 
 static void managed_kernel_phase70_finish_one_shot_after_service_stop(
     uint32_t object_slots_baseline, uint32_t thread_slots_baseline,
@@ -15994,6 +15996,13 @@ static void managed_kernel_phase70_prepare_restart(
     worker->restart_failure_after_dispatch =
         (uint32_t)worker->managed_dispatch_count + 1U;
     __atomic_store_n(&worker->restart_failure_armed, 1U, __ATOMIC_RELEASE);
+#ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+    worker->restart_admission_failure_armed = 1U;
+    worker->restart_admission_failure_attempts = 0U;
+    worker->restart_admission_failure_fired = 0U;
+    worker->restart_admission_natural_result = 0U;
+    worker->restart_admission_failure_result = UINT32_MAX;
+#endif
     g_phase70_restart_evidence.prepared = 1U;
     serial_text("GXOS_NET10:PHASE70_RESTART_FIXTURE_BEGIN=1\r\n");
     serial_text("GXOS_NET10:PHASE70_FAILURE_POINT=AFTER_SECOND_MANAGED_DISPATCH_RETURN\r\n");
@@ -16078,8 +16087,14 @@ static void managed_kernel_phase70_prepare_restart(
         g_phase70_restart_evidence.one_shot_memory_before.regions);
     serial_text("\r\n");
     serial_text("GXOS_NET10:PHASE70_ONE_SHOT_LIVE_BEFORE_FAILURE=1\r\n");
+#ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+    serial_text("GXOS_NET10:PHASE71_GENERATION1_OPERATIONAL=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_GENERATION1_REAL_COM1_EVENT=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_ADMISSION_FAILURE_ARMED_AFTER_INITIAL_START=1\r\n");
+#endif
 }
 
+#ifndef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
 static int managed_kernel_phase70_wait_for_restart(
     EFI_BOOT_SERVICES *boot_services)
 {
@@ -16197,6 +16212,269 @@ static int managed_kernel_phase70_wait_for_restart(
     serial_text("GXOS_NET10:PHASE70_REPLACEMENT_READY=1\r\n");
     return 1;
 }
+#endif
+#ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+static int managed_kernel_phase71_wait_for_restart_failure(
+    EFI_BOOT_SERVICES *boot_services)
+{
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker =
+        &g_managed_kernel_driver_worker_context;
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE old_handle =
+        g_phase70_restart_evidence.old_service;
+    GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE cause =
+        GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_RECOVERABLE_DISPATCH;
+    uint32_t budget_before = UINT32_MAX;
+    uint32_t iteration;
+    uint32_t tls_index;
+    uint32_t runtime_fls_slot;
+    GXOS_NATIVEAOT_FLS_CLEANUP_CALLBACK runtime_fls_cleanup;
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE manual_handle = {0};
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT initialize_result;
+    uint32_t manual_prepare_result;
+
+    if (boot_services == 0 || g_phase70_restart_evidence.prepared == 0U) {
+        return 0;
+    }
+    for (iteration = 0; iteration != 100000U; ++iteration) {
+        if (gxos_managed_kernel_driver_owner_restart_state(worker) ==
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_FAILED &&
+            worker->service_state ==
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESTART_FAILED) {
+            break;
+        }
+        managed_kernel_interrupt_enable_cpu();
+        if (gxos_managed_kernel_driver_worker_pump_current(
+                worker, &g_managed_kernel_driver_service_handle)) {
+            continue;
+        }
+        if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
+            managed_kernel_interrupt_enable_cpu();
+            (void)boot_services->Stall(1000);
+            continue;
+        }
+        __asm__ volatile ("pause" : : : "memory");
+    }
+    if (iteration == 100000U || worker->restart_failure_fired != 1U ||
+        worker->restart_admission_failure_armed != 0U ||
+        worker->restart_admission_failure_fired != 1U ||
+        worker->restart_admission_failure_attempts != 1U ||
+        worker->restart_admission_natural_result != 1U ||
+        worker->restart_admission_failure_result !=
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_CAPACITY ||
+        gxos_managed_kernel_driver_owner_restart_state(worker) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_FAILED ||
+        gxos_managed_kernel_driver_owner_restart_budget(worker) != 0U ||
+        worker->service_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESTART_FAILED ||
+        worker->state != GXOS_MANAGED_KERNEL_DRIVER_WORKER_DESTROYED ||
+        worker->service_handle.identity != 0U || worker->thread != 0 ||
+        worker->worker_handle != 0U || worker->wake_event != 0U ||
+        worker->tcb_owned != 0U || worker->thread_handle_owned != 0U ||
+        worker->wake_event_owned != 0U ||
+        worker->wake_event_handle_open != 0U || worker->route_published != 0U ||
+        !worker->nativeaot_lifecycle.attached ||
+        !worker->nativeaot_lifecycle.detached ||
+        worker->nativeaot_lifecycle.runtime_attach_count != 1U ||
+        worker->nativeaot_lifecycle.runtime_detach_count != 1U ||
+        worker->nativeaot_lifecycle.ownership_state !=
+            GXOS_NATIVEAOT_WORKER_OWNERSHIP_RECLAIMED ||
+        worker->nativeaot_lifecycle.main_thread == 0 ||
+        worker->nativeaot_lifecycle.runtime_fls_slot >=
+            GXOS_SCHEDULER_FLS_SLOTS ||
+        gxos_scheduler_thread_from_handle(
+            g_phase70_restart_evidence.old_thread_handle) != 0 ||
+        gxos_scheduler_event_from_handle(
+            g_phase70_restart_evidence.old_wake_event) != 0 ||
+        gxos_managed_kernel_driver_owner_is_current(worker, old_handle) ||
+        g_managed_kernel_interrupt_context.routes[0].subscription_active != 0U ||
+        g_managed_kernel_interrupt_context.routes[0].hardware_enabled != 0U ||
+        g_managed_kernel_interrupt_context.routes[0].accepting_events != 0U ||
+        g_managed_kernel_interrupt_context.routes[0].device_id != 1U ||
+        __atomic_load_n(&g_managed_kernel_interrupt_context.dropped_count,
+                        __ATOMIC_ACQUIRE) !=
+            g_phase70_restart_evidence.dropped_before ||
+        __atomic_load_n(
+            &g_managed_kernel_interrupt_context.shutdown_discarded_count,
+            __ATOMIC_ACQUIRE) !=
+            g_phase70_restart_evidence.shutdown_discarded_before ||
+        __atomic_load_n(
+            &g_managed_kernel_interrupt_context.recovery_discarded_count,
+            __ATOMIC_ACQUIRE) !=
+            g_phase70_restart_evidence.recovery_discarded_before ||
+        g_managed_kernel_interrupt_context.read_index !=
+            g_managed_kernel_interrupt_context.write_index ||
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+            g_phase70_restart_evidence.scheduler_object_baseline - 1U ||
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
+            g_phase70_restart_evidence.scheduler_thread_baseline - 1U ||
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+            worker->nativeaot_lifecycle.main_thread->fls_values[
+                worker->nativeaot_lifecycle.runtime_fls_slot], 0) !=
+            g_phase70_restart_evidence.threadstore_baseline ||
+        gxos_scheduler_can_admit(&g_create_event_scheduler, 1U, 2U) == 0) {
+        return 0;
+    }
+    if (gxos_managed_kernel_driver_worker_request_stop(
+            worker, old_handle, GXOS_MANAGED_KERNEL_DRIVER_SERVICE_DRAIN) ||
+        gxos_managed_kernel_driver_worker_pump(worker, old_handle) ||
+        gxos_managed_kernel_driver_owner_restart_begin(
+            worker, old_handle, cause, &budget_before) || budget_before != 0U ||
+        gxos_managed_kernel_driver_owner_restart_budget(worker) != 0U ||
+        worker->restart_admission_failure_attempts != 1U) {
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE71_OLD_GENERATION_FULLY_RECLAIMED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_REPLACEMENT_ADMISSION_ATTEMPTED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_REPLACEMENT_ADMISSION_STATUS=0x",
+        worker->restart_admission_failure_result);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE71_SCHEDULER_CAPACITY_AVAILABLE_BEFORE_INJECTION=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_REPLACEMENT_IDENTITY_ALLOCATED=0\r\n");
+    serial_text("GXOS_NET10:PHASE71_REPLACEMENT_TCB_ALLOCATED=0\r\n");
+    serial_text("GXOS_NET10:PHASE71_REPLACEMENT_WAKE_EVENT_ALLOCATED=0\r\n");
+    serial_text("GXOS_NET10:PHASE71_REPLACEMENT_RUNTIME_ATTACHED=0\r\n");
+    serial_text("GXOS_NET10:PHASE71_ROUTE_REENABLED=0\r\n");
+    serial_text("GXOS_NET10:PHASE71_NO_PARTIAL_REPLACEMENT=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_OBJECTS_FREE_AFTER_FAILURE=0x",
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_THREADS_FREE_AFTER_FAILURE=0x",
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_THREADSTORE_AFTER_FAILURE=0x",
+        gxos_nativeaot_scheduler_threadstore_count(
+            worker->nativeaot_lifecycle.main_thread->fls_values[
+                worker->nativeaot_lifecycle.runtime_fls_slot], 0));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_QUEUE_COUNT_AT_FAILURE=0x",
+        g_managed_kernel_interrupt_context.write_index -
+            g_managed_kernel_interrupt_context.read_index);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_RECOVERY_DISCARDED=0x",
+        __atomic_load_n(
+            &g_managed_kernel_interrupt_context.recovery_discarded_count,
+            __ATOMIC_ACQUIRE) -
+            g_phase70_restart_evidence.recovery_discarded_before);
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE71_OVERFLOW_ACCOUNTING_UNCHANGED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_SHUTDOWN_DISCARD_ACCOUNTING_UNCHANGED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_ROUTE_DISABLED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_ROUTE_DISABLED_BEFORE_RECLAIM=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_OLD_HANDLE_REJECTED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_OLD_STOP_REJECTED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_OLD_WAKE_AUTHORITY_REJECTED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_NO_SECOND_AUTOMATIC_RETRY=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_RESTART_BUDGET_EXHAUSTED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_OWNER_STATE_RESTART_FAILED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_DEVICE_IDENTITY_PRESERVED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_OLD_RUNTIME_ATTACH_COUNT=0x",
+        worker->nativeaot_lifecycle.runtime_attach_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_OLD_RUNTIME_DETACH_COUNT=0x",
+        worker->nativeaot_lifecycle.runtime_detach_count);
+    serial_text("\r\n");
+
+    managed_kernel_phase70_finish_one_shot_after_service_stop(
+        g_phase70_restart_evidence.scheduler_object_baseline,
+        g_phase70_restart_evidence.scheduler_thread_baseline,
+        g_phase70_restart_evidence.threadstore_baseline);
+    serial_text("GXOS_NET10:PHASE71_ONE_SHOT_SURVIVED_FAILED_RESTART_RESULT_42=1\r\n");
+    /* Keep the authoritative value-only handle in static fixture evidence
+       across managed one-shot execution; refresh the local snapshot before
+       comparing it with the later manual generation. */
+    old_handle = g_phase70_restart_evidence.old_service;
+    if (gxos_scheduler_available_object_slots(&g_create_event_scheduler) !=
+            g_phase70_restart_evidence.scheduler_object_baseline ||
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler) !=
+            g_phase70_restart_evidence.scheduler_thread_baseline ||
+        (uint32_t)gxos_nativeaot_scheduler_threadstore_count(
+            worker->nativeaot_lifecycle.main_thread->fls_values[
+                worker->nativeaot_lifecycle.runtime_fls_slot], 0) !=
+            g_phase70_restart_evidence.threadstore_baseline) {
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE71_FAILED_RESTART_BASELINE_RESTORED=1\r\n");
+
+    tls_index = worker->nativeaot_lifecycle.tls_index;
+    runtime_fls_slot = worker->nativeaot_lifecycle.runtime_fls_slot;
+    runtime_fls_cleanup = worker->nativeaot_lifecycle.runtime_fls_cleanup;
+    initialize_result = gxos_managed_kernel_driver_worker_initialize(
+        worker, worker->scheduler, worker->event_api, worker->interrupt,
+        worker->managed_bridge, worker->restart_prepare, tls_index,
+        runtime_fls_slot, runtime_fls_cleanup, serial_text, serial_field_hex);
+    if (initialize_result != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_RESULT_OK) {
+        return 0;
+    }
+    manual_handle = worker->service_handle;
+    if (manual_handle.identity == 0U || manual_handle.generation == 0U ||
+        manual_handle.identity == old_handle.identity ||
+        manual_handle.generation <= old_handle.generation ||
+        manual_handle.device_identity != old_handle.device_identity ||
+        gxos_managed_kernel_driver_owner_restart_budget(worker) != 1U ||
+        gxos_managed_kernel_driver_owner_restart_state(worker) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED ||
+        worker->restart_prepare == 0) {
+        return 0;
+    }
+    manual_prepare_result = worker->restart_prepare(
+        GXOS_MANAGED_KERNEL_DRIVER_RESTART_PREPARE_STAGE);
+    if (manual_prepare_result != GX_MANAGED_OK) return 0;
+    if (!gxos_managed_kernel_driver_worker_publish_route(worker, &manual_handle)) {
+        return 0;
+    }
+    g_managed_kernel_driver_service_handle = manual_handle;
+    if (!gxos_managed_kernel_driver_worker_start(worker, manual_handle)) {
+        return 0;
+    }
+    for (iteration = 0; iteration != 100000U; ++iteration) {
+        if (worker->service_state ==
+                GXOS_MANAGED_KERNEL_DRIVER_SERVICE_WAITING &&
+            worker->state == GXOS_MANAGED_KERNEL_DRIVER_WORKER_RUNNING) {
+            break;
+        }
+        managed_kernel_interrupt_enable_cpu();
+        (void)gxos_managed_kernel_driver_worker_pump_current(
+            worker, &g_managed_kernel_driver_service_handle);
+        if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
+            managed_kernel_interrupt_enable_cpu();
+            (void)boot_services->Stall(1000);
+        }
+    }
+    if (iteration == 100000U ||
+        gxos_managed_kernel_driver_owner_restart_budget(worker) != 1U ||
+        gxos_managed_kernel_driver_owner_restart_state(worker) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED ||
+        !worker->nativeaot_lifecycle.attached ||
+        worker->nativeaot_lifecycle.runtime_attach_count != 1U ||
+        worker->nativeaot_lifecycle.runtime_detach_count != 0U ||
+        !gxos_managed_kernel_driver_worker_is_running(
+            worker, g_managed_kernel_driver_service_handle) ||
+        g_managed_kernel_interrupt_context.routes[0].subscription_active == 0U ||
+        g_managed_kernel_interrupt_context.routes[0].hardware_enabled == 0U ||
+        g_managed_kernel_interrupt_context.routes[0].accepting_events == 0U) {
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE71_MANUAL_NEW_EPISODE=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_MANUAL_IDENTITY=0x",
+        manual_handle.identity);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_MANUAL_GENERATION=0x",
+        manual_handle.generation);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_MANUAL_RESTART_BUDGET=0x",
+        gxos_managed_kernel_driver_owner_restart_budget(worker));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_OBJECTS_FREE_AFTER_MANUAL_START=0x",
+        gxos_scheduler_available_object_slots(&g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_THREADS_FREE_AFTER_MANUAL_START=0x",
+        gxos_scheduler_available_thread_slots(&g_create_event_scheduler));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE71_MANUAL_COM1_ROUTE_ENABLED=1\r\n");
+    serial_text("GXOS_NET10:PHASE71_MANUAL_SERVICE_READY=1\r\n");
+    return 1;
+}
+#endif
 #endif
 
 static void managed_kernel_phase9_interrupt(
@@ -16745,6 +17023,37 @@ static void managed_kernel_phase9_interrupt(
     managed_kernel_serial_interrupt_checkpoint("BEFORE_SECOND");
     serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SECOND_WAIT_READY\r\n");
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
+#ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+    if (!managed_kernel_phase71_wait_for_restart_failure(boot_services)) {
+        managed_kernel_serial_interrupt_checkpoint("RESTART_ADMISSION_FAILURE_TIMEOUT");
+        fail("phase71-replacement-admission-failure");
+    }
+    if (!managed_kernel_interrupt_wait_for_enqueued(
+            boot_services, &g_managed_kernel_driver_worker_context, 3U)) {
+        managed_kernel_serial_interrupt_checkpoint("MANUAL_EPISODE_EVENT_TIMEOUT");
+        fail("phase71-manual-episode-event-count");
+    }
+    if (
+        g_managed_kernel_driver_worker_context.service_state !=
+            GXOS_MANAGED_KERNEL_DRIVER_SERVICE_WAITING ||
+        g_managed_kernel_driver_worker_context.managed_dispatch_count != 1U ||
+        g_managed_kernel_driver_worker_context.failure != 0U ||
+        g_managed_kernel_interrupt_context.enqueued_count != 3U ||
+        g_managed_kernel_interrupt_context.drained_count != 3U ||
+        g_managed_kernel_driver_worker_context.service_handle.identity ==
+            g_phase70_restart_evidence.old_service.identity ||
+        g_managed_kernel_driver_worker_context.service_handle.generation <=
+            g_phase70_restart_evidence.old_service.generation ||
+        g_managed_kernel_driver_worker_context.service_handle.device_identity !=
+            g_phase70_restart_evidence.old_service.device_identity) {
+        managed_kernel_serial_interrupt_checkpoint("MANUAL_EPISODE_EVENT_TIMEOUT");
+        fail("phase71-manual-episode-real-com1-event");
+    }
+    serial_text("GXOS_NET10:PHASE71_MANUAL_COM1_EVENT_DISPATCHED=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE71_MANUAL_MANAGED_DISPATCHES=0x",
+        g_managed_kernel_driver_worker_context.managed_dispatch_count);
+    serial_text("\r\n");
+#else
     if (!managed_kernel_phase70_wait_for_restart(boot_services)) {
         managed_kernel_serial_interrupt_checkpoint("RESTART_TIMEOUT");
         fail("phase70-automatic-service-restart");
@@ -16769,6 +17078,7 @@ static void managed_kernel_phase9_interrupt(
                      g_managed_kernel_driver_worker_context.managed_dispatch_count);
     serial_text("\r\n");
     serial_text("GXOS_NET10:PHASE70_DEVICE_GLOBAL_RECEIVE_STATE_PRESERVED=1\r\n");
+#endif
 #else
     if (!managed_kernel_interrupt_wait_for_enqueued(
             boot_services, &g_managed_kernel_driver_worker_context, 2)) {
@@ -17076,6 +17386,17 @@ static void managed_kernel_phase9_interrupt(
         fail("managed-kernel-driver-worker-stop");
     }
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
+#ifdef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
+    if (g_managed_kernel_driver_worker_context.service_handle.identity == 0U ||
+        gxos_managed_kernel_driver_owner_restart_budget(
+            &g_managed_kernel_driver_worker_context) != 1U ||
+        gxos_managed_kernel_driver_owner_restart_state(
+            &g_managed_kernel_driver_worker_context) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED) {
+        fail("phase71-manual-stop-triggered-restart");
+    }
+    serial_text("GXOS_NET10:PHASE71_MANUAL_NORMAL_DRAIN_NO_RESTART=1\r\n");
+#else
     if (g_managed_kernel_driver_worker_context.service_handle.identity == 0U ||
         gxos_managed_kernel_driver_owner_restart_budget(
             &g_managed_kernel_driver_worker_context) != 0U ||
@@ -17085,6 +17406,7 @@ static void managed_kernel_phase9_interrupt(
         fail("phase70-normal-drain-triggered-restart");
     }
     serial_text("GXOS_NET10:PHASE70_NORMAL_DRAIN_NO_RESTART=1\r\n");
+#endif
 #endif
     if (g_managed_kernel_driver_worker_context.nativeaot_lifecycle
             .runtime_detach_count != 1U ||
@@ -17214,10 +17536,12 @@ static void managed_kernel_phase9_interrupt(
         fail("managed-kernel-driver-worker-reclaim");
     }
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
+#ifndef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
     managed_kernel_phase70_finish_one_shot_after_service_stop(
         g_phase70_restart_evidence.scheduler_object_baseline,
         g_phase70_restart_evidence.scheduler_thread_baseline,
         g_phase70_restart_evidence.threadstore_baseline);
+#endif
 #endif
 #ifdef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
     if (g_managed_kernel_driver_worker_context.thread != 0 ||
@@ -17325,6 +17649,7 @@ static void managed_kernel_phase9_interrupt(
                      g_memory_vm_regions.live_count);
     serial_text("\r\n");
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
+#ifndef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
     if (baseline_live <
             g_phase70_restart_evidence.one_shot_memory_after.live_pages -
                 g_phase70_restart_evidence.one_shot_memory_before.live_pages ||
@@ -17382,6 +17707,7 @@ static void managed_kernel_phase9_interrupt(
         g_phase70_restart_evidence.one_shot_memory_after.regions -
         g_phase70_restart_evidence.one_shot_memory_before.regions;
     serial_text("GXOS_NET10:PHASE70_ONE_SHOT_RESOURCES_SUBTRACTED_FROM_BASELINE=1\r\n");
+#endif
 #endif
     if (stats.IrqEntryCount <
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE11

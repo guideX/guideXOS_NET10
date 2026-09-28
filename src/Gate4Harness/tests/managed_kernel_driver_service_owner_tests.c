@@ -133,6 +133,56 @@ int main(void)
                "fresh manual owner episode releases its slot");
     }
 
+    {
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE failed_episode = {0};
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE failed_admission_handle = {0};
+        GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE manual_episode = {0};
+        uint32_t budget_before = 0U;
+        expect(gxos_managed_kernel_driver_owner_claim(&owner_a) ==
+                   GXOS_MANAGED_KERNEL_DRIVER_OWNER_OK &&
+                   gxos_managed_kernel_driver_owner_publish(
+                       &owner_a, 1U, &failed_episode),
+               "failed-admission episode publishes its running generation");
+        expect(gxos_managed_kernel_driver_owner_restart_begin(
+                   &owner_a, failed_episode,
+                   GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_RECOVERABLE_DISPATCH,
+                   &budget_before) && budget_before == 1U &&
+                   gxos_managed_kernel_driver_owner_restart_budget(&owner_a) == 0U,
+               "failed replacement attempt consumes the only restart budget");
+        expect(gxos_managed_kernel_driver_owner_release(&owner_a) &&
+                   gxos_managed_kernel_driver_owner_claim(&owner_a) ==
+                       GXOS_MANAGED_KERNEL_DRIVER_OWNER_OK &&
+                   failed_admission_handle.identity == 0U &&
+                   gxos_managed_kernel_driver_owner_release(&owner_a) &&
+                   gxos_managed_kernel_driver_owner_restart_complete(&owner_a, 0),
+               "replacement capacity rejection publishes no replacement identity");
+        expect(gxos_managed_kernel_driver_owner_restart_budget(&owner_a) == 0U &&
+                   gxos_managed_kernel_driver_owner_restart_state(&owner_a) ==
+                       GXOS_MANAGED_KERNEL_DRIVER_RESTART_FAILED &&
+                   !gxos_managed_kernel_driver_owner_is_current(
+                       &owner_a, failed_episode),
+               "failed automatic replacement leaves a stopped failed episode");
+        expect(!gxos_managed_kernel_driver_owner_restart_begin(
+                   &owner_a, failed_episode,
+                   GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_RECOVERABLE_DISPATCH,
+                   &budget_before) && budget_before == 0U &&
+                   gxos_managed_kernel_driver_owner_restart_budget(&owner_a) == 0U,
+               "a second automatic replacement is rejected after admission failure");
+        expect(gxos_managed_kernel_driver_owner_claim(&owner_a) ==
+                   GXOS_MANAGED_KERNEL_DRIVER_OWNER_OK &&
+                   gxos_managed_kernel_driver_owner_restart_budget(&owner_a) == 1U &&
+                   gxos_managed_kernel_driver_owner_restart_state(&owner_a) ==
+                       GXOS_MANAGED_KERNEL_DRIVER_RESTART_NOT_ATTEMPTED &&
+                   gxos_managed_kernel_driver_owner_publish(
+                       &owner_a, 1U, &manual_episode) &&
+                   manual_episode.identity != failed_episode.identity &&
+                   manual_episode.generation != failed_episode.generation &&
+                   manual_episode.device_identity == failed_episode.device_identity,
+               "explicit manual start creates a new episode and resets budget");
+        expect(gxos_managed_kernel_driver_owner_release(&owner_a),
+               "manual episode releases the owner slot");
+    }
+
     if (g_failures != 0) {
         printf("MANAGED_KERNEL_DRIVER_SERVICE_OWNER_HOST_TESTS=FAILED failures=%u\n",
                g_failures);
