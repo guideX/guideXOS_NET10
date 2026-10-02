@@ -37,5 +37,20 @@ if ($LASTEXITCODE -ne 0) { throw "Diagnostic resource host build failed: $LASTEX
     2> (Join-Path $out 'resources-run.stderr.log')
 if ($LASTEXITCODE -ne 0) { throw "Diagnostic resource host tests failed: $LASTEXITCODE" }
 
+$resourceClaimExe = Join-Path $out 'managed_kernel_diagnostic_resource_tests.exe'
+$resourceClaimBuild = @(
+    '-std=c11', '-Wall', '-Wextra', '-Werror', '-Isrc\Gate4Harness',
+    'src\Gate4Harness\managed_kernel_device_resources.c',
+    'src\Gate4Harness\managed_kernel_diagnostic_resource.c',
+    'src\Gate4Harness\tests\managed_kernel_diagnostic_resource_tests.c',
+    '-o', $resourceClaimExe)
+& $gcc.Source @resourceClaimBuild 1> (Join-Path $out 'resource-claim-build.stdout.log') `
+    2> (Join-Path $out 'resource-claim-build.stderr.log')
+if ($LASTEXITCODE -ne 0) { throw "Diagnostic resource claim host build failed: $LASTEXITCODE" }
+& $resourceClaimExe 1> (Join-Path $out 'resource-claim-run.stdout.log') `
+    2> (Join-Path $out 'resource-claim-run.stderr.log')
+if ($LASTEXITCODE -ne 0) { throw "Diagnostic resource claim host tests failed: $LASTEXITCODE" }
+
 Get-Content (Join-Path $out 'diagnostic-run.stdout.log')
 Get-Content (Join-Path $out 'resources-run.stdout.log')
+Get-Content (Join-Path $out 'resource-claim-run.stdout.log')

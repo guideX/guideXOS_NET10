@@ -775,18 +775,45 @@ static GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE
     g_managed_kernel_driver_service_handle;
 static GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT
     g_managed_kernel_diagnostic_context;
-static const GXOS_MANAGED_KERNEL_SECONDARY_UART_CONFIG
-    g_managed_kernel_secondary_uart_config = {
+static GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE
+    g_managed_kernel_diagnostic_uart_resource;
+static GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESERVATION
+    g_managed_kernel_diagnostic_uart_reservation;
+static GXOS_DIAGNOSTIC_RESOURCE_DISABLE_REASON
+    g_managed_kernel_diagnostic_disable_reason =
+        GXOS_DIAGNOSTIC_RESOURCE_REASON_NO_RESOURCE;
+static uint32_t g_managed_kernel_device_resource_count;
+/* IRQ0 timer, IRQ1 keyboard, IRQ2 legacy cascade, and IRQ4 COM1 already have
+   exclusive platform owners in this kernel image. */
+#define GXOS_MANAGED_KERNEL_PLATFORM_EXCLUSIVE_IRQ_MASK \
+    ((1U << 0) | (1U << 1) | (1U << 2) | (1U << 4))
 #ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
-        .present = 1U, .io_base = 0x2F8U, .irq = 3U, .reserved = 0U
+static const uint32_t g_managed_kernel_diagnostic_policy_allowed = 1U;
 #else
-        .present = 0U, .io_base = 0U, .irq = 0U, .reserved = 0U
+static const uint32_t g_managed_kernel_diagnostic_policy_allowed = 0U;
 #endif
-    };
+#ifdef GXOS_CONFIGURE_PHASE76_QEMU_DIAGNOSTIC_UART
+static const GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE
+    g_managed_kernel_qemu_diagnostic_uart_resource = {
+        .present = 1U,
+        .enabled = 1U,
+        .source = GXOS_DIAGNOSTIC_UART_SOURCE_QEMU_PLATFORM,
+        .backend = GXOS_DIAGNOSTIC_UART_BACKEND_IO_16550,
+        .ownership_flags = GXOS_DIAGNOSTIC_UART_OWNERSHIP_EXCLUSIVE |
+                           GXOS_DIAGNOSTIC_UART_OWNERSHIP_DIAGNOSTIC_ONLY,
+        .io_base = 0x2F8U,
+        .register_span = GXOS_DIAGNOSTIC_UART_REGISTER_SPAN_16550,
+        .irq = 3U};
+#else
+static const GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE
+    g_managed_kernel_qemu_diagnostic_uart_resource = {0};
+#endif
 static uint32_t g_managed_kernel_diagnostic_ioapic_enabled;
+static uint32_t g_managed_kernel_diagnostic_uart_programmed;
 static uint8_t g_managed_kernel_diagnostic_saved_ier;
 static uint8_t g_managed_kernel_diagnostic_saved_mcr;
 static uint8_t g_managed_kernel_diagnostic_saved_pic_mask;
+static uint8_t g_managed_kernel_diagnostic_saved_pic_slave_mask;
 static uint32_t g_managed_kernel_diagnostic_saved_ioapic_high;
 static uint32_t g_managed_kernel_diagnostic_saved_ioapic_low;
 static uint64_t g_managed_kernel_diagnostic_boot_poll_count;
@@ -13024,6 +13051,19 @@ static int managed_kernel_find_uefi_mmio_page(
 }
 #endif
 
+static GXOS_DIAGNOSTIC_RESOURCE_QUERY_RESULT
+gxos_platform_get_diagnostic_uart_resource(
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE *resource_out)
+{
+    if (resource_out == 0) return GXOS_DIAGNOSTIC_RESOURCE_QUERY_INVALID;
+    *resource_out = (GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE){0};
+    if (g_managed_kernel_qemu_diagnostic_uart_resource.present == 0U) {
+        return GXOS_DIAGNOSTIC_RESOURCE_QUERY_UNAVAILABLE;
+    }
+    *resource_out = g_managed_kernel_qemu_diagnostic_uart_resource;
+    return GXOS_DIAGNOSTIC_RESOURCE_QUERY_VALID;
+}
+
 static void prepare_managed_kernel_device_resources(
     EFI_BOOT_SERVICES *boot_services)
 {
@@ -13036,11 +13076,10 @@ static void prepare_managed_kernel_device_resources(
                sizeof(g_managed_kernel_device_resources));
     zero_bytes((uint8_t *)&g_managed_kernel_device_resource_summary,
                sizeof(g_managed_kernel_device_resource_summary));
-    status = gxos_managed_kernel_make_platform_resources_with_secondary_uart(
+    status = gxos_managed_kernel_make_platform_resources(
         g_managed_kernel_device_resources,
         GX_MANAGED_KERNEL_DEVICE_RESOURCE_MAX_DESCRIPTORS,
-        &resource_count, &g_managed_kernel_device_resource_summary,
-        &g_managed_kernel_secondary_uart_config);
+        &resource_count, &g_managed_kernel_device_resource_summary);
     if (status != GXOS_MANAGED_KERNEL_RESOURCE_OK || resource_count == 0U) {
         fail("managed-kernel-resource-discovery");
     }
@@ -13136,12 +13175,12 @@ static void prepare_managed_kernel_device_resources(
             }
         }
     }
-    if (resource_count == 3U +
-            (g_managed_kernel_secondary_uart_config.present != 0U ? 2U : 0U)) {
+    if (resource_count == 3U) {
         serial_text("GXOS_NET10:MANAGED_KERNEL_MMIO_PCI_BAR_UNAVAILABLE=AUTHORITATIVE_FIRMWARE_RANGE_REQUIRED\r\n");
     } else {
         g_managed_kernel_device_resource_summary.ResourceCount = resource_count;
     }
+    g_managed_kernel_device_resource_count = resource_count;
     descriptor_bytes = (uint64_t)resource_count *
                        GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1_SIZE;
     zero_bytes((uint8_t *)&g_managed_kernel_device_resource_publication_storage,
@@ -13457,7 +13496,6 @@ static void managed_kernel_interrupt_install_idt(void);
 #define GXOS_MANAGED_KERNEL_LAPIC_EOI 0xFEE000B0ULL
 #define GXOS_MANAGED_KERNEL_IOAPIC_SERIAL_IRQ_REGISTER 0x18U
 #define GXOS_MANAGED_KERNEL_IOAPIC_KEYBOARD_IRQ_REGISTER 0x12U
-#define GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER 0x16U
 
 static uint32_t managed_kernel_ioapic_read(uint8_t register_index)
 {
@@ -13608,7 +13646,8 @@ static void managed_kernel_interrupt_install_idt(void)
     set_idt_gate(&g_gate4_idt[0x24], gxos_managed_kernel_serial_irq_entry);
     set_idt_gate(&g_gate4_idt[0x21], gxos_managed_kernel_keyboard_irq_entry);
     if (g_managed_kernel_diagnostic_context.present != 0U) {
-        set_idt_gate(&g_gate4_idt[0x23],
+        set_idt_gate(&g_gate4_idt[0x20U +
+                     g_managed_kernel_diagnostic_context.irq],
                      gxos_managed_kernel_diagnostic_irq_entry);
     }
     {
@@ -13894,7 +13933,9 @@ static int managed_kernel_diagnostic_transmit_byte(void *opaque, uint8_t value)
 static void managed_kernel_diagnostic_interrupt_eoi(void *opaque)
 {
     volatile uint32_t *lapic_eoi;
-    (void)opaque;
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *)opaque;
+    if (context != 0 && context->irq >= 8U) serial_out8(0xA0U, 0x20U);
     serial_out8(0x20, 0x20);
     if (g_managed_kernel_diagnostic_ioapic_enabled != 0U) {
         lapic_eoi = (volatile uint32_t *)(uintptr_t)
@@ -13904,27 +13945,34 @@ static void managed_kernel_diagnostic_interrupt_eoi(void *opaque)
     }
 }
 
-static int managed_kernel_diagnostic_uart_enable(void)
+static uint8_t managed_kernel_diagnostic_ioapic_route_register(uint8_t irq)
+{
+    return (uint8_t)(0x10U + ((uint32_t)irq * 2U));
+}
+
+static int managed_kernel_diagnostic_uart_initialize_stage(
+    void *opaque,
+    const GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE *resource)
 {
     GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
-        &g_managed_kernel_diagnostic_context;
-    uint32_t ioapic_low;
-    uint8_t mask;
-    if (context->present == 0U || context->io_base != 0x2F8U ||
-        context->irq != 3U) {
+        (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *)opaque;
+    uint8_t route_register;
+    if (context == 0 || resource == 0 || context->present == 0U ||
+        context->io_base != resource->io_base || context->irq != resource->irq ||
+        context->backend != GXOS_DIAGNOSTIC_UART_BACKEND_IO_16550) {
         return 0;
     }
-    managed_kernel_interrupt_install_idt();
     g_managed_kernel_diagnostic_saved_ier = serial_in8(context->io_base + 1U);
     g_managed_kernel_diagnostic_saved_mcr = serial_in8(context->io_base + 4U);
     g_managed_kernel_diagnostic_saved_pic_mask = serial_in8(0x21U);
+    g_managed_kernel_diagnostic_saved_pic_slave_mask = serial_in8(0xA1U);
+    route_register = managed_kernel_diagnostic_ioapic_route_register(context->irq);
     g_managed_kernel_diagnostic_saved_ioapic_high =
-        managed_kernel_ioapic_read(
-            GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER + 1U);
+        managed_kernel_ioapic_read((uint8_t)(route_register + 1U));
     g_managed_kernel_diagnostic_saved_ioapic_low =
-        managed_kernel_ioapic_read(
-            GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER);
+        managed_kernel_ioapic_read(route_register);
 
+    g_managed_kernel_diagnostic_uart_programmed = 1U;
     serial_out8(context->io_base + 1U, 0U);
     serial_out8(context->io_base + 3U, 0x80U);
     serial_out8(context->io_base, 0x03U);
@@ -13935,57 +13983,193 @@ static int managed_kernel_diagnostic_uart_enable(void)
     serial_out8(context->io_base + 2U, 0x07U);
     serial_out8(context->io_base + 4U,
                 (uint8_t)(g_managed_kernel_diagnostic_saved_mcr | 0x08U));
+    return 1;
+}
 
-    mask = (uint8_t)(g_managed_kernel_diagnostic_saved_pic_mask | 0x08U);
-    serial_out8(0x21U, mask);
+static int managed_kernel_diagnostic_irq_register_stage(
+    void *opaque,
+    const GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE *resource)
+{
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *)opaque;
+    uint8_t route_register;
+    uint8_t vector;
+    uint8_t mask;
+    uint32_t ioapic_low;
+    if (context == 0 || resource == 0 || context->present == 0U) return 0;
+    managed_kernel_interrupt_install_idt();
+    route_register = managed_kernel_diagnostic_ioapic_route_register(context->irq);
+    vector = (uint8_t)(0x20U + context->irq);
+    if (context->irq < 8U) {
+        mask = (uint8_t)(g_managed_kernel_diagnostic_saved_pic_mask |
+                         (uint8_t)(1U << context->irq));
+        serial_out8(0x21U, mask);
+    } else {
+        mask = (uint8_t)(g_managed_kernel_diagnostic_saved_pic_slave_mask |
+                         (uint8_t)(1U << (context->irq - 8U)));
+        serial_out8(0xA1U, mask);
+    }
     ioapic_low = (g_managed_kernel_diagnostic_saved_ioapic_low &
-                  ~0x000100FFU) | 0x23U;
+                  ~0x000100FFU) | vector;
     managed_kernel_ioapic_write(
-        GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER + 1U,
+        (uint8_t)(route_register + 1U),
         g_managed_kernel_diagnostic_saved_ioapic_high);
-    managed_kernel_ioapic_write(
-        GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER, ioapic_low);
+    managed_kernel_ioapic_write(route_register, ioapic_low);
     g_managed_kernel_diagnostic_ioapic_enabled = 1U;
-    gxos_managed_kernel_diagnostic_set_enabled(context, 1);
     /* The native ISR owns receive capture only. Do not inherit firmware
        THRE/modem interrupts that this bounded handler does not service. */
     serial_out8(context->io_base + 1U, 0x01U);
 
     if ((serial_in8(context->io_base + 1U) & 0x01U) != 0U &&
         (serial_in8(context->io_base + 4U) & 0x08U) != 0U &&
-        (serial_in8(0x21U) & 0x08U) != 0U &&
-        (managed_kernel_ioapic_read(
-             GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER) &
-             0xFFU) == 0x23U &&
-        (managed_kernel_ioapic_read(
-             GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER) &
-             0x00010000U) == 0U) {
+        (((context->irq < 8U ? serial_in8(0x21U) : serial_in8(0xA1U)) &
+          (uint8_t)(1U << (context->irq < 8U ? context->irq :
+                           context->irq - 8U))) != 0U) &&
+        (managed_kernel_ioapic_read(route_register) & 0xFFU) == vector &&
+        (managed_kernel_ioapic_read(route_register) & 0x00010000U) == 0U) {
+        gxos_managed_kernel_diagnostic_set_enabled(context, 1);
         return 1;
     }
+    return 0;
+}
 
+static void managed_kernel_diagnostic_irq_unregister_stage(
+    void *opaque,
+    const GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE *resource)
+{
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *)opaque;
+    uint8_t route_register;
+    (void)resource;
+    if (context == 0) return;
     gxos_managed_kernel_diagnostic_set_enabled(context, 0);
-    serial_out8(context->io_base + 1U, g_managed_kernel_diagnostic_saved_ier);
-    serial_out8(context->io_base + 4U, g_managed_kernel_diagnostic_saved_mcr);
-    serial_out8(0x21U, g_managed_kernel_diagnostic_saved_pic_mask);
+    if (g_managed_kernel_diagnostic_ioapic_enabled == 0U) return;
+    route_register = managed_kernel_diagnostic_ioapic_route_register(context->irq);
+    if (context->irq < 8U) {
+        serial_out8(0x21U, g_managed_kernel_diagnostic_saved_pic_mask);
+    } else {
+        serial_out8(0xA1U, g_managed_kernel_diagnostic_saved_pic_slave_mask);
+    }
     managed_kernel_ioapic_write(
-        GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER + 1U,
+        (uint8_t)(route_register + 1U),
         g_managed_kernel_diagnostic_saved_ioapic_high);
-    managed_kernel_ioapic_write(
-        GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER,
-        g_managed_kernel_diagnostic_saved_ioapic_low);
+    managed_kernel_ioapic_write(route_register,
+                                g_managed_kernel_diagnostic_saved_ioapic_low);
     g_managed_kernel_diagnostic_ioapic_enabled = 0U;
     if (g_managed_kernel_serial_interrupt_ioapic_enabled == 0U &&
         g_managed_kernel_keyboard_interrupt_enabled == 0U) {
         managed_kernel_serial_interrupt_restore_idt();
     }
-    return 0;
+}
+
+static void managed_kernel_diagnostic_uart_stop_stage(
+    void *opaque,
+    const GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE *resource)
+{
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *)opaque;
+    (void)resource;
+    if (context == 0 || context->present == 0U) return;
+    gxos_managed_kernel_diagnostic_set_enabled(context, 0);
+    if (g_managed_kernel_diagnostic_uart_programmed == 0U) return;
+    serial_out8(context->io_base + 1U, g_managed_kernel_diagnostic_saved_ier);
+    serial_out8(context->io_base + 4U, g_managed_kernel_diagnostic_saved_mcr);
+    g_managed_kernel_diagnostic_uart_programmed = 0U;
+}
+
+static const GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_OPERATIONS
+    g_managed_kernel_diagnostic_uart_operations = {
+        .initialize_uart = managed_kernel_diagnostic_uart_initialize_stage,
+        .register_irq = managed_kernel_diagnostic_irq_register_stage,
+        .unregister_irq = managed_kernel_diagnostic_irq_unregister_stage,
+        .stop_uart = managed_kernel_diagnostic_uart_stop_stage};
+
+static const char *managed_kernel_diagnostic_disable_reason_name(
+    GXOS_DIAGNOSTIC_RESOURCE_DISABLE_REASON reason)
+{
+    switch (reason) {
+    case GXOS_DIAGNOSTIC_RESOURCE_REASON_NO_RESOURCE: return "NO_RESOURCE";
+    case GXOS_DIAGNOSTIC_RESOURCE_REASON_INVALID_RESOURCE: return "INVALID_RESOURCE";
+    case GXOS_DIAGNOSTIC_RESOURCE_REASON_POLICY_DISABLED: return "POLICY_DISABLED";
+    case GXOS_DIAGNOSTIC_RESOURCE_REASON_IO_CONFLICT: return "IO_CONFLICT";
+    case GXOS_DIAGNOSTIC_RESOURCE_REASON_IRQ_CONFLICT: return "IRQ_CONFLICT";
+    case GXOS_DIAGNOSTIC_RESOURCE_REASON_RESERVATION_FAILED: return "RESERVATION_FAILED";
+    case GXOS_DIAGNOSTIC_RESOURCE_REASON_UART_INIT_FAILED: return "UART_INIT_FAILED";
+    case GXOS_DIAGNOSTIC_RESOURCE_REASON_IRQ_REGISTRATION_FAILED: return "IRQ_REGISTRATION_FAILED";
+    default: return "NONE";
+    }
+}
+
+static const char *managed_kernel_diagnostic_resource_source_name(uint32_t source)
+{
+    switch (source) {
+    case GXOS_DIAGNOSTIC_UART_SOURCE_QEMU_PLATFORM: return "QEMU_PLATFORM";
+    case GXOS_DIAGNOSTIC_UART_SOURCE_BOARD_DESCRIPTOR: return "BOARD_DESCRIPTOR";
+    case GXOS_DIAGNOSTIC_UART_SOURCE_FIRMWARE_DESCRIPTOR: return "FIRMWARE_DESCRIPTOR";
+    default: return "NONE";
+    }
 }
 
 static void managed_kernel_diagnostic_uart_initialize(void)
 {
+    GXOS_DIAGNOSTIC_RESOURCE_QUERY_RESULT query_result;
+    GXOS_DIAGNOSTIC_RESOURCE_ACTIVATION_RESULT activation_result;
+    GXOS_DIAGNOSTIC_RESOURCE_DISABLE_REASON reason =
+        GXOS_DIAGNOSTIC_RESOURCE_REASON_NO_RESOURCE;
+    query_result = gxos_platform_get_diagnostic_uart_resource(
+        &g_managed_kernel_diagnostic_uart_resource);
+    if (query_result == GXOS_DIAGNOSTIC_RESOURCE_QUERY_UNAVAILABLE) {
+        g_managed_kernel_diagnostic_disable_reason =
+            GXOS_DIAGNOSTIC_RESOURCE_REASON_NO_RESOURCE;
+        (void)gxos_managed_kernel_diagnostic_initialize(
+            &g_managed_kernel_diagnostic_context, 0,
+            &g_managed_kernel_driver_worker_context,
+            &g_managed_kernel_driver_service_handle,
+            gxos_managed_kernel_driver_service_get_status,
+            gxos_managed_kernel_driver_service_restart,
+            managed_kernel_diagnostic_read_iir,
+            managed_kernel_diagnostic_read_lsr,
+            managed_kernel_diagnostic_read_data,
+            managed_kernel_diagnostic_transmit_byte,
+            managed_kernel_diagnostic_interrupt_eoi,
+            &g_managed_kernel_diagnostic_context);
+        g_managed_kernel_diagnostic_context.disable_reason =
+            GXOS_DIAGNOSTIC_RESOURCE_REASON_NO_RESOURCE;
+        serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_SOURCE=NONE\r\n");
+        serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_POLICY_ALLOWED=");
+        serial_u32(g_managed_kernel_diagnostic_policy_allowed);
+        serial_text("\r\nGXOS_NET10:PHASE76_DIAGNOSTIC_DISABLE_REASON=1\r\n");
+        serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_INGRESS_DISABLED=NO_PLATFORM_UART\r\n");
+        serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_REJECTED=NO_RESOURCE\r\n");
+        return;
+    }
+    if (query_result != GXOS_DIAGNOSTIC_RESOURCE_QUERY_VALID ||
+        gxos_managed_kernel_diagnostic_uart_validate(
+            &g_managed_kernel_diagnostic_uart_resource) !=
+                GXOS_DIAGNOSTIC_RESOURCE_QUERY_VALID) {
+        reason = GXOS_DIAGNOSTIC_RESOURCE_REASON_INVALID_RESOURCE;
+        g_managed_kernel_diagnostic_disable_reason = reason;
+        g_managed_kernel_diagnostic_context.disable_reason = (uint32_t)reason;
+        serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_SOURCE=");
+        serial_text(managed_kernel_diagnostic_resource_source_name(
+            g_managed_kernel_diagnostic_uart_resource.source));
+        serial_text("\r\nGXOS_NET10:PHASE76_DIAGNOSTIC_POLICY_ALLOWED=");
+        serial_u32(g_managed_kernel_diagnostic_policy_allowed);
+        serial_text("\r\nGXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_REJECTED=INVALID_RESOURCE\r\n");
+        serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_DISABLE_REASON=2\r\n");
+        serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_INGRESS_DISABLED=INVALID_RESOURCE\r\n");
+        return;
+    }
+    serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_SOURCE=");
+    serial_text(managed_kernel_diagnostic_resource_source_name(
+        g_managed_kernel_diagnostic_uart_resource.source));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_POLICY_ALLOWED=");
+    serial_u32(g_managed_kernel_diagnostic_policy_allowed);
+    serial_text("\r\n");
     if (!gxos_managed_kernel_diagnostic_initialize(
             &g_managed_kernel_diagnostic_context,
-            &g_managed_kernel_secondary_uart_config,
+            &g_managed_kernel_diagnostic_uart_resource,
             &g_managed_kernel_driver_worker_context,
             &g_managed_kernel_driver_service_handle,
             gxos_managed_kernel_driver_service_get_status,
@@ -13996,25 +14180,58 @@ static void managed_kernel_diagnostic_uart_initialize(void)
             managed_kernel_diagnostic_transmit_byte,
             managed_kernel_diagnostic_interrupt_eoi,
             &g_managed_kernel_diagnostic_context)) {
-        fail("managed-kernel-diagnostic-context-init");
-    }
-    if (g_managed_kernel_diagnostic_context.present == 0U) {
-        serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_INGRESS_DISABLED=NO_PLATFORM_UART\r\n");
+        reason = GXOS_DIAGNOSTIC_RESOURCE_REASON_INVALID_RESOURCE;
+        g_managed_kernel_diagnostic_disable_reason = reason;
+        g_managed_kernel_diagnostic_context.disable_reason = (uint32_t)reason;
+        serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_REJECTED=INVALID_RESOURCE\r\n");
+        serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_INGRESS_DISABLED=INVALID_RESOURCE\r\n");
         return;
     }
-    if (!managed_kernel_diagnostic_uart_enable()) {
+    activation_result = gxos_managed_kernel_diagnostic_uart_activate(
+        &g_managed_kernel_diagnostic_uart_resource,
+        g_managed_kernel_diagnostic_policy_allowed,
+        g_managed_kernel_device_resources,
+        g_managed_kernel_device_resource_count,
+        GXOS_MANAGED_KERNEL_PLATFORM_EXCLUSIVE_IRQ_MASK,
+        &g_managed_kernel_diagnostic_uart_reservation,
+        &g_managed_kernel_diagnostic_uart_operations,
+        &g_managed_kernel_diagnostic_context, &reason);
+    if (activation_result != GXOS_DIAGNOSTIC_RESOURCE_ACTIVATION_ENABLED) {
+        g_managed_kernel_diagnostic_disable_reason = reason;
+        g_managed_kernel_diagnostic_context.disable_reason = (uint32_t)reason;
         gxos_managed_kernel_diagnostic_set_enabled(
             &g_managed_kernel_diagnostic_context, 0);
-#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
-        fail("phase75-required-com2-init");
-#else
-        serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_INGRESS_DISABLED=UART_INIT_FAILED\r\n");
+        g_managed_kernel_diagnostic_context.present = 0U;
+        serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_REJECTED=");
+        serial_text(managed_kernel_diagnostic_disable_reason_name(reason));
+        serial_text("\r\nGXOS_NET10:PHASE76_DIAGNOSTIC_DISABLE_REASON=");
+        serial_u32((uint32_t)reason);
+        serial_text("\r\nGXOS_NET10:PHASE75_DIAGNOSTIC_INGRESS_DISABLED=");
+        serial_text(managed_kernel_diagnostic_disable_reason_name(reason));
+        serial_text("\r\n");
         return;
-#endif
     }
+    g_managed_kernel_diagnostic_disable_reason =
+        GXOS_DIAGNOSTIC_RESOURCE_REASON_NONE;
+    g_managed_kernel_diagnostic_context.disable_reason =
+        GXOS_DIAGNOSTIC_RESOURCE_REASON_NONE;
+    serial_text("GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_ACCEPTED=1 SOURCE=");
+    serial_text(managed_kernel_diagnostic_resource_source_name(
+        g_managed_kernel_diagnostic_uart_resource.source));
+    serial_text(" BASE=0x");
+    serial_hex64(g_managed_kernel_diagnostic_uart_resource.io_base);
+    serial_text(" SPAN=0x");
+    serial_hex64(g_managed_kernel_diagnostic_uart_resource.register_span);
+    serial_text(" IRQ=");
+    serial_u32(g_managed_kernel_diagnostic_uart_resource.irq);
+    serial_text(" BACKEND=IO_16550\r\n");
     serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_UART_PRESENT=1\r\n");
     serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_UART_ENABLED=1\r\n");
-    serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_UART_BASE=0x2F8 IRQ=3\r\n");
+    serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_UART_BASE=0x");
+    serial_hex64(g_managed_kernel_diagnostic_uart_resource.io_base);
+    serial_text(" IRQ=");
+    serial_u32(g_managed_kernel_diagnostic_uart_resource.irq);
+    serial_text("\r\n");
 }
 
 static int managed_kernel_interrupt_range_is_known(

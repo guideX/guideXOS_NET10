@@ -10,6 +10,7 @@ param(
     [string]$Phase70FixtureMode = 'None',
     [switch]$EnablePhase72ExplicitRestartFixture,
     [switch]$EnablePhase75Com2DiagnosticIngress,
+    [switch]$ConfigurePhase76QemuDiagnosticUartProvider,
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 180
 )
@@ -31,6 +32,10 @@ if ($EnablePhase72ExplicitRestartFixture -and
 }
 if ($EnablePhase75Com2DiagnosticIngress -and -not $EnablePhase72ExplicitRestartFixture) {
     throw 'Phase 75 acceptance requires the Phase 72 and Phase 71 fixtures.'
+}
+if ($ConfigurePhase76QemuDiagnosticUartProvider -and
+    $EnablePhase75Com2DiagnosticIngress) {
+    throw 'Provider-only validation cannot enable the Phase 75 diagnostic client.'
 }
 
 function Require10([bool]$condition, [string]$message) {
@@ -439,6 +444,9 @@ if ($EnablePhase72ExplicitRestartFixture) {
 }
 if ($EnablePhase75Com2DiagnosticIngress) {
     $requiredMarkers += @(
+        'GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_SOURCE=QEMU_PLATFORM',
+        'GXOS_NET10:PHASE76_DIAGNOSTIC_POLICY_ALLOWED=1',
+        'GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_ACCEPTED=1 SOURCE=QEMU_PLATFORM',
         'GXOS_NET10:PHASE75_DIAGNOSTIC_UART_PRESENT=1',
         'GXOS_NET10:PHASE75_DIAGNOSTIC_UART_ENABLED=1',
         'GXOS_NET10:PHASE75_RESTART_FAILED_DIAGNOSTIC_READY=1',
@@ -448,6 +456,13 @@ if ($EnablePhase75Com2DiagnosticIngress) {
         'GXOS_NET10:PHASE75_DIAGNOSTIC_ALIVE_AFTER_COM1_STOP=1',
         'GXOS_NET10:PHASE75_IRQ_CAPTURE_ONLY=1',
         'GXOS_NET10:PHASE75_BOOT_THREAD_DISPATCH=1')
+}
+if ($ConfigurePhase76QemuDiagnosticUartProvider) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_SOURCE=QEMU_PLATFORM',
+        'GXOS_NET10:PHASE76_DIAGNOSTIC_POLICY_ALLOWED=0',
+        'GXOS_NET10:PHASE76_DIAGNOSTIC_RESOURCE_REJECTED=POLICY_DISABLED',
+        'GXOS_NET10:PHASE76_DIAGNOSTIC_DISABLE_REASON=3')
 }
 $requiredMarkers += switch ($Phase69FixtureMode) {
     'None' {
@@ -558,6 +573,13 @@ try {
         if ($EnablePhase75Com2DiagnosticIngress) {
             $diagnosticArguments = @(
                 '-chardev', "socket,id=diag0,host=127.0.0.1,port=$diagnosticPort,server=on,wait=on,telnet=off,ipv4=on,nodelay=on",
+                '-device', 'isa-serial,chardev=diag0,iobase=0x2f8,irq=3,wakeup=on')
+            $monitorIndex = [Array]::IndexOf($arguments, '-monitor')
+            $arguments = @($arguments[0..($monitorIndex - 1)]) +
+                $diagnosticArguments + @($arguments[$monitorIndex..($arguments.Count - 1)])
+        } elseif ($ConfigurePhase76QemuDiagnosticUartProvider) {
+            $diagnosticArguments = @(
+                '-chardev', 'null,id=diag0',
                 '-device', 'isa-serial,chardev=diag0,iobase=0x2f8,irq=3,wakeup=on')
             $monitorIndex = [Array]::IndexOf($arguments, '-monitor')
             $arguments = @($arguments[0..($monitorIndex - 1)]) +

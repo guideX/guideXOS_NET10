@@ -117,8 +117,13 @@ static void fake_eoi(void *opaque)
 
 static void reset_fixture(void)
 {
-    GXOS_MANAGED_KERNEL_SECONDARY_UART_CONFIG resource = {
-        .present = 1U, .io_base = 0x2F8U, .irq = 3U, .reserved = 0U};
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE resource = {
+        .present = 1U, .enabled = 1U,
+        .source = GXOS_DIAGNOSTIC_UART_SOURCE_QEMU_PLATFORM,
+        .backend = GXOS_DIAGNOSTIC_UART_BACKEND_IO_16550,
+        .ownership_flags = GXOS_DIAGNOSTIC_UART_OWNERSHIP_EXCLUSIVE |
+                           GXOS_DIAGNOSTIC_UART_OWNERSHIP_DIAGNOSTIC_ONLY,
+        .io_base = 0x2F8U, .register_span = 8U, .irq = 3U};
     fake_status_calls = 0U;
     fake_restart_calls = 0U;
     fake_expected_identity = 0U;

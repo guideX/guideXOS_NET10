@@ -21,6 +21,7 @@ param(
     [string]$Phase70FixtureMode = 'None',
     [switch]$EnablePhase72ExplicitRestartFixture,
     [switch]$EnablePhase75Com2DiagnosticIngress,
+    [switch]$ConfigurePhase76QemuDiagnosticUartProvider,
     [switch]$EnablePhase62ConcurrentManagedWorkerApi,
     [switch]$EnablePhase64ManagedWorkerApi,
     [switch]$EnablePhase65ManagedWorkerApi,
@@ -126,6 +127,14 @@ if ($EnablePhase72ExplicitRestartFixture -and
 }
 if ($EnablePhase75Com2DiagnosticIngress -and $PayloadMode -ne 'ManagedKernel') {
     throw 'Phase 75 COM2 diagnostic ingress requires the ManagedKernel payload.'
+}
+if ($ConfigurePhase76QemuDiagnosticUartProvider -and
+    $PayloadMode -ne 'ManagedKernel') {
+    throw 'The Phase 76 QEMU diagnostic UART provider requires the ManagedKernel payload.'
+}
+if ($ConfigurePhase76QemuDiagnosticUartProvider -and
+    $EnablePhase75Com2DiagnosticIngress) {
+    throw 'Select either the Phase 76 provider-only configuration or Phase 75 enabled ingress.'
 }
 if ($EnablePhase75Com2DiagnosticIngress -and
     (-not $EnablePhase69PersistentServiceOwner -or
@@ -421,6 +430,7 @@ $managedKernelDriverWorkerSource = Join-Path $root 'src\Gate4Harness\managed_ker
 $managedKernelDriverOwnerSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_service_owner.c'
 $managedKernelDriverStatusSource = Join-Path $root 'src\Gate4Harness\managed_kernel_driver_service_status.c'
 $managedKernelDiagnosticSource = Join-Path $root 'src\Gate4Harness\managed_kernel_diagnostic.c'
+$managedKernelDiagnosticResourceSource = Join-Path $root 'src\Gate4Harness\managed_kernel_diagnostic_resource.c'
 $vmSubstrateSource = Join-Path $root 'src\Gate4Harness\vm_substrate.c'
 $virtualMemorySource = Join-Path $root 'src\Gate4Harness\virtual_memory.c'
 $virtualQueryCaptureAssembly = Join-Path $root 'src\Gate4Harness\virtual_query_capture.S'
@@ -526,6 +536,9 @@ if (-not (Test-Path -LiteralPath $managedKernelDriverStatusSource)) {
 }
 if (-not (Test-Path -LiteralPath $managedKernelDiagnosticSource)) {
     throw "ManagedKernel diagnostic source not found: $managedKernelDiagnosticSource"
+}
+if (-not (Test-Path -LiteralPath $managedKernelDiagnosticResourceSource)) {
+    throw "ManagedKernel diagnostic resource source not found: $managedKernelDiagnosticResourceSource"
 }
 if (-not (Test-Path -LiteralPath $vmSubstrateSource)) { throw "VM substrate source not found: $vmSubstrateSource" }
 if (-not (Test-Path -LiteralPath $virtualMemorySource)) { throw "Virtual memory source not found: $virtualMemorySource" }
@@ -1613,6 +1626,10 @@ if ($Phase70FixtureMode -eq 'ReplacementAdmissionFailure') {
 if ($EnablePhase72ExplicitRestartFixture) {
     $gccArguments += '-DGXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE'
 }
+if ($EnablePhase75Com2DiagnosticIngress -or
+    $ConfigurePhase76QemuDiagnosticUartProvider) {
+    $gccArguments += '-DGXOS_CONFIGURE_PHASE76_QEMU_DIAGNOSTIC_UART'
+}
 if ($EnablePhase75Com2DiagnosticIngress) {
     $gccArguments += '-DGXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART'
 }
@@ -1787,6 +1804,7 @@ if ($PayloadMode -eq 'ManagedKernel') {
     $gccArguments += $managedKernelDriverOwnerSource
     $gccArguments += $managedKernelDriverStatusSource
     $gccArguments += $managedKernelDiagnosticSource
+    $gccArguments += $managedKernelDiagnosticResourceSource
     if ($Scenario -notin @('NativeAotEventWait', 'ManagedKernelPhase11')) {
         # ManagedKernel is an allocation-enabled NativeAOT payload.  Keep its
         # startup/runtime import surface on the already-proven bounded harness

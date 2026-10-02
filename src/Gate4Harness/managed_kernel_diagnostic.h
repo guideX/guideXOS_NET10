@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "managed_kernel_driver_worker.h"
-#include "managed_kernel_device_resources.h"
+#include "managed_kernel_diagnostic_resource.h"
 
 #define GXOS_MANAGED_KERNEL_DIAGNOSTIC_RX_CAPACITY 64U
 #define GXOS_MANAGED_KERNEL_DIAGNOSTIC_REQUEST_BYTES 32U
@@ -33,9 +33,12 @@ typedef GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT
 typedef struct {
     uint32_t present;
     uint32_t enabled;
+    uint32_t resource_source;
+    uint32_t disable_reason;
     uint16_t io_base;
+    uint16_t register_span;
     uint8_t irq;
-    uint8_t reserved;
+    uint8_t backend;
     volatile uint32_t rx_read_index;
     volatile uint32_t rx_write_index;
     volatile uint32_t rx_count;
@@ -72,7 +75,7 @@ typedef struct {
 
 int gxos_managed_kernel_diagnostic_initialize(
     GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context,
-    const GXOS_MANAGED_KERNEL_SECONDARY_UART_CONFIG *resource,
+    const GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE *resource,
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *service_context,
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE *current_handle_out,
     GXOS_MANAGED_KERNEL_DIAGNOSTIC_STATUS_API status_api,

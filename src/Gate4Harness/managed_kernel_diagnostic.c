@@ -53,7 +53,7 @@ uint32_t gxos_managed_kernel_diagnostic_crc32(
 
 int gxos_managed_kernel_diagnostic_initialize(
     GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context,
-    const GXOS_MANAGED_KERNEL_SECONDARY_UART_CONFIG *resource,
+    const GXOS_MANAGED_KERNEL_DIAGNOSTIC_UART_RESOURCE *resource,
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *service_context,
     GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE *current_handle_out,
     GXOS_MANAGED_KERNEL_DIAGNOSTIC_STATUS_API status_api,
@@ -68,8 +68,10 @@ int gxos_managed_kernel_diagnostic_initialize(
     if (context == 0) return 0;
     *context = (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT){0};
     if (resource == 0 || resource->present == 0U) return 1;
-    if (resource->present != 1U || resource->io_base == 0U ||
-        resource->irq == 0U || resource->reserved != 0U ||
+    if (resource->present != 1U || resource->enabled != 1U ||
+        resource->io_base == 0U || resource->register_span != 8U ||
+        resource->backend != GXOS_DIAGNOSTIC_UART_BACKEND_IO_16550 ||
+        resource->irq >= GXOS_DIAGNOSTIC_UART_IRQ_COUNT ||
         service_context == 0 || current_handle_out == 0 ||
         status_api == 0 || restart_api == 0 ||
         read_iir == 0 || read_lsr == 0 || read_data == 0 ||
@@ -77,8 +79,11 @@ int gxos_managed_kernel_diagnostic_initialize(
         return 0;
     }
     context->present = 1U;
+    context->resource_source = resource->source;
     context->io_base = resource->io_base;
+    context->register_span = resource->register_span;
     context->irq = resource->irq;
+    context->backend = (uint8_t)resource->backend;
     context->service_context = service_context;
     context->current_handle_out = current_handle_out;
     context->status_api = status_api;
