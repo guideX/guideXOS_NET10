@@ -63,7 +63,7 @@ static void test_bar_decoding(void)
 
 static void test_platform_publication(void)
 {
-    GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 resources[4];
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 resources[8];
     GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1 summary;
     uint32_t count = 0;
     expect(gxos_managed_kernel_make_platform_resources(resources, 4, &count,
@@ -86,6 +86,59 @@ static void test_platform_publication(void)
            "zero-length resource is rejected");
 }
 
+static void test_optional_secondary_uart_publication(void)
+{
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 resources[8];
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1 summary;
+    GXOS_MANAGED_KERNEL_SECONDARY_UART_CONFIG uart = {
+        .present = 1U, .io_base = 0x2F8U, .irq = 3U, .reserved = 0U};
+    uint32_t count = 0U;
+    expect(gxos_managed_kernel_make_platform_resources_with_secondary_uart(
+               resources, 8U, &count, &summary, &uart) ==
+               GXOS_MANAGED_KERNEL_RESOURCE_OK && count == 5U &&
+               summary.ResourceCount == 5U &&
+               resources[3].PhysicalBase == 0x2F8U &&
+               resources[3].Length == 8U &&
+               resources[3].OwnerDeviceId ==
+                   GX_MANAGED_SERIAL_DIAGNOSTIC_DEVICE_ID_COM2 &&
+               resources[4].ResourceType ==
+                   GX_MANAGED_DEVICE_RESOURCE_TYPE_INTERRUPT &&
+               resources[4].PhysicalBase == 3U,
+           "platform-published COM2 requires explicit base and IRQ evidence");
+    uart.irq = 4U;
+    count = 0U;
+    expect(gxos_managed_kernel_make_platform_resources_with_secondary_uart(
+               resources, 8U, &count, &summary, &uart) ==
+               GXOS_MANAGED_KERNEL_RESOURCE_DUPLICATE,
+           "secondary UART cannot collide with the COM1 IRQ");
+    uart.irq = 1U;
+    count = 0U;
+    expect(gxos_managed_kernel_make_platform_resources_with_secondary_uart(
+               resources, 8U, &count, &summary, &uart) ==
+               GXOS_MANAGED_KERNEL_RESOURCE_DUPLICATE,
+           "secondary UART cannot collide with the keyboard IRQ");
+    uart.irq = 3U;
+    uart.io_base = 0x3F8U;
+    count = 0U;
+    expect(gxos_managed_kernel_make_platform_resources_with_secondary_uart(
+               resources, 8U, &count, &summary, &uart) ==
+               GXOS_MANAGED_KERNEL_RESOURCE_DUPLICATE,
+           "secondary UART cannot overlap COM1 ports");
+    uart.io_base = 0x60U;
+    count = 0U;
+    expect(gxos_managed_kernel_make_platform_resources_with_secondary_uart(
+               resources, 8U, &count, &summary, &uart) ==
+               GXOS_MANAGED_KERNEL_RESOURCE_DUPLICATE,
+           "secondary UART cannot overlap i8042 ports");
+    uart.io_base = 0x2F8U;
+    uart.irq = 3U;
+    count = 0U;
+    expect(gxos_managed_kernel_make_platform_resources_with_secondary_uart(
+               resources, 4U, &count, &summary, &uart) ==
+               GXOS_MANAGED_KERNEL_RESOURCE_CAPACITY,
+           "secondary UART publication respects descriptor capacity");
+}
+
 static void test_isolation_and_duplicates(void)
 {
     GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 serial =
@@ -106,6 +159,7 @@ int main(void)
 {
     test_bar_decoding();
     test_platform_publication();
+    test_optional_secondary_uart_publication();
     test_isolation_and_duplicates();
     if (failures != 0) {
         printf("MANAGED_KERNEL_DEVICE_RESOURCES_HOST_TESTS=FAILED failures=%u\n",

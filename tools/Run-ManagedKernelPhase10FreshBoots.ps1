@@ -9,12 +9,16 @@ param(
     [ValidateSet('None', 'RecoverableRestart', 'ReplacementAdmissionFailure')]
     [string]$Phase70FixtureMode = 'None',
     [switch]$EnablePhase72ExplicitRestartFixture,
+    [switch]$EnablePhase75Com2DiagnosticIngress,
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 180
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($EnablePhase75Com2DiagnosticIngress) {
+    Import-Module (Join-Path $PSScriptRoot 'Phase75DiagnosticClient.psm1') -Force
+}
 $gate = [IO.Path]::GetFullPath($GateDirectory)
 $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 $efi = Join-Path $gate 'ESP\EFI\BOOT\BOOTX64.EFI'
@@ -24,6 +28,9 @@ $expectedHash = $PayloadSha256.ToUpperInvariant()
 if ($EnablePhase72ExplicitRestartFixture -and
     $Phase70FixtureMode -ne 'ReplacementAdmissionFailure') {
     throw 'Phase 72 acceptance requires the Phase 71 replacement-admission failure fixture.'
+}
+if ($EnablePhase75Com2DiagnosticIngress -and -not $EnablePhase72ExplicitRestartFixture) {
+    throw 'Phase 75 acceptance requires the Phase 72 and Phase 71 fixtures.'
 }
 
 function Require10([bool]$condition, [string]$message) {
@@ -95,7 +102,16 @@ function Connect-QemuSerial10([int]$port, [System.Diagnostics.Process]$process,
         $client = [Net.Sockets.TcpClient]::new()
         try {
             $attempt = $client.ConnectAsync('127.0.0.1', $port)
-            if ($attempt.Wait(500) -and $client.Connected) { return $client }
+            while (!$attempt.IsCompleted -and (Get-Date) -lt $deadline) {
+                if ($process.HasExited) {
+                    throw "QEMU exited before serial connection on port $port."
+                }
+                Start-Sleep -Milliseconds 25
+            }
+            if ($attempt.IsCompleted) {
+                [void]$attempt.GetAwaiter().GetResult()
+                if ($client.Connected) { return $client }
+            }
         } catch { }
         $client.Dispose()
         Start-Sleep -Milliseconds 50
@@ -169,6 +185,44 @@ function Get-HexField10([string]$text, [string]$name) {
     $match = [regex]::Match($text, [regex]::Escape($name) + '0x([0-9A-Fa-f]+)')
     if (!$match.Success) { throw "Missing numeric marker: $name" }
     return [Convert]::ToUInt64($match.Groups[1].Value, 16)
+}
+
+function Send-GxdcRunnerRequest([uint16]$commandId, [uint32]$requestId,
+                                [uint32]$expectedIdentity,
+                                [uint16]$expectedGeneration) {
+    $frame = New-GxdcRequest -CommandId $commandId -RequestId $requestId `
+        -ExpectedFailedIdentity $expectedIdentity `
+        -ExpectedFailedGeneration $expectedGeneration
+    $script:phase75DiagnosticTranscript.WriteLine((
+        'request id={0} command={1} bytes={2}' -f $requestId, $commandId,
+        [Convert]::ToHexString($frame)))
+    $script:phase75DiagnosticTranscript.Flush()
+    try {
+        $response = Send-GxdcRequest -Stream $script:phase75DiagnosticStream `
+            -Frame $frame -RequestId $requestId -TimeoutMilliseconds 45000
+    } catch {
+        if ($null -ne $script:phase10PumpStream) {
+            Pump-Serial10 $script:phase10PumpStream $script:phase10PumpLogStream `
+                $script:phase10PumpText $script:phase10PumpBuffer
+        }
+        throw
+    }
+    $logResponse = [ordered]@{}
+    foreach ($key in $response.Keys) {
+        if ($key -ne 'Bytes') { $logResponse[$key] = $response[$key] }
+    }
+    $script:phase75DiagnosticTranscript.WriteLine(
+        ($logResponse | ConvertTo-Json -Depth 5 -Compress))
+    $script:phase75DiagnosticTranscript.Flush()
+    return $response
+}
+
+function Send-GxdcRunnerMalformed([byte[]]$frame, [string]$caseName) {
+    Write-GxdcBytesPaced -Stream $script:phase75DiagnosticStream -Bytes $frame
+    Wait-GxdcSilence -Stream $script:phase75DiagnosticStream -Milliseconds 150
+    $script:phase75DiagnosticTranscript.WriteLine(
+        "malformed case=$caseName bytes=$([Convert]::ToHexString($frame)) response=none")
+    $script:phase75DiagnosticTranscript.Flush()
 }
 
 Require10 ($RunCount -ge 1) `
@@ -383,6 +437,18 @@ if ($EnablePhase72ExplicitRestartFixture) {
         'GXOS_NET10:PHASE72_POST_BUDGET=',
         'GXOS_NET10:PHASE72_POST_LAST_FAILURE=')
 }
+if ($EnablePhase75Com2DiagnosticIngress) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE75_DIAGNOSTIC_UART_PRESENT=1',
+        'GXOS_NET10:PHASE75_DIAGNOSTIC_UART_ENABLED=1',
+        'GXOS_NET10:PHASE75_RESTART_FAILED_DIAGNOSTIC_READY=1',
+        'GXOS_NET10:PHASE75_RESTART_DISPATCHED_FROM_BOOT_THREAD=1',
+        'GXOS_NET10:PHASE75_COM2_REMAINED_ENABLED_DURING_FAILURE=1',
+        'GXOS_NET10:PHASE75_POST_RESTART_CONTROL_COMPLETE=1',
+        'GXOS_NET10:PHASE75_DIAGNOSTIC_ALIVE_AFTER_COM1_STOP=1',
+        'GXOS_NET10:PHASE75_IRQ_CAPTURE_ONLY=1',
+        'GXOS_NET10:PHASE75_BOOT_THREAD_DISPATCH=1')
+}
 $requiredMarkers += switch ($Phase69FixtureMode) {
     'None' {
         $markers = @('GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_CAPTURED',
@@ -469,6 +535,16 @@ try {
         $probe.Start()
         $port = ([Net.IPEndPoint]$probe.LocalEndpoint).Port
         $probe.Stop()
+        $diagnosticPort = 0
+        if ($EnablePhase75Com2DiagnosticIngress) {
+            do {
+                $diagnosticProbe = [Net.Sockets.TcpListener]::new(
+                    [Net.IPAddress]::Loopback, 0)
+                $diagnosticProbe.Start()
+                $diagnosticPort = ([Net.IPEndPoint]$diagnosticProbe.LocalEndpoint).Port
+                $diagnosticProbe.Stop()
+            } while ($diagnosticPort -eq $port)
+        }
         $arguments = @(
             '-machine', 'q35', '-accel', 'tcg,thread=single', '-m', '128M',
             '-drive', "if=pflash,format=raw,readonly=on,file=$code",
@@ -479,11 +555,22 @@ try {
             '-serial', 'none',
             '-device', 'isa-serial,chardev=serial0,iobase=0x3f8,irq=4,wakeup=on',
             '-monitor', 'none', '-display', 'none', '-no-reboot', '-no-shutdown')
+        if ($EnablePhase75Com2DiagnosticIngress) {
+            $diagnosticArguments = @(
+                '-chardev', "socket,id=diag0,host=127.0.0.1,port=$diagnosticPort,server=on,wait=on,telnet=off,ipv4=on,nodelay=on",
+                '-device', 'isa-serial,chardev=diag0,iobase=0x2f8,irq=3,wakeup=on')
+            $monitorIndex = [Array]::IndexOf($arguments, '-monitor')
+            $arguments = @($arguments[0..($monitorIndex - 1)]) +
+                $diagnosticArguments + @($arguments[$monitorIndex..($arguments.Count - 1)])
+        }
         $commandLine = '"{0}" {1}' -f $qemu, ($arguments -join ' ')
         Set-Content -LiteralPath $commandLinePath -Value $commandLine -Encoding ascii
         $process = $null
         $client = $null
         $stream = $null
+        $diagnosticClient = $null
+        $diagnosticStream = $null
+        $diagnosticTranscript = $null
         $logStream = $null
         $injectionLog = $null
         $timeline = $null
@@ -503,6 +590,18 @@ try {
             $client = Connect-QemuSerial10 $port $process $deadline
             Write-Timeline10 $timeline 'SERIAL_CONNECTED' "port=$port"
             $stream = $client.GetStream()
+            if ($EnablePhase75Com2DiagnosticIngress) {
+                $diagnosticClient = Connect-QemuSerial10 $diagnosticPort $process $deadline
+                $diagnosticClient.Client.NoDelay = $true
+                $diagnosticStream = $diagnosticClient.GetStream()
+                $diagnosticTranscript = [IO.StreamWriter]::new(
+                    (Join-Path $run 'diagnostic-protocol.log'), $false,
+                    [Text.Encoding]::ASCII)
+                $script:phase75DiagnosticStream = $diagnosticStream
+                $script:phase75DiagnosticTranscript = $diagnosticTranscript
+                Write-Timeline10 $timeline 'DIAGNOSTIC_CONNECTED' `
+                    "host=127.0.0.1 port=$diagnosticPort device=COM2"
+            }
             $logStream = [IO.File]::Open($serial, [IO.FileMode]::Create,
                 [IO.FileAccess]::Write, [IO.FileShare]::Read)
             $injectionLog = [IO.StreamWriter]::new($injections, $false,
@@ -511,6 +610,10 @@ try {
             $script:phase10Tail = ''
             $script:phase10ReadTask = $null
             $buffer = New-Object byte[] 4096
+            $script:phase10PumpStream = $stream
+            $script:phase10PumpLogStream = $logStream
+            $script:phase10PumpText = $text
+            $script:phase10PumpBuffer = $buffer
 
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_READY' `
                 $deadline $process $stream $logStream $text $buffer
@@ -518,6 +621,10 @@ try {
                 $deadline $process $stream $logStream $text $buffer
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_WORKER_UART_READY' `
                 $deadline $process $stream $logStream $text $buffer
+            if ($EnablePhase75Com2DiagnosticIngress) {
+                Wait-Marker10 'GXOS_NET10:PHASE75_DIAGNOSTIC_UART_ENABLED=1' `
+                    $deadline $process $stream $logStream $text $buffer
+            }
             Start-Sleep -Milliseconds 50
             Send-SerialByte10 $client $stream $process $injectionLog 'RX_READY' 0x52
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_WAKE_OK' `
@@ -530,6 +637,59 @@ try {
                 $deadline $process $stream $logStream $text $buffer
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_NATIVE_OK' `
                 $deadline $process $stream $logStream $text $buffer
+            if ($EnablePhase75Com2DiagnosticIngress) {
+                Wait-Marker10 'GXOS_NET10:PHASE75_HEALTHY_CONTROL_READY=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                $healthy = Send-GxdcRunnerRequest 1 1 0 0
+                Require10 ($healthy.ApiResult -eq 0 -and $healthy.Length -eq 100 -and
+                    $healthy.Status.DeviceIdentity -eq 1 -and
+                    $healthy.Status.CurrentValid -eq 1 -and
+                    $healthy.Status.CurrentIdentity -ne 0 -and
+                    $healthy.Status.CurrentGeneration -ne 0 -and
+                    $healthy.Status.RouteEnabled -eq 1 -and
+                    $healthy.Status.RuntimeAttached -eq 1 -and
+                    $healthy.Status.OwnerState -eq 5 -and
+                    $healthy.Status.ExplicitRestartAllowed -eq 0) `
+                    'COM2 healthy STATUS did not report the running COM1 generation.'
+                $runningIdentity = [uint32]$healthy.Status.CurrentIdentity
+                $runningGeneration = [uint16]$healthy.Status.CurrentGeneration
+                $healthyRepeat = Send-GxdcRunnerRequest 1 2 0 0
+                Require10 ($healthyRepeat.ApiResult -eq 0 -and
+                    $healthyRepeat.Status.CurrentIdentity -eq $runningIdentity -and
+                    $healthyRepeat.Status.CurrentGeneration -eq $runningGeneration) `
+                    'COM2 did not process a second valid STATUS request.'
+                $runningRestart = Send-GxdcRunnerRequest 2 3 `
+                    $runningIdentity $runningGeneration
+                Require10 ($runningRestart.ApiResult -eq 2 -and
+                    $runningRestart.Length -eq 24) `
+                    'COM2 RESTART while running was not rejected as INVALID_STATE.'
+
+                $badCrc = New-GxdcRequest -CommandId 1 -RequestId 4
+                $badCrc[28] = $badCrc[28] -bxor 1
+                Send-GxdcRunnerMalformed $badCrc 'bad-crc'
+                $badVersion = New-GxdcRequest -CommandId 1 -RequestId 5
+                Set-GxdcU16 $badVersion 4 2
+                Set-GxdcU32 $badVersion 28 (Get-GxdcCrc32 $badVersion 28)
+                Send-GxdcRunnerMalformed $badVersion 'bad-version'
+                $badSize = New-GxdcRequest -CommandId 1 -RequestId 6
+                Set-GxdcU16 $badSize 6 31
+                Set-GxdcU32 $badSize 28 (Get-GxdcCrc32 $badSize 28)
+                Send-GxdcRunnerMalformed $badSize 'bad-size'
+                $badTarget = New-GxdcRequest -CommandId 1 -RequestId 7
+                Set-GxdcU32 $badTarget 16 2
+                Set-GxdcU32 $badTarget 28 (Get-GxdcCrc32 $badTarget 28)
+                Send-GxdcRunnerMalformed $badTarget 'wrong-target'
+                [byte[]]$garbageFragment = @(0xD0, 0x47, 0x58, 0x44, 0x43, 0x01, 0x00)
+                Write-GxdcBytesPaced -Stream $diagnosticStream -Bytes $garbageFragment
+                $resynchronized = Send-GxdcRunnerRequest 1 8 0 0
+                Require10 ($resynchronized.ApiResult -eq 0 -and
+                    $resynchronized.Status.CurrentIdentity -eq $runningIdentity -and
+                    $resynchronized.Status.CurrentGeneration -eq $runningGeneration) `
+                    'GXDC parser did not resynchronize after garbage and a truncated frame.'
+                Write-Timeline10 $timeline 'GXDC_GARBAGE_RESYNCHRONIZED' 'status=PASS'
+                Wait-Marker10 'GXOS_NET10:PHASE75_HEALTHY_CONTROL_COMPLETE=1' `
+                    $deadline $process $stream $logStream $text $buffer
+            }
 
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_SECOND_WAIT_READY' `
                 $deadline $process $stream $logStream $text $buffer
@@ -543,12 +703,78 @@ try {
                 Wait-Marker10 'GXOS_NET10:PHASE70_POST_RESTART_REAL_EVENT_DISPATCHED=1' `
                     $deadline $process $stream $logStream $text $buffer
             } elseif ($Phase70FixtureMode -eq 'ReplacementAdmissionFailure') {
+                if ($EnablePhase75Com2DiagnosticIngress) {
+                    Wait-Marker10 'GXOS_NET10:PHASE75_RESTART_FAILED_DIAGNOSTIC_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $failed = Send-GxdcRunnerRequest 1 9 0 0
+                    Require10 ($failed.ApiResult -eq 0 -and $failed.Length -eq 100 -and
+                        $failed.Status.OwnerState -eq 14 -and
+                        $failed.Status.DeviceIdentity -eq 1 -and
+                        $failed.Status.CurrentValid -eq 0 -and
+                        $failed.Status.CurrentIdentity -eq 0 -and
+                        $failed.Status.CurrentGeneration -eq 0 -and
+                        $failed.Status.RouteEnabled -eq 0 -and
+                        $failed.Status.RuntimeAttached -eq 0 -and
+                        $failed.Status.FailureReason -eq 3 -and
+                        $failed.Status.LastFailedIdentity -eq $runningIdentity -and
+                        $failed.Status.LastFailedGeneration -eq $runningGeneration -and
+                        $failed.Status.LastFailedDeviceIdentity -eq 1 -and
+                        $failed.Status.RestartBudgetRemaining -eq 0 -and
+                        $failed.Status.AutomaticRestartAttempts -eq 1 -and
+                        $failed.Status.RestartFailed -eq 1 -and
+                        $failed.Status.ExplicitRestartAllowed -eq 1) `
+                        'COM2 STATUS did not report the settled RESTART_FAILED COM1 service.'
+                    $capacityRestart = Send-GxdcRunnerRequest 2 10 `
+                        $failed.Status.LastFailedIdentity $failed.Status.LastFailedGeneration
+                    Require10 ($capacityRestart.ApiResult -eq 6 -and
+                        $capacityRestart.Length -eq 24) `
+                        'Injected Phase 72 capacity result was not returned through COM2.'
+                    $restart = Send-GxdcRunnerRequest 2 11 `
+                        $failed.Status.LastFailedIdentity $failed.Status.LastFailedGeneration
+                    Require10 ($restart.ApiResult -eq 0 -and $restart.Length -eq 36 -and
+                        $restart.Handle.DeviceIdentity -eq 1 -and
+                        $restart.Handle.Identity -ne $failed.Status.LastFailedIdentity -and
+                        $restart.Handle.Generation -gt $failed.Status.LastFailedGeneration -and
+                        $restart.Handle.Slot -eq 0) `
+                        'COM2 explicit restart did not return a new COM1 service handle.'
+                    Write-Timeline10 $timeline 'GXDC_RESTART_FAILED_STATUS' `
+                        'route=0 runtime=0 budget=0 eligible=1'
+                    Write-Timeline10 $timeline 'GXDC_EXPLICIT_RESTART' `
+                        "result=OK identity=$($restart.Handle.Identity) generation=$($restart.Handle.Generation)"
+                    Wait-Marker10 'GXOS_NET10:PHASE71_MANUAL_SERVICE_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $stale = Send-GxdcRunnerRequest 2 12 `
+                        $failed.Status.LastFailedIdentity $failed.Status.LastFailedGeneration
+                    Require10 (($stale.ApiResult -eq 2 -or $stale.ApiResult -eq 5) -and
+                        $stale.Length -eq 24) `
+                        'Stale Phase 75 RESTART did not return bounded STALE or INVALID_STATE.'
+                    $runningAgain = Send-GxdcRunnerRequest 2 13 `
+                        $restart.Handle.Identity $restart.Handle.Generation
+                    Require10 ($runningAgain.ApiResult -eq 2 -and $runningAgain.Length -eq 24) `
+                        'COM2 RESTART against the new running generation did not return INVALID_STATE.'
+                    $newHealthy = Send-GxdcRunnerRequest 1 14 0 0
+                    Require10 ($newHealthy.ApiResult -eq 0 -and
+                        $newHealthy.Status.CurrentIdentity -eq $restart.Handle.Identity -and
+                        $newHealthy.Status.CurrentGeneration -eq $restart.Handle.Generation -and
+                        $newHealthy.Status.RouteEnabled -eq 1 -and
+                        $newHealthy.Status.RuntimeAttached -eq 1) `
+                        'COM2 STATUS did not confirm route/runtime restoration after restart.'
+                    Wait-Marker10 'GXOS_NET10:PHASE75_POST_RESTART_CONTROL_COMPLETE=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Send-SerialByte10 $client $stream $process $injectionLog `
+                        'PHASE75_COM2_RESTARTED_COM1' 0x54
+                    Wait-Marker10 'GXOS_NET10:PHASE71_MANUAL_COM1_EVENT_DISPATCHED=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Write-Timeline10 $timeline 'COM1_REAL_EVENT_AFTER_DIAGNOSTIC_RESTART' `
+                        'managed_dispatch=PASS'
+                } else {
                 Wait-Marker10 'GXOS_NET10:PHASE71_MANUAL_SERVICE_READY=1' `
                     $deadline $process $stream $logStream $text $buffer
                 Send-SerialByte10 $client $stream $process $injectionLog `
                     'PHASE71_MANUAL_SERVICE_READY' 0x54
                 Wait-Marker10 'GXOS_NET10:PHASE71_MANUAL_COM1_EVENT_DISPATCHED=1' `
                     $deadline $process $stream $logStream $text $buffer
+                }
             } else {
                 Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_AFTER_RUNTIME_OK' `
                     $deadline $process $stream $logStream $text $buffer
@@ -577,6 +803,19 @@ try {
                 'RX_UNSUBSCRIBED_READY' 0x5A
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_STOP_OK' `
                 $deadline $process $stream $logStream $text $buffer
+            if ($EnablePhase75Com2DiagnosticIngress) {
+                Wait-Marker10 'GXOS_NET10:PHASE72_STATUS_AFTER_NORMAL_STOP=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                $stopped = Send-GxdcRunnerRequest 1 15 0 0
+                Require10 ($stopped.ApiResult -eq 0 -and $stopped.Length -eq 100 -and
+                    $stopped.Status.DeviceIdentity -eq 1 -and
+                    $stopped.Status.CurrentValid -eq 0 -and
+                    $stopped.Status.RouteEnabled -eq 0 -and
+                    $stopped.Status.RuntimeAttached -eq 0) `
+                    'COM2 STATUS did not remain available after COM1 service stop.'
+                Wait-Marker10 'GXOS_NET10:PHASE75_DIAGNOSTIC_ALIVE_AFTER_COM1_STOP=1' `
+                    $deadline $process $stream $logStream $text $buffer
+            }
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_DRIVER_WORKER_RECLAIMED' `
                 $deadline $process $stream $logStream $text $buffer
             Wait-Marker10 'GXOS_NET10:MANAGED_KERNEL_PHASE10_PASS' `
@@ -588,6 +827,9 @@ try {
             if ($null -ne $logStream) { $logStream.Dispose() }
             if ($null -ne $stream) { $stream.Dispose() }
             if ($null -ne $client) { $client.Dispose() }
+            if ($null -ne $diagnosticTranscript) { $diagnosticTranscript.Dispose() }
+            if ($null -ne $diagnosticStream) { $diagnosticStream.Dispose() }
+            if ($null -ne $diagnosticClient) { $diagnosticClient.Dispose() }
             Stop-OwnedQemu10 $process
             if ($null -ne $timeline) { $timeline.Dispose() }
             $script:phase10Timeline = $null
@@ -602,6 +844,14 @@ try {
             "ManagedKernel Phase 10 boot $sequence reported a fault, page fault, or unresolved import."
         foreach ($marker in $requiredMarkers) {
             Require10 ($finalText.Contains($marker)) "Boot $sequence missing marker: $marker"
+        }
+        if ($EnablePhase75Com2DiagnosticIngress) {
+            Require10 ((Get-HexField10 $finalText 'GXOS_NET10:PHASE75_STATUS_API_COUNT=') -eq 6 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE75_RESTART_API_COUNT=') -eq 5 -and
+                       (Get-HexField10 $finalText 'GXOS_NET10:PHASE75_RX_OVERFLOW_COUNT=') -eq 0) `
+                "Boot $sequence called service APIs for malformed requests or lost diagnostic bytes."
+            Require10 (Test-Path -LiteralPath (Join-Path $run 'diagnostic-protocol.log')) `
+                "Boot $sequence did not preserve its COM2 protocol transcript."
         }
         Require10 (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_PHASE10_PASS')).Count -eq 1) `
             "Boot $sequence repeated or omitted the Phase 10 pass marker."
@@ -794,10 +1044,18 @@ try {
         $timelineHash = (Get-FileHash -LiteralPath $timelinePath -Algorithm SHA256).Hash.ToUpperInvariant()
         $commandLineHash = (Get-FileHash -LiteralPath $commandLinePath -Algorithm SHA256).Hash.ToUpperInvariant()
         $firmwareIdentityHash = (Get-FileHash -LiteralPath $firmwareIdentityPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        $diagnosticHash = if ($EnablePhase75Com2DiagnosticIngress) {
+            (Get-FileHash -LiteralPath (Join-Path $run 'diagnostic-protocol.log') `
+                -Algorithm SHA256).Hash.ToUpperInvariant()
+        } else { 'NA' }
         Write-Output ("MANAGED_KERNEL_PHASE10_QEMU_RUN_{0}=PASS bytes={1} serial_sha256={2} injections_sha256={3} timeline_sha256={4} commandline_sha256={5} firmware_identity_sha256={6} serial={7} wake_requests={8}" -f `
             $sequence, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash,
             $injectionHash, $timelineHash, $commandLineHash, $firmwareIdentityHash,
             $serial, $wakeRequests)
+        if ($EnablePhase75Com2DiagnosticIngress) {
+            Write-Output ("PHASE75_DIAGNOSTIC_PROTOCOL_SHA256_{0}={1} path={2}" -f `
+                $sequence, $diagnosticHash, (Join-Path $run 'diagnostic-protocol.log'))
+        }
     }
 } finally {
     foreach ($process in $owned) { Stop-OwnedQemu10 $process }

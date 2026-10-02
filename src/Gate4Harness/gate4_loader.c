@@ -45,6 +45,7 @@
 #include "managed_kernel_serial.h"
 #include "managed_kernel_interrupt.h"
 #include "managed_kernel_driver_worker.h"
+#include "managed_kernel_diagnostic.h"
 #ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
 #include "managed_kernel_driver_service_owner.h"
 #endif
@@ -772,6 +773,23 @@ static GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT
     g_managed_kernel_driver_worker_context;
 static GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE
     g_managed_kernel_driver_service_handle;
+static GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT
+    g_managed_kernel_diagnostic_context;
+static const GXOS_MANAGED_KERNEL_SECONDARY_UART_CONFIG
+    g_managed_kernel_secondary_uart_config = {
+#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
+        .present = 1U, .io_base = 0x2F8U, .irq = 3U, .reserved = 0U
+#else
+        .present = 0U, .io_base = 0U, .irq = 0U, .reserved = 0U
+#endif
+    };
+static uint32_t g_managed_kernel_diagnostic_ioapic_enabled;
+static uint8_t g_managed_kernel_diagnostic_saved_ier;
+static uint8_t g_managed_kernel_diagnostic_saved_mcr;
+static uint8_t g_managed_kernel_diagnostic_saved_pic_mask;
+static uint32_t g_managed_kernel_diagnostic_saved_ioapic_high;
+static uint32_t g_managed_kernel_diagnostic_saved_ioapic_low;
+static uint64_t g_managed_kernel_diagnostic_boot_poll_count;
 static GXOS_NATIVEAOT_CALLBACK_BRIDGE
     g_managed_kernel_driver_worker_bridge;
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
@@ -13018,10 +13036,11 @@ static void prepare_managed_kernel_device_resources(
                sizeof(g_managed_kernel_device_resources));
     zero_bytes((uint8_t *)&g_managed_kernel_device_resource_summary,
                sizeof(g_managed_kernel_device_resource_summary));
-    status = gxos_managed_kernel_make_platform_resources(
+    status = gxos_managed_kernel_make_platform_resources_with_secondary_uart(
         g_managed_kernel_device_resources,
         GX_MANAGED_KERNEL_DEVICE_RESOURCE_MAX_DESCRIPTORS,
-        &resource_count, &g_managed_kernel_device_resource_summary);
+        &resource_count, &g_managed_kernel_device_resource_summary,
+        &g_managed_kernel_secondary_uart_config);
     if (status != GXOS_MANAGED_KERNEL_RESOURCE_OK || resource_count == 0U) {
         fail("managed-kernel-resource-discovery");
     }
@@ -13117,7 +13136,8 @@ static void prepare_managed_kernel_device_resources(
             }
         }
     }
-    if (resource_count == 3U) {
+    if (resource_count == 3U +
+            (g_managed_kernel_secondary_uart_config.present != 0U ? 2U : 0U)) {
         serial_text("GXOS_NET10:MANAGED_KERNEL_MMIO_PCI_BAR_UNAVAILABLE=AUTHORITATIVE_FIRMWARE_RANGE_REQUIRED\r\n");
     } else {
         g_managed_kernel_device_resource_summary.ResourceCount = resource_count;
@@ -13429,11 +13449,15 @@ static void managed_kernel_memory_services_make_valid(void)
 
 extern void gxos_managed_kernel_serial_irq_entry(void);
 extern void gxos_managed_kernel_keyboard_irq_entry(void);
+extern void gxos_managed_kernel_diagnostic_irq_entry(void);
+
+static void managed_kernel_interrupt_install_idt(void);
 
 #define GXOS_MANAGED_KERNEL_IOAPIC_BASE 0xFEC00000ULL
 #define GXOS_MANAGED_KERNEL_LAPIC_EOI 0xFEE000B0ULL
 #define GXOS_MANAGED_KERNEL_IOAPIC_SERIAL_IRQ_REGISTER 0x18U
 #define GXOS_MANAGED_KERNEL_IOAPIC_KEYBOARD_IRQ_REGISTER 0x12U
+#define GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER 0x16U
 
 static uint32_t managed_kernel_ioapic_read(uint8_t register_index)
 {
@@ -13583,6 +13607,10 @@ static void managed_kernel_interrupt_install_idt(void)
     }
     set_idt_gate(&g_gate4_idt[0x24], gxos_managed_kernel_serial_irq_entry);
     set_idt_gate(&g_gate4_idt[0x21], gxos_managed_kernel_keyboard_irq_entry);
+    if (g_managed_kernel_diagnostic_context.present != 0U) {
+        set_idt_gate(&g_gate4_idt[0x23],
+                     gxos_managed_kernel_diagnostic_irq_entry);
+    }
     {
         IDTR next = {
             (uint16_t)(sizeof(g_gate4_idt) - 1U),
@@ -13679,7 +13707,9 @@ static int managed_kernel_serial_interrupt_disable(void *opaque)
             g_managed_kernel_serial_saved_ioapic_low);
         g_managed_kernel_serial_interrupt_ioapic_enabled = 0;
     }
-    if (g_managed_kernel_keyboard_interrupt_enabled == 0) {
+    if (g_managed_kernel_keyboard_interrupt_enabled == 0 &&
+        __atomic_load_n(&g_managed_kernel_diagnostic_context.enabled,
+                        __ATOMIC_ACQUIRE) == 0U) {
         managed_kernel_serial_interrupt_restore_idt();
     }
     return 1;
@@ -13782,7 +13812,9 @@ static int managed_kernel_keyboard_interrupt_disable(void *opaque)
         g_managed_kernel_keyboard_interrupt_ioapic_enabled = 0;
     }
     g_managed_kernel_keyboard_interrupt_enabled = 0;
-    if (g_managed_kernel_serial_interrupt_ioapic_enabled == 0) {
+    if (g_managed_kernel_serial_interrupt_ioapic_enabled == 0 &&
+        __atomic_load_n(&g_managed_kernel_diagnostic_context.enabled,
+                        __ATOMIC_ACQUIRE) == 0U) {
         managed_kernel_serial_interrupt_restore_idt();
     }
     return 1;
@@ -13820,6 +13852,169 @@ static void managed_kernel_keyboard_interrupt_eoi(void *opaque)
         *lapic_eoi = 0;
         __asm__ volatile ("" : : : "memory");
     }
+}
+
+static uint8_t managed_kernel_diagnostic_read_iir(void *opaque)
+{
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *)opaque;
+    return context == 0 ? 0x01U : serial_in8(context->io_base + 2U);
+}
+
+static uint8_t managed_kernel_diagnostic_read_lsr(void *opaque)
+{
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *)opaque;
+    return context == 0 ? 0U : serial_in8(context->io_base + 5U);
+}
+
+static uint8_t managed_kernel_diagnostic_read_data(void *opaque)
+{
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *)opaque;
+    return context == 0 ? 0U : serial_in8(context->io_base);
+}
+
+static int managed_kernel_diagnostic_transmit_byte(void *opaque, uint8_t value)
+{
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *)opaque;
+    uint32_t index;
+    if (context == 0) return 0;
+    for (index = 0; index != GX_MANAGED_KERNEL_SERIAL_TX_POLL_LIMIT; ++index) {
+        if ((serial_in8(context->io_base + 5U) & 0x20U) != 0U) {
+            serial_out8(context->io_base, value);
+            return 1;
+        }
+        __asm__ volatile ("pause" : : : "memory");
+    }
+    return 0;
+}
+
+static void managed_kernel_diagnostic_interrupt_eoi(void *opaque)
+{
+    volatile uint32_t *lapic_eoi;
+    (void)opaque;
+    serial_out8(0x20, 0x20);
+    if (g_managed_kernel_diagnostic_ioapic_enabled != 0U) {
+        lapic_eoi = (volatile uint32_t *)(uintptr_t)
+            GXOS_MANAGED_KERNEL_LAPIC_EOI;
+        *lapic_eoi = 0;
+        __asm__ volatile ("" : : : "memory");
+    }
+}
+
+static int managed_kernel_diagnostic_uart_enable(void)
+{
+    GXOS_MANAGED_KERNEL_DIAGNOSTIC_CONTEXT *context =
+        &g_managed_kernel_diagnostic_context;
+    uint32_t ioapic_low;
+    uint8_t mask;
+    if (context->present == 0U || context->io_base != 0x2F8U ||
+        context->irq != 3U) {
+        return 0;
+    }
+    managed_kernel_interrupt_install_idt();
+    g_managed_kernel_diagnostic_saved_ier = serial_in8(context->io_base + 1U);
+    g_managed_kernel_diagnostic_saved_mcr = serial_in8(context->io_base + 4U);
+    g_managed_kernel_diagnostic_saved_pic_mask = serial_in8(0x21U);
+    g_managed_kernel_diagnostic_saved_ioapic_high =
+        managed_kernel_ioapic_read(
+            GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER + 1U);
+    g_managed_kernel_diagnostic_saved_ioapic_low =
+        managed_kernel_ioapic_read(
+            GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER);
+
+    serial_out8(context->io_base + 1U, 0U);
+    serial_out8(context->io_base + 3U, 0x80U);
+    serial_out8(context->io_base, 0x03U);
+    serial_out8(context->io_base + 1U, 0x00U);
+    serial_out8(context->io_base + 3U, 0x03U);
+    /* Use the one-byte receive trigger on this diagnostic UART so a short
+       fixed request cannot leave a sub-threshold tail in the FIFO. */
+    serial_out8(context->io_base + 2U, 0x07U);
+    serial_out8(context->io_base + 4U,
+                (uint8_t)(g_managed_kernel_diagnostic_saved_mcr | 0x08U));
+
+    mask = (uint8_t)(g_managed_kernel_diagnostic_saved_pic_mask | 0x08U);
+    serial_out8(0x21U, mask);
+    ioapic_low = (g_managed_kernel_diagnostic_saved_ioapic_low &
+                  ~0x000100FFU) | 0x23U;
+    managed_kernel_ioapic_write(
+        GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER + 1U,
+        g_managed_kernel_diagnostic_saved_ioapic_high);
+    managed_kernel_ioapic_write(
+        GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER, ioapic_low);
+    g_managed_kernel_diagnostic_ioapic_enabled = 1U;
+    gxos_managed_kernel_diagnostic_set_enabled(context, 1);
+    /* The native ISR owns receive capture only. Do not inherit firmware
+       THRE/modem interrupts that this bounded handler does not service. */
+    serial_out8(context->io_base + 1U, 0x01U);
+
+    if ((serial_in8(context->io_base + 1U) & 0x01U) != 0U &&
+        (serial_in8(context->io_base + 4U) & 0x08U) != 0U &&
+        (serial_in8(0x21U) & 0x08U) != 0U &&
+        (managed_kernel_ioapic_read(
+             GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER) &
+             0xFFU) == 0x23U &&
+        (managed_kernel_ioapic_read(
+             GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER) &
+             0x00010000U) == 0U) {
+        return 1;
+    }
+
+    gxos_managed_kernel_diagnostic_set_enabled(context, 0);
+    serial_out8(context->io_base + 1U, g_managed_kernel_diagnostic_saved_ier);
+    serial_out8(context->io_base + 4U, g_managed_kernel_diagnostic_saved_mcr);
+    serial_out8(0x21U, g_managed_kernel_diagnostic_saved_pic_mask);
+    managed_kernel_ioapic_write(
+        GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER + 1U,
+        g_managed_kernel_diagnostic_saved_ioapic_high);
+    managed_kernel_ioapic_write(
+        GXOS_MANAGED_KERNEL_IOAPIC_DIAGNOSTIC_IRQ_REGISTER,
+        g_managed_kernel_diagnostic_saved_ioapic_low);
+    g_managed_kernel_diagnostic_ioapic_enabled = 0U;
+    if (g_managed_kernel_serial_interrupt_ioapic_enabled == 0U &&
+        g_managed_kernel_keyboard_interrupt_enabled == 0U) {
+        managed_kernel_serial_interrupt_restore_idt();
+    }
+    return 0;
+}
+
+static void managed_kernel_diagnostic_uart_initialize(void)
+{
+    if (!gxos_managed_kernel_diagnostic_initialize(
+            &g_managed_kernel_diagnostic_context,
+            &g_managed_kernel_secondary_uart_config,
+            &g_managed_kernel_driver_worker_context,
+            &g_managed_kernel_driver_service_handle,
+            gxos_managed_kernel_driver_service_get_status,
+            gxos_managed_kernel_driver_service_restart,
+            managed_kernel_diagnostic_read_iir,
+            managed_kernel_diagnostic_read_lsr,
+            managed_kernel_diagnostic_read_data,
+            managed_kernel_diagnostic_transmit_byte,
+            managed_kernel_diagnostic_interrupt_eoi,
+            &g_managed_kernel_diagnostic_context)) {
+        fail("managed-kernel-diagnostic-context-init");
+    }
+    if (g_managed_kernel_diagnostic_context.present == 0U) {
+        serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_INGRESS_DISABLED=NO_PLATFORM_UART\r\n");
+        return;
+    }
+    if (!managed_kernel_diagnostic_uart_enable()) {
+        gxos_managed_kernel_diagnostic_set_enabled(
+            &g_managed_kernel_diagnostic_context, 0);
+#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
+        fail("phase75-required-com2-init");
+#else
+        serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_INGRESS_DISABLED=UART_INIT_FAILED\r\n");
+        return;
+#endif
+    }
+    serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_UART_PRESENT=1\r\n");
+    serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_UART_ENABLED=1\r\n");
+    serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_UART_BASE=0x2F8 IRQ=3\r\n");
 }
 
 static int managed_kernel_interrupt_range_is_known(
@@ -14036,6 +14231,7 @@ static void managed_kernel_interrupt_services_make_valid(void)
     g_managed_kernel_keyboard_status.Irq = GX_MANAGED_KEYBOARD_IRQ_1;
     g_managed_kernel_keyboard_status.ScancodeSet =
         GX_MANAGED_KEYBOARD_SCANCODE_SET_1;
+    managed_kernel_diagnostic_uart_initialize();
 }
 
 static void managed_kernel_serial_services_make_valid(void)
@@ -15155,6 +15351,28 @@ static int managed_kernel_interrupt_worker_rearmed(
            event->signaled == 0 && event->waiter_count == 1;
 }
 
+static uint32_t managed_kernel_diagnostic_boot_thread_poll(void)
+{
+    if (__atomic_load_n(&g_managed_kernel_diagnostic_context.enabled,
+                        __ATOMIC_ACQUIRE) == 0U) {
+        return 0U;
+    }
+    __atomic_add_fetch(&g_managed_kernel_diagnostic_boot_poll_count, 1U,
+                       __ATOMIC_RELAXED);
+    return gxos_managed_kernel_diagnostic_poll(
+        &g_managed_kernel_diagnostic_context);
+}
+
+#ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
+static int managed_kernel_boot_thread_pump_current(
+    GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker,
+    GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE *handle_inout)
+{
+    (void)managed_kernel_diagnostic_boot_thread_poll();
+    return gxos_managed_kernel_driver_worker_pump_current(worker, handle_inout);
+}
+#endif
+
 static int managed_kernel_interrupt_wait_for_worker_rearmed(
     EFI_BOOT_SERVICES *boot_services,
     GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT *worker)
@@ -15167,6 +15385,7 @@ static int managed_kernel_interrupt_wait_for_worker_rearmed(
 #endif
     if (boot_services == 0 || worker == 0) return 0;
     for (iteration = 0; iteration != maximum_iterations; ++iteration) {
+        (void)managed_kernel_diagnostic_boot_thread_poll();
         managed_kernel_interrupt_enable_cpu();
         if (managed_kernel_interrupt_worker_rearmed(worker)) return 1;
         if (gxos_managed_kernel_driver_worker_pump_current(
@@ -15189,6 +15408,7 @@ static int managed_kernel_interrupt_wait_for_enqueued(
     if (boot_services == 0 || worker == 0) return 0;
     managed_kernel_interrupt_enable_cpu();
     for (iteration = 0; iteration != 100000U; ++iteration) {
+        (void)managed_kernel_diagnostic_boot_thread_poll();
         if (__atomic_load_n(&g_managed_kernel_interrupt_context.enqueued_count,
                             __ATOMIC_ACQUIRE) < expected_count) {
             uint8_t io_delay;
@@ -15244,6 +15464,12 @@ static int managed_kernel_interrupt_wait_for_enqueued(
     return 0;
 }
 
+void gxos_managed_kernel_diagnostic_irq_entry_capture(void)
+{
+    (void)gxos_managed_kernel_diagnostic_irq_capture(
+        &g_managed_kernel_diagnostic_context);
+}
+
 #ifndef GXOS_ENABLE_PHASE69_IDLE_STOP_FIXTURE
 static int managed_kernel_interrupt_wait_for_optional_burst(
     EFI_BOOT_SERVICES *boot_services,
@@ -15263,6 +15489,7 @@ static int managed_kernel_interrupt_wait_for_optional_burst(
     /* Keep the Phase 9 two-byte diagnostic control usable, but give the
        Phase 10 producer a bounded window to deliver its A/B/C burst. */
     for (iteration = 0; iteration != 100000U; ++iteration) {
+        (void)managed_kernel_diagnostic_boot_thread_poll();
         uint64_t enqueued = __atomic_load_n(
             &g_managed_kernel_interrupt_context.enqueued_count,
             __ATOMIC_ACQUIRE);
@@ -16160,7 +16387,7 @@ static int managed_kernel_phase70_wait_for_restart(
             return 0;
         }
         managed_kernel_interrupt_enable_cpu();
-        if (gxos_managed_kernel_driver_worker_pump_current(
+        if (managed_kernel_boot_thread_pump_current(
                 worker, &g_managed_kernel_driver_service_handle)) {
             continue;
         }
@@ -16262,6 +16489,11 @@ static int managed_kernel_phase71_wait_for_restart_failure(
         GXOS_MANAGED_KERNEL_DRIVER_RESTART_CAUSE_RECOVERABLE_DISPATCH;
     uint32_t budget_before = UINT32_MAX;
     uint32_t iteration;
+#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
+    const uint32_t maximum_iterations = 2000000U;
+#else
+    const uint32_t maximum_iterations = 100000U;
+#endif
 #ifndef GXOS_ENABLE_PHASE72_EXPLICIT_RESTART_FIXTURE
     uint32_t tls_index;
     uint32_t runtime_fls_slot;
@@ -16279,7 +16511,7 @@ static int managed_kernel_phase71_wait_for_restart_failure(
     if (boot_services == 0 || g_phase70_restart_evidence.prepared == 0U) {
         return 0;
     }
-    for (iteration = 0; iteration != 100000U; ++iteration) {
+    for (iteration = 0; iteration != maximum_iterations; ++iteration) {
         if (gxos_managed_kernel_driver_owner_restart_state(worker) ==
                 GXOS_MANAGED_KERNEL_DRIVER_RESTART_FAILED &&
             worker->service_state ==
@@ -16287,7 +16519,7 @@ static int managed_kernel_phase71_wait_for_restart_failure(
             break;
         }
         managed_kernel_interrupt_enable_cpu();
-        if (gxos_managed_kernel_driver_worker_pump_current(
+        if (managed_kernel_boot_thread_pump_current(
                 worker, &g_managed_kernel_driver_service_handle)) {
             continue;
         }
@@ -16298,7 +16530,7 @@ static int managed_kernel_phase71_wait_for_restart_failure(
         }
         __asm__ volatile ("pause" : : : "memory");
     }
-    if (iteration == 100000U || worker->restart_failure_fired != 1U ||
+    if (iteration == maximum_iterations || worker->restart_failure_fired != 1U ||
         worker->restart_admission_failure_armed != 0U ||
         worker->restart_admission_failure_fired != 1U ||
         worker->restart_admission_failure_attempts != 1U ||
@@ -16508,7 +16740,7 @@ static int managed_kernel_phase71_wait_for_restart_failure(
             break;
         }
         managed_kernel_interrupt_enable_cpu();
-        (void)gxos_managed_kernel_driver_worker_pump_current(
+        (void)managed_kernel_boot_thread_pump_current(
             worker, &g_managed_kernel_driver_service_handle);
         if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
             managed_kernel_interrupt_enable_cpu();
@@ -16607,9 +16839,67 @@ static int managed_kernel_phase71_wait_for_restart_failure(
     serial_text("GXOS_NET10:PHASE72_STALE_RESTART_REQUEST_REJECTED=1\r\n");
 
     worker->restart_admission_failure_armed = 1U;
+#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
+    g_managed_kernel_driver_service_handle =
+        (GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE){0};
+    serial_text("GXOS_NET10:PHASE75_RESTART_FAILED_DIAGNOSTIC_READY=1\r\n");
+    for (iteration = 0U; iteration != maximum_iterations; ++iteration) {
+        managed_kernel_interrupt_enable_cpu();
+        (void)managed_kernel_diagnostic_boot_thread_poll();
+        if (g_managed_kernel_driver_service_handle.identity != 0U) break;
+        if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
+            (void)boot_services->Stall(1000);
+            continue;
+        }
+        __asm__ volatile ("pause" : : : "memory");
+    }
+    if (iteration == maximum_iterations) return 0;
+    manual_handle = g_managed_kernel_driver_service_handle;
+    restart_result = (GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT)
+        __atomic_load_n(
+            &g_managed_kernel_diagnostic_context.last_restart_api_result,
+            __ATOMIC_ACQUIRE);
+    if (restart_result != GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+        __atomic_load_n(&g_managed_kernel_diagnostic_context.enabled,
+                        __ATOMIC_ACQUIRE) == 0U ||
+        g_managed_kernel_diagnostic_context.irq_bytes == 0U ||
+        g_managed_kernel_diagnostic_context.response_count < 2U ||
+        worker->restart_admission_failure_attempts != 2U) {
+        return 0;
+    }
+    manual_handle = g_managed_kernel_driver_service_handle;
+    serial_text("GXOS_NET10:PHASE75_RESTART_DISPATCHED_FROM_BOOT_THREAD=1\r\n");
+    serial_text("GXOS_NET10:PHASE75_COM2_REMAINED_ENABLED_DURING_FAILURE=1\r\n");
+#else
     restart_result = gxos_managed_kernel_driver_service_restart(
         worker, old_handle.identity, old_handle.generation,
         old_handle.device_identity, &manual_handle);
+#endif
+#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
+    if (restart_result != GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+        manual_handle.identity == 0U ||
+        worker->service_state != GXOS_MANAGED_KERNEL_DRIVER_SERVICE_WAITING ||
+        !worker->nativeaot_lifecycle.attached ||
+        worker->nativeaot_lifecycle.runtime_attach_count != 1U ||
+        worker->nativeaot_lifecycle.runtime_detach_count != 0U ||
+        !gxos_managed_kernel_driver_worker_is_running(worker, manual_handle) ||
+        g_managed_kernel_interrupt_context.routes[0].subscription_active == 0U ||
+        g_managed_kernel_interrupt_context.routes[0].hardware_enabled == 0U ||
+        g_managed_kernel_interrupt_context.routes[0].accepting_events == 0U ||
+        gxos_managed_kernel_driver_service_get_status(worker, &status) !=
+            GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+        status.current_service_identity != manual_handle.identity ||
+        status.current_generation != manual_handle.generation ||
+        status.route_enabled == 0U || status.runtime_attached == 0U ||
+        status.restart_budget_remaining != 1U ||
+        status.automatic_restart_attempts != 0U ||
+        status.explicit_restart_allowed != 0U) {
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE72_EXPLICIT_ADMISSION_FAILURE_CONTAINED=1\r\n");
+    serial_text("GXOS_NET10:PHASE72_EXPLICIT_FAILURE_RESULT=0x6\r\n");
+    serial_text("GXOS_NET10:PHASE72_BUDGET_AFTER_EXPLICIT_FAILURE=0x1\r\n");
+#else
     if (restart_result != GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_CAPACITY ||
         manual_handle.identity != 0U ||
         worker->service_state !=
@@ -16662,6 +16952,7 @@ static int managed_kernel_phase71_wait_for_restart_failure(
         g_managed_kernel_interrupt_context.routes[0].accepting_events == 0U) {
         return 0;
     }
+#endif
     g_managed_kernel_driver_service_handle = manual_handle;
     if (gxos_managed_kernel_driver_service_get_status(worker, &status) !=
             GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
@@ -16722,6 +17013,26 @@ static int managed_kernel_phase71_wait_for_restart_failure(
     serial_text("\r\n");
     serial_text("GXOS_NET10:PHASE71_MANUAL_COM1_ROUTE_ENABLED=1\r\n");
     serial_text("GXOS_NET10:PHASE71_MANUAL_SERVICE_READY=1\r\n");
+#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
+    {
+        uint32_t iteration;
+        for (iteration = 0U; iteration != 1000000U; ++iteration) {
+            managed_kernel_interrupt_enable_cpu();
+            (void)managed_kernel_diagnostic_boot_thread_poll();
+            if (g_managed_kernel_diagnostic_context.status_api_count >= 5U &&
+                g_managed_kernel_diagnostic_context.restart_api_count >= 5U) {
+                break;
+            }
+            if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
+                (void)boot_services->Stall(1000);
+                continue;
+            }
+            __asm__ volatile ("pause" : : : "memory");
+        }
+        if (iteration == 1000000U) fail("phase75-post-restart-control-timeout");
+        serial_text("GXOS_NET10:PHASE75_POST_RESTART_CONTROL_COMPLETE=1\r\n");
+    }
+#endif
 #endif
     return 1;
 }
@@ -17080,6 +17391,30 @@ static void managed_kernel_phase9_interrupt(
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_ENQUEUED\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_INTERRUPT_EVENT_DRAINED\r\n");
     serial_text("GXOS_NET10:MANAGED_KERNEL_SERIAL_RX_RUNTIME_SURVIVAL_NATIVE_OK\r\n");
+#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
+    {
+        uint32_t iteration;
+        serial_text("GXOS_NET10:PHASE75_HEALTHY_CONTROL_READY=1\r\n");
+        for (iteration = 0U; iteration != 2000000U; ++iteration) {
+            managed_kernel_interrupt_enable_cpu();
+            (void)managed_kernel_diagnostic_boot_thread_poll();
+            if (g_managed_kernel_diagnostic_context.status_api_count >= 2U &&
+                g_managed_kernel_diagnostic_context.restart_api_count >= 1U &&
+                g_managed_kernel_diagnostic_context.malformed_request_count >= 4U) {
+                break;
+            }
+            if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
+                (void)boot_services->Stall(1000);
+                continue;
+            }
+            __asm__ volatile ("pause" : : : "memory");
+        }
+        if (iteration == 2000000U) {
+            fail("phase75-healthy-control-timeout");
+        }
+        serial_text("GXOS_NET10:PHASE75_HEALTHY_CONTROL_COMPLETE=1\r\n");
+    }
+#endif
 #ifdef GXOS_ENABLE_PHASE69_PERSISTENT_SERVICE_OWNER
     if (g_managed_kernel_driver_worker_context.service_handle.identity !=
             phase69_dispatch_identity ||
@@ -17924,6 +18259,39 @@ static void managed_kernel_phase9_interrupt(
         serial_text("GXOS_NET10:PHASE72_QUARANTINE_RESTART_REJECTED=1\r\n");
     }
 #endif
+#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
+    {
+        uint64_t responses_before = __atomic_load_n(
+            &g_managed_kernel_diagnostic_context.response_count,
+            __ATOMIC_ACQUIRE);
+        uint32_t iteration;
+        const uint32_t maximum_iterations = 2000000U;
+        for (iteration = 0U; iteration != maximum_iterations; ++iteration) {
+            managed_kernel_interrupt_enable_cpu();
+            (void)managed_kernel_diagnostic_boot_thread_poll();
+            if (__atomic_load_n(
+                    &g_managed_kernel_diagnostic_context.response_count,
+                    __ATOMIC_ACQUIRE) != responses_before) {
+                break;
+            }
+            if ((iteration & 0xFFU) == 0U && boot_services->Stall != 0) {
+                (void)boot_services->Stall(1000);
+                continue;
+            }
+            __asm__ volatile ("pause" : : : "memory");
+        }
+        if (iteration == maximum_iterations ||
+            __atomic_load_n(
+                &g_managed_kernel_diagnostic_context.last_status_api_result,
+                __ATOMIC_ACQUIRE) !=
+                GXOS_MANAGED_KERNEL_DRIVER_RESTART_RESULT_OK ||
+            __atomic_load_n(&g_managed_kernel_diagnostic_context.enabled,
+                            __ATOMIC_ACQUIRE) == 0U) {
+            fail("phase75-com2-after-com1-stop");
+        }
+        serial_text("GXOS_NET10:PHASE75_DIAGNOSTIC_ALIVE_AFTER_COM1_STOP=1\r\n");
+    }
+#endif
 #ifdef GXOS_ENABLE_PHASE70_RESTART_FIXTURE
 #ifndef GXOS_ENABLE_PHASE71_RESTART_ADMISSION_FAILURE_FIXTURE
     managed_kernel_phase70_finish_one_shot_after_service_stop(
@@ -18198,6 +18566,41 @@ static void managed_kernel_phase9_interrupt(
         serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_OK\r\n");
         serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_WAKE_COALESCE_OK\r\n");
     }
+#ifdef GXOS_ENABLE_PHASE75_COM2_DIAGNOSTIC_UART
+    if (__atomic_load_n(&g_managed_kernel_diagnostic_context.enabled,
+                        __ATOMIC_ACQUIRE) == 0U ||
+        g_managed_kernel_diagnostic_context.irq_count == 0U ||
+        g_managed_kernel_diagnostic_context.irq_bytes == 0U ||
+        g_managed_kernel_diagnostic_boot_poll_count == 0U ||
+        g_managed_kernel_diagnostic_context.status_api_count < 3U ||
+        g_managed_kernel_diagnostic_context.restart_api_count < 3U ||
+        g_managed_kernel_diagnostic_context.rx_overflow_count != 0U) {
+        fail("phase75-irq-dispatch-proof");
+    }
+    serial_text("GXOS_NET10:PHASE75_IRQ_CAPTURE_ONLY=1\r\n");
+    serial_text("GXOS_NET10:PHASE75_BOOT_THREAD_DISPATCH=1\r\n");
+    serial_field_hex("GXOS_NET10:PHASE75_IRQ_COUNT=0x",
+                     g_managed_kernel_diagnostic_context.irq_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE75_IRQ_BYTES=0x",
+                     g_managed_kernel_diagnostic_context.irq_bytes);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE75_BOOT_POLL_COUNT=0x",
+                     g_managed_kernel_diagnostic_boot_poll_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE75_STATUS_API_COUNT=0x",
+                     g_managed_kernel_diagnostic_context.status_api_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE75_RESTART_API_COUNT=0x",
+                     g_managed_kernel_diagnostic_context.restart_api_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE75_MALFORMED_COUNT=0x",
+                     g_managed_kernel_diagnostic_context.malformed_request_count);
+    serial_text("\r\n");
+    serial_field_hex("GXOS_NET10:PHASE75_RX_OVERFLOW_COUNT=0x",
+                     g_managed_kernel_diagnostic_context.rx_overflow_count);
+    serial_text("\r\n");
+#endif
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE11
     if (stats.EnqueuedCount == 9) {
         serial_text("GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_OK\r\n");

@@ -275,6 +275,24 @@ static GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 make_platform_resource(
     return resource;
 }
 
+static GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 make_platform_interrupt_resource(
+    uint64_t resource_id, uint32_t device_id, uint64_t irq)
+{
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 resource = {0};
+    resource.Size = GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1_SIZE;
+    resource.AbiVersion = GX_MANAGED_KERNEL_DEVICE_RESOURCES_ABI_V1;
+    resource.ResourceId = resource_id;
+    resource.OwnerDeviceKind = GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL;
+    resource.OwnerDeviceId = device_id;
+    resource.ResourceIndex = 1U;
+    resource.ResourceType = GX_MANAGED_DEVICE_RESOURCE_TYPE_INTERRUPT;
+    resource.Flags = GX_MANAGED_DEVICE_RESOURCE_FLAG_PLATFORM;
+    resource.PhysicalBase = irq;
+    resource.Length = 1U;
+    resource.Alignment = 1U;
+    return resource;
+}
+
 GXOS_MANAGED_KERNEL_RESOURCE_STATUS gxos_managed_kernel_make_platform_resources(
     GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 *resources,
     uint32_t resource_capacity,
@@ -319,5 +337,69 @@ GXOS_MANAGED_KERNEL_RESOURCE_STATUS gxos_managed_kernel_make_platform_resources(
                         GX_MANAGED_DEVICE_RESOURCE_CAPABILITY_CLAIM_POLICY,
         .Reserved = 0U
     };
+    return GXOS_MANAGED_KERNEL_RESOURCE_OK;
+}
+
+GXOS_MANAGED_KERNEL_RESOURCE_STATUS
+gxos_managed_kernel_make_platform_resources_with_secondary_uart(
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 *resources,
+    uint32_t resource_capacity,
+    uint32_t *resource_count,
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_SUMMARY_V1 *summary,
+    const GXOS_MANAGED_KERNEL_SECONDARY_UART_CONFIG *secondary_uart)
+{
+    GXOS_MANAGED_KERNEL_RESOURCE_STATUS status;
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 port_resource;
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 irq_resource;
+    uint32_t index;
+    status = gxos_managed_kernel_make_platform_resources(
+        resources, resource_capacity, resource_count, summary);
+    if (status != GXOS_MANAGED_KERNEL_RESOURCE_OK || secondary_uart == 0 ||
+        secondary_uart->present == 0U) {
+        return status;
+    }
+    if (secondary_uart->present != 1U || secondary_uart->reserved != 0U ||
+        secondary_uart->io_base == 0U ||
+        (secondary_uart->io_base & 7U) != 0U ||
+        secondary_uart->io_base > UINT16_MAX - 7U ||
+        secondary_uart->irq == 0U || secondary_uart->irq >= 16U) {
+        return GXOS_MANAGED_KERNEL_RESOURCE_MALFORMED;
+    }
+    /* IRQ1 belongs to the i8042 keyboard and IRQ4 to the existing COM1
+       service. Those hardware routes are reserved even though older platform
+       publication did not emit interrupt descriptors for them. */
+    if (secondary_uart->irq == 1U || secondary_uart->irq == 4U) {
+        return GXOS_MANAGED_KERNEL_RESOURCE_DUPLICATE;
+    }
+    if (resource_capacity < 5U || *resource_count > resource_capacity - 2U) {
+        return GXOS_MANAGED_KERNEL_RESOURCE_CAPACITY;
+    }
+    port_resource = make_platform_resource(
+        0x47584F5301000004ULL, GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL,
+        GX_MANAGED_SERIAL_DIAGNOSTIC_DEVICE_ID_COM2, 0U,
+        secondary_uart->io_base, 8U);
+    irq_resource = make_platform_interrupt_resource(
+        0x47584F5301000005ULL,
+        GX_MANAGED_SERIAL_DIAGNOSTIC_DEVICE_ID_COM2, secondary_uart->irq);
+    if (gxos_managed_kernel_validate_resource(&port_resource) !=
+            GXOS_MANAGED_KERNEL_RESOURCE_OK ||
+        gxos_managed_kernel_validate_resource(&irq_resource) !=
+            GXOS_MANAGED_KERNEL_RESOURCE_OK) {
+        return GXOS_MANAGED_KERNEL_RESOURCE_MALFORMED;
+    }
+    for (index = 0; index != *resource_count; ++index) {
+        if (resources[index].ResourceId == port_resource.ResourceId ||
+            resources[index].ResourceId == irq_resource.ResourceId ||
+            gxos_managed_kernel_resource_ranges_overlap(
+                &resources[index], &port_resource) ||
+            gxos_managed_kernel_resource_ranges_overlap(
+                &resources[index], &irq_resource)) {
+            return GXOS_MANAGED_KERNEL_RESOURCE_DUPLICATE;
+        }
+    }
+    resources[*resource_count] = port_resource;
+    resources[*resource_count + 1U] = irq_resource;
+    *resource_count += 2U;
+    summary->ResourceCount = *resource_count;
     return GXOS_MANAGED_KERNEL_RESOURCE_OK;
 }
