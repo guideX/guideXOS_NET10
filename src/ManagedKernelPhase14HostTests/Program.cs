@@ -68,6 +68,55 @@ internal static class Program
         Check(!ManagedE1000Protocol.TryBuildTxDescriptor(descriptor, 0, 60),
             "tx-descriptor-zero-bus-rejected");
 
+        Check(!ManagedE1000Protocol.TryClassifyInterruptCause(0, out uint noCause) &&
+              noCause == 0, "e1000-txdw-cause-required");
+        Check(ManagedE1000Protocol.TryClassifyInterruptCause(
+                  ManagedE1000Protocol.InterruptCauseTxDescriptorWriteback,
+                  out uint noUnrelated) && noUnrelated == 0,
+            "e1000-txdw-cause-classified");
+        Check(ManagedE1000Protocol.TryClassifyInterruptCause(
+                  ManagedE1000Protocol.InterruptCauseTxDescriptorWriteback | 0x20,
+                  out uint unrelated) && unrelated == 0x20,
+            "e1000-unrelated-cause-preserved");
+
+        GxManagedKernelInterruptEventV1 e1000Event = new()
+        {
+            Size = GxManagedKernelInterruptEventV1.ExpectedSize,
+            AbiVersion = GxManagedKernelInterruptEventV1.AbiVersionCurrent,
+            EventType = ManagedE1000Protocol.InterruptEventType,
+            DeviceKind = ManagedE1000Protocol.PciDeviceKind,
+            DeviceId = ManagedE1000Protocol.PciOwnerId,
+            Sequence = 7,
+            Flags = GxManagedKernelInterruptEventV1.EventFlagHardwareCapture,
+            PayloadByte = 1,
+            PayloadLength = 1,
+            Status = ManagedE1000Protocol.InterruptCauseTxDescriptorWriteback
+        };
+        Check(ManagedE1000Protocol.TryValidateInterruptEvent(
+                  in e1000Event, 6, out _), "e1000-bound-event-accepted");
+        Check(!ManagedE1000Protocol.TryValidateInterruptEvent(
+                  in e1000Event, 7, out _), "e1000-stale-sequence-rejected");
+        e1000Event.DeviceId++;
+        Check(!ManagedE1000Protocol.TryValidateInterruptEvent(
+                  in e1000Event, 6, out _), "e1000-wrong-device-rejected");
+        e1000Event.DeviceId = ManagedE1000Protocol.PciOwnerId;
+        e1000Event.Status = 0;
+        Check(!ManagedE1000Protocol.TryValidateInterruptEvent(
+                  in e1000Event, 6, out _), "e1000-unbound-or-empty-cause-rejected");
+
+        byte[] phase80Frame = new byte[60];
+        byte[] phase80Repeat = new byte[60];
+        Check(ManagedE1000Protocol.TryBuildPhase80Frame(
+                  phase80Frame, mac, 1) &&
+              ManagedE1000Protocol.TryBuildPhase80Frame(
+                  phase80Repeat, mac, 1) &&
+              phase80Frame.AsSpan().SequenceEqual(phase80Repeat) &&
+              phase80Frame[0] == 0xFF && phase80Frame[6] == mac[0] &&
+              phase80Frame[12] == 0x88 && phase80Frame[13] == 0xB5,
+            "phase80-frame-is-bounded-local-and-deterministic");
+        Check(!ManagedE1000Protocol.TryBuildPhase80Frame(
+                  phase80Frame, mac, 0), "phase80-zero-sequence-rejected");
+
         Console.WriteLine("MANAGED_KERNEL_PHASE14_HOST_TESTS_PASS");
         return 0;
     }

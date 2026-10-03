@@ -9,6 +9,7 @@ internal static class ManagedE1000Protocol
     internal const ushort VendorId = 0x8086;
     internal const ushort DeviceId = 0x10D3;
     internal const uint PciOwnerId = 0x808610D3;
+    internal const uint PciDeviceKind = 1;
     internal const uint ExpectedClass = 0x020000;
     internal const uint PciCommandMemorySpace = 1U << 1;
     internal const uint PciCommandBusMaster = 1U << 2;
@@ -23,6 +24,10 @@ internal static class ManagedE1000Protocol
     internal const ushort ProofEtherType = 0x88B5;
     internal const uint TxCommandEopIfcsRs = 0x0B;
     internal const byte TxStatusDone = 0x01;
+    internal const uint InterruptEventType = 3;
+    internal const uint InterruptCauseTxDescriptorWriteback = 1U << 0;
+    internal const uint InterruptMaskTxDescriptorWriteback =
+        InterruptCauseTxDescriptorWriteback;
     internal const byte RxStatusDone = 0x01;
     internal const byte RxStatusEop = 0x02;
     internal const byte RxErrorMask = 0xFF;
@@ -42,6 +47,9 @@ internal static class ManagedE1000Protocol
 
     internal const ulong RegCtrl = 0x0000;
     internal const ulong RegStatus = 0x0008;
+    internal const ulong RegInterruptCauseRead = 0x00C0;
+    internal const ulong RegInterruptMaskSet = 0x00D0;
+    internal const ulong RegInterruptMaskClear = 0x00D8;
     internal const ulong RegRctl = 0x0100;
     internal const ulong RegTctl = 0x0400;
     internal const ulong RegRal = 0x5400;
@@ -212,6 +220,59 @@ internal static class ManagedE1000Protocol
     {
         return descriptor.Length == DescriptorSize &&
                (descriptor[12] & TxStatusDone) != 0;
+    }
+
+    internal static bool TryClassifyInterruptCause(uint cause,
+                                                    out uint unrelated)
+    {
+        unrelated = cause & ~InterruptCauseTxDescriptorWriteback;
+        return (cause & InterruptCauseTxDescriptorWriteback) != 0;
+    }
+
+    internal static bool TryValidateInterruptEvent(
+        in GxManagedKernelInterruptEventV1 value, ulong previousSequence,
+        out uint unrelated)
+    {
+        unrelated = 0;
+        if (value.Size != GxManagedKernelInterruptEventV1.ExpectedSize ||
+            value.AbiVersion != GxManagedKernelInterruptEventV1.AbiVersionCurrent ||
+            value.EventType != InterruptEventType ||
+            value.DeviceKind != PciDeviceKind ||
+            value.DeviceId != PciOwnerId ||
+            value.Flags != GxManagedKernelInterruptEventV1.EventFlagHardwareCapture ||
+            value.PayloadLength != 1 || value.Reserved0 != 0 ||
+            value.Timestamp != 0 || value.Sequence == 0 ||
+            value.Sequence <= previousSequence ||
+            value.PayloadByte != (byte)value.Status ||
+            !TryClassifyInterruptCause(value.Status, out unrelated))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    internal static bool TryBuildPhase80Frame(Span<byte> frame,
+                                               ReadOnlySpan<byte> source,
+                                               uint sequence)
+    {
+        if (frame.Length != MinimumEthernetFrameLength || source.Length != 6 ||
+            IsInvalidMac(source) || sequence == 0) return false;
+        frame.Clear();
+        for (int index = 0; index != 6; ++index)
+        {
+            frame[index] = 0xFF;
+            frame[6 + index] = source[index];
+        }
+        frame[12] = (byte)(ProofEtherType >> 8);
+        frame[13] = (byte)(ProofEtherType & 0xFF);
+        ReadOnlySpan<byte> signature = "guideXOS Phase80 TX IRQ"u8;
+        signature.CopyTo(frame[14..]);
+        int sequenceOffset = 14 + signature.Length;
+        frame[sequenceOffset] = (byte)(sequence >> 24);
+        frame[sequenceOffset + 1] = (byte)(sequence >> 16);
+        frame[sequenceOffset + 2] = (byte)(sequence >> 8);
+        frame[sequenceOffset + 3] = (byte)sequence;
+        return true;
     }
 
     internal static bool TryBuildProofFrame(byte[] frame, ReadOnlySpan<byte> source)

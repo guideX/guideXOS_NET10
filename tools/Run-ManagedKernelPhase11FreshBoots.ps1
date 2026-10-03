@@ -8,6 +8,7 @@ param(
     [int]$TimeoutSeconds = 180,
     [string]$PostPhase11Marker = '',
     [switch]$EnablePhase15Rx,
+    [switch]$EnablePhase80E1000,
     [string]$Phase15InjectorPath = '',
     [ValidateSet('dgram', 'user')]
     [string]$Phase15NetworkBackend = 'dgram',
@@ -67,6 +68,9 @@ $script:phase11RunDeadline = $null
 $script:phase11StderrPath = $null
 if ($EnablePhase32NegativeControl -and -not $EnablePhase32Protocol) {
     throw '-EnablePhase32NegativeControl requires -EnablePhase32Protocol.'
+}
+if ($EnablePhase80E1000 -and $EnablePhase15Rx) {
+    throw 'Phase 80 uses a local user-mode backend and does not combine with Phase 15 RX injection.'
 }
 if ($EnablePhase33NegativeControl -and -not $EnablePhase33Protocol) {
     throw '-EnablePhase33NegativeControl requires -EnablePhase33Protocol.'
@@ -3365,7 +3369,10 @@ try {
             '-serial', 'none', '-device', 'isa-serial,chardev=serial0,iobase=0x3f8,irq=4,wakeup=on',
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
             '-display', $(if ($CaptureQemuScreen) { 'gtk' } else { 'none' }), '-no-reboot', '-no-shutdown')
-        if ($EnablePhase15Rx) {
+        if ($EnablePhase80E1000) {
+            $arguments += @('-nic', 'none', '-netdev', 'user,id=net0')
+            $arguments += @('-device', 'e1000e,netdev=net0,addr=2')
+        } elseif ($EnablePhase15Rx) {
             if (-not $Phase15KeepDefaultNic -and
                 $Phase15NetworkBackend -eq 'dgram') {
                 $arguments += @('-nic', 'none')
@@ -3461,7 +3468,7 @@ try {
             Start-Sleep -Milliseconds 50
             Send-Serial11 $client $stream $process $injectionLog 'KEYBOARD_B_SENT' 0x46
             if (-not $EnablePhase52Protocol -and -not $EnablePhase53Protocol) {
-                Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_DRAINED' $deadline $process $stream $logStream $text $buffer
+                Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_OK' $deadline $process $stream $logStream $text $buffer
             }
             Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS' $deadline $process $stream $logStream $text $buffer
             if (-not [string]::IsNullOrEmpty($PostPhase11Marker)) {

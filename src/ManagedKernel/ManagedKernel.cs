@@ -889,6 +889,7 @@ internal static unsafe class ManagedKernelContract
     private static int s_phase51ResetReuseMode;
     private static int s_phase52Mode;
     private static int s_phase53Mode;
+    private static int s_phase80Mode;
     private static int s_framebufferInstalled;
     private static GxManagedKernelFramebufferV1 s_framebuffer;
     private static ManagedE1000Driver? s_phase14Driver;
@@ -2769,6 +2770,25 @@ internal static unsafe class ManagedKernelContract
             ManagedE1000Driver.EnablePhase53Mode();
             return ManagedOk;
         }
+        if (stage == 23)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_phase80Mode != 0 || s_dmaServicesInstalled == 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            s_phase80Mode = 1;
+            ManagedE1000Driver.EnablePhase80Mode();
+            return ManagedOk;
+        }
+        if (stage == 24)
+        {
+            if (s_phase14Run == 0 || s_phase14TeardownRun != 0 ||
+                s_phase80Mode == 0 || s_phase14Driver == null ||
+                s_phase14Driver.State != ManagedE1000DriverState.Running)
+                return InvalidState;
+            return s_phase14Driver.TryRunPhase80Proof() ? ManagedOk : InvalidState;
+        }
         if (stage == 1)
         {
             if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
@@ -2782,7 +2802,7 @@ internal static unsafe class ManagedKernelContract
                  s_phase46Mode == 0 && s_phase46CapacityMode == 0 &&
                  s_phase48Mode == 0 && s_phase49Mode == 0 && s_phase50Mode == 0 &&
                  s_phase51Mode == 0 && s_phase51ResetReuseMode == 0 &&
-                 s_phase52Mode == 0 && s_phase53Mode == 0 &&
+                 s_phase52Mode == 0 && s_phase53Mode == 0 && s_phase80Mode == 0 &&
                  ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0))
                 return InvalidState;
             ManagedE1000Driver? candidate = ManagedE1000Driver.TryCreate();
@@ -2801,6 +2821,9 @@ internal static unsafe class ManagedKernelContract
             if (s_phase14Run == 0 || s_phase14TeardownRun != 0 ||
                 s_phase14Driver == null ||
                 s_phase14Driver.State != ManagedE1000DriverState.Running)
+                return InvalidState;
+            bool phase80Proof = s_phase80Mode != 0;
+            if (phase80Proof && !s_phase14Driver.Phase80Passed)
                 return InvalidState;
             if (!s_phase14Driver.TryStop() ||
                 s_phase14Driver.State != ManagedE1000DriverState.Stopped ||
@@ -2827,6 +2850,7 @@ internal static unsafe class ManagedKernelContract
             s_phase51ResetReuseMode = 0;
             s_phase52Mode = 0;
             s_phase53Mode = 0;
+            s_phase80Mode = 0;
             bool rxProof = s_phase14Driver.RxProofReceived;
             bool phase15RxProof = s_phase14Driver.RxPhase15Received;
             bool phase16Proof = s_phase14Driver.Phase16Passed;
@@ -2856,6 +2880,7 @@ internal static unsafe class ManagedKernelContract
             bool phase51ResetReuseProof = s_phase14Driver.Phase51ResetReusePassed;
             bool phase52Proof = s_phase14Driver.Phase52Passed;
             bool phase53Proof = s_phase14Driver.Phase53Passed;
+            bool phase80Passed = s_phase14Driver.Phase80Passed;
             s_phase14TeardownRun = 1;
             if (!KernelLog.Write(rxProof
                     ? "PHASE 14 FIRST MANAGED PCI DRIVER COMPLETE — DMA TX/RX PROVEN\r\n"u8
@@ -2920,7 +2945,8 @@ internal static unsafe class ManagedKernelContract
                 (phase52Proof &&
                  !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS\r\n"u8)) ||
                 (phase53Proof &&
-                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE53_PASS\r\n"u8)))
+                 !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE53_PASS\r\n"u8)) ||
+                (phase80Proof && !phase80Passed))
                 return InvalidState;
             s_phase14Driver = null;
             return ManagedOk;

@@ -289,6 +289,70 @@ int main(void)
                "failed generation unsubscribe does not double count shutdown loss");
     }
 
+    {
+        uint64_t first_token;
+        uint64_t replacement_token;
+        uint64_t enqueued_before = context.enqueued_count;
+        uint32_t eoi_before = g_eoi_calls;
+        expect(gxos_managed_kernel_interrupt_add_route(
+                   &context, 1U, GX_MANAGED_DEVICE_KIND_PCI,
+                   0x808610D3U, GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE,
+                   enable_hardware, disable_hardware, capture_source, send_eoi,
+                   0), "E1000 PCI cause route registers as a second device route");
+        set_source("G");
+        gxos_managed_kernel_interrupt_capture_route(&context, 1U);
+        expect(g_eoi_calls == eoi_before + 1U && g_source_index == 0U &&
+                   context.enqueued_count == enqueued_before,
+               "unbound E1000 IRQ is acknowledged without source read or callback");
+
+        result = gxos_managed_kernel_interrupt_subscribe_input_v1(
+            &context, GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE,
+            GX_MANAGED_DEVICE_KIND_PCI, 0x808610D3U,
+            (uintptr_t)&g_token, sizeof(g_token));
+        first_token = g_token;
+        set_source("E");
+        gxos_managed_kernel_interrupt_capture_route(&context, 1U);
+        g_drained = 0;
+        result = result == GX_MANAGED_OK
+            ? gxos_managed_kernel_interrupt_drain_v1(
+                  &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+                  (uintptr_t)g_events, sizeof(g_events),
+                  (uintptr_t)&g_drained, sizeof(g_drained))
+            : result;
+        expect(result == GX_MANAGED_OK && g_drained == 1U &&
+                   g_events[0].EventType ==
+                       GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE &&
+                   g_events[0].DeviceId == 0x808610D3U &&
+                   g_events[0].PayloadByte == 'E',
+               "bound E1000 PCI subscription receives its own typed record");
+        expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
+                   &context, first_token) == GX_MANAGED_OK,
+               "E1000 generation can be unsubscribed");
+        result = gxos_managed_kernel_interrupt_subscribe_input_v1(
+            &context, GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE,
+            GX_MANAGED_DEVICE_KIND_PCI, 0x808610D3U,
+            (uintptr_t)&g_token, sizeof(g_token));
+        replacement_token = g_token;
+        expect(result == GX_MANAGED_OK && replacement_token != first_token &&
+                   gxos_managed_kernel_interrupt_unsubscribe_input_v1(
+                       &context, first_token) == GX_MANAGED_NOT_FOUND &&
+                   context.routes[1].subscription_active != 0U,
+               "stale E1000 generation token cannot unsubscribe its replacement");
+        set_source("F");
+        gxos_managed_kernel_interrupt_capture_route(&context, 1U);
+        g_drained = 0;
+        result = gxos_managed_kernel_interrupt_drain_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)g_events, sizeof(g_events),
+            (uintptr_t)&g_drained, sizeof(g_drained));
+        expect(result == GX_MANAGED_OK && g_drained == 1U &&
+                   g_events[0].PayloadByte == 'F',
+               "replacement E1000 binding receives later event");
+        expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
+                   &context, replacement_token) == GX_MANAGED_OK,
+               "replacement E1000 binding unsubscribes cleanly");
+    }
+
     if (g_failures != 0) {
         printf("MANAGED_KERNEL_INTERRUPT_NATIVE_HOST_TESTS=FAILED failures=%u\n",
                g_failures);

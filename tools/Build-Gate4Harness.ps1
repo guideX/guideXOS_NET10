@@ -441,6 +441,7 @@ $exceptionSource = Join-Path $root 'src\Gate4Harness\exception_context.c'
 $exceptionAssembly = Join-Path $root 'src\Gate4Harness\exception_entry.S'
 $serialInterruptAssembly = Join-Path $root 'src\Gate4Harness\serial_irq_entry.S'
 $keyboardInterruptAssembly = Join-Path $root 'src\Gate4Harness\keyboard_irq_entry.S'
+$e1000InterruptAssembly = Join-Path $root 'src\Gate4Harness\e1000_irq_entry.S'
 $diagnosticInterruptAssembly = Join-Path $root 'src\Gate4Harness\diagnostic_irq_entry.S'
 $vectoredHandlerSource = Join-Path $root 'src\Gate4Harness\vectored_handler.c'
 $schedulerSource = Join-Path $root 'src\Gate4Harness\scheduler_foundation.c'
@@ -522,8 +523,9 @@ if (-not (Test-Path -LiteralPath $managedKernelSerialSource)) { throw "ManagedKe
 if (-not (Test-Path -LiteralPath $managedKernelInterruptSource) -or
     -not (Test-Path -LiteralPath $serialInterruptAssembly) -or
     -not (Test-Path -LiteralPath $keyboardInterruptAssembly) -or
+    -not (Test-Path -LiteralPath $e1000InterruptAssembly) -or
     -not (Test-Path -LiteralPath $diagnosticInterruptAssembly)) {
-    throw "ManagedKernel interrupt sources not found: $managedKernelInterruptSource / $serialInterruptAssembly / $keyboardInterruptAssembly / $diagnosticInterruptAssembly"
+    throw "ManagedKernel interrupt sources not found: $managedKernelInterruptSource / $serialInterruptAssembly / $keyboardInterruptAssembly / $e1000InterruptAssembly / $diagnosticInterruptAssembly"
 }
 if (-not (Test-Path -LiteralPath $managedKernelDriverWorkerSource)) {
     throw "ManagedKernel driver-worker source not found: $managedKernelDriverWorkerSource"
@@ -703,7 +705,7 @@ if (($requiresAuthoritativePayload -or $requiresCallbackPayload) -and
 }
 
 $managedKernelInterruptAssemblies = if ($PayloadMode -eq 'ManagedKernel') {
-    @($serialInterruptAssembly, $keyboardInterruptAssembly,
+    @($serialInterruptAssembly, $keyboardInterruptAssembly, $e1000InterruptAssembly,
       $diagnosticInterruptAssembly)
 } else {
     @()

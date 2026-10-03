@@ -4,29 +4,6 @@ using System.Runtime.InteropServices;
 namespace GuideXOS.Net10.ManagedKernel;
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
-internal struct GxManagedKernelInterruptEventV1
-{
-    internal const uint ExpectedSize = 48;
-    internal const uint AbiVersionCurrent = 1;
-    internal const uint EventTypeSerialReceive = 1;
-    internal const uint EventTypeKeyboardScancode = 2;
-    internal const uint EventFlagHardwareCapture = 1;
-
-    internal uint Size;
-    internal uint AbiVersion;
-    internal uint EventType;
-    internal uint DeviceKind;
-    internal uint DeviceId;
-    internal ulong Sequence;
-    internal uint Flags;
-    internal byte PayloadByte;
-    internal byte PayloadLength;
-    internal ushort Reserved0;
-    internal uint Status;
-    internal ulong Timestamp;
-}
-
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
 internal struct GxManagedKernelInterruptStatsV1
 {
     internal const uint ExpectedSize = 80;
@@ -109,6 +86,7 @@ internal unsafe sealed class ManagedInterruptDispatcher
 {
     private readonly GxManagedKernelInterruptServicesV1 _services;
     private ulong _subscriptionId;
+    private ulong _e1000SubscriptionId;
     private GxManagedKernelInputServicesV1 _inputServices;
     private ulong _inputSubscriptionId;
     private bool _inputAttached;
@@ -119,6 +97,7 @@ internal unsafe sealed class ManagedInterruptDispatcher
     }
 
     internal ulong SubscriptionId => _subscriptionId;
+    internal ulong E1000SubscriptionId => _e1000SubscriptionId;
     internal ulong InputSubscriptionId => _inputSubscriptionId;
 
     internal static ManagedInterruptDispatcher? TryCreate(
@@ -203,6 +182,34 @@ internal unsafe sealed class ManagedInterruptDispatcher
         return true;
     }
 
+    internal bool TrySubscribeE1000(out ulong subscriptionId)
+    {
+        subscriptionId = 0;
+        if (_e1000SubscriptionId != 0) return false;
+        delegate* unmanaged<uint, uint, uint, nuint, nuint, uint> subscribe =
+            (delegate* unmanaged<uint, uint, uint, nuint, nuint, uint>)(nuint)
+                _services.SubscribeAddress;
+        ulong token = 0;
+        uint result = subscribe(ManagedE1000Protocol.InterruptEventType,
+            ManagedE1000Protocol.PciDeviceKind,
+            ManagedE1000Protocol.PciOwnerId, (nuint)(&token), sizeof(ulong));
+        if (result != ManagedKernelContract.ManagedOk || token == 0) return false;
+        _e1000SubscriptionId = token;
+        subscriptionId = token;
+        return true;
+    }
+
+    internal bool TryUnsubscribeE1000()
+    {
+        if (_e1000SubscriptionId == 0) return false;
+        delegate* unmanaged<ulong, uint> unsubscribe =
+            (delegate* unmanaged<ulong, uint>)(nuint)_services.UnsubscribeAddress;
+        if (unsubscribe(_e1000SubscriptionId) != ManagedKernelContract.ManagedOk)
+            return false;
+        _e1000SubscriptionId = 0;
+        return true;
+    }
+
     internal bool TrySubscribeInput(uint eventType, uint deviceKind,
                                     uint deviceId, out ulong subscriptionId)
     {
@@ -280,6 +287,15 @@ internal unsafe sealed class ManagedInterruptDispatcher
                                    ManagedKeyboardDriver? keyboardDriver,
                                    out uint delivered, out uint rejected)
     {
+        return TryDispatchBatch(serialDriver, keyboardDriver, null,
+                                out delivered, out rejected);
+    }
+
+    internal bool TryDispatchBatch(ManagedSerialDriver? serialDriver,
+                                   ManagedKeyboardDriver? keyboardDriver,
+                                   ManagedE1000Driver? e1000Driver,
+                                   out uint delivered, out uint rejected)
+    {
         Span<GxManagedKernelInterruptEventV1> events =
             stackalloc GxManagedKernelInterruptEventV1[(int)_services.MaxDrainValue];
         uint drained = 0;
@@ -299,7 +315,7 @@ internal unsafe sealed class ManagedInterruptDispatcher
         for (uint index = 0; index != drained; ++index)
         {
             ref GxManagedKernelInterruptEventV1 value = ref events[(int)index];
-            if (!TryRouteEvent(in value, serialDriver, keyboardDriver))
+            if (!TryRouteEvent(in value, serialDriver, keyboardDriver, e1000Driver))
             {
                 rejected++;
                 continue;
@@ -311,7 +327,8 @@ internal unsafe sealed class ManagedInterruptDispatcher
 
     private bool TryRouteEvent(in GxManagedKernelInterruptEventV1 value,
                                ManagedSerialDriver? serialDriver,
-                               ManagedKeyboardDriver? keyboardDriver)
+                               ManagedKeyboardDriver? keyboardDriver,
+                               ManagedE1000Driver? e1000Driver)
     {
         if (value.Size != GxManagedKernelInterruptEventV1.ExpectedSize ||
             value.AbiVersion != GxManagedKernelInterruptEventV1.AbiVersionCurrent ||
@@ -330,6 +347,11 @@ internal unsafe sealed class ManagedInterruptDispatcher
             keyboardDriver != null)
         {
             return keyboardDriver.TryHandleScancode(in value);
+        }
+        if (value.EventType == ManagedE1000Protocol.InterruptEventType &&
+            e1000Driver != null)
+        {
+            return e1000Driver.TryHandleInterrupt(in value);
         }
         return false;
     }

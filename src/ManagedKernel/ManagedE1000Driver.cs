@@ -21,6 +21,7 @@ internal sealed class ManagedE1000Driver
 {
     internal const uint DriverId = 0xD014;
     private const uint PollLimit = 100000;
+    private const uint Phase80InterruptPollLimit = 100000;
     /* The host observes RX_READY over a serial socket before sending the one
        frame.  Keep this bounded window long enough for that handshake without
        adding a wall-clock sleep to the guest. */
@@ -49,6 +50,7 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase51ResetReuseModeEnabled;
     private static bool s_phase52ModeEnabled;
     private static bool s_phase53ModeEnabled;
+    private static bool s_phase80ModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -62,6 +64,15 @@ internal sealed class ManagedE1000Driver
     private ManagedEthernetLayer? _ethernet;
     private readonly byte[] _mac = new byte[6];
     private readonly byte[] _txFrame = new byte[60];
+    private readonly byte[] _phase80Frame = new byte[60];
+    private ManagedInterruptDispatcher? _interruptDispatcher;
+    private uint _lastSubmittedTxIndex;
+    private uint _phase80LastCause;
+    private uint _phase80LastUnrelatedCause;
+    private uint _phase80DeliveryCount;
+    private ulong _phase80LastSequence;
+    private bool _phase80Requested;
+    private bool _interruptSubscribed;
     private ulong _macValue;
     private bool _phase16Passed;
     private bool _phase17Passed;
@@ -128,6 +139,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase51ResetReuseRequested;
     private bool _phase52Requested;
     private bool _phase53Requested;
+    private bool _phase80Passed;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -175,6 +187,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase51ResetReusePassed => _phase51ResetReusePassed;
     internal bool Phase52Passed => _phase52Passed;
     internal bool Phase53Passed => _phase53Passed;
+    internal bool Phase80Passed => _phase80Passed;
 
     internal static void EnablePhase35Mode()
     {
@@ -276,6 +289,11 @@ internal sealed class ManagedE1000Driver
         s_phase53ModeEnabled = true;
     }
 
+    internal static void EnablePhase80Mode()
+    {
+        s_phase80ModeEnabled = true;
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -317,6 +335,7 @@ internal sealed class ManagedE1000Driver
         _phase51ResetReuseRequested = s_phase51ResetReuseModeEnabled;
         _phase52Requested = s_phase52ModeEnabled;
         _phase53Requested = s_phase53ModeEnabled;
+        _phase80Requested = s_phase80ModeEnabled;
         return TryStartCore();
     }
 
@@ -388,6 +407,9 @@ internal sealed class ManagedE1000Driver
             !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_NIC_INITIALIZED\r\n"u8))
             return AbortStart();
         _state = ManagedE1000DriverState.Initialized;
+        if (_phase80Requested &&
+            !ManagedSerialDriverSubsystem.TrySubscribeE1000Interrupt(this))
+            return AbortStart();
         if (!SubmitProofFrame() || !PollTxCompletion()) return AbortStart();
         _state = ManagedE1000DriverState.Running;
         if (!RunGcSurvival() ||
@@ -413,6 +435,16 @@ internal sealed class ManagedE1000Driver
                     "GXOS_NET10:MANAGED_PUBLIC_HTTPS_START_FAILED\r\n"u8);
                 return AbortStart();
             }
+        }
+        else if (_phase80Requested)
+        {
+            /* Phase 80 proves TX completion delivery only; keep its boot
+               bounded without waiting for the independent Phase 15 RX source. */
+            if (!KernelLog.Write(
+                    "GXOS_NET10:MANAGED_KERNEL_PHASE14_RX_HARNESS_DEFERRED\r\n"u8) ||
+                !KernelLog.Write(
+                    "GXOS_NET10:MANAGED_E1000_RX_HARNESS_DEFERRED\r\n"u8))
+                return AbortStart();
         }
         else if (!PollPhase15RxProof()) return AbortStart();
         if (_rxPhase15Received != 0)
@@ -665,7 +697,11 @@ internal sealed class ManagedE1000Driver
         s_phase51ModeEnabled = false;
         s_phase52ModeEnabled = false;
         s_phase53ModeEnabled = false;
+        s_phase80ModeEnabled = false;
         bool safe = true;
+        if (_interruptSubscribed &&
+            !ManagedSerialDriverSubsystem.TryUnsubscribeE1000Interrupt(this))
+            safe = false;
         if (_ethernet != null)
         {
             safe = _ethernet.TryStop() && safe;
@@ -714,6 +750,9 @@ internal sealed class ManagedE1000Driver
     internal bool TryStop()
     {
         if (_state != ManagedE1000DriverState.Running) return false;
+        if (_interruptSubscribed &&
+            !ManagedSerialDriverSubsystem.TryUnsubscribeE1000Interrupt(this))
+            return false;
         _state = ManagedE1000DriverState.Stopping;
         ManagedEthernetLayer? ethernet = (_phase35Requested || _phase39Requested || _phase40Requested || _phase41Requested || _phase42Requested || _phase43Requested || _phase43CapacityRequested || _phase44Requested || _phase44CapacityRequested || _phase45Requested || _phase45CapacityRequested || _phase46Requested || _phase46CapacityRequested || _phase48Requested || _phase49Requested || _phase50Requested || _phase51Requested || _phase51ResetReuseRequested || _phase52Requested || _phase53Requested || _phase34Requested || _phase33Requested || _phase32Requested || _phase23Requested || _phase22Requested || _phase21Requested)
             ? ManagedNetworkServiceBackend.LiveEthernet ?? _ethernet
@@ -999,6 +1038,7 @@ internal sealed class ManagedE1000Driver
         descriptor[9] = (byte)(_txFrame.Length >> 8);
         descriptor[11] = (byte)ManagedE1000Protocol.TxCommandEopIfcsRs;
         descriptor[12] = 0;
+        _lastSubmittedTxIndex = _txIndex;
         if (!_txRing.TryWrite(_txIndex * ManagedE1000Protocol.DescriptorSize,
                               descriptor) ||
             !WriteRegister(ManagedE1000Protocol.RegTxDescTail, 1)) return false;
@@ -1071,6 +1111,7 @@ internal sealed class ManagedE1000Driver
             KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_RING_ADVANCE_FAILED\r\n"u8);
             return false;
         }
+        _lastSubmittedTxIndex = _txIndex;
         if (!WriteRegister(ManagedE1000Protocol.RegTxDescTail, nextIndex))
         {
             KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_TAIL_WRITE_FAILED\r\n"u8);
@@ -1083,6 +1124,103 @@ internal sealed class ManagedE1000Driver
         }
         _txIndex = nextIndex;
         return true;
+    }
+
+    internal bool TrySubscribeInterrupt(ManagedInterruptDispatcher dispatcher)
+    {
+        if (!_phase80Requested || _state != ManagedE1000DriverState.Initialized ||
+            _interruptSubscribed || dispatcher == null ||
+            !dispatcher.TrySubscribeE1000(out _)) return false;
+        _interruptDispatcher = dispatcher;
+        _interruptSubscribed = true;
+        return KernelLog.Write(
+            "GXOS_NET10:PHASE80_E1000_MANAGED_BINDING_READY\r\n"u8);
+    }
+
+    internal bool TryUnsubscribeInterrupt(ManagedInterruptDispatcher dispatcher)
+    {
+        if (!_interruptSubscribed || dispatcher == null ||
+            _interruptDispatcher != dispatcher || !dispatcher.TryUnsubscribeE1000())
+            return false;
+        _interruptSubscribed = false;
+        _interruptDispatcher = null;
+        return true;
+    }
+
+    internal bool TryHandleInterrupt(in GxManagedKernelInterruptEventV1 value)
+    {
+        if (!_phase80Requested || !_interruptSubscribed || _state != ManagedE1000DriverState.Running ||
+            _txRing == null ||
+            !ManagedE1000Protocol.TryValidateInterruptEvent(
+                in value, _phase80LastSequence, out uint unrelated) ||
+            !_txRing.TryRead8(
+                (ulong)_lastSubmittedTxIndex * ManagedE1000Protocol.DescriptorSize + 12,
+                out byte txStatus) ||
+            (txStatus & ManagedE1000Protocol.TxStatusDone) == 0)
+        {
+            return false;
+        }
+        _phase80LastSequence = value.Sequence;
+        _phase80LastCause = value.Status;
+        _phase80LastUnrelatedCause = unrelated;
+        _phase80DeliveryCount++;
+        return true;
+    }
+
+    internal bool TryRunPhase80Proof()
+    {
+        if (!_phase80Requested || !_interruptSubscribed ||
+            _state != ManagedE1000DriverState.Running || _phase80DeliveryCount != 0)
+            return false;
+
+        if (!TryWaitForPhase80Delivery(out uint delivered, out uint rejected) ||
+            delivered != 1 || rejected != 0)
+            return false;
+
+        for (uint repeat = 0; repeat != 3; ++repeat)
+        {
+            if (!ManagedE1000Protocol.TryBuildPhase80Frame(
+                    _phase80Frame, _mac, repeat + 1) ||
+                !TryTransmitFrame(_phase80Frame, _phase80Frame.Length) ||
+                !TryWaitForPhase80Delivery(out delivered, out rejected) ||
+                delivered != 1 || rejected != 0)
+                return false;
+        }
+        if (_phase80DeliveryCount != 4 || _phase80LastSequence == 0 ||
+            !ManagedE1000Protocol.TryClassifyInterruptCause(
+                _phase80LastCause, out _phase80LastUnrelatedCause))
+            return false;
+        if (!KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE80_E1000_MANAGED_DELIVERY_COUNT=0x"u8,
+                _phase80DeliveryCount) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE80_E1000_MANAGED_SEQUENCE=0x"u8,
+                _phase80LastSequence) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE80_E1000_MANAGED_CAUSE=0x"u8,
+                _phase80LastCause) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE80_E1000_MANAGED_UNRELATED_CAUSE=0x"u8,
+                _phase80LastUnrelatedCause) ||
+            !KernelLog.Write("GXOS_NET10:PHASE80_E1000_TX_DESCRIPTOR_COMPLETE=1\r\n"u8) ||
+            !KernelLog.Write("GXOS_NET10:PHASE80_E1000_REPEATS=3\r\n"u8))
+            return false;
+        _phase80Passed = true;
+        return KernelLog.Write("GXOS_NET10:PHASE80_E1000_MANAGED_DELIVERY=4\r\n"u8);
+    }
+
+    private bool TryWaitForPhase80Delivery(out uint delivered, out uint rejected)
+    {
+        delivered = 0;
+        rejected = 0;
+        for (uint poll = 0; poll != Phase80InterruptPollLimit; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                    this, out delivered, out rejected)) return false;
+            if (delivered != 0 || rejected != 0)
+                return delivered == 1 && rejected == 0;
+        }
+        return false;
     }
 
     internal bool TryReceiveProtocolFrame(byte[] frame, int capacity,

@@ -11,5 +11,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\ManagedKernel\ManagedE1000Protocol.cs" Link="ManagedE1000Protocol.cs" />
+    <Compile Include="..\ManagedKernel\ManagedInterruptEvent.cs" Link="ManagedInterruptEvent.cs" />
   </ItemGroup>
 </Project>

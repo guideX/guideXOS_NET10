@@ -769,6 +769,37 @@ static GX_MANAGED_KERNEL_INPUT_SERVICES_V1
     g_managed_kernel_input_services;
 static GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT
     g_managed_kernel_interrupt_context;
+typedef struct {
+    uint64_t resource_id;
+    uint64_t bar_physical_base;
+    uint64_t hardware_irq_entry_count;
+    uint64_t native_dispatch_count;
+    uint64_t last_native_sequence;
+    uint64_t first_event_sequence;
+    uint64_t dropped_before_enable;
+    uint64_t enqueued_before_enable;
+    uint64_t drained_before_enable;
+    uint32_t route_available;
+    uint32_t route_enabled;
+    uint32_t msi_capability_offset;
+    uint32_t msi_is_64_bit;
+    uint32_t msi_original_valid;
+    uint32_t msi_original_control;
+    uint32_t msi_original_address_low;
+    uint32_t msi_original_address_high;
+    uint32_t msi_original_data;
+    uint32_t last_enable_cause;
+    uint32_t last_mask_readback;
+    uint32_t last_cause;
+    uint32_t last_cause_clear_read;
+    uint32_t last_disable_cause;
+    uint32_t last_cause_acknowledgements;
+    uint8_t interrupt_line;
+    uint8_t interrupt_pin;
+    uint16_t reserved;
+} GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT;
+static GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT
+    g_managed_kernel_e1000_interrupt_context;
 static GXOS_MANAGED_KERNEL_DRIVER_WORKER_CONTEXT
     g_managed_kernel_driver_worker_context;
 static GXOS_MANAGED_KERNEL_DRIVER_SERVICE_HANDLE
@@ -13488,6 +13519,7 @@ static void managed_kernel_memory_services_make_valid(void)
 
 extern void gxos_managed_kernel_serial_irq_entry(void);
 extern void gxos_managed_kernel_keyboard_irq_entry(void);
+extern void gxos_managed_kernel_e1000_irq_entry(void);
 extern void gxos_managed_kernel_diagnostic_irq_entry(void);
 
 static void managed_kernel_interrupt_install_idt(void);
@@ -13496,6 +13528,17 @@ static void managed_kernel_interrupt_install_idt(void);
 #define GXOS_MANAGED_KERNEL_LAPIC_EOI 0xFEE000B0ULL
 #define GXOS_MANAGED_KERNEL_IOAPIC_SERIAL_IRQ_REGISTER 0x18U
 #define GXOS_MANAGED_KERNEL_IOAPIC_KEYBOARD_IRQ_REGISTER 0x12U
+#define GXOS_MANAGED_KERNEL_E1000_MSI_VECTOR 0x51U
+#define GXOS_MANAGED_KERNEL_E1000_MSI_ADDRESS 0xFEE00000U
+#define GXOS_MANAGED_KERNEL_E1000_IRQ_ROUTE_INDEX 2U
+#define GXOS_MANAGED_KERNEL_E1000_DRIVER_ID 0xD014U
+#define GXOS_MANAGED_KERNEL_E1000_RESOURCE_ID 0x47584F5302020000ULL
+#define GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_TXDW 0x00000001U
+#define GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_ALL 0xFFFFFFFFU
+#define GXOS_MANAGED_KERNEL_E1000_BAR_LENGTH 0x20000ULL
+#define GXOS_MANAGED_KERNEL_E1000_REG_ICR 0x00C0U
+#define GXOS_MANAGED_KERNEL_E1000_REG_IMS 0x00D0U
+#define GXOS_MANAGED_KERNEL_E1000_REG_IMC 0x00D8U
 
 static uint32_t managed_kernel_ioapic_read(uint8_t register_index)
 {
@@ -13645,6 +13688,10 @@ static void managed_kernel_interrupt_install_idt(void)
     }
     set_idt_gate(&g_gate4_idt[0x24], gxos_managed_kernel_serial_irq_entry);
     set_idt_gate(&g_gate4_idt[0x21], gxos_managed_kernel_keyboard_irq_entry);
+    if (g_managed_kernel_e1000_interrupt_context.route_available != 0U) {
+        set_idt_gate(&g_gate4_idt[GXOS_MANAGED_KERNEL_E1000_MSI_VECTOR],
+                     gxos_managed_kernel_e1000_irq_entry);
+    }
     if (g_managed_kernel_diagnostic_context.present != 0U) {
         set_idt_gate(&g_gate4_idt[0x20U +
                      g_managed_kernel_diagnostic_context.irq],
@@ -13747,6 +13794,7 @@ static int managed_kernel_serial_interrupt_disable(void *opaque)
         g_managed_kernel_serial_interrupt_ioapic_enabled = 0;
     }
     if (g_managed_kernel_keyboard_interrupt_enabled == 0 &&
+        g_managed_kernel_e1000_interrupt_context.route_enabled == 0U &&
         __atomic_load_n(&g_managed_kernel_diagnostic_context.enabled,
                         __ATOMIC_ACQUIRE) == 0U) {
         managed_kernel_serial_interrupt_restore_idt();
@@ -13853,7 +13901,8 @@ static int managed_kernel_keyboard_interrupt_disable(void *opaque)
     g_managed_kernel_keyboard_interrupt_enabled = 0;
     if (g_managed_kernel_serial_interrupt_ioapic_enabled == 0 &&
         __atomic_load_n(&g_managed_kernel_diagnostic_context.enabled,
-                        __ATOMIC_ACQUIRE) == 0U) {
+                        __ATOMIC_ACQUIRE) == 0U &&
+        g_managed_kernel_e1000_interrupt_context.route_enabled == 0U) {
         managed_kernel_serial_interrupt_restore_idt();
     }
     return 1;
@@ -13891,6 +13940,403 @@ static void managed_kernel_keyboard_interrupt_eoi(void *opaque)
         *lapic_eoi = 0;
         __asm__ volatile ("" : : : "memory");
     }
+}
+
+static uint32_t managed_kernel_e1000_pci_read(uint32_t offset)
+{
+    return gxos_managed_kernel_pci_config_read32(
+        0, 0, 0, 2, 0, (uint8_t)offset);
+}
+
+static int managed_kernel_e1000_pci_write32(uint32_t offset, uint32_t value)
+{
+    uint32_t address;
+    if (offset > 0xFCU || (offset & 3U) != 0U) return 0;
+    address = 0x80000000U | (2U << 11) | (offset & 0xFCU);
+    __asm__ volatile ("outl %0, %1" : : "a"(address),
+                      "Nd"(GXOS_PCI_CONFIG_ADDRESS_PORT));
+    __asm__ volatile ("outl %0, %1" : : "a"(value),
+                      "Nd"(GXOS_PCI_CONFIG_DATA_PORT));
+    return managed_kernel_e1000_pci_read(offset) == value;
+}
+
+static int managed_kernel_e1000_pci_write16(uint32_t offset, uint16_t value)
+{
+    uint32_t address;
+    uint16_t port;
+    uint16_t observed;
+    if (offset > 0xFEU || (offset & 1U) != 0U) return 0;
+    address = 0x80000000U | (2U << 11) | (offset & 0xFCU);
+    port = (uint16_t)(GXOS_PCI_CONFIG_DATA_PORT + (offset & 3U));
+    __asm__ volatile ("outl %0, %1" : : "a"(address),
+                      "Nd"(GXOS_PCI_CONFIG_ADDRESS_PORT));
+    __asm__ volatile ("outw %0, %1" : : "a"(value), "Nd"(port));
+    __asm__ volatile ("outl %0, %1" : : "a"(address),
+                      "Nd"(GXOS_PCI_CONFIG_ADDRESS_PORT));
+    __asm__ volatile ("inw %1, %0" : "=a"(observed) : "Nd"(port));
+    return observed == value;
+}
+
+static int managed_kernel_e1000_find_msi_capability(uint8_t *offset_out,
+                                                    uint32_t *is_64_bit_out)
+{
+    uint32_t status;
+    uint32_t pointer;
+    uint64_t visited = 0;
+    uint32_t count;
+    if (offset_out == 0 || is_64_bit_out == 0) return 0;
+    *offset_out = 0;
+    *is_64_bit_out = 0;
+    status = managed_kernel_e1000_pci_read(4U);
+    if (status == UINT32_MAX || (status & (1U << 20)) == 0U) return 0;
+    pointer = managed_kernel_e1000_pci_read(0x34U) & 0xFFU;
+    for (count = 0; count != 48U; ++count) {
+        uint32_t bit;
+        uint32_t header;
+        uint32_t control;
+        uint32_t is_64_bit;
+        if (pointer < 0x40U || pointer > 0xFCU || (pointer & 3U) != 0U) {
+            return 0;
+        }
+        bit = (pointer - 0x40U) >> 2;
+        if ((visited & (1ULL << bit)) != 0U) return 0;
+        visited |= 1ULL << bit;
+        header = managed_kernel_e1000_pci_read(pointer);
+        if (header == UINT32_MAX) return 0;
+        if ((header & 0xFFU) == 0x05U) {
+            control = header >> 16;
+            is_64_bit = (control & (1U << 7)) != 0U;
+            if (pointer + (is_64_bit != 0U ? 0x0EU : 0x0AU) > 0x100U) {
+                return 0;
+            }
+            *offset_out = (uint8_t)pointer;
+            *is_64_bit_out = is_64_bit;
+            return 1;
+        }
+        pointer = (header >> 8) & 0xFFU;
+        if (pointer == 0U) return 0;
+    }
+    return 0;
+}
+
+static int managed_kernel_e1000_program_msi(
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *context)
+{
+    uint32_t header;
+    uint32_t control;
+    uint32_t data_offset;
+    if (context == 0 || context->route_available == 0U ||
+        context->msi_capability_offset < 0x40U) return 0;
+    header = managed_kernel_e1000_pci_read(context->msi_capability_offset);
+    if (header == UINT32_MAX || (header & 0xFFU) != 0x05U) return 0;
+    control = header >> 16;
+    context->msi_original_control = control & 0xFFFFU;
+    context->msi_is_64_bit = (control & (1U << 7)) != 0U;
+    data_offset = context->msi_capability_offset +
+                  (context->msi_is_64_bit != 0U ? 0x0CU : 0x08U);
+    context->msi_original_address_low = managed_kernel_e1000_pci_read(
+        context->msi_capability_offset + 4U);
+    context->msi_original_address_high = context->msi_is_64_bit != 0U
+        ? managed_kernel_e1000_pci_read(context->msi_capability_offset + 8U)
+        : 0U;
+    context->msi_original_data = managed_kernel_e1000_pci_read(data_offset);
+    if (context->msi_original_address_low == UINT32_MAX ||
+        context->msi_original_address_high == UINT32_MAX ||
+        context->msi_original_data == UINT32_MAX) return 0;
+    context->msi_original_valid = 1U;
+    if (!managed_kernel_e1000_pci_write16(
+            context->msi_capability_offset + 2U,
+            (uint16_t)(context->msi_original_control & ~1U)) ||
+        !managed_kernel_e1000_pci_write32(
+            context->msi_capability_offset + 4U,
+            GXOS_MANAGED_KERNEL_E1000_MSI_ADDRESS) ||
+        (context->msi_is_64_bit != 0U &&
+         !managed_kernel_e1000_pci_write32(
+             context->msi_capability_offset + 8U, 0U)) ||
+        !managed_kernel_e1000_pci_write16(
+            data_offset, GXOS_MANAGED_KERNEL_E1000_MSI_VECTOR) ||
+        !managed_kernel_e1000_pci_write16(
+            context->msi_capability_offset + 2U,
+            (uint16_t)((context->msi_original_control & ~0x71U) | 1U))) {
+        return 0;
+    }
+    header = managed_kernel_e1000_pci_read(context->msi_capability_offset);
+    return header != UINT32_MAX && ((header >> 16) & 1U) != 0U &&
+           managed_kernel_e1000_pci_read(context->msi_capability_offset + 4U) ==
+               GXOS_MANAGED_KERNEL_E1000_MSI_ADDRESS &&
+           managed_kernel_e1000_pci_read(data_offset) != UINT32_MAX &&
+           (managed_kernel_e1000_pci_read(data_offset) & 0xFFFFU) ==
+               GXOS_MANAGED_KERNEL_E1000_MSI_VECTOR;
+}
+
+static int managed_kernel_e1000_restore_msi(
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *context)
+{
+    uint32_t data_offset;
+    if (context == 0 || context->msi_original_valid == 0U) return 1;
+    data_offset = context->msi_capability_offset +
+                  (context->msi_is_64_bit != 0U ? 0x0CU : 0x08U);
+    if (!managed_kernel_e1000_pci_write16(
+            context->msi_capability_offset + 2U,
+            (uint16_t)(context->msi_original_control & ~1U)) ||
+        !managed_kernel_e1000_pci_write32(
+            context->msi_capability_offset + 4U,
+            context->msi_original_address_low) ||
+        (context->msi_is_64_bit != 0U &&
+         !managed_kernel_e1000_pci_write32(
+             context->msi_capability_offset + 8U,
+             context->msi_original_address_high)) ||
+        !managed_kernel_e1000_pci_write16(
+            data_offset, (uint16_t)context->msi_original_data) ||
+        !managed_kernel_e1000_pci_write16(
+            context->msi_capability_offset + 2U,
+            (uint16_t)context->msi_original_control)) return 0;
+    context->msi_original_valid = 0U;
+    return 1;
+}
+
+static volatile uint32_t *managed_kernel_e1000_mmio_register(
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *context, uint32_t offset)
+{
+    uint32_t index;
+    if (context == 0 || context->route_available == 0U ||
+        offset > GXOS_MANAGED_KERNEL_E1000_BAR_LENGTH - sizeof(uint32_t) ||
+        (offset & 3U) != 0U) return 0;
+    for (index = 0; index != GXOS_MMIO_MAPPING_CAPACITY; ++index) {
+        GXOS_MMIO_MAPPING_RECORD *mapping =
+            &g_managed_kernel_mmio_service.mappings[index];
+        if (mapping->live != 0U &&
+            mapping->resource_id == context->resource_id &&
+            mapping->owner_driver_id == GXOS_MANAGED_KERNEL_E1000_DRIVER_ID &&
+            mapping->requested_offset == 0U &&
+            mapping->requested_length >= GXOS_MANAGED_KERNEL_E1000_BAR_LENGTH &&
+            mapping->mapped_length >= GXOS_MANAGED_KERNEL_E1000_BAR_LENGTH &&
+            (mapping->access & 3U) == 3U) {
+            return (volatile uint32_t *)(uintptr_t)(mapping->virtual_base + offset);
+        }
+    }
+    return 0;
+}
+
+static int managed_kernel_e1000_mmio_read(
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *context, uint32_t offset,
+    uint32_t *value_out)
+{
+    volatile uint32_t *reg = managed_kernel_e1000_mmio_register(context, offset);
+    if (value_out != 0) *value_out = 0;
+    if (reg == 0 || value_out == 0) return 0;
+    *value_out = *reg;
+    __asm__ volatile ("" : : : "memory");
+    return 1;
+}
+
+static int managed_kernel_e1000_mmio_write(
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *context, uint32_t offset,
+    uint32_t value)
+{
+    volatile uint32_t *reg = managed_kernel_e1000_mmio_register(context, offset);
+    if (reg == 0) return 0;
+    *reg = value;
+    __asm__ volatile ("" : : : "memory");
+    return 1;
+}
+
+static int managed_kernel_e1000_interrupt_enable(void *opaque)
+{
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *)opaque;
+    if (context == 0 || context->route_available == 0U ||
+        context->route_enabled != 0U) return 0;
+    managed_kernel_interrupt_install_idt();
+    if (!managed_kernel_e1000_mmio_write(
+            context, GXOS_MANAGED_KERNEL_E1000_REG_IMC,
+            GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_ALL) ||
+        !managed_kernel_e1000_mmio_read(
+            context, GXOS_MANAGED_KERNEL_E1000_REG_ICR,
+            &context->last_enable_cause)) return 0;
+    if (!managed_kernel_e1000_program_msi(context)) {
+        (void)managed_kernel_e1000_restore_msi(context);
+        return 0;
+    }
+    if (!managed_kernel_e1000_mmio_write(
+            context, GXOS_MANAGED_KERNEL_E1000_REG_IMS,
+            GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_TXDW) ||
+        !managed_kernel_e1000_mmio_read(
+            context, GXOS_MANAGED_KERNEL_E1000_REG_IMS,
+            &context->last_mask_readback) ||
+        (context->last_mask_readback &
+         GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_TXDW) == 0U) {
+        (void)managed_kernel_e1000_mmio_write(
+            context, GXOS_MANAGED_KERNEL_E1000_REG_IMC,
+            GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_ALL);
+        (void)managed_kernel_e1000_restore_msi(context);
+        return 0;
+    }
+    context->route_enabled = 1U;
+    return 1;
+}
+
+static int managed_kernel_e1000_interrupt_disable(void *opaque)
+{
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *)opaque;
+    if (context == 0 || context->route_available == 0U) return 0;
+    if (context->route_enabled != 0U) {
+        if (!managed_kernel_e1000_mmio_write(
+                context, GXOS_MANAGED_KERNEL_E1000_REG_IMC,
+                GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_ALL) ||
+            !managed_kernel_e1000_mmio_read(
+                context, GXOS_MANAGED_KERNEL_E1000_REG_ICR,
+                &context->last_disable_cause)) return 0;
+        context->route_enabled = 0U;
+    }
+    if (!managed_kernel_e1000_restore_msi(context)) return 0;
+    if (g_managed_kernel_serial_interrupt_ioapic_enabled == 0U &&
+        g_managed_kernel_keyboard_interrupt_enabled == 0U &&
+        __atomic_load_n(&g_managed_kernel_diagnostic_context.enabled,
+                        __ATOMIC_ACQUIRE) == 0U) {
+        managed_kernel_serial_interrupt_restore_idt();
+    }
+    return 1;
+}
+
+static int managed_kernel_e1000_interrupt_source(
+    void *opaque, uint8_t *payload_byte, uint32_t *status)
+{
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *context =
+        (GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *)opaque;
+    uint32_t cause;
+    uint32_t cleared;
+    if (context == 0 || payload_byte == 0 || status == 0 ||
+        !managed_kernel_e1000_mmio_read(
+            context, GXOS_MANAGED_KERNEL_E1000_REG_ICR, &cause)) return 0;
+    /* The common route reader calls the source again to drain any additional
+       device causes.  Keep the last authoritative nonzero cause instead of
+       letting the terminating empty read erase the proof value. */
+    if (cause != 0U) {
+        context->last_cause = cause;
+        context->last_cause_acknowledgements++;
+    }
+    if (!managed_kernel_e1000_mmio_read(
+            context, GXOS_MANAGED_KERNEL_E1000_REG_ICR, &cleared)) return 0;
+    if (cause != 0U) context->last_cause_clear_read = cleared;
+    if (cause == 0U) return 0;
+    *payload_byte = (uint8_t)cause;
+    *status = cause;
+    __atomic_add_fetch(&context->native_dispatch_count, 1U, __ATOMIC_RELAXED);
+    return 1;
+}
+
+static void managed_kernel_e1000_interrupt_eoi(void *opaque)
+{
+    volatile uint32_t *lapic_eoi = (volatile uint32_t *)(uintptr_t)
+        GXOS_MANAGED_KERNEL_LAPIC_EOI;
+    (void)opaque;
+    *lapic_eoi = 0;
+    __asm__ volatile ("" : : : "memory");
+}
+
+void gxos_managed_kernel_e1000_irq_capture(void)
+{
+    uint64_t before;
+    uint64_t after;
+    __atomic_add_fetch(
+        &g_managed_kernel_e1000_interrupt_context.hardware_irq_entry_count,
+        1U, __ATOMIC_RELAXED);
+    before = __atomic_load_n(
+        &g_managed_kernel_e1000_interrupt_context.native_dispatch_count,
+        __ATOMIC_ACQUIRE);
+    gxos_managed_kernel_interrupt_capture_route(
+        &g_managed_kernel_interrupt_context,
+        GXOS_MANAGED_KERNEL_E1000_IRQ_ROUTE_INDEX);
+    after = __atomic_load_n(
+        &g_managed_kernel_e1000_interrupt_context.native_dispatch_count,
+        __ATOMIC_ACQUIRE);
+    if (after != before &&
+        g_managed_kernel_interrupt_context.next_sequence > 1U) {
+        g_managed_kernel_e1000_interrupt_context.last_native_sequence =
+            g_managed_kernel_interrupt_context.next_sequence - 1U;
+    }
+}
+
+static int managed_kernel_e1000_interrupt_route_configure(void)
+{
+    uint32_t index;
+    uint8_t msi_offset;
+    uint32_t msi_is_64_bit;
+    uint32_t location;
+    GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 *resource = 0;
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *context =
+        &g_managed_kernel_e1000_interrupt_context;
+    if (context->route_available != 0U) return 1;
+    if (g_managed_kernel_mmio_service_ready == 0U ||
+        g_managed_kernel_interrupt_context.initialized == 0U ||
+        g_managed_kernel_interrupt_context.route_count != 2U) return 0;
+    for (index = 0; index != g_managed_kernel_device_resource_count; ++index) {
+        GX_MANAGED_KERNEL_DEVICE_RESOURCE_V1 *candidate =
+            &g_managed_kernel_device_resources[index];
+        if (candidate->ResourceType == GX_MANAGED_DEVICE_RESOURCE_TYPE_MMIO &&
+            candidate->OwnerDeviceKind == GX_MANAGED_DEVICE_KIND_PCI &&
+            candidate->OwnerDeviceId == 0x808610D3U &&
+            candidate->OwnerSegment == 0U && candidate->OwnerBus == 0U &&
+            candidate->OwnerDevice == 2U && candidate->OwnerFunction == 0U &&
+            candidate->ResourceIndex == 0U &&
+            candidate->Length >= GXOS_MANAGED_KERNEL_E1000_BAR_LENGTH &&
+            candidate->PhysicalBase != 0U) {
+            resource = candidate;
+            break;
+        }
+    }
+    if (resource == 0 || managed_kernel_e1000_pci_read(0U) !=
+            0x10D38086U ||
+        !managed_kernel_e1000_find_msi_capability(&msi_offset,
+                                                  &msi_is_64_bit)) return 0;
+    zero_bytes((uint8_t *)context, sizeof(*context));
+    context->resource_id = resource->ResourceId;
+    context->bar_physical_base = resource->PhysicalBase;
+    context->msi_capability_offset = msi_offset;
+    context->msi_is_64_bit = msi_is_64_bit;
+    location = managed_kernel_e1000_pci_read(0x3CU);
+    context->interrupt_line = (uint8_t)location;
+    context->interrupt_pin = (uint8_t)(location >> 8);
+    context->route_available = 1U;
+    context->first_event_sequence =
+        g_managed_kernel_interrupt_context.next_sequence;
+    context->dropped_before_enable =
+        __atomic_load_n(&g_managed_kernel_interrupt_context.dropped_count,
+                        __ATOMIC_ACQUIRE);
+    context->enqueued_before_enable =
+        __atomic_load_n(&g_managed_kernel_interrupt_context.enqueued_count,
+                        __ATOMIC_ACQUIRE);
+    context->drained_before_enable =
+        __atomic_load_n(&g_managed_kernel_interrupt_context.drained_count,
+                        __ATOMIC_ACQUIRE);
+    if (!gxos_managed_kernel_interrupt_add_route(
+            &g_managed_kernel_interrupt_context,
+            GXOS_MANAGED_KERNEL_E1000_IRQ_ROUTE_INDEX,
+            GX_MANAGED_DEVICE_KIND_PCI, 0x808610D3U,
+            GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE,
+            managed_kernel_e1000_interrupt_enable,
+            managed_kernel_e1000_interrupt_disable,
+            managed_kernel_e1000_interrupt_source,
+            managed_kernel_e1000_interrupt_eoi, context)) {
+        context->route_available = 0U;
+        return 0;
+    }
+    serial_text("GXOS_NET10:PHASE80_E1000_PCI=0000:00:02.0_8086:10D3\r\n");
+    serial_text("GXOS_NET10:PHASE80_E1000_BAR0=0x");
+    serial_hex64(context->bar_physical_base);
+    serial_text("\r\nGXOS_NET10:PHASE80_E1000_INTERRUPT=MSI\r\n");
+    serial_text("GXOS_NET10:PHASE80_E1000_MSI_CAPABILITY=0x");
+    serial_hex64(context->msi_capability_offset);
+    serial_text("\r\nGXOS_NET10:PHASE80_E1000_MSI_VECTOR=0x");
+    serial_hex64(GXOS_MANAGED_KERNEL_E1000_MSI_VECTOR);
+    serial_text("\r\nGXOS_NET10:PHASE80_E1000_INTERRUPT_MASK_TXDW=0x");
+    serial_hex64(GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_TXDW);
+    serial_text("\r\nGXOS_NET10:PHASE80_E1000_LEGACY_INTX_LINE=0x");
+    serial_hex64(context->interrupt_line);
+    serial_text("\r\nGXOS_NET10:PHASE80_E1000_IRQ_ROUTE_REGISTERED\r\n");
+    return 1;
 }
 
 static uint8_t managed_kernel_diagnostic_read_iir(void *opaque)
@@ -14262,7 +14708,9 @@ managed_kernel_interrupt_subscribe_service(
     uint32_t event_type, uint32_t device_kind, uint32_t device_id,
     uintptr_t token_address, uintptr_t token_capacity)
 {
-    return gxos_managed_kernel_interrupt_subscribe_v1(
+    /* The existing service ABI carries the full device identity, so resolve
+       it against the configured route table rather than hard-wiring route 0. */
+    return gxos_managed_kernel_interrupt_subscribe_input_v1(
         &g_managed_kernel_interrupt_context, event_type, device_kind,
         device_id, token_address, token_capacity);
 }
@@ -14270,7 +14718,7 @@ managed_kernel_interrupt_subscribe_service(
 static uint32_t GX_MANAGED_KERNEL_MS_ABI
 managed_kernel_interrupt_unsubscribe_service(uint64_t subscription_id)
 {
-    return gxos_managed_kernel_interrupt_unsubscribe_v1(
+    return gxos_managed_kernel_interrupt_unsubscribe_input_v1(
         &g_managed_kernel_interrupt_context, subscription_id);
 }
 
@@ -15174,13 +15622,118 @@ static void managed_kernel_phase14_driver(
        firmware IDT.  Capture faults only at the Phase 53C driver/GC boundary. */
     install_fault_handlers();
 #endif
+    if (!managed_kernel_e1000_interrupt_route_configure()) {
+        fail("managed-kernel-phase80-e1000-route");
+    }
+    status = run_phase14(23U);
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase80-mode");
+    serial_text("GXOS_NET10:PHASE80_E1000_MODE_SELECTED\r\n");
     status = run_phase14(1U);
-    if (status != GX_MANAGED_OK || run_phase14(1U) != GX_MANAGED_INVALID_STATE ||
-        run_phase14(2U) != GX_MANAGED_OK ||
-        run_phase14(2U) != GX_MANAGED_INVALID_STATE) {
+    if (status != GX_MANAGED_OK ||
+        run_phase14(1U) != GX_MANAGED_INVALID_STATE) {
         serial_field_hex("GXOS_NET10:MANAGED_KERNEL_PHASE14_STATUS=0x", status);
         serial_text("\r\n");
         fail("managed-kernel-phase14-driver-proof");
+    }
+    {
+        GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *e1000 =
+            &g_managed_kernel_e1000_interrupt_context;
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route =
+            &g_managed_kernel_interrupt_context.routes[
+                GXOS_MANAGED_KERNEL_E1000_IRQ_ROUTE_INDEX];
+        uint64_t hardware_count = __atomic_load_n(
+            &e1000->hardware_irq_entry_count, __ATOMIC_ACQUIRE);
+        uint64_t dispatch_count = __atomic_load_n(
+            &e1000->native_dispatch_count, __ATOMIC_ACQUIRE);
+        if (hardware_count == 0U || dispatch_count == 0U ||
+            (e1000->last_cause &
+             GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_TXDW) == 0U ||
+            e1000->last_cause_clear_read != 0U || route->subscription_active == 0U ||
+            route->hardware_enabled == 0U || e1000->route_enabled == 0U ||
+            e1000->last_native_sequence < e1000->first_event_sequence) {
+            fail("managed-kernel-phase80-e1000-first-hardware-event");
+        }
+        serial_text("GXOS_NET10:PHASE80_E1000_HW_IRQ_ENTRY=1\r\n");
+        serial_text("GXOS_NET10:PHASE80_E1000_NATIVE_DISPATCH_ENTRY=1\r\n");
+        serial_text("GXOS_NET10:PHASE80_E1000_INITIAL_IRQ_COUNT=0x");
+        serial_hex64(hardware_count);
+        serial_text("\r\nGXOS_NET10:PHASE80_E1000_INITIAL_NATIVE_COUNT=0x");
+        serial_hex64(dispatch_count);
+        serial_text("\r\nGXOS_NET10:PHASE80_E1000_INITIAL_CAUSE=0x");
+        serial_hex64(e1000->last_cause);
+        serial_text("\r\n");
+    }
+    status = run_phase14(24U);
+    if (status != GX_MANAGED_OK ||
+        run_phase14(24U) != GX_MANAGED_INVALID_STATE) {
+        serial_field_hex("GXOS_NET10:PHASE80_MANAGED_PROOF_STATUS=0x", status);
+        serial_text("\r\n");
+        fail("managed-kernel-phase80-managed-e1000-delivery");
+    }
+    if (run_phase14(2U) != GX_MANAGED_OK ||
+        run_phase14(2U) != GX_MANAGED_INVALID_STATE) {
+        fail("managed-kernel-phase14-driver-teardown");
+    }
+    {
+        GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *e1000 =
+            &g_managed_kernel_e1000_interrupt_context;
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route =
+            &g_managed_kernel_interrupt_context.routes[
+                GXOS_MANAGED_KERNEL_E1000_IRQ_ROUTE_INDEX];
+        uint64_t quiet_entry_count;
+        uint32_t iteration;
+        uint64_t hardware_count = __atomic_load_n(
+            &e1000->hardware_irq_entry_count, __ATOMIC_ACQUIRE);
+        uint64_t dispatch_count = __atomic_load_n(
+            &e1000->native_dispatch_count, __ATOMIC_ACQUIRE);
+        uint64_t enqueued_count = __atomic_load_n(
+            &g_managed_kernel_interrupt_context.enqueued_count, __ATOMIC_ACQUIRE);
+        uint64_t drained_count = __atomic_load_n(
+            &g_managed_kernel_interrupt_context.drained_count, __ATOMIC_ACQUIRE);
+        uint64_t dropped_count = __atomic_load_n(
+            &g_managed_kernel_interrupt_context.dropped_count, __ATOMIC_ACQUIRE);
+        if (hardware_count != 4U || dispatch_count != 4U ||
+            e1000->last_native_sequence != e1000->first_event_sequence + 3U ||
+            g_managed_kernel_interrupt_context.next_sequence !=
+                e1000->first_event_sequence + 4U ||
+            enqueued_count - e1000->enqueued_before_enable != 4U ||
+            drained_count - e1000->drained_before_enable != 4U ||
+            dropped_count != e1000->dropped_before_enable ||
+            e1000->last_cause_acknowledgements != 4U ||
+            (e1000->last_mask_readback &
+             GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_TXDW) == 0U ||
+            (e1000->last_cause & GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_TXDW) == 0U ||
+            e1000->last_cause_clear_read != 0U || route->subscription_active != 0U ||
+            route->hardware_enabled != 0U || route->accepting_events != 0U ||
+            e1000->route_enabled != 0U || e1000->msi_original_valid != 0U ||
+            g_managed_kernel_interrupt_context.read_index !=
+                g_managed_kernel_interrupt_context.write_index) {
+            fail("managed-kernel-phase80-e1000-proof-state");
+        }
+        quiet_entry_count = hardware_count;
+        for (iteration = 0U; iteration != 100000U; ++iteration) {
+            __asm__ volatile ("sti\n\tpause" : : : "cc", "memory");
+        }
+        if (__atomic_load_n(&e1000->hardware_irq_entry_count,
+                            __ATOMIC_ACQUIRE) != quiet_entry_count) {
+            fail("managed-kernel-phase80-e1000-post-ack-storm");
+        }
+        serial_text("GXOS_NET10:PHASE80_E1000_HW_IRQ=4\r\n");
+        serial_text("GXOS_NET10:PHASE80_E1000_NATIVE_DISPATCH=4\r\n");
+        serial_text("GXOS_NET10:PHASE80_E1000_IRQ_ENTRY_COUNT=0x");
+        serial_hex64(hardware_count);
+        serial_text("\r\nGXOS_NET10:PHASE80_E1000_NATIVE_CAUSE=0x");
+        serial_hex64(e1000->last_cause);
+        serial_text("\r\nGXOS_NET10:PHASE80_E1000_MASK_READBACK=0x");
+        serial_hex64(e1000->last_mask_readback);
+        serial_text("\r\nGXOS_NET10:PHASE80_E1000_CAUSE_CLEAR_READ=0x");
+        serial_hex64(e1000->last_cause_clear_read);
+        serial_text("\r\nGXOS_NET10:PHASE80_E1000_ACKNOWLEDGEMENTS=0x");
+        serial_hex64(e1000->last_cause_acknowledgements);
+        serial_text("\r\nGXOS_NET10:PHASE80_E1000_EVENT_SEQUENCE_LAST=0x");
+        serial_hex64(e1000->last_native_sequence);
+        serial_text("\r\nGXOS_NET10:PHASE80_E1000_INTERRUPT_STORM=0\r\n");
+        serial_text("GXOS_NET10:PHASE80_E1000_ROUTE_QUIESCED=1\r\n");
     }
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE53
     restore_fault_handlers();

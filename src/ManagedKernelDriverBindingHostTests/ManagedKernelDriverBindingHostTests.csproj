@@ -12,18 +12,8 @@
     <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelDriverBindingHostTests</PathMap>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="..\ManagedKernel\ManagedKernel.cs" Link="ManagedKernel.cs" />
-    <Compile Include="..\ManagedKernel\KernelArena.cs" Link="KernelArena.cs" />
-    <Compile Include="..\ManagedKernel\KernelArenaProof.cs" Link="KernelArenaProof.cs" />
-    <Compile Include="..\ManagedKernel\ManagedDeviceInventory.cs" Link="ManagedDeviceInventory.cs" />
-    <Compile Include="..\ManagedKernel\ManagedDeviceResourceCatalog.cs" Link="ManagedDeviceResourceCatalog.cs" />
-    <Compile Include="..\ManagedKernel\ManagedDeviceResourceRuntimeCatalog.cs" Link="ManagedDeviceResourceRuntimeCatalog.cs" />
-    <Compile Include="..\ManagedKernel\ManagedMmioMapping.cs" Link="ManagedMmioMapping.cs" />
-    <Compile Include="..\ManagedKernel\ManagedDriverBinding.cs" Link="ManagedDriverBinding.cs" />
-    <Compile Include="..\ManagedKernel\ManagedPciConfiguration.cs" Link="ManagedPciConfiguration.cs" />
-    <Compile Include="..\ManagedKernel\ManagedSerialDriver.cs" Link="ManagedSerialDriver.cs" />
-    <Compile Include="..\ManagedKernel\ManagedDriverWorker.cs" Link="ManagedDriverWorker.cs" />
-    <Compile Include="..\ManagedKernel\ManagedKeyboardDriver.cs" Link="ManagedKeyboardDriver.cs" />
-    <Compile Include="..\ManagedKernel\ManagedInterruptDispatcher.cs" Link="ManagedInterruptDispatcher.cs" />
+    <Compile Include="..\ManagedKernel\**\*.cs"
+             Exclude="..\ManagedKernel\bin\**\*.cs;..\ManagedKernel\obj\**\*.cs"
+             Link="ManagedKernel\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

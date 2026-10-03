@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([string]$SdkDirectory = '')
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -7,18 +7,19 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $out = Join-Path $root 'artifacts\managed-kernel-phase14-host-tests'
 $project = Join-Path $root 'src\ManagedKernelPhase14HostTests\ManagedKernelPhase14HostTests.csproj'
 $dotnet = Get-Command dotnet -ErrorAction Stop
-$sdkDirectory = Join-Path (Split-Path -Parent $dotnet.Source) 'sdk\10.0.400'
-$msbuild = Join-Path $sdkDirectory 'MSBuild.dll'
-if (-not (Test-Path -LiteralPath $msbuild)) { throw "Missing MSBuild: $msbuild" }
+. (Join-Path $PSScriptRoot 'Resolve-ManagedKernelHostToolchain.ps1')
+$toolchain = Resolve-ManagedKernelHostToolchain `
+    -DotNetPath $dotnet.Source -SdkDirectoryOverride $SdkDirectory
 New-Item -ItemType Directory -Force -Path $out | Out-Null
+Write-Output "MANAGED_KERNEL_PHASE14_HOST_DOTNET_SDK=$($toolchain.SdkVersion) path=$($toolchain.SdkDirectory) selection=$($toolchain.SelectionSource)"
 
 $parent = Split-Path -Parent $root
 Push-Location $parent
 try {
-    & $dotnet.Source $msbuild $project '/t:Restore' '/p:Configuration=Release' `
+    & $toolchain.DotNetPath $toolchain.MSBuildPath $project '/t:Restore' '/p:Configuration=Release' `
         1> (Join-Path $out 'restore.stdout.log') 2> (Join-Path $out 'restore.stderr.log')
     if ($LASTEXITCODE -ne 0) { throw "Phase 14 host-test restore failed: $LASTEXITCODE" }
-    & $dotnet.Source $msbuild $project '/t:Build' '/p:Configuration=Release' `
+    & $toolchain.DotNetPath $toolchain.MSBuildPath $project '/t:Build' '/p:Configuration=Release' `
         "/p:OutputPath=$out\bin\" 1> (Join-Path $out 'build.stdout.log') `
         2> (Join-Path $out 'build.stderr.log')
     if ($LASTEXITCODE -ne 0) { throw "Phase 14 host-test build failed: $LASTEXITCODE" }
@@ -27,7 +28,7 @@ try {
 }
 $assembly = Join-Path $out 'bin\ManagedKernelPhase14HostTests.dll'
 if (-not (Test-Path -LiteralPath $assembly)) { throw "Missing host-test assembly: $assembly" }
-& $dotnet.Source $assembly 1> (Join-Path $out 'run.stdout.log') `
+& $toolchain.DotNetPath $assembly 1> (Join-Path $out 'run.stdout.log') `
     2> (Join-Path $out 'run.stderr.log')
 if ($LASTEXITCODE -ne 0) { throw "Phase 14 host tests failed: $LASTEXITCODE" }
 Get-Content (Join-Path $out 'run.stdout.log')

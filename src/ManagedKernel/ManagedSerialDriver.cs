@@ -472,6 +472,32 @@ internal static unsafe class ManagedSerialDriverSubsystem
 
     internal static bool Installed => s_installed != 0;
 
+    internal static bool TrySubscribeE1000Interrupt(ManagedE1000Driver driver)
+    {
+        return driver != null && ManagedKernelContract.IsStarted &&
+               s_interruptInstalled != 0 && s_interruptDispatcher != null &&
+               driver.TrySubscribeInterrupt(s_interruptDispatcher);
+    }
+
+    internal static bool TryDispatchE1000InterruptBatch(
+        ManagedE1000Driver driver, out uint delivered, out uint rejected)
+    {
+        delivered = 0;
+        rejected = 0;
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        return driver != null && ManagedKernelContract.IsStarted &&
+               s_interruptInstalled != 0 && dispatcher != null &&
+               dispatcher.TryDispatchBatch(null, null, driver,
+                                            out delivered, out rejected);
+    }
+
+    internal static bool TryUnsubscribeE1000Interrupt(ManagedE1000Driver driver)
+    {
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        return driver != null && dispatcher != null &&
+               driver.TryUnsubscribeInterrupt(dispatcher);
+    }
+
     internal static uint Install(uint requestedAbiVersion, nuint servicesAddress,
                                  nuint deviceAddress)
     {

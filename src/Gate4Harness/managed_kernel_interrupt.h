@@ -5,7 +5,7 @@
 
 #include "managed_kernel_abi.h"
 
-#define GXOS_MANAGED_KERNEL_INTERRUPT_MAX_ROUTES 2U
+#define GXOS_MANAGED_KERNEL_INTERRUPT_MAX_ROUTES 3U
 
 typedef int (*GXOS_MANAGED_KERNEL_INTERRUPT_RANGE_VALIDATOR)(
     void *context, uintptr_t address, uintptr_t byte_length);
