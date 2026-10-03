@@ -5,6 +5,7 @@ using GuideXOS.Net10.ManagedKernel;
 internal static unsafe class Program
 {
     private const ulong PageSize = KernelArena.PageSize;
+    private static uint s_assertions;
     private static uint s_failures;
     private static uint s_transmitCalls;
     private static bool s_interruptActive;
@@ -99,6 +100,7 @@ internal static unsafe class Program
 
     private static void Expect(bool condition, string message)
     {
+        s_assertions++;
         if (condition) return;
         s_failures++;
         Console.WriteLine("FAIL: " + message);
@@ -348,11 +350,14 @@ internal static unsafe class Program
         RunDispatcherAndDriverProof();
         if (s_failures != 0)
         {
-            Console.WriteLine("MANAGED_KERNEL_INTERRUPT_HOST_TESTS=FAILED failures=" +
-                              s_failures);
+            Console.WriteLine("MANAGED_KERNEL_INTERRUPT_HOST_TESTS=FAILED assertions=" +
+                              s_assertions + " passed=" + (s_assertions - s_failures) +
+                              " failed=" + s_failures + " skipped=0");
             return 1;
         }
-        Console.WriteLine("MANAGED_KERNEL_INTERRUPT_HOST_TESTS=PASSED");
+        Console.WriteLine("MANAGED_KERNEL_INTERRUPT_HOST_TESTS=PASSED assertions=" +
+                          s_assertions + " passed=" + s_assertions +
+                          " failed=0 skipped=0");
         return 0;
     }
 }
