@@ -463,6 +463,7 @@ internal static unsafe class ManagedSerialDriverSubsystem
     private static GxManagedKernelInputServicesV1 s_inputServices;
     private static ManagedInterruptDispatcher? s_interruptDispatcher;
     private static ManagedSerialDriver? s_operationalDriver;
+    private static ManagedSerialDriver? s_phase82SerialDriver;
     private static KernelArena? s_operationalArena;
     private static GxManagedKernelKeyboardPlatformDeviceV1 s_keyboardDevice;
     private static ManagedKeyboardDriver? s_keyboardDriver;
@@ -471,6 +472,81 @@ internal static unsafe class ManagedSerialDriverSubsystem
     private static int s_phase11State;
 
     internal static bool Installed => s_installed != 0;
+
+    internal static ManagedSerialDriver? Phase82SerialDriver => s_phase82SerialDriver;
+    internal static ManagedInterruptDispatcher? GetInterruptDispatcherForPhase82() =>
+        s_interruptDispatcher;
+
+    internal static bool TryStartPhase82SerialRoute()
+    {
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        if (!ManagedKernelContract.IsStarted || s_interruptInstalled == 0 ||
+            dispatcher == null || s_phase82SerialDriver != null ||
+            s_device.DeviceId != GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1)
+            return false;
+        ManagedSerialDriver? candidate = ManagedSerialDriver.TryCreate(
+            Phase4KernelMemoryProvider.Instance, in s_device, in s_services);
+        if (candidate == null || !candidate.TryInitialize() || !candidate.TryStart() ||
+            !candidate.TrySubscribeReceive(dispatcher))
+        {
+            if (candidate != null)
+            {
+                if (candidate.ReceiveState == ManagedSerialReceiveState.Subscribed)
+                    candidate.TryUnsubscribeReceive(dispatcher);
+                if (candidate.State == ManagedSerialDriverState.Started)
+                    candidate.TryStop();
+                if (candidate.State == ManagedSerialDriverState.Stopped)
+                    candidate.Destroy();
+            }
+            return false;
+        }
+        s_phase82SerialDriver = candidate;
+        return KernelLog.Write(
+            "GXOS_NET10:PHASE82_COM1_MANAGED_ROUTE_REGISTERED=1\r\n"u8);
+    }
+
+    internal static bool TryDispatchPhase82Batch(
+        ManagedE1000Driver e1000Driver, out uint delivered, out uint rejected)
+    {
+        delivered = 0;
+        rejected = 0;
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        ManagedSerialDriver? serial = s_phase82SerialDriver;
+        return serial != null && dispatcher != null && e1000Driver != null &&
+               dispatcher.TryDispatchBatch(serial, null, e1000Driver,
+                                            out delivered, out rejected);
+    }
+
+    internal static bool TryUnsubscribePhase82SerialRoute()
+    {
+        ManagedSerialDriver? serial = s_phase82SerialDriver;
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        return serial != null && dispatcher != null &&
+               serial.TryUnsubscribeReceive(dispatcher);
+    }
+
+    internal static bool TryResubscribePhase82SerialRoute()
+    {
+        ManagedSerialDriver? serial = s_phase82SerialDriver;
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        return serial != null && dispatcher != null &&
+               serial.TrySubscribeReceive(dispatcher);
+    }
+
+    internal static bool TryStopPhase82SerialDriver()
+    {
+        ManagedSerialDriver? serial = s_phase82SerialDriver;
+        ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
+        if (serial == null || dispatcher == null) return false;
+        if (serial.ReceiveState == ManagedSerialReceiveState.Subscribed &&
+            !serial.TryUnsubscribeReceive(dispatcher)) return false;
+        if (serial.State == ManagedSerialDriverState.Started && !serial.TryStop())
+            return false;
+        if (serial.State != ManagedSerialDriverState.Stopped || !serial.Destroy())
+            return false;
+        s_phase82SerialDriver = null;
+        return true;
+    }
 
     internal static bool TrySubscribeE1000Interrupt(ManagedE1000Driver driver)
     {
@@ -487,7 +563,10 @@ internal static unsafe class ManagedSerialDriverSubsystem
         ManagedInterruptDispatcher? dispatcher = s_interruptDispatcher;
         return driver != null && ManagedKernelContract.IsStarted &&
                s_interruptInstalled != 0 && dispatcher != null &&
-               dispatcher.TryDispatchBatch(null, null, driver,
+               dispatcher.TryDispatchBatch(
+                   s_phase82SerialDriver?.ReceiveState == ManagedSerialReceiveState.Subscribed
+                       ? s_phase82SerialDriver : null,
+                   null, driver,
                                             out delivered, out rejected);
     }
 

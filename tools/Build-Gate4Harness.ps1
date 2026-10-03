@@ -61,6 +61,7 @@ param(
     [switch]$EnableManagedKernelPhase51ResetReuse,
     [switch]$EnableManagedKernelPhase52,
     [switch]$EnableManagedKernelPhase53,
+    [switch]$EnablePhase82ConcurrentManagedInterrupts,
     [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
@@ -107,6 +108,10 @@ if ($PayloadMode -eq 'ManagedKernel' -and
 }
 if ($PayloadMode -eq 'ManagedKernel' -and -not $EnableNativeAotStartup) {
     throw 'ManagedKernel payload selection requires -EnableNativeAotStartup.'
+}
+if ($EnablePhase82ConcurrentManagedInterrupts -and
+    ($PayloadMode -ne 'ManagedKernel' -or -not $EnableNativeAotStartup)) {
+    throw 'Phase 82 acceptance mode requires the ManagedKernel payload and NativeAOT startup.'
 }
 if ($Phase69FixtureMode -ne 'None' -and
     ($PayloadMode -ne 'ManagedKernel' -or -not $EnablePhase69PersistentServiceOwner)) {
@@ -1688,6 +1693,9 @@ if ($EnablePhase53VGuardProbe) {
     $gccArguments += '-DGXOS_ENABLE_PHASE53V_GUARD_PROBE'
 }
 if ($PayloadMode -eq 'ManagedKernel') { $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL' }
+if ($EnablePhase82ConcurrentManagedInterrupts) {
+    $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE82'
+}
 if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE11'
 }

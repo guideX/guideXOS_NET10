@@ -28,6 +28,13 @@ typedef struct {
     volatile uint32_t subscription_active;
     volatile uint32_t hardware_enabled;
     volatile uint32_t accepting_events;
+    volatile uint64_t hardware_capture_count;
+    volatile uint64_t source_event_count;
+    volatile uint64_t enqueued_count;
+    volatile uint64_t dropped_count;
+    volatile uint64_t eoi_count;
+    volatile uint64_t last_event_sequence;
+    volatile uint32_t last_payload_byte;
     GXOS_MANAGED_KERNEL_INTERRUPT_RANGE_VALIDATOR range_is_known;
     GXOS_MANAGED_KERNEL_INTERRUPT_CRITICAL_ENTER critical_enter;
     GXOS_MANAGED_KERNEL_INTERRUPT_CRITICAL_LEAVE critical_leave;

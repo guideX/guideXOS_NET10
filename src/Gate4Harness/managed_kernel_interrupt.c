@@ -329,7 +329,7 @@ int gxos_managed_kernel_interrupt_resume_service_routes(
 
 static void enqueue_from_route(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
-    const GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route,
+    GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route,
     uint8_t payload, uint32_t status)
 {
     GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1 event;
@@ -341,6 +341,7 @@ static void enqueue_from_route(
         GX_MANAGED_KERNEL_INTERRUPT_QUEUE_CAPACITY) {
         if (load_u32(&route->accepting_events) == 0) return;
         __atomic_add_fetch(&context->dropped_count, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&route->dropped_count, 1, __ATOMIC_RELAXED);
         return;
     }
     event.Size = GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1_SIZE;
@@ -359,11 +360,14 @@ static void enqueue_from_route(
     event.Reserved0 = 0;
     event.Status = status;
     event.Timestamp = 0;
+    __atomic_store_n(&route->last_payload_byte, payload, __ATOMIC_RELEASE);
+    __atomic_store_n(&route->last_event_sequence, event.Sequence, __ATOMIC_RELEASE);
     context->events[write_index % GX_MANAGED_KERNEL_INTERRUPT_QUEUE_CAPACITY] =
         event;
     next_index = write_index + 1U;
     store_u32(&context->write_index, next_index);
     __atomic_add_fetch(&context->enqueued_count, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&route->enqueued_count, 1, __ATOMIC_RELAXED);
     {
         uint32_t depth = next_index - read_index;
         uint32_t high_water = load_u32(&context->queue_high_water);
@@ -395,9 +399,11 @@ void gxos_managed_kernel_interrupt_capture_route(
         route_index >= context->route_count) return;
     route = &context->routes[route_index];
     __atomic_add_fetch(&context->irq_entry_count, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&route->hardware_capture_count, 1, __ATOMIC_RELAXED);
     if (load_u32(&route->subscription_active) == 0 ||
         load_u32(&route->accepting_events) == 0) {
         route->send_eoi(route->hardware_context);
+        __atomic_add_fetch(&route->eoi_count, 1, __ATOMIC_RELAXED);
         sync_legacy_route0(context);
         return;
     }
@@ -408,9 +414,12 @@ void gxos_managed_kernel_interrupt_capture_route(
             break;
         }
         __atomic_add_fetch(&context->serial_isr_count, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&route->source_event_count, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&route->last_payload_byte, payload, __ATOMIC_RELEASE);
         enqueue_from_route(context, route, payload, status);
     }
     route->send_eoi(route->hardware_context);
+    __atomic_add_fetch(&route->eoi_count, 1, __ATOMIC_RELAXED);
     sync_legacy_route0(context);
 }
 

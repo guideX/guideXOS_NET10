@@ -9,12 +9,24 @@ static uint8_t g_source[32];
 static uint32_t g_source_length;
 static uint32_t g_source_index;
 static uint64_t g_token;
-static GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1 g_events[4];
+static GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1 g_events[8];
 static GX_MANAGED_KERNEL_INTERRUPT_STATS_V1 g_stats;
 static uint32_t g_drained;
 static uint32_t g_enable_calls;
 static uint32_t g_disable_calls;
 static uint32_t g_eoi_calls;
+static uint64_t g_secondary_token;
+
+typedef struct {
+    const char *bytes;
+    uint32_t length;
+    uint32_t index;
+    uint32_t enable_calls;
+    uint32_t disable_calls;
+    uint32_t eoi_calls;
+} ROUTE_SOURCE_FIXTURE;
+
+static ROUTE_SOURCE_FIXTURE g_secondary_source;
 
 static void expect(int condition, const char *message)
 {
@@ -37,6 +49,11 @@ static int range_is_known(void *context, uintptr_t address, uintptr_t length)
     }
     begin = (uintptr_t)&g_token;
     end = begin + sizeof(g_token);
+    if (address >= begin && address <= end && length <= end - address) {
+        return 1;
+    }
+    begin = (uintptr_t)&g_secondary_token;
+    end = begin + sizeof(g_secondary_token);
     if (address >= begin && address <= end && length <= end - address) {
         return 1;
     }
@@ -90,6 +107,47 @@ static int capture_source(void *context, uint8_t *payload_byte,
     *payload_byte = g_source[g_source_index++];
     *status = 0x20U | *payload_byte;
     return 1;
+}
+
+static int secondary_enable_hardware(void *context)
+{
+    ROUTE_SOURCE_FIXTURE *fixture = (ROUTE_SOURCE_FIXTURE *)context;
+    if (fixture == 0) return 0;
+    ++fixture->enable_calls;
+    return 1;
+}
+
+static int secondary_disable_hardware(void *context)
+{
+    ROUTE_SOURCE_FIXTURE *fixture = (ROUTE_SOURCE_FIXTURE *)context;
+    if (fixture == 0) return 0;
+    ++fixture->disable_calls;
+    return 1;
+}
+
+static int secondary_capture_source(void *context, uint8_t *payload_byte,
+                                    uint32_t *status)
+{
+    ROUTE_SOURCE_FIXTURE *fixture = (ROUTE_SOURCE_FIXTURE *)context;
+    if (fixture == 0 || fixture->bytes == 0 ||
+        fixture->index >= fixture->length || payload_byte == 0 ||
+        status == 0) return 0;
+    *payload_byte = (uint8_t)fixture->bytes[fixture->index++];
+    *status = 0x40U | *payload_byte;
+    return 1;
+}
+
+static void secondary_send_eoi(void *context)
+{
+    ROUTE_SOURCE_FIXTURE *fixture = (ROUTE_SOURCE_FIXTURE *)context;
+    if (fixture != 0) ++fixture->eoi_calls;
+}
+
+static void set_secondary_source(const char *bytes)
+{
+    g_secondary_source.bytes = bytes;
+    g_secondary_source.length = (uint32_t)strlen(bytes);
+    g_secondary_source.index = 0;
 }
 
 static void send_eoi(void *context)
@@ -293,15 +351,25 @@ int main(void)
         uint64_t first_token;
         uint64_t replacement_token;
         uint64_t enqueued_before = context.enqueued_count;
-        uint32_t eoi_before = g_eoi_calls;
+        uint32_t eoi_before = g_secondary_source.eoi_calls;
         expect(gxos_managed_kernel_interrupt_add_route(
-                   &context, 1U, GX_MANAGED_DEVICE_KIND_PCI,
-                   0x808610D3U, GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE,
+                   &context, 1U, GX_MANAGED_DEVICE_KIND_PLATFORM_KEYBOARD,
+                   GX_MANAGED_KEYBOARD_DEVICE_ID_I8042,
+                   GX_MANAGED_INTERRUPT_EVENT_TYPE_KEYBOARD_SCANCODE,
                    enable_hardware, disable_hardware, capture_source, send_eoi,
-                   0), "E1000 PCI cause route registers as a second device route");
+                   0), "keyboard route occupies the production route-table slot");
+        expect(gxos_managed_kernel_interrupt_add_route(
+                   &context, 2U, GX_MANAGED_DEVICE_KIND_PCI,
+                   0x808610D3U, GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE,
+                   secondary_enable_hardware, secondary_disable_hardware,
+                   secondary_capture_source, secondary_send_eoi,
+                   &g_secondary_source),
+               "E1000 PCI cause route registers independently at route slot 2");
         set_source("G");
-        gxos_managed_kernel_interrupt_capture_route(&context, 1U);
-        expect(g_eoi_calls == eoi_before + 1U && g_source_index == 0U &&
+        set_secondary_source("G");
+        gxos_managed_kernel_interrupt_capture_route(&context, 2U);
+        expect(g_secondary_source.eoi_calls == eoi_before + 1U &&
+                   g_source_index == 0U &&
                    context.enqueued_count == enqueued_before,
                "unbound E1000 IRQ is acknowledged without source read or callback");
 
@@ -310,8 +378,8 @@ int main(void)
             GX_MANAGED_DEVICE_KIND_PCI, 0x808610D3U,
             (uintptr_t)&g_token, sizeof(g_token));
         first_token = g_token;
-        set_source("E");
-        gxos_managed_kernel_interrupt_capture_route(&context, 1U);
+        set_secondary_source("E");
+        gxos_managed_kernel_interrupt_capture_route(&context, 2U);
         g_drained = 0;
         result = result == GX_MANAGED_OK
             ? gxos_managed_kernel_interrupt_drain_v1(
@@ -336,10 +404,10 @@ int main(void)
         expect(result == GX_MANAGED_OK && replacement_token != first_token &&
                    gxos_managed_kernel_interrupt_unsubscribe_input_v1(
                        &context, first_token) == GX_MANAGED_NOT_FOUND &&
-                   context.routes[1].subscription_active != 0U,
+                   context.routes[2].subscription_active != 0U,
                "stale E1000 generation token cannot unsubscribe its replacement");
-        set_source("F");
-        gxos_managed_kernel_interrupt_capture_route(&context, 1U);
+        set_secondary_source("F");
+        gxos_managed_kernel_interrupt_capture_route(&context, 2U);
         g_drained = 0;
         result = gxos_managed_kernel_interrupt_drain_v1(
             &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
@@ -351,6 +419,170 @@ int main(void)
         expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
                    &context, replacement_token) == GX_MANAGED_OK,
                "replacement E1000 binding unsubscribes cleanly");
+    }
+
+    {
+        uint64_t serial_token;
+        uint64_t e1000_token;
+        uint64_t replacement_serial_token;
+        uint64_t replacement_e1000_token;
+        uint64_t sequence_before;
+        uint64_t enqueued_before;
+        uint64_t dropped_before;
+        uint32_t serial_native_before;
+        uint32_t e1000_native_before;
+        uint32_t index;
+
+        result = gxos_managed_kernel_interrupt_subscribe_v1(
+            &context, GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX,
+            GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL,
+            GX_MANAGED_SERIAL_DEVICE_ID_COM1,
+            (uintptr_t)&g_token, sizeof(g_token));
+        serial_token = g_token;
+        expect(result == GX_MANAGED_OK && serial_token != 0,
+               "COM1 route binds through its exact route-0 identity");
+        result = gxos_managed_kernel_interrupt_subscribe_input_v1(
+            &context, GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE,
+            GX_MANAGED_DEVICE_KIND_PCI, 0x808610D3U,
+            (uintptr_t)&g_secondary_token, sizeof(g_secondary_token));
+        e1000_token = g_secondary_token;
+        expect(result == GX_MANAGED_OK && e1000_token != 0 &&
+                   e1000_token != serial_token &&
+                   context.routes[0].subscription_active != 0U &&
+                   context.routes[2].subscription_active != 0U &&
+                   context.device_kind == GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL &&
+                   context.device_id == GX_MANAGED_SERIAL_DEVICE_ID_COM1 &&
+                   context.event_type == GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX,
+               "COM1 and E1000 remain independently bound without route-0 replacement");
+
+        serial_native_before = (uint32_t)context.routes[0].source_event_count;
+        e1000_native_before = (uint32_t)context.routes[2].source_event_count;
+        set_source("S");
+        gxos_managed_kernel_interrupt_capture_route(&context, 0U);
+        set_secondary_source("N");
+        gxos_managed_kernel_interrupt_capture_route(&context, 2U);
+        g_drained = 0;
+        result = gxos_managed_kernel_interrupt_drain_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)g_events, sizeof(g_events),
+            (uintptr_t)&g_drained, sizeof(g_drained));
+        expect(result == GX_MANAGED_OK && g_drained == 2U &&
+                   g_events[0].DeviceKind == GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL &&
+                   g_events[0].DeviceId == GX_MANAGED_SERIAL_DEVICE_ID_COM1 &&
+                   g_events[0].EventType == GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX &&
+                   g_events[1].DeviceKind == GX_MANAGED_DEVICE_KIND_PCI &&
+                   g_events[1].DeviceId == 0x808610D3U &&
+                   g_events[1].EventType == GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE &&
+                   g_events[1].Sequence == g_events[0].Sequence + 1U &&
+                   context.routes[0].source_event_count == serial_native_before + 1U &&
+                   context.routes[2].source_event_count == e1000_native_before + 1U,
+               "shared FIFO preserves interleaved route identity and global ordering");
+
+        sequence_before = context.next_sequence;
+        enqueued_before = context.enqueued_count;
+        dropped_before = context.dropped_count;
+        for (index = 0; index != 7U; ++index) {
+            if ((index & 1U) == 0U) {
+                set_source("C");
+                gxos_managed_kernel_interrupt_capture_route(&context, 0U);
+            } else {
+                set_secondary_source("E");
+                gxos_managed_kernel_interrupt_capture_route(&context, 2U);
+            }
+        }
+        expect(context.write_index - context.read_index == 7U &&
+                   context.enqueued_count == enqueued_before + 7U &&
+                   context.dropped_count == dropped_before &&
+                   context.routes[0].enqueued_count >= 4U &&
+                   context.routes[2].enqueued_count >= 4U,
+               "alternating records stay within the shared eight-record queue capacity");
+        g_drained = 0;
+        result = gxos_managed_kernel_interrupt_drain_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)g_events, sizeof(g_events),
+            (uintptr_t)&g_drained, sizeof(g_drained));
+        expect(result == GX_MANAGED_OK && g_drained == 4U &&
+                   g_events[0].Sequence == sequence_before &&
+                   g_events[1].Sequence == sequence_before + 1U &&
+                   g_events[2].Sequence == sequence_before + 2U &&
+                   g_events[3].Sequence == sequence_before + 3U &&
+                   g_events[0].DeviceId == GX_MANAGED_SERIAL_DEVICE_ID_COM1 &&
+                   g_events[1].DeviceId == 0x808610D3U &&
+                   g_events[2].DeviceId == GX_MANAGED_SERIAL_DEVICE_ID_COM1 &&
+                   g_events[3].DeviceId == 0x808610D3U,
+               "bounded first drain preserves alternating records and route sequence");
+        g_drained = 0;
+        result = gxos_managed_kernel_interrupt_drain_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)g_events, sizeof(g_events),
+            (uintptr_t)&g_drained, sizeof(g_drained));
+        expect(result == GX_MANAGED_OK && g_drained == 3U &&
+                   g_events[0].Sequence == sequence_before + 4U &&
+                   g_events[1].Sequence == sequence_before + 5U &&
+                   g_events[2].Sequence == sequence_before + 6U &&
+                   context.write_index == context.read_index,
+               "second bounded drain completes the near-capacity sequence");
+
+        expect(gxos_managed_kernel_interrupt_unsubscribe_v1(
+                   &context, serial_token) == GX_MANAGED_OK &&
+                   context.routes[0].subscription_active == 0U &&
+                   context.routes[2].subscription_active != 0U,
+               "COM1 unsubscribe leaves the E1000 route active");
+        expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
+                   &context, serial_token) == GX_MANAGED_NOT_FOUND &&
+                   context.routes[2].subscription_active != 0U,
+               "stale COM1 token cannot unsubscribe E1000");
+        result = gxos_managed_kernel_interrupt_subscribe_v1(
+            &context, GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX,
+            GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL,
+            GX_MANAGED_SERIAL_DEVICE_ID_COM1,
+            (uintptr_t)&g_token, sizeof(g_token));
+        replacement_serial_token = g_token;
+        expect(result == GX_MANAGED_OK &&
+                   replacement_serial_token != serial_token &&
+                   context.routes[2].subscription_active != 0U,
+               "COM1 replacement binds without replacing E1000");
+        expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
+                   &context, e1000_token) == GX_MANAGED_OK &&
+                   context.routes[0].subscription_active != 0U,
+               "E1000 unsubscribe leaves replacement COM1 active");
+        expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
+                   &context, e1000_token) == GX_MANAGED_NOT_FOUND &&
+                   context.routes[0].subscription_active != 0U,
+               "stale E1000 token cannot unsubscribe COM1");
+        result = gxos_managed_kernel_interrupt_subscribe_input_v1(
+            &context, GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE,
+            GX_MANAGED_DEVICE_KIND_PCI, 0x808610D3U,
+            (uintptr_t)&g_secondary_token, sizeof(g_secondary_token));
+        replacement_e1000_token = g_secondary_token;
+        expect(result == GX_MANAGED_OK &&
+                   replacement_e1000_token != e1000_token &&
+                   gxos_managed_kernel_interrupt_unsubscribe_input_v1(
+                       &context, e1000_token) == GX_MANAGED_NOT_FOUND &&
+                   context.routes[0].subscription_active != 0U &&
+                   context.routes[2].subscription_active != 0U,
+               "stale E1000 token cannot remove its replacement or COM1");
+
+        expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
+                   &context, replacement_e1000_token) == GX_MANAGED_OK &&
+                   context.routes[0].subscription_active != 0U,
+               "E1000 route teardown preserves COM1");
+        set_source("R");
+        gxos_managed_kernel_interrupt_capture_route(&context, 0U);
+        g_drained = 0;
+        result = gxos_managed_kernel_interrupt_drain_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)g_events, sizeof(g_events),
+            (uintptr_t)&g_drained, sizeof(g_drained));
+        expect(result == GX_MANAGED_OK && g_drained == 1U &&
+                   g_events[0].DeviceId == GX_MANAGED_SERIAL_DEVICE_ID_COM1 &&
+                   g_events[0].EventType == GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX,
+               "COM1 hardware capture continues after E1000 unsubscribe");
+        expect(gxos_managed_kernel_interrupt_unsubscribe_v1(
+                   &context, replacement_serial_token) == GX_MANAGED_OK &&
+                   context.routes[0].subscription_active == 0U &&
+                   context.routes[2].subscription_active == 0U,
+               "final COM1 unsubscribe leaves the route table clean");
     }
 
     if (g_failures != 0) {

@@ -890,6 +890,7 @@ internal static unsafe class ManagedKernelContract
     private static int s_phase52Mode;
     private static int s_phase53Mode;
     private static int s_phase80Mode;
+    private static int s_phase82Mode;
     private static int s_framebufferInstalled;
     private static GxManagedKernelFramebufferV1 s_framebuffer;
     private static ManagedE1000Driver? s_phase14Driver;
@@ -2788,6 +2789,103 @@ internal static unsafe class ManagedKernelContract
                 s_phase14Driver.State != ManagedE1000DriverState.Running)
                 return InvalidState;
             return s_phase14Driver.TryRunPhase80Proof() ? ManagedOk : InvalidState;
+        }
+        if (stage == 25)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_phase80Mode == 0 || s_phase82Mode != 0 ||
+                !ManagedSerialDriverSubsystem.TryStartPhase82SerialRoute())
+                return InvalidState;
+            s_phase82Mode = 1;
+            return KernelLog.Write(
+                "GXOS_NET10:PHASE82_COM1_ROUTE_READY=1\r\n"u8)
+                ? ManagedOk : InvalidState;
+        }
+        if (stage == 26)
+        {
+            ManagedSerialDriver? serial = ManagedSerialDriverSubsystem.Phase82SerialDriver;
+            ManagedE1000Driver? e1000 = s_phase14Driver;
+            if (s_phase82Mode == 0 || serial == null || e1000 == null ||
+                e1000.State != ManagedE1000DriverState.Running ||
+                serial.ReceiveState != ManagedSerialReceiveState.Subscribed)
+                return InvalidState;
+            uint serialBefore = serial.ReceiveCount;
+            uint e1000Before = e1000.Phase80DeliveryCount;
+            if (!ManagedSerialDriverSubsystem.TryDispatchPhase82Batch(
+                    e1000, out uint delivered, out uint rejected) ||
+                delivered != 1 || rejected != 0 ||
+                serial.ReceiveCount != serialBefore + 1U ||
+                e1000.Phase80DeliveryCount != e1000Before)
+                return InvalidState;
+            return KernelLog.WriteHexLine(
+                       "GXOS_NET10:PHASE82_COM1_SEQUENCE=0x"u8,
+                       serial.LastReceiveSequence) &&
+                   KernelLog.WriteHexLine(
+                       "GXOS_NET10:PHASE82_COM1_DELIVERIES=0x"u8,
+                       serial.ReceiveCount) &&
+                   KernelLog.Write(
+                       "GXOS_NET10:PHASE82_COM1_DELIVERED_ONLY=1\r\n"u8)
+                ? ManagedOk : InvalidState;
+        }
+        if (stage == 27)
+        {
+            if (s_phase82Mode == 0 || s_phase14Driver == null ||
+                s_phase14Driver.State != ManagedE1000DriverState.Running)
+                return InvalidState;
+            return s_phase14Driver.TryRunPhase82Transmit() ? ManagedOk : InvalidState;
+        }
+        if (stage == 28)
+        {
+            if (s_phase82Mode == 0 ||
+                !ManagedSerialDriverSubsystem.TryUnsubscribePhase82SerialRoute() ||
+                ManagedSerialDriverSubsystem.Phase82SerialDriver?.ReceiveState !=
+                    ManagedSerialReceiveState.NotSubscribed)
+                return InvalidState;
+            return KernelLog.Write(
+                "GXOS_NET10:PHASE82_COM1_UNSUBSCRIBED=1\r\n"u8)
+                ? ManagedOk : InvalidState;
+        }
+        if (stage == 29)
+        {
+            if (s_phase82Mode == 0 ||
+                !ManagedSerialDriverSubsystem.TryResubscribePhase82SerialRoute())
+                return InvalidState;
+            return KernelLog.Write(
+                "GXOS_NET10:PHASE82_COM1_REPLACEMENT_SUBSCRIBED=1\r\n"u8)
+                ? ManagedOk : InvalidState;
+        }
+        if (stage == 30)
+        {
+            if (s_phase82Mode == 0 || s_phase14Driver == null ||
+                !s_phase14Driver.TryUnsubscribeInterrupt(
+                    ManagedSerialDriverSubsystem.GetInterruptDispatcherForPhase82()) ||
+                ManagedSerialDriverSubsystem.Phase82SerialDriver?.ReceiveState !=
+                    ManagedSerialReceiveState.Subscribed)
+                return InvalidState;
+            return KernelLog.Write(
+                "GXOS_NET10:PHASE82_E1000_UNSUBSCRIBED=1\r\n"u8)
+                ? ManagedOk : InvalidState;
+        }
+        if (stage == 31)
+        {
+            ManagedSerialDriver? serial = ManagedSerialDriverSubsystem.Phase82SerialDriver;
+            ManagedE1000Driver? e1000 = s_phase14Driver;
+            if (serial == null || e1000 == null) return InvalidState;
+            uint serialDeliveries = serial.ReceiveCount;
+            uint e1000Deliveries = e1000.Phase80DeliveryCount;
+            if (s_phase82Mode == 0 ||
+                !ManagedSerialDriverSubsystem.TryStopPhase82SerialDriver())
+                return InvalidState;
+            s_phase82Mode = 0;
+            return KernelLog.WriteHexLine(
+                       "GXOS_NET10:PHASE82_COM1_MANAGED_DELIVERIES=0x"u8,
+                       serialDeliveries) &&
+                   KernelLog.WriteHexLine(
+                       "GXOS_NET10:PHASE82_E1000_MANAGED_DELIVERIES=0x"u8,
+                       e1000Deliveries) &&
+                   KernelLog.Write(
+                       "GXOS_NET10:PHASE82_COM1_DRIVER_STOPPED=1\r\n"u8)
+                ? ManagedOk : InvalidState;
         }
         if (stage == 1)
         {

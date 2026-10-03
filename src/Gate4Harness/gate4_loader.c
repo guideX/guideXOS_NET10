@@ -15447,6 +15447,360 @@ static void managed_kernel_phase13_mmio(
     serial_text("GXOS_NET10:MANAGED_KERNEL_MMIO_PHASE_PROOF_OK\r\n");
 }
 
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE82
+static void managed_kernel_phase82_wait_com1(
+    ManagedKernelRunPhase14Entry run_phase14, uint32_t step)
+{
+    GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route =
+        &g_managed_kernel_interrupt_context.routes[0];
+    uint64_t before = __atomic_load_n(&route->source_event_count,
+                                      __ATOMIC_ACQUIRE);
+    uint64_t sequence_before = __atomic_load_n(&route->last_event_sequence,
+                                                __ATOMIC_ACQUIRE);
+    uint32_t iteration;
+    uint32_t status;
+    serial_text("GXOS_NET10:PHASE82_EXPECT_COM1_STEP=0x");
+    serial_hex64(step);
+    serial_text("\r\n");
+    for (iteration = 0U; iteration != 100000000U; ++iteration) {
+        if (__atomic_load_n(&route->source_event_count,
+                            __ATOMIC_ACQUIRE) != before) break;
+        __asm__ volatile ("sti\n\tpause" : : : "cc", "memory");
+    }
+    if (iteration == 100000000U ||
+        __atomic_load_n(&route->source_event_count,
+                        __ATOMIC_ACQUIRE) != before + 1U) {
+        fail("phase82-com1-hardware-event-timeout-or-coalescing");
+    }
+    status = run_phase14(26U);
+    if (status != GX_MANAGED_OK ||
+        __atomic_load_n(&route->source_event_count,
+                        __ATOMIC_ACQUIRE) != before + 1U ||
+        __atomic_load_n(&route->last_event_sequence,
+                        __ATOMIC_ACQUIRE) <= sequence_before) {
+        fail("phase82-com1-managed-isolated-dispatch");
+    }
+    serial_text("GXOS_NET10:PHASE82_COM1_STEP_DELIVERED=0x");
+    serial_hex64(step);
+    serial_text("\r\n");
+}
+
+static void managed_kernel_phase82_coexistence(
+    ManagedKernelRunPhase14Entry run_phase14,
+    uint64_t phase80_hardware_entry_snapshot)
+{
+    static const char order_a[5] = { 'E', 'C', 'E', 'E', 'C' };
+    static const char order_b[5] = { 'C', 'E', 'E', 'C', 'E' };
+    static const char order_c[5] = { 'E', 'E', 'C', 'E', 'C' };
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *interrupts =
+        &g_managed_kernel_interrupt_context;
+    GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *serial_route = &interrupts->routes[0];
+    GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *e1000_route =
+        &interrupts->routes[GXOS_MANAGED_KERNEL_E1000_IRQ_ROUTE_INDEX];
+    GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *e1000 =
+        &g_managed_kernel_e1000_interrupt_context;
+    const char *order = order_a;
+    uint64_t serial_initial_token;
+    uint64_t e1000_initial_token;
+    uint64_t serial_native_before;
+    uint64_t serial_irq_before;
+    uint64_t serial_enqueued_before;
+    uint64_t serial_eoi_before;
+    uint64_t e1000_native_before;
+    uint64_t e1000_interleaved_start;
+    uint64_t e1000_capture_before;
+    uint64_t e1000_sequence_before;
+    uint64_t e1000_hardware_before;
+    uint64_t e1000_ack_before;
+    uint64_t e1000_eoi_start;
+    uint64_t e1000_eoi_before;
+    uint64_t dropped_before;
+    uint32_t initial_serial_payload;
+    uint32_t step;
+    uint32_t status;
+
+    if (run_phase14 == 0 || serial_route->subscription_active == 0U ||
+        e1000_route->subscription_active == 0U ||
+        serial_route->hardware_enabled == 0U ||
+        e1000_route->hardware_enabled == 0U ||
+        serial_route->device_kind != GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL ||
+        serial_route->device_id != GX_MANAGED_SERIAL_DEVICE_ID_COM1 ||
+        serial_route->event_type != GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX ||
+        e1000_route->device_kind != GX_MANAGED_DEVICE_KIND_PCI ||
+        e1000_route->device_id != 0x808610D3U ||
+        e1000_route->event_type != GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE ||
+        serial_route->subscription_id == e1000_route->subscription_id) {
+        fail("phase82-two-distinct-routes-not-active");
+    }
+    serial_initial_token = serial_route->subscription_id;
+    e1000_initial_token = e1000_route->subscription_id;
+    serial_text("GXOS_NET10:PHASE82_BOTH_ROUTES_REGISTERED=1\r\n");
+    serial_text("GXOS_NET10:PHASE82_COM1_TOKEN=0x");
+    serial_hex64(serial_initial_token);
+    serial_text("\r\nGXOS_NET10:PHASE82_E1000_TOKEN=0x");
+    serial_hex64(e1000_initial_token);
+    serial_text("\r\n");
+
+    serial_native_before = __atomic_load_n(&serial_route->source_event_count,
+                                            __ATOMIC_ACQUIRE);
+    serial_irq_before = __atomic_load_n(&serial_route->hardware_capture_count,
+                                         __ATOMIC_ACQUIRE);
+    serial_enqueued_before = __atomic_load_n(&serial_route->enqueued_count,
+                                              __ATOMIC_ACQUIRE);
+    serial_eoi_before = __atomic_load_n(&serial_route->eoi_count,
+                                         __ATOMIC_ACQUIRE);
+    e1000_native_before = __atomic_load_n(&e1000_route->source_event_count,
+                                           __ATOMIC_ACQUIRE);
+    e1000_interleaved_start = e1000_native_before;
+    e1000_capture_before = __atomic_load_n(&e1000_route->hardware_capture_count,
+                                            __ATOMIC_ACQUIRE);
+    e1000_sequence_before = __atomic_load_n(&e1000_route->last_event_sequence,
+                                             __ATOMIC_ACQUIRE);
+    e1000_hardware_before = __atomic_load_n(&e1000->hardware_irq_entry_count,
+                                             __ATOMIC_ACQUIRE);
+    e1000_ack_before = e1000->last_cause_acknowledgements;
+    e1000_eoi_before = __atomic_load_n(&e1000_route->eoi_count,
+                                        __ATOMIC_ACQUIRE);
+    e1000_eoi_start = e1000_eoi_before;
+    serial_text("GXOS_NET10:PHASE82_ROUTE_CAPACITY=3\r\n");
+    serial_text("GXOS_NET10:PHASE82_QUEUE_CAPACITY=8\r\n");
+    serial_text("GXOS_NET10:PHASE82_QUEUE_MAX_DRAIN=4\r\n");
+    serial_text("GXOS_NET10:PHASE82_COM1_IRQ=4\r\n");
+    serial_text("GXOS_NET10:PHASE82_E1000_MSI_VECTOR=0x51\r\n");
+    dropped_before = __atomic_load_n(&interrupts->dropped_count,
+                                      __ATOMIC_ACQUIRE);
+    serial_text("GXOS_NET10:PHASE82_INTERLEAVING_READY=1\r\n");
+    managed_kernel_phase82_wait_com1(run_phase14, 1U);
+    if (__atomic_load_n(&e1000_route->source_event_count,
+                        __ATOMIC_ACQUIRE) != e1000_native_before ||
+        __atomic_load_n(&e1000->hardware_irq_entry_count,
+                        __ATOMIC_ACQUIRE) != e1000_hardware_before ||
+        e1000->last_cause_acknowledgements != e1000_ack_before ||
+        __atomic_load_n(&e1000_route->eoi_count,
+                        __ATOMIC_ACQUIRE) != e1000_eoi_before ||
+        __atomic_load_n(&serial_route->eoi_count,
+                        __ATOMIC_ACQUIRE) != serial_eoi_before + 1U ||
+        __atomic_load_n(&interrupts->dropped_count,
+                        __ATOMIC_ACQUIRE) != dropped_before) {
+        fail("phase82-com1-event-cross-route-or-drop");
+    }
+    initial_serial_payload = __atomic_load_n(&serial_route->last_payload_byte,
+                                              __ATOMIC_ACQUIRE);
+    if (initial_serial_payload == (uint32_t)'A') order = order_a;
+    else if (initial_serial_payload == (uint32_t)'B') order = order_b;
+    else if (initial_serial_payload == (uint32_t)'C') order = order_c;
+    else fail("phase82-interleaving-order-selector");
+    serial_text("GXOS_NET10:PHASE82_INTERLEAVING_ORDER=0x");
+    serial_hex64(initial_serial_payload);
+    serial_text("\r\nGXOS_NET10:PHASE82_INTERLEAVED_STEP=0x0000000000000001_COM1\r\n");
+
+    for (step = 0U; step != 5U; ++step) {
+        uint64_t serial_before = __atomic_load_n(
+            &serial_route->source_event_count, __ATOMIC_ACQUIRE);
+        uint64_t e1000_before = __atomic_load_n(
+            &e1000_route->source_event_count, __ATOMIC_ACQUIRE);
+        if (order[step] == 'C') {
+            managed_kernel_phase82_wait_com1(run_phase14, step + 2U);
+            if (__atomic_load_n(&e1000_route->source_event_count,
+                                __ATOMIC_ACQUIRE) != e1000_before) {
+                fail("phase82-interleaved-com1-cross-delivery");
+            }
+            if (__atomic_load_n(&e1000->hardware_irq_entry_count,
+                                __ATOMIC_ACQUIRE) != e1000_hardware_before ||
+                e1000->last_cause_acknowledgements != e1000_ack_before ||
+                __atomic_load_n(&e1000_route->eoi_count,
+                                __ATOMIC_ACQUIRE) != e1000_eoi_before ||
+                __atomic_load_n(&serial_route->eoi_count,
+                                __ATOMIC_ACQUIRE) !=
+                    serial_eoi_before +
+                        (__atomic_load_n(&serial_route->source_event_count,
+                                         __ATOMIC_ACQUIRE) - serial_native_before)) {
+                fail("phase82-com1-acknowledgement-isolation");
+            }
+            serial_text("GXOS_NET10:PHASE82_INTERLEAVED_STEP=0x");
+            serial_hex64(step + 2U);
+            serial_text("_COM1\r\n");
+        } else {
+            status = run_phase14(27U);
+            if (status != GX_MANAGED_OK ||
+                __atomic_load_n(&e1000_route->source_event_count,
+                                __ATOMIC_ACQUIRE) != e1000_before + 1U ||
+                __atomic_load_n(&serial_route->source_event_count,
+                                __ATOMIC_ACQUIRE) != serial_before ||
+                __atomic_load_n(&e1000_route->last_event_sequence,
+                                __ATOMIC_ACQUIRE) <= e1000_sequence_before) {
+                fail("phase82-interleaved-e1000-isolated-dispatch");
+            }
+            if (__atomic_load_n(&e1000->hardware_irq_entry_count,
+                                __ATOMIC_ACQUIRE) != e1000_hardware_before + 1U ||
+                e1000->last_cause_acknowledgements != e1000_ack_before + 1U ||
+                __atomic_load_n(&e1000_route->eoi_count,
+                                __ATOMIC_ACQUIRE) != e1000_eoi_before + 1U ||
+                __atomic_load_n(&serial_route->eoi_count,
+                                __ATOMIC_ACQUIRE) !=
+                    serial_eoi_before +
+                        (__atomic_load_n(&serial_route->source_event_count,
+                                         __ATOMIC_ACQUIRE) - serial_native_before)) {
+                fail("phase82-e1000-acknowledgement-isolation");
+            }
+            e1000_hardware_before = __atomic_load_n(
+                &e1000->hardware_irq_entry_count, __ATOMIC_ACQUIRE);
+            e1000_ack_before = e1000->last_cause_acknowledgements;
+            e1000_eoi_before = __atomic_load_n(&e1000_route->eoi_count,
+                                                __ATOMIC_ACQUIRE);
+            e1000_sequence_before = __atomic_load_n(
+                &e1000_route->last_event_sequence, __ATOMIC_ACQUIRE);
+            serial_text("GXOS_NET10:PHASE82_INTERLEAVED_STEP=0x");
+            serial_hex64(step + 2U);
+            serial_text("_E1000\r\n");
+        }
+        if (__atomic_load_n(&interrupts->dropped_count,
+                            __ATOMIC_ACQUIRE) != dropped_before ||
+            interrupts->read_index != interrupts->write_index) {
+            fail("phase82-interleaving-queue-accounting");
+        }
+    }
+    if (__atomic_load_n(&serial_route->source_event_count,
+                        __ATOMIC_ACQUIRE) - serial_native_before != 3U ||
+        __atomic_load_n(&e1000_route->source_event_count,
+                        __ATOMIC_ACQUIRE) - e1000_interleaved_start != 3U) {
+        fail("phase82-interleaving-counts");
+    }
+    serial_text("GXOS_NET10:PHASE82_INTERLEAVING_6_EVENTS=1\r\n");
+    serial_text("GXOS_NET10:PHASE82_ZERO_CROSS_DELIVERY=1\r\n");
+    serial_text("GXOS_NET10:PHASE82_CROSS_DELIVERIES=0\r\n");
+    serial_text("GXOS_NET10:PHASE82_WRONG_DEVICE_DELIVERIES=0\r\n");
+    serial_text("GXOS_NET10:PHASE82_WRONG_EVENT_TYPE_DELIVERIES=0\r\n");
+    serial_text("GXOS_NET10:PHASE82_SHARED_QUEUE_IDENTITY=1\r\n");
+
+    if (run_phase14(28U) != GX_MANAGED_OK ||
+        serial_route->subscription_active != 0U ||
+        e1000_route->subscription_active == 0U ||
+        e1000_route->hardware_enabled == 0U) {
+        fail("phase82-unsubscribe-com1-preserve-e1000");
+    }
+    serial_text("GXOS_NET10:PHASE82_COM1_UNSUBSCRIBE_E1000_REMAINS_ACTIVE=1\r\n");
+    {
+        uint64_t serial_before = __atomic_load_n(
+            &serial_route->source_event_count, __ATOMIC_ACQUIRE);
+        uint64_t e1000_before = __atomic_load_n(
+            &e1000_route->source_event_count, __ATOMIC_ACQUIRE);
+        uint64_t e1000_hardware_count = __atomic_load_n(
+            &e1000->hardware_irq_entry_count, __ATOMIC_ACQUIRE);
+        uint64_t e1000_ack_count = e1000->last_cause_acknowledgements;
+        uint64_t e1000_eoi_count = __atomic_load_n(
+            &e1000_route->eoi_count, __ATOMIC_ACQUIRE);
+        if (run_phase14(27U) != GX_MANAGED_OK ||
+            __atomic_load_n(&serial_route->source_event_count,
+                            __ATOMIC_ACQUIRE) != serial_before ||
+            __atomic_load_n(&serial_route->eoi_count,
+                            __ATOMIC_ACQUIRE) != serial_eoi_before +
+                                (serial_before - serial_native_before) ||
+            __atomic_load_n(&e1000_route->source_event_count,
+                            __ATOMIC_ACQUIRE) != e1000_before + 1U ||
+            __atomic_load_n(&e1000->hardware_irq_entry_count,
+                            __ATOMIC_ACQUIRE) != e1000_hardware_count + 1U ||
+            e1000->last_cause_acknowledgements != e1000_ack_count + 1U ||
+            __atomic_load_n(&e1000_route->eoi_count,
+                            __ATOMIC_ACQUIRE) != e1000_eoi_count + 1U) {
+            fail("phase82-e1000-after-com1-unsubscribe");
+        }
+        e1000_hardware_before = __atomic_load_n(
+            &e1000->hardware_irq_entry_count, __ATOMIC_ACQUIRE);
+        e1000_ack_before = e1000->last_cause_acknowledgements;
+        e1000_eoi_before = __atomic_load_n(&e1000_route->eoi_count,
+                                            __ATOMIC_ACQUIRE);
+    }
+    serial_text("GXOS_NET10:PHASE82_E1000_AFTER_COM1_UNSUBSCRIBE=1\r\n");
+
+    if (run_phase14(29U) != GX_MANAGED_OK ||
+        serial_route->subscription_active == 0U ||
+        serial_route->subscription_id == serial_initial_token ||
+        e1000_route->subscription_id != e1000_initial_token ||
+        run_phase14(30U) != GX_MANAGED_OK ||
+        e1000_route->subscription_active != 0U ||
+        e1000_route->hardware_enabled != 0U ||
+        serial_route->subscription_active == 0U ||
+        serial_route->hardware_enabled == 0U) {
+        fail("phase82-unsubscribe-e1000-preserve-com1-replacement");
+    }
+    serial_text("GXOS_NET10:PHASE82_E1000_UNSUBSCRIBE_COM1_REMAINS_ACTIVE=1\r\n");
+    {
+        uint64_t serial_before = __atomic_load_n(
+            &serial_route->source_event_count, __ATOMIC_ACQUIRE);
+        uint64_t e1000_before = __atomic_load_n(
+            &e1000_route->source_event_count, __ATOMIC_ACQUIRE);
+        managed_kernel_phase82_wait_com1(run_phase14, 7U);
+        if (__atomic_load_n(&serial_route->source_event_count,
+                            __ATOMIC_ACQUIRE) != serial_before + 1U ||
+            __atomic_load_n(&e1000_route->source_event_count,
+                            __ATOMIC_ACQUIRE) != e1000_before ||
+            __atomic_load_n(&e1000->hardware_irq_entry_count,
+                            __ATOMIC_ACQUIRE) != e1000_hardware_before ||
+            e1000->last_cause_acknowledgements != e1000_ack_before ||
+            __atomic_load_n(&e1000_route->eoi_count,
+                            __ATOMIC_ACQUIRE) != e1000_eoi_before ||
+            __atomic_load_n(&serial_route->eoi_count,
+                            __ATOMIC_ACQUIRE) != serial_eoi_before + 4U) {
+            fail("phase82-com1-after-e1000-unsubscribe");
+        }
+    }
+    serial_text("GXOS_NET10:PHASE82_COM1_AFTER_E1000_UNSUBSCRIBE=1\r\n");
+    if (run_phase14(31U) != GX_MANAGED_OK ||
+        serial_route->subscription_active != 0U ||
+        e1000_route->subscription_active != 0U ||
+        __atomic_load_n(&serial_route->source_event_count,
+                        __ATOMIC_ACQUIRE) - serial_native_before != 4U ||
+        __atomic_load_n(&serial_route->hardware_capture_count,
+                        __ATOMIC_ACQUIRE) - serial_irq_before != 4U ||
+        __atomic_load_n(&serial_route->enqueued_count,
+                        __ATOMIC_ACQUIRE) - serial_enqueued_before != 4U ||
+        __atomic_load_n(&serial_route->eoi_count,
+                        __ATOMIC_ACQUIRE) - serial_eoi_before != 4U ||
+        __atomic_load_n(&e1000_route->source_event_count,
+                        __ATOMIC_ACQUIRE) != 8U ||
+        __atomic_load_n(&e1000_route->hardware_capture_count,
+                        __ATOMIC_ACQUIRE) - e1000_capture_before != 4U ||
+        __atomic_load_n(&e1000_route->enqueued_count,
+                        __ATOMIC_ACQUIRE) != 8U ||
+        __atomic_load_n(&e1000_route->eoi_count,
+                        __ATOMIC_ACQUIRE) - e1000_eoi_start != 4U ||
+        e1000->last_cause_acknowledgements != 8U ||
+        __atomic_load_n(&e1000->hardware_irq_entry_count,
+                        __ATOMIC_ACQUIRE) - phase80_hardware_entry_snapshot != 4U ||
+        __atomic_load_n(&e1000_route->eoi_count,
+                        __ATOMIC_ACQUIRE) !=
+            __atomic_load_n(&e1000->hardware_irq_entry_count,
+                            __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&interrupts->dropped_count,
+                        __ATOMIC_ACQUIRE) != dropped_before ||
+        interrupts->read_index != interrupts->write_index) {
+        fail("phase82-final-route-cleanup");
+    }
+    serial_text("GXOS_NET10:PHASE82_COM1_HARDWARE_EVENTS=0x0000000000000004\r\n");
+    serial_text("GXOS_NET10:PHASE82_COM1_NATIVE_CAPTURES=0x0000000000000004\r\n");
+    serial_text("GXOS_NET10:PHASE82_COM1_NATIVE_QUEUED=0x0000000000000004\r\n");
+    serial_text("GXOS_NET10:PHASE82_E1000_HARDWARE_EVENTS=0x0000000000000008\r\n");
+    serial_text("GXOS_NET10:PHASE82_E1000_NATIVE_CAPTURES=0x0000000000000008\r\n");
+    serial_text("GXOS_NET10:PHASE82_E1000_NATIVE_QUEUED=0x0000000000000008\r\n");
+    serial_text("GXOS_NET10:PHASE82_COM1_IRQ_EOI=0x0000000000000004\r\n");
+    serial_text("GXOS_NET10:PHASE82_E1000_MSI_ACKNOWLEDGEMENTS=0x0000000000000008\r\n");
+    serial_text("GXOS_NET10:PHASE82_COM1_ROUTE_IRQ_ENTRIES=0x");
+    serial_hex64(__atomic_load_n(&serial_route->hardware_capture_count,
+                                 __ATOMIC_ACQUIRE) - serial_irq_before);
+    serial_text("\r\nGXOS_NET10:PHASE82_COM1_TOTAL_ROUTE_IRQ_ENTRIES=0x");
+    serial_hex64(__atomic_load_n(&serial_route->hardware_capture_count,
+                                 __ATOMIC_ACQUIRE));
+    serial_text("\r\nGXOS_NET10:PHASE82_E1000_ROUTE_ISR_ENTRIES=0x");
+    serial_hex64(__atomic_load_n(&e1000_route->hardware_capture_count,
+                                 __ATOMIC_ACQUIRE));
+    serial_text("\r\nGXOS_NET10:PHASE82_E1000_APIC_EOI=0x");
+    serial_hex64(__atomic_load_n(&e1000_route->eoi_count, __ATOMIC_ACQUIRE));
+    serial_text("\r\n");
+    serial_text("GXOS_NET10:PHASE82_TEARDOWN_INDEPENDENCE=1\r\n");
+}
+#endif
+
 static void managed_kernel_phase14_driver(
     ManagedKernelInstallDmaServicesEntry install_dma_services,
     ManagedKernelRunPhase14Entry run_phase14,
@@ -15454,6 +15808,12 @@ static void managed_kernel_phase14_driver(
 {
     GX_MANAGED_KERNEL_DMA_SERVICES_V1 bad_services;
     uint32_t status;
+    uint64_t phase80_hardware_snapshot = 0;
+    uint64_t phase80_dispatch_snapshot = 0;
+    uint64_t phase80_sequence_snapshot = 0;
+    uint64_t phase80_cause_snapshot = 0;
+    uint64_t phase80_mask_snapshot = 0;
+    uint64_t phase80_ack_snapshot = 0;
     if (install_dma_services == 0 || run_phase14 == 0 ||
         g_managed_kernel_dma_service_ready == 0) {
         fail("managed-kernel-phase14-precondition");
@@ -15628,6 +15988,10 @@ static void managed_kernel_phase14_driver(
     status = run_phase14(23U);
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase80-mode");
     serial_text("GXOS_NET10:PHASE80_E1000_MODE_SELECTED\r\n");
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE82
+    status = run_phase14(25U);
+    if (status != GX_MANAGED_OK) fail("phase82-com1-managed-route-start");
+#endif
     status = run_phase14(1U);
     if (status != GX_MANAGED_OK ||
         run_phase14(1U) != GX_MANAGED_INVALID_STATE) {
@@ -15670,6 +16034,59 @@ static void managed_kernel_phase14_driver(
         serial_text("\r\n");
         fail("managed-kernel-phase80-managed-e1000-delivery");
     }
+    phase80_hardware_snapshot = __atomic_load_n(
+        &g_managed_kernel_e1000_interrupt_context.hardware_irq_entry_count,
+        __ATOMIC_ACQUIRE);
+    phase80_dispatch_snapshot = __atomic_load_n(
+        &g_managed_kernel_e1000_interrupt_context.native_dispatch_count,
+        __ATOMIC_ACQUIRE);
+    phase80_sequence_snapshot =
+        g_managed_kernel_e1000_interrupt_context.last_native_sequence;
+    phase80_cause_snapshot = g_managed_kernel_e1000_interrupt_context.last_cause;
+    phase80_mask_snapshot =
+        g_managed_kernel_e1000_interrupt_context.last_mask_readback;
+    phase80_ack_snapshot =
+        g_managed_kernel_e1000_interrupt_context.last_cause_acknowledgements;
+    if (phase80_hardware_snapshot < 4U || phase80_hardware_snapshot > 5U ||
+        phase80_dispatch_snapshot != 4U || phase80_ack_snapshot != 4U ||
+        __atomic_load_n(
+            &g_managed_kernel_interrupt_context.routes[
+                GXOS_MANAGED_KERNEL_E1000_IRQ_ROUTE_INDEX].source_event_count,
+            __ATOMIC_ACQUIRE) != 4U) {
+        fail("phase80-exact-four-event-regression");
+    }
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE82
+    {
+        GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *e1000 =
+            &g_managed_kernel_e1000_interrupt_context;
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route =
+            &g_managed_kernel_interrupt_context.routes[
+                GXOS_MANAGED_KERNEL_E1000_IRQ_ROUTE_INDEX];
+        uint64_t phase80_route_entries = __atomic_load_n(
+            &e1000->hardware_irq_entry_count, __ATOMIC_ACQUIRE);
+        if (phase80_route_entries != phase80_hardware_snapshot ||
+            phase80_route_entries < 4U || phase80_route_entries > 5U ||
+            __atomic_load_n(&e1000->native_dispatch_count,
+                            __ATOMIC_ACQUIRE) != 4U ||
+            __atomic_load_n(&route->source_event_count,
+                            __ATOMIC_ACQUIRE) != 4U ||
+            __atomic_load_n(&route->hardware_capture_count,
+                            __ATOMIC_ACQUIRE) != phase80_route_entries ||
+            __atomic_load_n(&route->eoi_count,
+                            __ATOMIC_ACQUIRE) != phase80_route_entries ||
+            e1000->last_cause_acknowledgements != 4U ||
+            g_managed_kernel_interrupt_context.next_sequence !=
+                e1000->first_event_sequence + 4U ||
+            route->subscription_active == 0U || route->hardware_enabled == 0U) {
+            fail("phase82-phase80-four-event-regression");
+        }
+        serial_text("GXOS_NET10:PHASE82_PHASE80_RAW_IRQ_ENTRIES=0x");
+        serial_hex64(phase80_hardware_snapshot);
+        serial_text("\r\nGXOS_NET10:PHASE82_PHASE80_REGRESSION_4_OF_4=1\r\n");
+    }
+    managed_kernel_phase82_coexistence(run_phase14,
+                                       phase80_hardware_snapshot);
+#endif
     if (run_phase14(2U) != GX_MANAGED_OK ||
         run_phase14(2U) != GX_MANAGED_INVALID_STATE) {
         fail("managed-kernel-phase14-driver-teardown");
@@ -15692,6 +16109,26 @@ static void managed_kernel_phase14_driver(
             &g_managed_kernel_interrupt_context.drained_count, __ATOMIC_ACQUIRE);
         uint64_t dropped_count = __atomic_load_n(
             &g_managed_kernel_interrupt_context.dropped_count, __ATOMIC_ACQUIRE);
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE82
+        if (hardware_count != phase80_hardware_snapshot + 4U ||
+            dispatch_count != 8U ||
+            __atomic_load_n(&route->source_event_count,
+                            __ATOMIC_ACQUIRE) != 8U ||
+            e1000->last_native_sequence != route->last_event_sequence ||
+            g_managed_kernel_interrupt_context.next_sequence !=
+                e1000->first_event_sequence + 12U ||
+            enqueued_count - e1000->enqueued_before_enable != 12U ||
+            drained_count - e1000->drained_before_enable != 12U ||
+            dropped_count != e1000->dropped_before_enable ||
+            e1000->last_cause_acknowledgements != 8U ||
+            route->subscription_active != 0U || route->hardware_enabled != 0U ||
+            route->accepting_events != 0U || e1000->route_enabled != 0U ||
+            e1000->msi_original_valid != 0U ||
+            g_managed_kernel_interrupt_context.read_index !=
+                g_managed_kernel_interrupt_context.write_index) {
+            fail("phase82-final-e1000-route-accounting");
+        }
+#else
         if (hardware_count != 4U || dispatch_count != 4U ||
             e1000->last_native_sequence != e1000->first_event_sequence + 3U ||
             g_managed_kernel_interrupt_context.next_sequence !=
@@ -15710,6 +16147,7 @@ static void managed_kernel_phase14_driver(
                 g_managed_kernel_interrupt_context.write_index) {
             fail("managed-kernel-phase80-e1000-proof-state");
         }
+#endif
         quiet_entry_count = hardware_count;
         for (iteration = 0U; iteration != 100000U; ++iteration) {
             __asm__ volatile ("sti\n\tpause" : : : "cc", "memory");
@@ -15721,17 +16159,17 @@ static void managed_kernel_phase14_driver(
         serial_text("GXOS_NET10:PHASE80_E1000_HW_IRQ=4\r\n");
         serial_text("GXOS_NET10:PHASE80_E1000_NATIVE_DISPATCH=4\r\n");
         serial_text("GXOS_NET10:PHASE80_E1000_IRQ_ENTRY_COUNT=0x");
-        serial_hex64(hardware_count);
+        serial_hex64(phase80_hardware_snapshot);
         serial_text("\r\nGXOS_NET10:PHASE80_E1000_NATIVE_CAUSE=0x");
-        serial_hex64(e1000->last_cause);
+        serial_hex64(phase80_cause_snapshot);
         serial_text("\r\nGXOS_NET10:PHASE80_E1000_MASK_READBACK=0x");
-        serial_hex64(e1000->last_mask_readback);
+        serial_hex64(phase80_mask_snapshot);
         serial_text("\r\nGXOS_NET10:PHASE80_E1000_CAUSE_CLEAR_READ=0x");
         serial_hex64(e1000->last_cause_clear_read);
         serial_text("\r\nGXOS_NET10:PHASE80_E1000_ACKNOWLEDGEMENTS=0x");
-        serial_hex64(e1000->last_cause_acknowledgements);
+        serial_hex64(phase80_ack_snapshot);
         serial_text("\r\nGXOS_NET10:PHASE80_E1000_EVENT_SEQUENCE_LAST=0x");
-        serial_hex64(e1000->last_native_sequence);
+        serial_hex64(phase80_sequence_snapshot);
         serial_text("\r\nGXOS_NET10:PHASE80_E1000_INTERRUPT_STORM=0\r\n");
         serial_text("GXOS_NET10:PHASE80_E1000_ROUTE_QUIESCED=1\r\n");
     }

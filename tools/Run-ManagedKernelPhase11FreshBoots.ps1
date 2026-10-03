@@ -9,6 +9,7 @@ param(
     [string]$PostPhase11Marker = '',
     [switch]$EnablePhase15Rx,
     [switch]$EnablePhase80E1000,
+    [switch]$EnablePhase82,
     [string]$Phase15InjectorPath = '',
     [ValidateSet('dgram', 'user')]
     [string]$Phase15NetworkBackend = 'dgram',
@@ -71,6 +72,9 @@ if ($EnablePhase32NegativeControl -and -not $EnablePhase32Protocol) {
 }
 if ($EnablePhase80E1000 -and $EnablePhase15Rx) {
     throw 'Phase 80 uses a local user-mode backend and does not combine with Phase 15 RX injection.'
+}
+if ($EnablePhase82 -and -not $EnablePhase80E1000) {
+    throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
 }
 if ($EnablePhase33NegativeControl -and -not $EnablePhase33Protocol) {
     throw '-EnablePhase33NegativeControl requires -EnablePhase33Protocol.'
@@ -3308,6 +3312,20 @@ $requiredMarkers = @(
     'GXOS_NET10:MANAGED_KERNEL_PHASE9_PASS',
     'GXOS_NET10:MANAGED_KERNEL_PHASE10_PASS',
     'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS')
+if ($EnablePhase82) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE82_BOTH_ROUTES_REGISTERED=1',
+        'GXOS_NET10:PHASE82_PHASE80_REGRESSION_4_OF_4=1',
+        'GXOS_NET10:PHASE82_INTERLEAVING_6_EVENTS=1',
+        'GXOS_NET10:PHASE82_ZERO_CROSS_DELIVERY=1',
+        'GXOS_NET10:PHASE82_SHARED_QUEUE_IDENTITY=1',
+        'GXOS_NET10:PHASE82_COM1_UNSUBSCRIBE_E1000_REMAINS_ACTIVE=1',
+        'GXOS_NET10:PHASE82_E1000_AFTER_COM1_UNSUBSCRIBE=1',
+        'GXOS_NET10:PHASE82_E1000_UNSUBSCRIBE_COM1_REMAINS_ACTIVE=1',
+        'GXOS_NET10:PHASE82_COM1_AFTER_E1000_UNSUBSCRIBE=1',
+        'GXOS_NET10:PHASE82_TEARDOWN_INDEPENDENCE=1',
+        'GXOS_NET10:PHASE82_E1000_TXDW_DELIVERED_ONLY=1')
+}
 
 $owned = @()
 try {
@@ -3471,6 +3489,59 @@ try {
                 Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_OK' $deadline $process $stream $logStream $text $buffer
             }
             Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS' $deadline $process $stream $logStream $text $buffer
+            if ($EnablePhase82) {
+                Wait-Marker11 'GXOS_NET10:PHASE82_INTERLEAVING_READY=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                [byte]$selector = 0x40 + $sequence
+                Send-Serial11 $client $stream $process $injectionLog `
+                    'PHASE82_INTERLEAVING_READY' $selector
+                $stepOne = 'GXOS_NET10:PHASE82_COM1_STEP_DELIVERED=0x0000000000000001'
+                Wait-Marker11 $stepOne $deadline $process $stream $logStream $text $buffer
+                Wait-Marker11 'GXOS_NET10:PHASE82_INTERLEAVED_STEP=0x0000000000000001_COM1' `
+                    $deadline $process $stream $logStream $text $buffer
+                $patterns = @(
+                    @('E', 'C', 'E', 'E', 'C'),
+                    @('C', 'E', 'E', 'C', 'E'),
+                    @('E', 'E', 'C', 'E', 'C'))
+                $pattern = $patterns[$sequence - 1]
+                for ($patternIndex = 0; $patternIndex -lt $pattern.Count; $patternIndex++) {
+                    $step = $patternIndex + 2
+                    $stepHex = '0x{0:X16}' -f $step
+                    if ($pattern[$patternIndex] -eq 'C') {
+                        $expected = "GXOS_NET10:PHASE82_EXPECT_COM1_STEP=$stepHex"
+                        Wait-Marker11 $expected $deadline $process $stream $logStream $text $buffer
+                        [byte]$value = 0x60 + $step
+                        Send-Serial11 $client $stream $process $injectionLog `
+                            "PHASE82_COM1_STEP_$step" $value
+                        Wait-Marker11 "GXOS_NET10:PHASE82_COM1_STEP_DELIVERED=$stepHex" `
+                            $deadline $process $stream $logStream $text $buffer
+                        $stepMarker = 'GXOS_NET10:PHASE82_INTERLEAVED_STEP={0}_COM1' -f $stepHex
+                        Wait-Marker11 $stepMarker `
+                            $deadline $process $stream $logStream $text $buffer
+                    } else {
+                        $stepMarker = 'GXOS_NET10:PHASE82_INTERLEAVED_STEP={0}_E1000' -f $stepHex
+                        Wait-Marker11 $stepMarker `
+                            $deadline $process $stream $logStream $text $buffer
+                    }
+                }
+                Wait-Marker11 'GXOS_NET10:PHASE82_COM1_UNSUBSCRIBE_E1000_REMAINS_ACTIVE=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                Wait-Marker11 'GXOS_NET10:PHASE82_E1000_AFTER_COM1_UNSUBSCRIBE=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                Wait-Marker11 'GXOS_NET10:PHASE82_E1000_UNSUBSCRIBE_COM1_REMAINS_ACTIVE=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                $stepSeven = '0x0000000000000007'
+                Wait-Marker11 "GXOS_NET10:PHASE82_EXPECT_COM1_STEP=$stepSeven" `
+                    $deadline $process $stream $logStream $text $buffer
+                Send-Serial11 $client $stream $process $injectionLog `
+                    'PHASE82_COM1_AFTER_E1000_UNSUBSCRIBE' 0x67
+                Wait-Marker11 "GXOS_NET10:PHASE82_COM1_STEP_DELIVERED=$stepSeven" `
+                    $deadline $process $stream $logStream $text $buffer
+                Wait-Marker11 'GXOS_NET10:PHASE82_COM1_AFTER_E1000_UNSUBSCRIBE=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                Wait-Marker11 'GXOS_NET10:PHASE82_TEARDOWN_INDEPENDENCE=1' `
+                    $deadline $process $stream $logStream $text $buffer
+            }
             if (-not [string]::IsNullOrEmpty($PostPhase11Marker)) {
                 Wait-Marker11 $PostPhase11Marker $deadline $process $stream $logStream $text $buffer
             }

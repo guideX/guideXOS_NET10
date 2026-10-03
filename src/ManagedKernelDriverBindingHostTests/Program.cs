@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using GuideXOS.Net10.ManagedKernel;
 
@@ -6,6 +7,123 @@ internal static unsafe class Program
 {
     private const ulong PageSize = KernelArena.PageSize;
     private static uint s_failures;
+
+    private static class InterruptRouteFixture
+    {
+        private const uint SerialEvent = GxManagedKernelInterruptEventV1.EventTypeSerialReceive;
+        private const uint E1000Event = 3;
+        private const uint SerialKind = GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial;
+        private const uint SerialId = GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1;
+        private const uint PciKind = 1;
+        private const uint E1000Id = 0x808610D3;
+        private static ulong s_nextToken;
+        private static ulong s_serialToken;
+        private static ulong s_e1000Token;
+
+        internal static bool SerialActive => s_serialToken != 0;
+        internal static bool E1000Active => s_e1000Token != 0;
+
+        internal static void Reset()
+        {
+            s_nextToken = 0;
+            s_serialToken = 0;
+            s_e1000Token = 0;
+        }
+
+        internal static uint UnsubscribeRaw(ulong token)
+        {
+            delegate* unmanaged<ulong, uint> unsubscribe =
+                (delegate* unmanaged<ulong, uint>)(nuint)
+                    Services().UnsubscribeAddress;
+            return unsubscribe(token);
+        }
+
+        [UnmanagedCallersOnly]
+        internal static uint Subscribe(uint eventType, uint deviceKind,
+                                        uint deviceId, nuint tokenAddress,
+                                        nuint tokenCapacity)
+        {
+            if (tokenAddress == 0 || tokenCapacity < sizeof(ulong))
+                return ManagedKernelContract.InvalidArgument;
+            bool serial = eventType == SerialEvent && deviceKind == SerialKind &&
+                          deviceId == SerialId;
+            bool e1000 = eventType == E1000Event && deviceKind == PciKind &&
+                         deviceId == E1000Id;
+            if (!serial && !e1000) return ManagedKernelContract.InvalidArgument;
+            if ((serial && s_serialToken != 0) || (e1000 && s_e1000Token != 0))
+                return ManagedKernelContract.AlreadyInitialized;
+            ulong token = ++s_nextToken;
+            if (serial) s_serialToken = token;
+            else s_e1000Token = token;
+            *(ulong*)tokenAddress = token;
+            return ManagedKernelContract.ManagedOk;
+        }
+
+        [UnmanagedCallersOnly]
+        internal static uint Unsubscribe(ulong token)
+        {
+            if (token == 0) return ManagedKernelContract.NotFound;
+            if (token == s_serialToken)
+            {
+                s_serialToken = 0;
+                return ManagedKernelContract.ManagedOk;
+            }
+            if (token == s_e1000Token)
+            {
+                s_e1000Token = 0;
+                return ManagedKernelContract.ManagedOk;
+            }
+            return ManagedKernelContract.NotFound;
+        }
+
+        [UnmanagedCallersOnly]
+        internal static uint Drain(uint abiVersion, nuint eventsAddress,
+                                   uint capacity, nuint drainedAddress,
+                                   nuint drainedCapacity)
+        {
+            if (abiVersion != GxManagedKernelInterruptServicesV1.AbiVersionCurrent ||
+                eventsAddress == 0 || capacity < GxManagedKernelInterruptEventV1.ExpectedSize ||
+                drainedAddress == 0 || drainedCapacity < sizeof(uint))
+                return ManagedKernelContract.InvalidArgument;
+            *(uint*)drainedAddress = 0;
+            return ManagedKernelContract.ManagedOk;
+        }
+
+        [UnmanagedCallersOnly]
+        internal static uint QueryStats(uint abiVersion, nuint statsAddress,
+                                        nuint capacity)
+        {
+            return abiVersion == GxManagedKernelInterruptServicesV1.AbiVersionCurrent &&
+                   statsAddress != 0 && capacity >= GxManagedKernelInterruptStatsV1.ExpectedSize
+                ? ManagedKernelContract.ManagedOk
+                : ManagedKernelContract.InvalidArgument;
+        }
+
+        internal static GxManagedKernelInterruptServicesV1 Services()
+        {
+            return new GxManagedKernelInterruptServicesV1
+            {
+                Size = GxManagedKernelInterruptServicesV1.ExpectedSize,
+                AbiVersion = GxManagedKernelInterruptServicesV1.AbiVersionCurrent,
+                ServiceVersion = GxManagedKernelInterruptServicesV1.ServiceVersionCurrent,
+                Architecture = GxManagedKernelInterruptServicesV1.ArchitectureX64,
+                Capabilities = GxManagedKernelInterruptServicesV1.CapabilitySubscribe |
+                    GxManagedKernelInterruptServicesV1.CapabilityUnsubscribe |
+                    GxManagedKernelInterruptServicesV1.CapabilityDrain |
+                    GxManagedKernelInterruptServicesV1.CapabilityQueryStats,
+                EventRecordSize = GxManagedKernelInterruptEventV1.ExpectedSize,
+                QueueCapacityValue = GxManagedKernelInterruptServicesV1.QueueCapacity,
+                MaxDrainValue = GxManagedKernelInterruptServicesV1.MaxDrain,
+                SubscribeAddress = (ulong)(nuint)(delegate* unmanaged<uint, uint, uint,
+                    nuint, nuint, uint>)&Subscribe,
+                UnsubscribeAddress = (ulong)(nuint)(delegate* unmanaged<ulong, uint>)&Unsubscribe,
+                DrainAddress = (ulong)(nuint)(delegate* unmanaged<uint, nuint, uint,
+                    nuint, nuint, uint>)&Drain,
+                QueryStatsAddress = (ulong)(nuint)(delegate* unmanaged<uint, nuint,
+                    nuint, uint>)&QueryStats
+            };
+        }
+    }
 
     private sealed class FakeProvider : IKernelMemoryProvider
     {
@@ -226,9 +344,87 @@ internal static unsafe class Program
                "arena-backed test state returns all provider allocations");
     }
 
+    private static void TestManagedInterruptRouteIdentity()
+    {
+        InterruptRouteFixture.Reset();
+        GxManagedKernelInterruptServicesV1 services = InterruptRouteFixture.Services();
+        ManagedInterruptDispatcher? dispatcher = ManagedInterruptDispatcher.TryCreate(in services);
+        Expect(dispatcher != null, "interrupt route dispatcher accepts the production ABI");
+        if (dispatcher == null) return;
+
+        Expect(!dispatcher.TrySubscribe(3,
+                    GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial,
+                    GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1, out _),
+               "wrong event type does not fall back to the COM1 route");
+        Expect(!dispatcher.TrySubscribe(
+                    GxManagedKernelInterruptEventV1.EventTypeSerialReceive,
+                    GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial,
+                    GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1 + 1, out _),
+               "wrong device identity does not fall back to route zero");
+
+        Expect(dispatcher.TrySubscribe(
+                   GxManagedKernelInterruptEventV1.EventTypeSerialReceive,
+                   GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial,
+                   GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1,
+                   out ulong serialToken),
+               "COM1 route subscribes by its device and event identity");
+        Expect(dispatcher.TrySubscribeE1000(out ulong e1000Token),
+               "E1000 route subscribes independently while COM1 remains active");
+        Expect(serialToken != 0 && e1000Token != 0 && serialToken != e1000Token &&
+                   InterruptRouteFixture.SerialActive && InterruptRouteFixture.E1000Active,
+               "both routes retain distinct live subscription tokens");
+
+        Expect(dispatcher.TryUnsubscribe() && !InterruptRouteFixture.SerialActive &&
+                   InterruptRouteFixture.E1000Active,
+               "unsubscribing COM1 leaves E1000 active");
+        Expect(InterruptRouteFixture.UnsubscribeRaw(serialToken) ==
+                   ManagedKernelContract.NotFound && InterruptRouteFixture.E1000Active,
+               "stale COM1 token cannot remove the E1000 route");
+        Expect(dispatcher.TrySubscribe(
+                   GxManagedKernelInterruptEventV1.EventTypeSerialReceive,
+                   GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial,
+                   GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1,
+                   out ulong replacementSerialToken) &&
+                   replacementSerialToken != serialToken &&
+                   InterruptRouteFixture.E1000Active,
+               "COM1 replacement receives a new token without replacing E1000");
+        Expect(InterruptRouteFixture.UnsubscribeRaw(serialToken) ==
+                   ManagedKernelContract.NotFound &&
+                   InterruptRouteFixture.SerialActive &&
+                   InterruptRouteFixture.E1000Active,
+               "stale COM1 token cannot remove its replacement or E1000");
+        Expect(dispatcher.TryUnsubscribeE1000() &&
+                   !InterruptRouteFixture.E1000Active &&
+                   InterruptRouteFixture.SerialActive,
+               "unsubscribing E1000 leaves the replacement COM1 route active");
+        Expect(InterruptRouteFixture.UnsubscribeRaw(e1000Token) ==
+                   ManagedKernelContract.NotFound &&
+                   InterruptRouteFixture.SerialActive,
+               "stale E1000 token cannot remove COM1");
+        Expect(dispatcher.TrySubscribeE1000(out ulong replacementE1000Token) &&
+                   replacementE1000Token != e1000Token &&
+                   InterruptRouteFixture.SerialActive &&
+                   InterruptRouteFixture.E1000Active,
+               "E1000 replacement receives a new token alongside COM1");
+        Expect(InterruptRouteFixture.UnsubscribeRaw(e1000Token) ==
+                   ManagedKernelContract.NotFound &&
+                   InterruptRouteFixture.SerialActive &&
+                   InterruptRouteFixture.E1000Active,
+               "stale E1000 token cannot remove its replacement or COM1");
+        Expect(dispatcher.TryUnsubscribeE1000() &&
+                   !InterruptRouteFixture.E1000Active &&
+                   InterruptRouteFixture.SerialActive,
+               "replacement E1000 route unsubscribes independently");
+        Expect(dispatcher.TryUnsubscribe() &&
+                   !InterruptRouteFixture.SerialActive &&
+                   !InterruptRouteFixture.E1000Active,
+               "replacement COM1 route unsubscribes independently");
+    }
+
     public static int Main()
     {
         TestPrecedenceAndLifecycle();
+        TestManagedInterruptRouteIdentity();
         if (s_failures != 0)
         {
             Console.WriteLine("MANAGED_KERNEL_DRIVER_BINDING_HOST_TESTS=FAILED failures=" +

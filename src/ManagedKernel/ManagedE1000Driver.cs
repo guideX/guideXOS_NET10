@@ -71,6 +71,7 @@ internal sealed class ManagedE1000Driver
     private uint _phase80LastUnrelatedCause;
     private uint _phase80DeliveryCount;
     private ulong _phase80LastSequence;
+    private uint _phase82TransmitSequence;
     private bool _phase80Requested;
     private bool _interruptSubscribed;
     private ulong _macValue;
@@ -188,6 +189,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase52Passed => _phase52Passed;
     internal bool Phase53Passed => _phase53Passed;
     internal bool Phase80Passed => _phase80Passed;
+    internal uint Phase80DeliveryCount => _phase80DeliveryCount;
 
     internal static void EnablePhase35Mode()
     {
@@ -1207,6 +1209,47 @@ internal sealed class ManagedE1000Driver
             return false;
         _phase80Passed = true;
         return KernelLog.Write("GXOS_NET10:PHASE80_E1000_MANAGED_DELIVERY=4\r\n"u8);
+    }
+
+    internal bool TryRunPhase82Transmit()
+    {
+        ManagedSerialDriver? serial = ManagedSerialDriverSubsystem.Phase82SerialDriver;
+        if (!_phase80Requested || !_phase80Passed || !_interruptSubscribed ||
+            _state != ManagedE1000DriverState.Running || serial == null ||
+            serial.State != ManagedSerialDriverState.Started ||
+            (serial.ReceiveState != ManagedSerialReceiveState.Subscribed &&
+             serial.ReceiveState != ManagedSerialReceiveState.NotSubscribed))
+            return false;
+
+        uint serialBefore = serial.ReceiveCount;
+        uint e1000Before = _phase80DeliveryCount;
+        uint repeat = ++_phase82TransmitSequence;
+        if (!ManagedE1000Protocol.TryBuildPhase80Frame(
+                _phase80Frame, _mac, repeat + 4U) ||
+            !TryTransmitFrame(_phase80Frame, _phase80Frame.Length))
+            return false;
+
+        for (uint poll = 0; poll != Phase80InterruptPollLimit; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchPhase82Batch(
+                    this, out uint delivered, out uint rejected)) return false;
+            if (delivered == 0 && rejected == 0) continue;
+            bool isolated = delivered == 1 && rejected == 0 &&
+                _phase80DeliveryCount == e1000Before + 1U &&
+                serial.ReceiveCount == serialBefore &&
+                ManagedE1000Protocol.TryClassifyInterruptCause(
+                    _phase80LastCause, out _phase80LastUnrelatedCause);
+            return isolated &&
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE82_E1000_SEQUENCE=0x"u8,
+                    _phase80LastSequence) &&
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE82_E1000_DELIVERIES=0x"u8,
+                    _phase80DeliveryCount) &&
+                KernelLog.Write(
+                    "GXOS_NET10:PHASE82_E1000_TXDW_DELIVERED_ONLY=1\r\n"u8);
+        }
+        return false;
     }
 
     private bool TryWaitForPhase80Delivery(out uint delivered, out uint rejected)
