@@ -891,6 +891,7 @@ internal static unsafe class ManagedKernelContract
     private static int s_phase53Mode;
     private static int s_phase80Mode;
     private static int s_phase83Mode;
+    private static int s_phase85ArpMode;
     private static int s_phase82Mode;
     private static int s_framebufferInstalled;
     private static GxManagedKernelFramebufferV1 s_framebuffer;
@@ -2892,6 +2893,7 @@ internal static unsafe class ManagedKernelContract
         {
             if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
                 s_phase80Mode == 0 || s_phase83Mode != 0 ||
+                s_phase85ArpMode != 0 ||
                 s_dmaServicesInstalled == 0 ||
                 !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
                 ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
@@ -2902,12 +2904,30 @@ internal static unsafe class ManagedKernelContract
                 "GXOS_NET10:PHASE83_RX_MODE_SELECTED=1\r\n"u8)
                 ? ManagedOk : InvalidState;
         }
+        if (stage == 34)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_phase80Mode == 0 || s_phase83Mode != 0 ||
+                s_phase85ArpMode != 0 || s_dmaServicesInstalled == 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            s_phase83Mode = 1;
+            s_phase85ArpMode = 1;
+            ManagedE1000Driver.EnablePhase85ArpMode();
+            return KernelLog.Write(
+                "GXOS_NET10:PHASE85_ARP_MODE_SELECTED=1\r\n"u8)
+                ? ManagedOk : InvalidState;
+        }
         if (stage == 33)
         {
             if (s_phase83Mode == 0 || s_phase14Driver == null ||
                 s_phase14Driver.State != ManagedE1000DriverState.Running)
                 return InvalidState;
-            return s_phase14Driver.TryRunPhase83RxProof()
+            bool passed = s_phase85ArpMode != 0
+                ? s_phase14Driver.TryRunPhase85ArpProof()
+                : s_phase14Driver.TryRunPhase83RxProof();
+            return passed
                 ? ManagedOk : InvalidState;
         }
         if (stage == 1)
@@ -2924,7 +2944,7 @@ internal static unsafe class ManagedKernelContract
                  s_phase48Mode == 0 && s_phase49Mode == 0 && s_phase50Mode == 0 &&
                  s_phase51Mode == 0 && s_phase51ResetReuseMode == 0 &&
                  s_phase52Mode == 0 && s_phase53Mode == 0 && s_phase80Mode == 0 &&
-                 s_phase83Mode == 0 &&
+                 s_phase83Mode == 0 && s_phase85ArpMode == 0 &&
                  ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0))
                 return InvalidState;
             ManagedE1000Driver? candidate = ManagedE1000Driver.TryCreate();
@@ -2948,6 +2968,8 @@ internal static unsafe class ManagedKernelContract
             if (phase80Proof && !s_phase14Driver.Phase80Passed)
                 return InvalidState;
             if (s_phase83Mode != 0 && !s_phase14Driver.Phase83Passed)
+                return InvalidState;
+            if (s_phase85ArpMode != 0 && !s_phase14Driver.Phase85ArpPassed)
                 return InvalidState;
             if (!s_phase14Driver.TryStop() ||
                 s_phase14Driver.State != ManagedE1000DriverState.Stopped ||
@@ -2976,6 +2998,7 @@ internal static unsafe class ManagedKernelContract
             s_phase53Mode = 0;
             s_phase80Mode = 0;
             s_phase83Mode = 0;
+            s_phase85ArpMode = 0;
             bool rxProof = s_phase14Driver.RxProofReceived;
             bool phase15RxProof = s_phase14Driver.RxPhase15Received;
             bool phase16Proof = s_phase14Driver.Phase16Passed;

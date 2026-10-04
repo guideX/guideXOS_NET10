@@ -11,6 +11,7 @@ param(
     [switch]$EnablePhase80E1000,
     [switch]$EnablePhase82,
     [switch]$EnablePhase83,
+    [switch]$EnablePhase85Arp,
     [string]$Phase15InjectorPath = '',
     [ValidateSet('dgram', 'user')]
     [string]$Phase15NetworkBackend = 'dgram',
@@ -79,6 +80,13 @@ if ($EnablePhase83 -and (-not $EnablePhase80E1000 -or $EnablePhase15Rx)) {
 }
 if ($EnablePhase83 -and $RunCount -ne 3) {
     throw 'Phase 83 hardware acceptance requires exactly three fresh boots.'
+}
+if ($EnablePhase85Arp -and (-not $EnablePhase83 -or
+    -not $EnablePhase80E1000 -or $EnablePhase15Rx)) {
+    throw '-EnablePhase85Arp requires the Phase 83 local dgram/e1000e receive path.'
+}
+if ($EnablePhase85Arp -and $RunCount -ne 3) {
+    throw 'Phase 85 hardware acceptance requires exactly three fresh boots.'
 }
 if ($EnablePhase82 -and -not $EnablePhase80E1000) {
     throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
@@ -621,6 +629,107 @@ function New-Phase83RxFrame11([string]$destinationMac, [uint32]$sequence) {
     $frame[$sequenceOffset + 2] = [byte](($frameSequence -shr 8) -band 0xFF)
     $frame[$sequenceOffset + 3] = [byte]($frameSequence -band 0xFF)
     return ,$frame
+}
+
+function New-Phase85ArpFrame11([uint32]$sequence) {
+    Require11 ($sequence -ge 1 -and $sequence -le 4) `
+        'Phase 85 ARP sequence must be in the bounded range 1 through 4.'
+    [byte[]]$frame = New-Object byte[] 60
+    for ($index = 0; $index -lt 6; $index++) { $frame[$index] = 0xFF }
+    [byte[]]$senderMac = 0x02, 0x15, 0, 0, 0, [byte]$sequence
+    [Array]::Copy($senderMac, 0, $frame, 6, 6)
+    $frame[12] = 0x08
+    $frame[13] = 0x06
+    $frame[15] = 0x01
+    $frame[16] = 0x08
+    $frame[17] = 0x00
+    $frame[18] = 6
+    $frame[19] = 4
+    $frame[21] = 1
+    [Array]::Copy($senderMac, 0, $frame, 22, 6)
+    $frame[28] = 10
+    $frame[29] = 15
+    $frame[31] = [byte]($sequence + 1)
+    $frame[38] = 10
+    $frame[39] = 15
+    $frame[40] = 0
+    if ($sequence -le 3) {
+        $frame[41] = 1
+    } else {
+        $frame[41] = 99
+    }
+    return ,$frame
+}
+
+function Receive-Phase85QemuDatagram11([Net.Sockets.UdpClient]$peerUdp,
+                                       [int]$timeoutMs) {
+    $peerUdp.Client.ReceiveTimeout = [Math]::Max(1, $timeoutMs)
+    $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
+    try {
+        [byte[]]$received = $peerUdp.Receive([ref]$remote)
+        return ,$received
+    } catch [Net.Sockets.SocketException] {
+        if ($_.Exception.SocketErrorCode -in @(
+            [Net.Sockets.SocketError]::TimedOut,
+            [Net.Sockets.SocketError]::WouldBlock)) { return $null }
+        throw
+    }
+}
+
+function Write-Phase85QemuDatagram11([string]$captureLogPath,
+                                      [string]$captureBinaryPath,
+                                      [uint32]$sequence,
+                                      [byte[]]$frame) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $frameHash = ([BitConverter]::ToString(
+            $hash.ComputeHash($frame))).Replace('-', '')
+    } finally { $hash.Dispose() }
+    $hex = ([BitConverter]::ToString($frame)).Replace('-', '')
+    Add-Content -LiteralPath $captureLogPath -Encoding ascii -Value (
+        'PHASE85_QEMU_TX_DATAGRAM sequence={0} length={1} sha256={2} hex={3}' -f `
+        $sequence, $frame.Length, $frameHash, $hex)
+    $stream = [IO.File]::Open($captureBinaryPath, [IO.FileMode]::Append,
+        [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $lengthPrefix = [BitConverter]::GetBytes([uint32]$frame.Length)
+        $stream.Write($lengthPrefix, 0, $lengthPrefix.Length)
+        $stream.Write($frame, 0, $frame.Length)
+        $stream.Flush()
+    } finally { $stream.Dispose() }
+}
+
+function Test-Phase85ArpReply11([byte[]]$reply, [byte[]]$guestMac,
+                                 [byte[]]$request) {
+    if ($reply.Length -lt 42 || $request.Length -lt 42 ||
+        $reply[12] -ne 0x08 -or $reply[13] -ne 0x06 ||
+        $reply[14] -ne 0 -or $reply[15] -ne 1 ||
+        $reply[16] -ne 0x08 -or $reply[17] -ne 0 ||
+        $reply[18] -ne 6 -or $reply[19] -ne 4 ||
+        $reply[20] -ne 0 || $reply[21] -ne 2) { return $false }
+    for ($index = 0; $index -lt 6; $index++) {
+        if ($reply[$index] -ne $request[6 + $index] -or
+            $reply[6 + $index] -ne $guestMac[$index] -or
+            $reply[22 + $index] -ne $guestMac[$index] -or
+            $reply[32 + $index] -ne $request[22 + $index]) { return $false }
+    }
+    for ($index = 0; $index -lt 4; $index++) {
+        if ($reply[28 + $index] -ne $request[38 + $index] -or
+            $reply[38 + $index] -ne $request[28 + $index]) { return $false }
+    }
+    return $true
+}
+
+function Test-Phase85AnyArpReplyFromGuest11([byte[]]$frame,
+                                             [byte[]]$guestMac) {
+    if ($frame.Length -lt 42 || $frame[12] -ne 0x08 ||
+        $frame[13] -ne 0x06 || $frame[20] -ne 0 || $frame[21] -ne 2) {
+        return $false
+    }
+    for ($index = 0; $index -lt 6; $index++) {
+        if ($frame[6 + $index] -ne $guestMac[$index]) { return $false }
+    }
+    return $true
 }
 
 function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
@@ -3357,6 +3466,14 @@ if ($EnablePhase82) {
         'GXOS_NET10:PHASE82_TEARDOWN_INDEPENDENCE=1',
         'GXOS_NET10:PHASE82_E1000_TXDW_DELIVERED_ONLY=1')
 }
+if ($EnablePhase85Arp) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE85_ARP_MODE_SELECTED=1',
+        'GXOS_NET10:PHASE85_ARP_HANDLER_READY=1',
+        'GXOS_NET10:PHASE85_ARP_RX_READY=1',
+        'GXOS_NET10:PHASE85_ARP_REQUEST_NOT_FOR_US=1',
+        'GXOS_NET10:PHASE85_HARDWARE_ARP_INGRESS_PASS=1')
+}
 
 $owned = @()
 try {
@@ -3369,6 +3486,12 @@ try {
         $serial = Join-Path $run 'serial.log'
         $screenPath = Join-Path $run 'qemu-screen.ppm'
         $injections = Join-Path $run 'injections.log'
+        $arpTxCaptureLog = Join-Path $run 'arp-tx-capture.log'
+        $arpTxCaptureBinary = Join-Path $run 'arp-tx-capture.bin'
+        if ($EnablePhase85Arp) {
+            [IO.File]::WriteAllText($arpTxCaptureLog, '')
+            [IO.File]::WriteAllBytes($arpTxCaptureBinary, [byte[]]@())
+        }
         $timelinePath = Join-Path $run 'timeline.log'
         $commandLinePath = Join-Path $run 'qemu-commandline.log'
         $firmwareIdentityPath = Join-Path $run 'firmware-identity.log'
@@ -3529,41 +3652,138 @@ try {
             }
             Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS' $deadline $process $stream $logStream $text $buffer
             if ($EnablePhase83) {
-                Wait-Marker11 'GXOS_NET10:PHASE83_RX_READY=1' `
-                    $deadline $process $stream $logStream $text $buffer
+                if ($EnablePhase85Arp) {
+                    Wait-Marker11 'GXOS_NET10:PHASE85_ARP_RX_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                } else {
+                    Wait-Marker11 'GXOS_NET10:PHASE83_RX_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                }
                 $macMatch = [regex]::Match($text.ToString(),
                     'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
                 Require11 $macMatch.Success 'Phase 83 did not publish the runtime e1000 MAC.'
                 $destinationMac = ($macMatch.Groups[1].Value +
                                    $macMatch.Groups[2].Value).ToUpperInvariant()
-                for ($frameSequence = 1; $frameSequence -le 4; $frameSequence++) {
-                    [byte[]]$frame = New-Phase83RxFrame11 `
-                        $destinationMac ([uint32]$frameSequence)
-                    $sent = $peerUdp.Send($frame, $frame.Length,
-                                          '127.0.0.1', $rxPort)
-                    Require11 ($sent -eq $frame.Length) `
-                        'Phase 83 local UDP injector sent a short Ethernet frame.'
-                    $hash = [Security.Cryptography.SHA256]::Create()
-                    try {
-                        $frameHash = ([BitConverter]::ToString(
-                            $hash.ComputeHash($frame))).Replace('-', '')
-                    } finally { $hash.Dispose() }
-                    $injectionLog.WriteLine((
-                        'PHASE83_FRAME_INJECTED=PASS sequence={0} length={1} destination={2} source=021500000001 ethertype=88B5 sentinel="guideXOS Phase83 RX" hash={3} backend=dgram host=127.0.0.1 guest_port={4} source_port={5}' -f `
-                        $frameSequence, $frame.Length, $destinationMac,
-                        $frameHash, $rxPort, $peerPort))
+                if ($EnablePhase85Arp) {
+                    $guestMacBytes = [byte[]]@(
+                        [Convert]::ToByte($destinationMac.Substring(0, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(2, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(4, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(6, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(8, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(10, 2), 16))
+                    $localIpMatch = [regex]::Match($text.ToString(),
+                        'GXOS_NET10:PHASE85_LOCAL_IPV4=0x([0-9A-Fa-f]{16})')
+                    Require11 ($localIpMatch.Success -and
+                        [Convert]::ToUInt32($localIpMatch.Groups[1].Value, 16) -eq 0x0A0F0001) `
+                        'Phase 85 ARP handler did not publish the existing local IPv4 authority.'
+                    $replyCount = 0
+                    for ($frameSequence = 1; $frameSequence -le 4; $frameSequence++) {
+                        [byte[]]$frame = New-Phase85ArpFrame11 `
+                            ([uint32]$frameSequence)
+                        $sent = $peerUdp.Send($frame, $frame.Length,
+                                              '127.0.0.1', $rxPort)
+                        Require11 ($sent -eq $frame.Length) `
+                            'Phase 85 local UDP injector sent a short ARP frame.'
+                        $hash = [Security.Cryptography.SHA256]::Create()
+                        try {
+                            $frameHash = ([BitConverter]::ToString(
+                                $hash.ComputeHash($frame))).Replace('-', '')
+                        } finally { $hash.Dispose() }
+                        $senderMacText = ([BitConverter]::ToString(
+                            $frame[6..11])).Replace('-', '')
+                        $senderIpText = '10.15.0.{0}' -f ($frameSequence + 1)
+                        $targetIpText = if ($frameSequence -le 3) {
+                            '10.15.0.1'
+                        } else { '10.15.0.99' }
+                        $injectionLog.WriteLine((
+                            'PHASE85_ARP_REQUEST_INJECTED=PASS sequence={0} length={1} ethernet_destination=FFFFFFFFFFFF guest_mac={2} requester_mac={3} requester_ipv4={4} target_ipv4={5} ethertype=0806 htype=0001 ptype=0800 hlen=6 plen=4 opcode=1 sha256={6} backend=dgram host=127.0.0.1 guest_port={7} source_port={8}' -f `
+                            $frameSequence, $frame.Length, $destinationMac,
+                            $senderMacText, $senderIpText, $targetIpText,
+                            $frameHash, $rxPort, $peerPort))
+                        $injectionLog.Flush()
+                        Write-Timeline11 $timeline 'PHASE85_LOCAL_ARP_REQUEST_INJECTED' `
+                            "sequence=$frameSequence requester=$senderMacText/$senderIpText target=$targetIpText sha256=$frameHash backend=dgram"
+                        $accepted = 'GXOS_NET10:PHASE85_ARP_DELIVERY=0x{0:X16}' -f $frameSequence
+                        Wait-Marker11 $accepted $deadline $process $stream $logStream $text $buffer
+                        if ($frameSequence -le 3) {
+                            $replyDeadline = [DateTime]::UtcNow.AddSeconds(8)
+                            $reply = $null
+                            while ([DateTime]::UtcNow -lt $replyDeadline -and $null -eq $reply) {
+                                [byte[]]$candidate = Receive-Phase85QemuDatagram11 $peerUdp 200
+                                if ($null -eq $candidate) { continue }
+                                Write-Phase85QemuDatagram11 $arpTxCaptureLog `
+                                    $arpTxCaptureBinary $frameSequence $candidate
+                                if (Test-Phase85ArpReply11 $candidate $guestMacBytes $frame) {
+                                    $reply = $candidate
+                                }
+                            }
+                            Require11 ($null -ne $reply) `
+                                "Phase 85 ARP reply $frameSequence was not captured from QEMU E1000 TX."
+                            $replyCount++
+                            $replyHasher = [Security.Cryptography.SHA256]::Create()
+                            try {
+                                $replyHash = ([BitConverter]::ToString(
+                                    $replyHasher.ComputeHash($reply))).Replace('-', '')
+                            } finally { $replyHasher.Dispose() }
+                            $replyHex = ([BitConverter]::ToString($reply)).Replace('-', '')
+                            $injectionLog.WriteLine((
+                                'PHASE85_QEMU_ARP_REPLY_CAPTURED=PASS sequence={0} destination={1} source={2} ethertype=0806 opcode=2 sender_ipv4=10.15.0.1 target_ipv4={3} capture_sha256={4} bytes={5}' -f `
+                                $frameSequence, $senderMacText, $destinationMac,
+                                $senderIpText, $replyHash, $replyHex))
+                            $injectionLog.Flush()
+                            Write-Timeline11 $timeline 'PHASE85_QEMU_ARP_REPLY_CAPTURED' `
+                                "sequence=$frameSequence source=$destinationMac opcode=2 sha256=$replyHash"
+                        } else {
+                            $quietDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
+                            while ([DateTime]::UtcNow -lt $quietDeadline) {
+                                [byte[]]$candidate = Receive-Phase85QemuDatagram11 $peerUdp 100
+                                if ($null -eq $candidate) { continue }
+                                Write-Phase85QemuDatagram11 $arpTxCaptureLog `
+                                    $arpTxCaptureBinary $frameSequence $candidate
+                                Require11 (-not (Test-Phase85AnyArpReplyFromGuest11 `
+                                    $candidate $guestMacBytes)) `
+                                    'Phase 85 not-for-us ARP request produced a local reply.'
+                            }
+                        }
+                    }
+                    Require11 ($replyCount -eq 3) 'Phase 85 did not capture exactly three local ARP replies.'
+                    Wait-Marker11 'GXOS_NET10:PHASE85_HARDWARE_ARP_INGRESS_PASS=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $injectionLog.WriteLine(
+                        'PHASE85_ARP_INJECTION_SUMMARY=PASS requests=4 local_targets=3 not_for_us=1 captured_replies={0} external_network=false' -f `
+                        $replyCount)
                     $injectionLog.Flush()
-                    Write-Timeline11 $timeline 'PHASE83_LOCAL_RX_FRAME_INJECTED' `
-                        "sequence=$frameSequence length=$($frame.Length) destination=$destinationMac sha256=$frameHash backend=dgram"
-                    $accepted = 'GXOS_NET10:PHASE83_RX_ACCEPTED=0x{0:X16}' -f $frameSequence
-                    Wait-Marker11 $accepted $deadline $process $stream $logStream $text $buffer
+                } else {
+                    for ($frameSequence = 1; $frameSequence -le 4; $frameSequence++) {
+                        [byte[]]$frame = New-Phase83RxFrame11 `
+                            $destinationMac ([uint32]$frameSequence)
+                        $sent = $peerUdp.Send($frame, $frame.Length,
+                                              '127.0.0.1', $rxPort)
+                        Require11 ($sent -eq $frame.Length) `
+                            'Phase 83 local UDP injector sent a short Ethernet frame.'
+                        $hash = [Security.Cryptography.SHA256]::Create()
+                        try {
+                            $frameHash = ([BitConverter]::ToString(
+                                $hash.ComputeHash($frame))).Replace('-', '')
+                        } finally { $hash.Dispose() }
+                        $injectionLog.WriteLine((
+                            'PHASE83_FRAME_INJECTED=PASS sequence={0} length={1} destination={2} source=021500000001 ethertype=88B5 sentinel="guideXOS Phase83 RX" hash={3} backend=dgram host=127.0.0.1 guest_port={4} source_port={5}' -f `
+                            $frameSequence, $frame.Length, $destinationMac,
+                            $frameHash, $rxPort, $peerPort))
+                        $injectionLog.Flush()
+                        Write-Timeline11 $timeline 'PHASE83_LOCAL_RX_FRAME_INJECTED' `
+                            "sequence=$frameSequence length=$($frame.Length) destination=$destinationMac sha256=$frameHash backend=dgram"
+                        $accepted = 'GXOS_NET10:PHASE83_RX_ACCEPTED=0x{0:X16}' -f $frameSequence
+                        Wait-Marker11 $accepted $deadline $process $stream $logStream $text $buffer
+                    }
+                    Wait-Marker11 'GXOS_NET10:PHASE83_RX_MANAGED_PROOF=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $injectionLog.WriteLine(
+                        'PHASE83_INJECTION_SUMMARY=PASS attempted=4 frame_length=60 destination={0} backend=dgram external_network=false' -f `
+                        $destinationMac)
+                    $injectionLog.Flush()
                 }
-                Wait-Marker11 'GXOS_NET10:PHASE83_RX_MANAGED_PROOF=1' `
-                    $deadline $process $stream $logStream $text $buffer
-                $injectionLog.WriteLine(
-                    'PHASE83_INJECTION_SUMMARY=PASS attempted=4 frame_length=60 destination={0} backend=dgram external_network=false' -f `
-                    $destinationMac)
-                $injectionLog.Flush()
             }
             if ($EnablePhase82) {
                 Wait-Marker11 'GXOS_NET10:PHASE82_INTERLEAVING_READY=1' `
@@ -5718,7 +5938,12 @@ try {
         $serialHash = (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant()
         $injectionHash = (Get-FileHash -LiteralPath $injections -Algorithm SHA256).Hash.ToUpperInvariant()
         $timelineHash = (Get-FileHash -LiteralPath $timelinePath -Algorithm SHA256).Hash.ToUpperInvariant()
-        Write-Output ("MANAGED_KERNEL_PHASE11_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} timeline_sha256={5} serial={6}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $timelineHash, $serial)
+        if ($EnablePhase85Arp) {
+            $arpCaptureHash = (Get-FileHash -LiteralPath $arpTxCaptureBinary -Algorithm SHA256).Hash.ToUpperInvariant()
+            Write-Output ("MANAGED_KERNEL_PHASE85_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} arp_tx_capture_sha256={5} timeline_sha256={6} serial={7}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $arpCaptureHash, $timelineHash, $serial)
+        } else {
+            Write-Output ("MANAGED_KERNEL_PHASE11_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} timeline_sha256={5} serial={6}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $timelineHash, $serial)
+        }
     }
 } finally {
     foreach ($process in $owned) { Stop-OwnedQemu11 $process }

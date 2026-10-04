@@ -2,10 +2,21 @@ using System;
 
 namespace GuideXOS.Net10.ManagedKernel;
 
+internal interface IManagedArpEthernet
+{
+    bool TryTransmit(ushort etherType, byte[] destination, byte[] payload,
+                     int payloadLength);
+    bool TryTransmitBroadcast(ushort etherType, byte[] payload,
+                              int payloadLength);
+    bool TryReceiveAndDispatch(ManagedArpLayer arp,
+                               out ManagedArpHandleResult result);
+    bool TryVerifyTransportAfterGc();
+}
+
 internal sealed class ManagedArpLayer
 {
     private const int MaximumProtocolFrames = 16;
-    private readonly ManagedEthernetLayer _ethernet;
+    private readonly IManagedArpEthernet _ethernet;
     private readonly ManagedArpCache _cache = new();
     private ulong _localMacValue;
     private readonly byte[] _localMac = new byte[ManagedEthernetProtocol.MacLength];
@@ -23,7 +34,7 @@ internal sealed class ManagedArpLayer
     private uint _pendingIpv4;
     private bool _responderReplySent;
 
-    internal ManagedArpLayer(ManagedEthernetLayer ethernet)
+    internal ManagedArpLayer(IManagedArpEthernet ethernet)
     {
         _ethernet = ethernet;
         _broadcastMac.AsSpan().Fill(0xFF);
@@ -99,26 +110,17 @@ internal sealed class ManagedArpLayer
     }
 
     internal ManagedArpHandleResult TryHandleEthernetArp(
-        ReadOnlySpan<byte> frame, int destinationOffset, int sourceOffset,
-        int payloadOffset, int payloadLength)
+        in ManagedEthernetFrame ethernetFrame,
+        out ManagedArpReceiveMetadata metadata)
     {
-        if (destinationOffset < 0 || sourceOffset < 0 ||
-            payloadOffset < 0 || destinationOffset > frame.Length -
-            ManagedEthernetProtocol.MacLength || sourceOffset > frame.Length -
-            ManagedEthernetProtocol.MacLength || payloadLength < 0 ||
-            payloadOffset > frame.Length - payloadLength)
-            return ManagedArpHandleResult.Invalid;
-
-        ReadOnlySpan<byte> ethernetDestination = frame.Slice(
-            destinationOffset, ManagedEthernetProtocol.MacLength);
-        ReadOnlySpan<byte> ethernetSource = frame.Slice(
-            sourceOffset, ManagedEthernetProtocol.MacLength);
-        ReadOnlySpan<byte> payload = frame.Slice(payloadOffset, payloadLength);
-        if (!_active || !ManagedArpProtocol.TryParse(payload,
+        metadata = default;
+        if (ethernetFrame.EtherType != ManagedEthernetProtocol.ArpEtherType ||
+            !_active || !ManagedArpProtocol.TryParse(ethernetFrame.Payload,
                                                      out ManagedArpPacket packet) ||
-            !ethernetSource.SequenceEqual(packet.SenderMac) ||
-            !ManagedEthernetProtocol.IsUsableSourceMac(ethernetSource))
+            !ethernetFrame.Source.SequenceEqual(packet.SenderMac) ||
+            !ManagedEthernetProtocol.IsUsableSourceMac(ethernetFrame.Source))
             return ManagedArpHandleResult.Invalid;
+        metadata = new ManagedArpReceiveMetadata(in ethernetFrame, in packet);
         if (!IsUsableIpv4(_localIpv4))
             return ManagedArpHandleResult.Ignored;
 
@@ -131,7 +133,7 @@ internal sealed class ManagedArpLayer
         if (packet.Operation == ManagedArpProtocol.OperationReply)
         {
             if (!_pending || !ManagedArpProtocol.IsPendingReplyMatch(
-                    packet, ethernetSource, ethernetDestination,
+                    packet, ethernetFrame.Source, ethernetFrame.Destination,
                     localMac, localIpv4, _pendingIpv4))
                 return ManagedArpHandleResult.Ignored;
 
@@ -147,9 +149,13 @@ internal sealed class ManagedArpLayer
             return ManagedArpHandleResult.ReplySatisfied;
         }
 
+        if (packet.SenderIpv4.SequenceEqual(localIpv4))
+            return ManagedArpHandleResult.Ignored;
+        if (!packet.TargetIpv4.SequenceEqual(localIpv4))
+            return ManagedArpHandleResult.RequestNotForUs;
         if (!ManagedArpProtocol.IsRequestForLocal(
-                packet, ethernetSource, ethernetDestination, localIpv4) ||
-            packet.SenderIpv4.SequenceEqual(localIpv4))
+                packet, ethernetFrame.Source, ethernetFrame.Destination,
+                localIpv4))
             return ManagedArpHandleResult.Ignored;
         if (!KernelLog.Write("GXOS_NET10:MANAGED_ARP_REQUEST_FOR_LOCAL\r\n"u8))
             return ManagedArpHandleResult.Failed;

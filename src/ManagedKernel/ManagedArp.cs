@@ -28,6 +28,54 @@ internal readonly ref struct ManagedArpPacket
     }
 }
 
+/* Scalar snapshot copied while the Ethernet receive buffer is still owned by
+   the managed layer.  This record never carries a view into recyclable DMA
+   storage. */
+internal readonly struct ManagedArpReceiveMetadata
+{
+    internal readonly ulong EthernetDestination;
+    internal readonly ulong EthernetSource;
+    internal readonly ushort EtherType;
+    internal readonly ushort PayloadLength;
+    internal readonly ushort HardwareType;
+    internal readonly ushort ProtocolType;
+    internal readonly byte HardwareLength;
+    internal readonly byte ProtocolLength;
+    internal readonly ushort Operation;
+    internal readonly ulong SenderMac;
+    internal readonly uint SenderIpv4;
+    internal readonly ulong TargetMac;
+    internal readonly uint TargetIpv4;
+
+    internal ManagedArpReceiveMetadata(in ManagedEthernetFrame ethernet,
+                                       in ManagedArpPacket packet)
+    {
+        EthernetDestination = ReadMac(ethernet.Destination);
+        EthernetSource = ReadMac(ethernet.Source);
+        EtherType = ethernet.EtherType;
+        PayloadLength = (ushort)ethernet.Payload.Length;
+        HardwareType = packet.HardwareType;
+        ProtocolType = packet.ProtocolType;
+        HardwareLength = packet.HardwareLength;
+        ProtocolLength = packet.ProtocolLength;
+        Operation = packet.Operation;
+        SenderMac = ReadMac(packet.SenderMac);
+        SenderIpv4 = ManagedEthernetProtocol.ReadUInt32Network(
+            packet.SenderIpv4, 0);
+        TargetMac = ReadMac(packet.TargetMac);
+        TargetIpv4 = ManagedEthernetProtocol.ReadUInt32Network(
+            packet.TargetIpv4, 0);
+    }
+
+    private static ulong ReadMac(ReadOnlySpan<byte> mac)
+    {
+        ulong value = 0;
+        for (int index = 0; index != mac.Length; ++index)
+            value = (value << 8) | mac[index];
+        return value;
+    }
+}
+
 internal static class ManagedArpProtocol
 {
     internal const int PayloadLength = 28;
@@ -296,5 +344,6 @@ internal enum ManagedArpHandleResult : byte
     Ignored = 1,
     ReplySatisfied = 2,
     ResponderReplySent = 3,
-    Failed = 4
+    Failed = 4,
+    RequestNotForUs = 5
 }

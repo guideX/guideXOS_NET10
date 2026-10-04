@@ -14,5 +14,6 @@
     <Compile Include="..\ManagedKernel\ManagedInterruptEvent.cs" Link="ManagedInterruptEvent.cs" />
     <Compile Include="..\ManagedKernel\ManagedEthernet.cs" Link="ManagedEthernet.cs" />
     <Compile Include="..\ManagedKernel\ManagedArp.cs" Link="ManagedArp.cs" />
+    <Compile Include="..\ManagedKernel\ManagedArpLayer.cs" Link="ManagedArpLayer.cs" />
   </ItemGroup>
 </Project>

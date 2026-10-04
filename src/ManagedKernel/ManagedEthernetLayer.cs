@@ -2,7 +2,7 @@ using System;
 
 namespace GuideXOS.Net10.ManagedKernel;
 
-internal sealed class ManagedEthernetLayer
+internal sealed class ManagedEthernetLayer : IManagedArpEthernet
 {
     internal const uint ReceivePollLimit = 1000000000;
     internal const uint Phase34ReceivePollLimit = 4096;
@@ -338,6 +338,10 @@ internal sealed class ManagedEthernetLayer
         return _transport.TryTransmitFrame(_txFrame, frameLength);
     }
 
+    bool IManagedArpEthernet.TryTransmit(ushort etherType, byte[] destination,
+                                         byte[] payload, int payloadLength) =>
+        TryTransmit(etherType, destination, payload, payloadLength);
+
     internal bool TryTransmitBroadcast(ushort etherType, byte[] payload,
                                         int payloadLength)
     {
@@ -352,6 +356,10 @@ internal sealed class ManagedEthernetLayer
         }
         return _transport.TryTransmitFrame(_txFrame, frameLength);
     }
+
+    bool IManagedArpEthernet.TryTransmitBroadcast(ushort etherType,
+        byte[] payload, int payloadLength) =>
+        TryTransmitBroadcast(etherType, payload, payloadLength);
 
     internal bool TryReceiveAndDispatch(ManagedArpLayer arp,
                                          out ManagedArpHandleResult result)
@@ -371,10 +379,15 @@ internal sealed class ManagedEthernetLayer
         }
         ManagedEthernetReceiveResult dispatch = TryDispatchFrame(
             _rxFrame.AsSpan(0, frameLength), arp,
-            out ManagedNetworkDispatchResult _, out result);
+            out ManagedNetworkDispatchResult _, out result,
+            out ManagedArpReceiveMetadata _);
         return dispatch != ManagedEthernetReceiveResult.DispatchFailed &&
                dispatch != ManagedEthernetReceiveResult.DriverError;
     }
+
+    bool IManagedArpEthernet.TryReceiveAndDispatch(
+        ManagedArpLayer arp, out ManagedArpHandleResult result) =>
+        TryReceiveAndDispatch(arp, out result);
 
     internal bool TryReceiveAndDispatch(out ManagedNetworkDispatchResult result)
     {
@@ -393,7 +406,8 @@ internal sealed class ManagedEthernetLayer
         }
         ManagedEthernetReceiveResult dispatch = TryDispatchFrame(
             _rxFrame.AsSpan(0, frameLength), _arp,
-            out result, out ManagedArpHandleResult _);
+            out result, out ManagedArpHandleResult _,
+            out ManagedArpReceiveMetadata _);
         return dispatch != ManagedEthernetReceiveResult.DispatchFailed &&
                dispatch != ManagedEthernetReceiveResult.DriverError;
     }
@@ -404,6 +418,19 @@ internal sealed class ManagedEthernetLayer
     internal ManagedEthernetReceiveResult ProcessDriverReceivedFrame(
         ushort frameLength)
     {
+        return ProcessDriverReceivedFrame(frameLength,
+            out ManagedNetworkDispatchResult _,
+            out ManagedArpHandleResult _, out ManagedArpReceiveMetadata _);
+    }
+
+    internal ManagedEthernetReceiveResult ProcessDriverReceivedFrame(
+        ushort frameLength, out ManagedNetworkDispatchResult networkResult,
+        out ManagedArpHandleResult arpResult,
+        out ManagedArpReceiveMetadata arpMetadata)
+    {
+        networkResult = ManagedNetworkDispatchResult.Invalid;
+        arpResult = ManagedArpHandleResult.Invalid;
+        arpMetadata = default;
         if (!_accepting || frameLength > _rxFrame.Length)
             return ManagedEthernetReceiveResult.DriverError;
         if (frameLength == 0)
@@ -412,7 +439,8 @@ internal sealed class ManagedEthernetLayer
             return ManagedEthernetReceiveResult.MalformedFrame;
         }
         return TryDispatchFrame(_rxFrame.AsSpan(0, frameLength), _arp,
-                                out _, out _);
+                                out networkResult, out arpResult,
+                                out arpMetadata);
     }
 
     internal void RecordDriverRejectedFrame()
@@ -432,13 +460,23 @@ internal sealed class ManagedEthernetLayer
         return ProcessDriverReceivedFrame((ushort)frame.Length);
     }
 
+    internal bool TryEnablePhase85ArpAcceptance()
+    {
+        return _arp.TryInstallLocalIpv4(_arp.LocalIpv4);
+    }
+
+    internal uint LocalIpv4Value =>
+        ManagedEthernetProtocol.ReadUInt32Network(_arp.LocalIpv4, 0);
+
     private ManagedEthernetReceiveResult TryDispatchFrame(
         ReadOnlySpan<byte> frame, ManagedArpLayer arp,
         out ManagedNetworkDispatchResult networkResult,
-        out ManagedArpHandleResult arpResult)
+        out ManagedArpHandleResult arpResult,
+        out ManagedArpReceiveMetadata arpMetadata)
     {
         networkResult = ManagedNetworkDispatchResult.Invalid;
         arpResult = ManagedArpHandleResult.Invalid;
+        arpMetadata = default;
         _receivedFrameCount++;
         if (frame.Length < ManagedEthernetProtocol.HeaderLength ||
             frame.Length > ManagedEthernetProtocol.MaximumFrameLength ||
@@ -474,8 +512,7 @@ internal sealed class ManagedEthernetLayer
         if (dispatchKind == ManagedEthernetDispatchKind.Arp)
         {
             arpResult = arp.TryHandleEthernetArp(
-                frame, 0, 6, ManagedEthernetProtocol.HeaderLength,
-                parsed.Payload.Length);
+                in parsed, out arpMetadata);
             if (arpResult == ManagedArpHandleResult.ReplySatisfied)
             {
                 _ipv4.TryReleasePendingAfterArp();
@@ -488,6 +525,11 @@ internal sealed class ManagedEthernetLayer
                 return ManagedEthernetReceiveResult.Consumed;
             }
             if (arpResult == ManagedArpHandleResult.Ignored)
+            {
+                networkResult = ManagedNetworkDispatchResult.Ignored;
+                return ManagedEthernetReceiveResult.Consumed;
+            }
+            if (arpResult == ManagedArpHandleResult.RequestNotForUs)
             {
                 networkResult = ManagedNetworkDispatchResult.Ignored;
                 return ManagedEthernetReceiveResult.Consumed;
@@ -541,6 +583,9 @@ internal sealed class ManagedEthernetLayer
     {
         return _transport.TryVerifyProtocolGcSurvival();
     }
+
+    bool IManagedArpEthernet.TryVerifyTransportAfterGc() =>
+        TryVerifyTransportAfterGc();
 
     internal bool TryStop()
     {

@@ -53,6 +53,7 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase53ModeEnabled;
     private static bool s_phase80ModeEnabled;
     private static bool s_phase83ModeEnabled;
+    private static bool s_phase85ArpModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -79,10 +80,13 @@ internal sealed class ManagedE1000Driver
     private uint _phase83LastDescriptorErrors;
     private uint _phase83LastFrameLength;
     private uint _phase83LastDescriptorIndex;
+    private uint _phase85ArpDeliveryCount;
+    private uint _phase85ReplyTxCount;
     private ulong _phase80LastSequence;
     private uint _phase82TransmitSequence;
     private bool _phase80Requested;
     private bool _phase83Requested;
+    private bool _phase85ArpRequested;
     private bool _interruptSubscribed;
     private ulong _macValue;
     private bool _phase16Passed;
@@ -152,6 +156,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase53Requested;
     private bool _phase80Passed;
     private bool _phase83Passed;
+    private bool _phase85ArpPassed;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -201,6 +206,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase53Passed => _phase53Passed;
     internal bool Phase80Passed => _phase80Passed;
     internal bool Phase83Passed => _phase83Passed;
+    internal bool Phase85ArpPassed => _phase85ArpPassed;
     internal uint Phase80DeliveryCount => _phase80DeliveryCount;
 
     internal static void EnablePhase35Mode()
@@ -313,6 +319,12 @@ internal sealed class ManagedE1000Driver
         s_phase83ModeEnabled = true;
     }
 
+    internal static void EnablePhase85ArpMode()
+    {
+        s_phase83ModeEnabled = true;
+        s_phase85ArpModeEnabled = true;
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -356,6 +368,7 @@ internal sealed class ManagedE1000Driver
         _phase53Requested = s_phase53ModeEnabled;
         _phase80Requested = s_phase80ModeEnabled;
         _phase83Requested = s_phase83ModeEnabled;
+        _phase85ArpRequested = s_phase85ArpModeEnabled;
         return TryStartCore();
     }
 
@@ -419,7 +432,15 @@ internal sealed class ManagedE1000Driver
         Phase16MacLow = ((uint)_mac[2] << 24) | ((uint)_mac[3] << 16) |
                         ((uint)_mac[4] << 8) | _mac[5];
         _ethernet!.InitializeMac();
-        if (_phase83Requested) _ethernet.EnablePhase84TestConsumer();
+        if (_phase83Requested && !_phase85ArpRequested)
+            _ethernet.EnablePhase84TestConsumer();
+        if (_phase85ArpRequested &&
+            (!_ethernet.TryEnablePhase85ArpAcceptance() ||
+             !KernelLog.WriteHexLine(
+                 "GXOS_NET10:PHASE85_LOCAL_IPV4=0x"u8,
+                 _ethernet.LocalIpv4Value) ||
+             !KernelLog.Write("GXOS_NET10:PHASE85_ARP_HANDLER_READY=1\r\n"u8)))
+            return AbortStart();
         if (!AllocateDma() ||
             !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_CAPABILITY_READY\r\n"u8))
             return AbortStart();
@@ -730,6 +751,7 @@ internal sealed class ManagedE1000Driver
         s_phase53ModeEnabled = false;
         s_phase80ModeEnabled = false;
         s_phase83ModeEnabled = false;
+        s_phase85ArpModeEnabled = false;
         bool safe = true;
         if (_interruptSubscribed &&
             !ManagedSerialDriverSubsystem.TryUnsubscribeE1000Interrupt(this))
@@ -833,6 +855,7 @@ internal sealed class ManagedE1000Driver
         _nativeClaimHandle = 0;
         _state = ManagedE1000DriverState.Stopped;
         s_phase83ModeEnabled = false;
+        s_phase85ArpModeEnabled = false;
         return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED\r\n"u8);
     }
 
@@ -1234,6 +1257,10 @@ internal sealed class ManagedE1000Driver
 
         _phase83RxDescriptorCount++;
         ManagedEthernetReceiveResult receiveResult;
+        ManagedNetworkDispatchResult networkResult =
+            ManagedNetworkDispatchResult.Invalid;
+        ManagedArpHandleResult arpResult = ManagedArpHandleResult.Invalid;
+        ManagedArpReceiveMetadata arpMetadata = default;
         if ((status & ManagedE1000Protocol.RxStatusEop) == 0 || errors != 0 ||
             length < ManagedE1000Protocol.MinimumRxEthernetHeaderLength ||
             length > ManagedE1000Protocol.PacketBufferSize ||
@@ -1252,7 +1279,8 @@ internal sealed class ManagedE1000Driver
         }
         else
         {
-            receiveResult = _ethernet.ProcessDriverReceivedFrame(length);
+            receiveResult = _ethernet.ProcessDriverReceivedFrame(
+                length, out networkResult, out arpResult, out arpMetadata);
         }
 
         /* Ethernet dispatch is synchronous.  Recycle every DD descriptor only
@@ -1263,6 +1291,10 @@ internal sealed class ManagedE1000Driver
         _phase83LastDescriptorStatus = status;
         _phase83LastDescriptorErrors = errors;
         _phase83LastFrameLength = length;
+        if (_phase85ArpRequested)
+            return RecordPhase85ArpDelivery(
+                receiveResult, networkResult, arpResult, in arpMetadata,
+                descriptorIndex, status, errors, length, value.Sequence);
         bool testConsumerAccepted =
             receiveResult == ManagedEthernetReceiveResult.Consumed &&
             _ethernet.Phase84TestConsumerDeliveryCount == ordinal &&
@@ -1297,6 +1329,109 @@ internal sealed class ManagedE1000Driver
                    "GXOS_NET10:PHASE83_RX_FRAME_LENGTH=0x"u8, length) &&
                KernelLog.Write(
                    "GXOS_NET10:PHASE83_RX_DESCRIPTOR_RECYCLED=1\r\n"u8);
+    }
+
+    private bool RecordPhase85ArpDelivery(
+        ManagedEthernetReceiveResult receiveResult,
+        ManagedNetworkDispatchResult networkResult,
+        ManagedArpHandleResult arpResult,
+        in ManagedArpReceiveMetadata metadata,
+        uint descriptorIndex, byte status, byte errors, ushort length,
+        ulong eventSequence)
+    {
+        uint ordinal = _phase85ArpDeliveryCount + 1U;
+        if (ordinal > 4U || receiveResult != ManagedEthernetReceiveResult.Consumed ||
+            (status & (ManagedE1000Protocol.RxStatusDone |
+                       ManagedE1000Protocol.RxStatusEop)) !=
+                      (ManagedE1000Protocol.RxStatusDone |
+                       ManagedE1000Protocol.RxStatusEop) ||
+            errors != 0 || length != 60 || descriptorIndex != ordinal - 1U ||
+            metadata.EtherType != ManagedEthernetProtocol.ArpEtherType ||
+            metadata.PayloadLength != 46 || metadata.HardwareType != 1 ||
+            metadata.ProtocolType != 0x0800 || metadata.HardwareLength != 6 ||
+            metadata.ProtocolLength != 4 || metadata.Operation != 1 ||
+            metadata.EthernetDestination != 0xFFFFFFFFFFFFUL ||
+            metadata.EthernetSource != 0x021500000000UL + ordinal ||
+            metadata.SenderMac != metadata.EthernetSource ||
+            metadata.SenderIpv4 != 0x0A0F0001U + ordinal ||
+            metadata.TargetMac != 0 ||
+            metadata.TargetIpv4 !=
+                (ordinal <= 3U ? 0x0A0F0001U : 0x0A0F0063U) ||
+            (ordinal <= 3U &&
+             (arpResult != ManagedArpHandleResult.ResponderReplySent ||
+              networkResult != ManagedNetworkDispatchResult.ArpResponderReplySent)) ||
+            (ordinal == 4U &&
+             (arpResult != ManagedArpHandleResult.RequestNotForUs ||
+              networkResult != ManagedNetworkDispatchResult.Ignored)))
+            return false;
+
+        _phase85ArpDeliveryCount = ordinal;
+        if (ordinal <= 3U) _phase85ReplyTxCount++;
+        bool logged =
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_DELIVERY=0x"u8, ordinal) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_EVENT_SEQUENCE=0x"u8, eventSequence) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_RX_DESCRIPTOR_INDEX=0x"u8,
+                descriptorIndex) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ETHERNET_DESTINATION=0x"u8,
+                metadata.EthernetDestination) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ETHERNET_SOURCE=0x"u8,
+                metadata.EthernetSource) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ETHERNET_ETHERTYPE=0x"u8,
+                metadata.EtherType) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_PAYLOAD_LENGTH=0x"u8,
+                metadata.PayloadLength) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_HARDWARE_TYPE=0x"u8,
+                metadata.HardwareType) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_PROTOCOL_TYPE=0x"u8,
+                metadata.ProtocolType) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_HLEN=0x"u8,
+                metadata.HardwareLength) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_PLEN=0x"u8,
+                metadata.ProtocolLength) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_OPCODE=0x"u8,
+                metadata.Operation) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_SENDER_MAC=0x"u8,
+                metadata.SenderMac) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_SENDER_IPV4=0x"u8,
+                metadata.SenderIpv4) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_TARGET_MAC=0x"u8,
+                metadata.TargetMac) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_TARGET_IPV4=0x"u8,
+                metadata.TargetIpv4) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_RX_DESCRIPTOR_STATUS=0x"u8,
+                status) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_RX_DESCRIPTOR_ERRORS=0x"u8,
+                errors) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_RX_FRAME_LENGTH=0x"u8, length) &&
+            KernelLog.Write(
+                "GXOS_NET10:PHASE85_RX_DESCRIPTOR_RECYCLED=1\r\n"u8);
+        if (!logged) return false;
+        return ordinal <= 3U
+            ? KernelLog.Write(
+                "GXOS_NET10:PHASE85_ARP_REQUEST_FOR_LOCAL=1\r\n"u8) &&
+              KernelLog.Write(
+                "GXOS_NET10:PHASE85_ARP_REPLY_TX_COMPLETED=1\r\n"u8)
+            : KernelLog.Write(
+                "GXOS_NET10:PHASE85_ARP_REQUEST_NOT_FOR_US=1\r\n"u8);
     }
 
     internal bool TryRunPhase80Proof()
@@ -1465,6 +1600,80 @@ internal sealed class ManagedE1000Driver
                    "GXOS_NET10:PHASE83_RX_RING_ADVANCE_AND_RECYCLE_OK=1\r\n"u8) &&
                KernelLog.Write(
                    "GXOS_NET10:PHASE83_RX_MANAGED_PROOF=1\r\n"u8);
+        _phase83Passed = passed;
+        return passed;
+    }
+
+    internal bool TryRunPhase85ArpProof()
+    {
+        if (!_phase85ArpRequested || !_phase80Requested || !_interruptSubscribed ||
+            _state != ManagedE1000DriverState.Running ||
+            _phase80DeliveryCount < 4 || _phase85ArpDeliveryCount != 0 ||
+            _phase83RxDescriptorCount != 0 || _rxRing == null ||
+            _rxBuffers == null || _ethernet == null || _mmio == null ||
+            _ethernet.LocalIpv4Value != 0x0A0F0001U)
+            return false;
+
+        if (!KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_GUEST_MAC=0x"u8, _macValue) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_LOCAL_IPV4=0x"u8,
+                _ethernet.LocalIpv4Value) ||
+            !KernelLog.Write(
+                "GXOS_NET10:PHASE85_ARP_RX_READY=1\r\n"u8))
+            return false;
+
+        for (uint poll = 0; poll != Phase83InterruptPollLimit &&
+             _phase85ArpDeliveryCount != 4U; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                    this, out uint delivered, out uint rejected) ||
+                rejected != 0 || delivered > 1)
+                return false;
+        }
+
+        if (_phase85ArpDeliveryCount != 4U ||
+            _phase83RxDescriptorCount != 4U || _phase85ReplyTxCount != 3U ||
+            _ethernet.ReceivedFrameCount != 4U ||
+            _ethernet.ParsedFrameCount != 4U ||
+            _ethernet.MalformedFrameCount != 0U ||
+            _ethernet.UnsupportedEtherTypeDropCount != 0U ||
+            _ethernet.Phase84TestConsumerDeliveryCount != 0U ||
+            _phase80DeliveryCount < 8U || _rxIndex != 4U ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescTail,
+                             out uint postedTail) || postedTail != 3U)
+            return false;
+
+        bool passed =
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_MANAGED_DELIVERIES=0x"u8,
+                _phase85ArpDeliveryCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_RX_DESCRIPTORS_COMPLETED=0x"u8,
+                _phase83RxDescriptorCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ARP_REPLY_TX_RESULTS=0x"u8,
+                _phase85ReplyTxCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ETHERNET_RECEIVED=0x"u8,
+                _ethernet.ReceivedFrameCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_ETHERNET_PARSED=0x"u8,
+                _ethernet.ParsedFrameCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_RX_LAST_DESCRIPTOR_INDEX=0x"u8,
+                _phase83LastDescriptorIndex) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_RX_RDT_AFTER_RECYCLE=0x"u8,
+                postedTail) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_TXDW_DELIVERIES=0x"u8,
+                _phase80DeliveryCount - 4U) &&
+            KernelLog.Write(
+                "GXOS_NET10:PHASE85_RX_DESCRIPTOR_RECYCLE_PASS=1\r\n"u8) &&
+            KernelLog.Write(
+                "GXOS_NET10:PHASE85_HARDWARE_ARP_INGRESS_PASS=1\r\n"u8);
+        _phase85ArpPassed = passed;
         _phase83Passed = passed;
         return passed;
     }

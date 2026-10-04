@@ -18,6 +18,7 @@ internal static class Program
     {
         EthernetTests();
         ArpTests();
+        ArpHandlerTests();
         CacheTests();
         Console.WriteLine($"MANAGED_KERNEL_PHASE16_HOST_TESTS_PASS cases={s_cases}");
         return 0;
@@ -178,6 +179,9 @@ internal static class Program
               requestPacket.Operation == ManagedArpProtocol.OperationRequest &&
               requestPacket.SenderIpv4.SequenceEqual(s_hostIp),
               "canonical-arp-request");
+        Check(ManagedArpProtocol.IsRequestForLocal(
+                  requestPacket, request.AsSpan(6, 6), request.AsSpan(0, 6),
+                  s_guestIp), "request-for-local-address-recognized");
 
         byte[] reply = BuildReply(s_guestMac, s_hostMac, s_hostIp, s_guestIp);
         Check(ManagedArpProtocol.TryParse(
@@ -230,6 +234,104 @@ internal static class Program
                   unrelatedPacket, unrelatedRequest.AsSpan(6, 6),
                   unrelatedRequest.AsSpan(0, 6), s_guestIp),
               "request-for-unrelated-ip-rejected");
+    }
+
+    private static void ArpHandlerTests()
+    {
+        ManagedE1000Driver.Phase16MacHigh = 0x5254;
+        ManagedE1000Driver.Phase16MacLow = 0x00123456;
+        FakeArpEthernet ethernet = new();
+        ManagedArpLayer arp = new(ethernet);
+        arp.InitializeMac();
+        Check(arp.TryInstallLocalIpv4(s_guestIp),
+              "arp-local-address-installed-through-existing-boundary");
+
+        byte[] localRequest = BuildRequest(
+            s_broadcast, s_hostMac, s_hostIp, s_guestIp);
+        Check(ManagedEthernetProtocol.TryParseFrame(
+                  localRequest, s_guestMac,
+                  out ManagedEthernetFrame localFrame),
+              "arp-handler-receives-normal-ethernet-parse");
+        ManagedArpHandleResult localResult = arp.TryHandleEthernetArp(
+            in localFrame, out ManagedArpReceiveMetadata localMetadata);
+        Check(localResult == ManagedArpHandleResult.ResponderReplySent &&
+              ethernet.TransmitCount == 1,
+              "valid-request-for-local-address-reaches-existing-handler");
+        Check(arp.Cache.Count == 0,
+              "accepted-arp-request-does-not-invent-cache-learning");
+        Check(localMetadata.EthernetDestination == 0xFFFFFFFFFFFFUL &&
+              localMetadata.EthernetSource == 0x021500000002UL &&
+              localMetadata.EtherType == 0x0806 &&
+              localMetadata.PayloadLength == 46 &&
+              localMetadata.HardwareType == 1 &&
+              localMetadata.ProtocolType == 0x0800 &&
+              localMetadata.HardwareLength == 6 &&
+              localMetadata.ProtocolLength == 4 &&
+              localMetadata.Operation == 1 &&
+              localMetadata.SenderMac == 0x021500000002UL &&
+              localMetadata.SenderIpv4 == 0x0A0F0002 &&
+              localMetadata.TargetMac == 0 &&
+              localMetadata.TargetIpv4 == 0x0A0F0001,
+              "arp-handler-copies-authoritative-sender-target-metadata");
+        Check(ethernet.LastEtherType == ManagedEthernetProtocol.ArpEtherType &&
+              ethernet.LastDestination.AsSpan().SequenceEqual(s_hostMac) &&
+              ManagedArpProtocol.TryParse(
+                  ethernet.LastPayload, out ManagedArpPacket reply) &&
+              reply.Operation == ManagedArpProtocol.OperationReply &&
+              reply.SenderMac.SequenceEqual(s_guestMac) &&
+              reply.SenderIpv4.SequenceEqual(s_guestIp) &&
+              reply.TargetMac.SequenceEqual(s_hostMac) &&
+              reply.TargetIpv4.SequenceEqual(s_hostIp),
+              "existing-arp-reply-uses-normal-ethernet-transmit-boundary");
+
+        byte[] notForUs = BuildRequest(
+            s_broadcast, s_hostMac, s_hostIp, new byte[] { 10, 15, 0, 99 });
+        Check(ManagedEthernetProtocol.TryParseFrame(
+                  notForUs, s_guestMac,
+                  out ManagedEthernetFrame unrelatedFrame),
+              "valid-not-for-us-request-passes-ethernet");
+        ManagedArpHandleResult unrelatedResult = arp.TryHandleEthernetArp(
+            in unrelatedFrame, out ManagedArpReceiveMetadata unrelatedMetadata);
+        Check(unrelatedResult == ManagedArpHandleResult.RequestNotForUs &&
+              unrelatedMetadata.TargetIpv4 == 0x0A0F0063 &&
+              ethernet.TransmitCount == 1 && arp.Cache.Count == 0,
+              "valid-not-for-us-request-is-classified-without-reply");
+
+        foreach ((int offset, int value, string name) in new[]
+        {
+            (0, 2, "unsupported-hardware-type"),
+            (2, 0x86DD, "unsupported-protocol-type"),
+            (4, 5, "wrong-hlen"),
+            (5, 6, "wrong-plen"),
+            (6, 3, "unsupported-opcode")
+        })
+        {
+            byte[] malformed = MutateArp(localRequest, offset, value);
+            Check(ManagedEthernetProtocol.TryParseFrame(
+                      malformed, s_guestMac,
+                      out ManagedEthernetFrame malformedFrame),
+                  "malformed-" + name + "-passes-ethernet");
+            Check(arp.TryHandleEthernetArp(
+                      in malformedFrame, out _) == ManagedArpHandleResult.Invalid &&
+                  ethernet.TransmitCount == 1,
+                  "arp-handler-rejects-" + name + "-without-reply");
+        }
+
+        byte[] shortPayload = new byte[ManagedArpProtocol.PayloadLength - 1];
+        Check(!ManagedArpProtocol.TryParse(shortPayload, out _),
+              "arp-handler-supported-payload-minimum-is-28-bytes");
+        byte[] wrongEtherType = new byte[ManagedEthernetProtocol.MinimumFrameLength];
+        Check(ManagedEthernetProtocol.TryBuildFrame(
+                  wrongEtherType, s_broadcast, s_hostMac, 0x0800,
+                  localRequest.AsSpan(14, ManagedArpProtocol.PayloadLength),
+                  out _) &&
+              ManagedEthernetProtocol.TryParseFrame(
+                  wrongEtherType, s_guestMac,
+                  out ManagedEthernetFrame wrongTypeFrame) &&
+              arp.TryHandleEthernetArp(
+                  in wrongTypeFrame, out _) == ManagedArpHandleResult.Invalid &&
+              ethernet.TransmitCount == 1,
+              "arp-handler-requires-ethernet-arp-classification");
     }
 
     private static void CacheTests()
@@ -328,6 +430,12 @@ internal static class Program
 
     private static bool TryMutatedArp(byte[] source, int offset, int value)
     {
+        byte[] mutated = MutateArp(source, offset, value);
+        return ManagedArpProtocol.TryParse(mutated.AsSpan(14), out _);
+    }
+
+    private static byte[] MutateArp(byte[] source, int offset, int value)
+    {
         byte[] mutated = (byte[])source.Clone();
         if (offset == 0 || offset == 2 || offset == 6)
         {
@@ -338,7 +446,7 @@ internal static class Program
         {
             mutated[14 + offset] = (byte)value;
         }
-        return ManagedArpProtocol.TryParse(mutated.AsSpan(14), out _);
+        return mutated;
     }
 
     private static void Check(bool condition, string name)
@@ -347,4 +455,35 @@ internal static class Program
         s_cases++;
         Console.WriteLine("PASS: " + name);
     }
+}
+
+internal sealed class FakeArpEthernet : IManagedArpEthernet
+{
+    internal int TransmitCount { get; private set; }
+    internal ushort LastEtherType { get; private set; }
+    internal byte[] LastDestination { get; private set; } = Array.Empty<byte>();
+    internal byte[] LastPayload { get; private set; } = Array.Empty<byte>();
+
+    public bool TryTransmit(ushort etherType, byte[] destination,
+                            byte[] payload, int payloadLength)
+    {
+        if (payloadLength < 0 || payloadLength > payload.Length) return false;
+        TransmitCount++;
+        LastEtherType = etherType;
+        LastDestination = destination.AsSpan().ToArray();
+        LastPayload = payload.AsSpan(0, payloadLength).ToArray();
+        return true;
+    }
+
+    public bool TryTransmitBroadcast(ushort etherType, byte[] payload,
+                                     int payloadLength) => false;
+
+    public bool TryReceiveAndDispatch(ManagedArpLayer arp,
+                                     out ManagedArpHandleResult result)
+    {
+        result = ManagedArpHandleResult.Invalid;
+        return false;
+    }
+
+    public bool TryVerifyTransportAfterGc() => true;
 }
