@@ -18,6 +18,7 @@ internal static class Program
     {
         EthernetTests();
         Ipv4IngressTests();
+        Icmpv4Tests();
         ArpTests();
         ArpHandlerTests();
         CacheTests();
@@ -135,6 +136,102 @@ internal static class Program
                 protocol, source, destination, payload, out ushort length))
             throw new InvalidOperationException("Could not build IPv4 host vector.");
         return packet.AsSpan(0, length).ToArray();
+    }
+
+    private static void Icmpv4Tests()
+    {
+        byte[] payload = System.Text.Encoding.ASCII.GetBytes("gX87-0001");
+        byte[] request = new byte[ManagedIcmpv4Protocol.HeaderLength + payload.Length];
+        Check(ManagedIcmpv4Protocol.TryBuildEchoRequest(request, 0x8701, 1,
+                  payload, out ushort requestLength) &&
+              requestLength == request.Length && request[0] == 8 && request[1] == 0 &&
+              ManagedIcmpv4Protocol.ComputeChecksum(request) == 0,
+              "icmpv4-valid-echo-request-and-network-order-checksum");
+        Check(ManagedIcmpv4Protocol.TryParse(request,
+                  out ManagedIcmpv4Packet parsedRequest) &&
+              parsedRequest.Type == 8 && parsedRequest.Code == 0 &&
+              parsedRequest.Identifier == 0x8701 && parsedRequest.Sequence == 1 &&
+              parsedRequest.Payload.SequenceEqual(payload),
+              "icmpv4-echo-request-fields-and-payload");
+
+        byte[] reply = new byte[request.Length];
+        Check(ManagedIcmpv4Protocol.TryBuildEchoReply(reply,
+                  parsedRequest.Identifier, parsedRequest.Sequence,
+                  parsedRequest.Payload, out ushort replyLength) &&
+              replyLength == requestLength && reply[0] == 0 && reply[1] == 0 &&
+              ManagedIcmpv4Protocol.TryParse(reply,
+                  out ManagedIcmpv4Packet parsedReply) &&
+              parsedReply.Identifier == parsedRequest.Identifier &&
+              parsedReply.Sequence == parsedRequest.Sequence &&
+              parsedReply.Payload.SequenceEqual(payload),
+              "icmpv4-echo-reply-preserves-id-sequence-payload-and-checksum");
+
+        byte[] oddPayloadRequest = new byte[9];
+        Check(ManagedIcmpv4Protocol.TryBuildEchoRequest(
+                  oddPayloadRequest, 0x1234, 0xABCD, new byte[] { 0xA5 },
+                  out _) && ManagedIcmpv4Protocol.ComputeChecksum(
+                  oddPayloadRequest) == 0,
+              "icmpv4-checksum-odd-payload-zero-pad");
+
+        byte[] malformed = (byte[])request.Clone();
+        malformed[8] ^= 1;
+        Check(!ManagedIcmpv4Protocol.TryParse(malformed, out _),
+              "icmpv4-bad-checksum-rejected");
+        malformed = (byte[])request.Clone();
+        malformed[1] = 1;
+        RecomputeIcmpChecksum(malformed);
+        Check(ManagedIcmpv4Protocol.TryParse(malformed,
+                  out ManagedIcmpv4Packet wrongCode) && wrongCode.Code == 1 &&
+              ManagedIcmpv4Protocol.Classify(in wrongCode) ==
+                  ManagedIcmpv4Disposition.Unsupported,
+              "icmpv4-valid-wrong-code-is-unsupported-without-echo-reply");
+        Check(!ManagedIcmpv4Protocol.TryParse(request.AsSpan(0, 7), out _),
+              "icmpv4-truncated-echo-header-rejected");
+        malformed = (byte[])request.Clone();
+        malformed[0] = 3;
+        RecomputeIcmpChecksum(malformed);
+        Check(ManagedIcmpv4Protocol.TryParse(malformed,
+                  out ManagedIcmpv4Packet unsupported) && unsupported.Type == 3 &&
+              ManagedIcmpv4Protocol.Classify(in unsupported) ==
+                  ManagedIcmpv4Disposition.Unsupported,
+              "icmpv4-valid-unsupported-type-classified-after-parse");
+        Check(ManagedIcmpv4Protocol.TryParse(reply,
+                  out ManagedIcmpv4Packet incomingReply) &&
+              incomingReply.Type == ManagedIcmpv4Protocol.EchoReply &&
+              ManagedIcmpv4Protocol.Classify(in incomingReply) ==
+                  ManagedIcmpv4Disposition.EchoReply,
+              "icmpv4-incoming-echo-reply-does-not-request-reply");
+
+        byte[] paddedFrame = new byte[60];
+        Check(ManagedEthernetProtocol.TryBuildFrame(paddedFrame,
+                  s_guestMac, s_hostMac, ManagedIpv4Protocol.EtherType,
+                  BuildIpv4(0x8701, 0, 63, ManagedIpv4Protocol.IcmpProtocol,
+                      s_hostIp, s_guestIp, request), out _) &&
+              ManagedEthernetProtocol.TryParseFrame(paddedFrame, s_guestMac,
+                  out ManagedEthernetFrame ethernet) &&
+              ManagedIpv4Protocol.TryParse(ethernet.Payload,
+                  out ManagedIpv4Packet ip) && ip.Payload.Length == request.Length &&
+              ManagedIcmpv4Protocol.TryParse(ip.Payload, out _) &&
+              ethernet.Payload.Length > ip.TotalLength,
+              "icmpv4-ip-total-length-excludes-ethernet-padding");
+
+        byte[] otherHost = BuildIpv4(0x8702, 0, 63,
+            ManagedIpv4Protocol.IcmpProtocol, s_hostIp,
+            new byte[] { 10, 15, 0, 99 }, request);
+        Check(ManagedIpv4Protocol.TryParse(otherHost,
+                  out ManagedIpv4Packet notForUs) &&
+              ManagedEthernetProtocol.ReadUInt32Network(
+                  notForUs.DestinationAddress, 0) !=
+              ManagedEthernetProtocol.ReadUInt32Network(s_guestIp, 0),
+              "icmpv4-not-for-us-ip-remains-filtered-before-handler");
+    }
+
+    private static void RecomputeIcmpChecksum(byte[] packet)
+    {
+        packet[2] = 0;
+        packet[3] = 0;
+        ManagedEthernetProtocol.WriteUInt16Network(packet, 2,
+            ManagedIcmpv4Protocol.ComputeChecksum(packet));
     }
 
     private static void RecomputeIpv4Checksum(byte[] packet)

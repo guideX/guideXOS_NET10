@@ -13,6 +13,7 @@ param(
     [switch]$EnablePhase83,
     [switch]$EnablePhase85Arp,
     [switch]$EnablePhase86Ipv4,
+    [switch]$EnablePhase87Icmpv4,
     [string]$Phase15InjectorPath = '',
     [ValidateSet('dgram', 'user')]
     [string]$Phase15NetworkBackend = 'dgram',
@@ -95,6 +96,14 @@ if ($EnablePhase86Ipv4 -and (-not $EnablePhase83 -or
 }
 if ($EnablePhase86Ipv4 -and $RunCount -ne 3) {
     throw 'Phase 86 hardware acceptance requires exactly three fresh boots.'
+}
+if ($EnablePhase87Icmpv4 -and (-not $EnablePhase83 -or
+    -not $EnablePhase80E1000 -or $EnablePhase15Rx -or
+    $EnablePhase85Arp -or $EnablePhase86Ipv4)) {
+    throw '-EnablePhase87Icmpv4 requires the Phase 83 local dgram/e1000e receive path and is exclusive with Phase 85/86 modes.'
+}
+if ($EnablePhase87Icmpv4 -and $RunCount -ne 3) {
+    throw 'Phase 87 hardware acceptance requires exactly three fresh boots.'
 }
 if ($EnablePhase82 -and -not $EnablePhase80E1000) {
     throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
@@ -706,6 +715,114 @@ function New-Phase86Ipv4Frame11([string]$destinationMac,
     return ,$frame
 }
 
+function Get-Phase87Checksum11([byte[]]$bytes, [int]$offset,
+                               [int]$length) {
+    [uint32]$sum = 0
+    $end = $offset + $length
+    while ($offset + 1 -lt $end) {
+        $sum += ([uint32]$bytes[$offset] -shl 8) -bor
+                [uint32]$bytes[$offset + 1]
+        $offset += 2
+    }
+    if ($offset -lt $end) { $sum += [uint32]$bytes[$offset] -shl 8 }
+    while ($sum -gt 0xFFFF) { $sum = ($sum -band 0xFFFF) + ($sum -shr 16) }
+    return [uint16]((-bnot $sum) -band 0xFFFF)
+}
+
+function New-Phase87IcmpFrame11([string]$destinationMac,
+                                [uint32]$sequence) {
+    Require11 ($destinationMac -match '^[0-9A-Fa-f]{12}$') `
+        'Phase 87 destination MAC must contain exactly six octets.'
+    Require11 ($sequence -ge 1 -and $sequence -le 3) `
+        'Phase 87 sequence must be in the bounded range 1 through 3.'
+    [byte[]]$frame = New-Object byte[] 60
+    for ($index = 0; $index -lt 6; $index++) {
+        $frame[$index] = [Convert]::ToByte(
+            $destinationMac.Substring($index * 2, 2), 16)
+    }
+    [byte[]]$sourceMac = 0x02, 0x15, 0, 0, 0, 2
+    [Array]::Copy($sourceMac, 0, $frame, 6, 6)
+    $frame[12] = 0x08; $frame[13] = 0x00
+    $frame[14] = 0x45; $frame[16] = 0; $frame[17] = 45
+    $frame[18] = 0x87; $frame[19] = [byte]$sequence
+    $frame[22] = 63; $frame[23] = 1
+    $frame[26] = 10; $frame[27] = 15; $frame[28] = 0; $frame[29] = 2
+    $frame[30] = 10; $frame[31] = 15; $frame[32] = 0; $frame[33] = 1
+    $frame[34] = 8; $frame[35] = 0
+    $frame[38] = 0x87; $frame[39] = 1
+    $frame[40] = 0; $frame[41] = [byte]$sequence
+    [byte[]]$sentinel = [Text.Encoding]::ASCII.GetBytes(
+        ('GXOS-PHASE87-{0:D4}' -f $sequence))
+    [Array]::Copy($sentinel, 0, $frame, 42, $sentinel.Length)
+    [uint16]$icmpChecksum = Get-Phase87Checksum11 $frame 34 25
+    $frame[36] = [byte]($icmpChecksum -shr 8)
+    $frame[37] = [byte]($icmpChecksum -band 0xFF)
+    [uint16]$ipChecksum = Get-Phase87Checksum11 $frame 14 20
+    $frame[24] = [byte]($ipChecksum -shr 8)
+    $frame[25] = [byte]($ipChecksum -band 0xFF)
+    return ,$frame
+}
+
+function Test-Phase87EchoReply11([byte[]]$reply, [byte[]]$guestMac,
+                                 [byte[]]$requesterMac,
+                                 [uint32]$sequence,
+                                 [byte[]]$expectedPayload) {
+    if ($reply.Length -lt 60 -or $reply[12] -ne 0x08 -or
+        $reply[13] -ne 0x00) { return $false }
+    for ($index = 0; $index -lt 6; $index++) {
+        if ($reply[$index] -ne $requesterMac[$index] -or
+            $reply[6 + $index] -ne $guestMac[$index]) { return $false }
+    }
+    $ihl = [int]($reply[14] -band 0x0F) * 4
+    $ipLength = ([int]$reply[16] -shl 8) -bor [int]$reply[17]
+    if (($reply[14] -shr 4) -ne 4 -or $ihl -lt 20 -or
+        $ihl -gt 60 -or $ipLength -lt ($ihl + 8) -or
+        $ipLength -gt ($reply.Length - 14) -or $reply[23] -ne 1 -or
+        (Get-Phase87Checksum11 $reply 14 $ihl) -ne 0 -or
+        $reply[26] -ne 10 -or $reply[27] -ne 15 -or
+        $reply[28] -ne 0 -or $reply[29] -ne 1 -or
+        $reply[30] -ne 10 -or $reply[31] -ne 15 -or
+        $reply[32] -ne 0 -or $reply[33] -ne 2) { return $false }
+    $icmpOffset = 14 + $ihl
+    $icmpLength = $ipLength - $ihl
+    if ($icmpLength -ne (8 + $expectedPayload.Length) -or
+        $reply[$icmpOffset] -ne 0 -or $reply[$icmpOffset + 1] -ne 0 -or
+        (Get-Phase87Checksum11 $reply $icmpOffset $icmpLength) -ne 0 -or
+        $reply[$icmpOffset + 4] -ne 0x87 -or
+        $reply[$icmpOffset + 5] -ne 1 -or
+        $reply[$icmpOffset + 6] -ne 0 -or
+        $reply[$icmpOffset + 7] -ne $sequence) { return $false }
+    for ($index = 0; $index -lt $expectedPayload.Length; $index++) {
+        if ($reply[$icmpOffset + 8 + $index] -ne $expectedPayload[$index]) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Write-Phase87QemuDatagram11([string]$captureLogPath,
+                                      [string]$captureBinaryPath,
+                                      [uint32]$sequence,
+                                      [byte[]]$frame) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $frameHash = ([BitConverter]::ToString(
+            $hash.ComputeHash($frame))).Replace('-', '')
+    } finally { $hash.Dispose() }
+    $hex = ([BitConverter]::ToString($frame)).Replace('-', '')
+    Add-Content -LiteralPath $captureLogPath -Encoding ascii -Value (
+        'PHASE87_QEMU_TX_DATAGRAM sequence={0} length={1} sha256={2} hex={3}' -f `
+        $sequence, $frame.Length, $frameHash, $hex)
+    $stream = [IO.File]::Open($captureBinaryPath, [IO.FileMode]::Append,
+        [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $prefix = [BitConverter]::GetBytes([uint32]$frame.Length)
+        $stream.Write($prefix, 0, $prefix.Length)
+        $stream.Write($frame, 0, $frame.Length)
+        $stream.Flush()
+    } finally { $stream.Dispose() }
+}
+
 function Receive-Phase85QemuDatagram11([Net.Sockets.UdpClient]$peerUdp,
                                        [int]$timeoutMs) {
     $peerUdp.Client.ReceiveTimeout = [Math]::Max(1, $timeoutMs)
@@ -746,12 +863,12 @@ function Write-Phase85QemuDatagram11([string]$captureLogPath,
 
 function Test-Phase85ArpReply11([byte[]]$reply, [byte[]]$guestMac,
                                  [byte[]]$request) {
-    if ($reply.Length -lt 42 || $request.Length -lt 42 ||
-        $reply[12] -ne 0x08 -or $reply[13] -ne 0x06 ||
-        $reply[14] -ne 0 -or $reply[15] -ne 1 ||
-        $reply[16] -ne 0x08 -or $reply[17] -ne 0 ||
-        $reply[18] -ne 6 -or $reply[19] -ne 4 ||
-        $reply[20] -ne 0 || $reply[21] -ne 2) { return $false }
+    if ($reply.Length -lt 42 -or $request.Length -lt 42 -or
+        $reply[12] -ne 0x08 -or $reply[13] -ne 0x06 -or
+        $reply[14] -ne 0 -or $reply[15] -ne 1 -or
+        $reply[16] -ne 0x08 -or $reply[17] -ne 0 -or
+        $reply[18] -ne 6 -or $reply[19] -ne 4 -or
+        $reply[20] -ne 0 -or $reply[21] -ne 2) { return $false }
     for ($index = 0; $index -lt 6; $index++) {
         if ($reply[$index] -ne $request[6 + $index] -or
             $reply[6 + $index] -ne $guestMac[$index] -or
@@ -767,8 +884,8 @@ function Test-Phase85ArpReply11([byte[]]$reply, [byte[]]$guestMac,
 
 function Test-Phase85AnyArpReplyFromGuest11([byte[]]$frame,
                                              [byte[]]$guestMac) {
-    if ($frame.Length -lt 42 || $frame[12] -ne 0x08 ||
-        $frame[13] -ne 0x06 || $frame[20] -ne 0 || $frame[21] -ne 2) {
+    if ($frame.Length -lt 42 -or $frame[12] -ne 0x08 -or
+        $frame[13] -ne 0x06 -or $frame[20] -ne 0 -or $frame[21] -ne 2) {
         return $false
     }
     for ($index = 0; $index -lt 6; $index++) {
@@ -3528,6 +3645,14 @@ if ($EnablePhase86Ipv4) {
         'GXOS_NET10:PHASE86_RX_DESCRIPTOR_RECYCLE_PASS=1',
         'GXOS_NET10:PHASE86_HARDWARE_IPV4_INGRESS_PASS=1')
 }
+if ($EnablePhase87Icmpv4) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE87_ICMP_MODE_SELECTED=1',
+        'GXOS_NET10:PHASE87_ICMP_HANDLER_READY=1',
+        'GXOS_NET10:PHASE87_ICMP_RX_READY=1',
+        'GXOS_NET10:PHASE87_RX_DESCRIPTOR_RECYCLE_PASS=1',
+        'GXOS_NET10:PHASE87_HARDWARE_ICMP_ECHO_PASS=1')
+}
 
 $owned = @()
 try {
@@ -3545,6 +3670,12 @@ try {
         if ($EnablePhase85Arp) {
             [IO.File]::WriteAllText($arpTxCaptureLog, '')
             [IO.File]::WriteAllBytes($arpTxCaptureBinary, [byte[]]@())
+        }
+        $icmpTxCaptureLog = Join-Path $run 'icmp-tx-capture.log'
+        $icmpTxCaptureBinary = Join-Path $run 'icmp-tx-capture.bin'
+        if ($EnablePhase87Icmpv4) {
+            [IO.File]::WriteAllText($icmpTxCaptureLog, '')
+            [IO.File]::WriteAllBytes($icmpTxCaptureBinary, [byte[]]@())
         }
         $timelinePath = Join-Path $run 'timeline.log'
         $commandLinePath = Join-Path $run 'qemu-commandline.log'
@@ -3709,6 +3840,9 @@ try {
                 if ($EnablePhase85Arp) {
                     Wait-Marker11 'GXOS_NET10:PHASE85_ARP_RX_READY=1' `
                         $deadline $process $stream $logStream $text $buffer
+                } elseif ($EnablePhase87Icmpv4) {
+                    Wait-Marker11 'GXOS_NET10:PHASE87_ICMP_RX_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
                 } elseif ($EnablePhase86Ipv4) {
                     Wait-Marker11 'GXOS_NET10:PHASE86_IPV4_RX_READY=1' `
                         $deadline $process $stream $logStream $text $buffer
@@ -3721,7 +3855,116 @@ try {
                 Require11 $macMatch.Success 'Phase 83 did not publish the runtime e1000 MAC.'
                 $destinationMac = ($macMatch.Groups[1].Value +
                                    $macMatch.Groups[2].Value).ToUpperInvariant()
-                if ($EnablePhase85Arp) {
+                if ($EnablePhase87Icmpv4) {
+                    $guestMacBytes = [byte[]]@(
+                        [Convert]::ToByte($destinationMac.Substring(0, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(2, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(4, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(6, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(8, 2), 16),
+                        [Convert]::ToByte($destinationMac.Substring(10, 2), 16))
+                    $localIpMatch = [regex]::Match($text.ToString(),
+                        'GXOS_NET10:PHASE87_LOCAL_IPV4=0x([0-9A-Fa-f]{16})')
+                    Require11 ($localIpMatch.Success -and
+                        [Convert]::ToUInt64($localIpMatch.Groups[1].Value, 16) -eq 0x0A0F0001) `
+                        'Phase 87 ICMP handler did not use the existing local IPv4 authority.'
+                    while ($peerUdp.Available -gt 0) {
+                        [void](Receive-Phase85QemuDatagram11 $peerUdp 10)
+                    }
+                    $requesterMac = [byte[]]@(0x02, 0x15, 0, 0, 0, 2)
+                    $capturedReplies = 0
+                    for ($frameSequence = 1; $frameSequence -le 3; $frameSequence++) {
+                        [byte[]]$frame = New-Phase87IcmpFrame11 `
+                            $destinationMac ([uint32]$frameSequence)
+                        $sent = $peerUdp.Send($frame, $frame.Length,
+                                              '127.0.0.1', $rxPort)
+                        Require11 ($sent -eq $frame.Length) `
+                            'Phase 87 local UDP injector sent a short ICMP Ethernet frame.'
+                        $requestHashAlgorithm = [Security.Cryptography.SHA256]::Create()
+                        try {
+                            $requestHash = ([BitConverter]::ToString(
+                                $requestHashAlgorithm.ComputeHash($frame))).Replace('-', '')
+                        } finally { $requestHashAlgorithm.Dispose() }
+                        [byte[]]$sentinel = [Text.Encoding]::ASCII.GetBytes(
+                            ('GXOS-PHASE87-{0:D4}' -f $frameSequence))
+                        $requesterMacText = ([BitConverter]::ToString(
+                            $requesterMac)).Replace('-', '')
+                        $requestIcmpChecksum = ([int]$frame[36] -shl 8) -bor
+                                               [int]$frame[37]
+                        $injectionLog.WriteLine((
+                            'PHASE87_ICMP_ECHO_REQUEST_INJECTED=PASS sequence={0} ethernet_length=60 destination_mac={1} requester_mac={2} source_ipv4=10.15.0.2 destination_ipv4=10.15.0.1 ethertype=0800 ipv4_total_length=45 ipv4_ttl=63 ipv4_checksum={3:X4} protocol=1 icmp_type=8 icmp_code=0 identifier=8701 icmp_sequence={0} icmp_length=25 icmp_checksum={4:X4} payload_length=17 payload={5} sha256={6} backend=dgram guest_port={7} source_port={8}' -f `
+                            $frameSequence, $destinationMac, $requesterMacText,
+                            (([int]$frame[24] -shl 8) -bor [int]$frame[25]),
+                            $requestIcmpChecksum,
+                            [Text.Encoding]::ASCII.GetString($sentinel),
+                            $requestHash, $rxPort, $peerPort))
+                        $injectionLog.Flush()
+                        Write-Timeline11 $timeline 'PHASE87_ICMP_ECHO_REQUEST_INJECTED' `
+                            "sequence=$frameSequence requester=$requesterMacText/10.15.0.2 payload=$([Text.Encoding]::ASCII.GetString($sentinel)) sha256=$requestHash"
+                        $accepted = 'GXOS_NET10:PHASE87_ICMP_DELIVERY=0x{0:X16}' -f $frameSequence
+                        Wait-Marker11 $accepted $deadline $process $stream $logStream $text $buffer
+                        $replyDeadline = [DateTime]::UtcNow.AddSeconds(8)
+                        $reply = $null
+                        while ([DateTime]::UtcNow -lt $replyDeadline -and $null -eq $reply) {
+                            [byte[]]$candidate = Receive-Phase85QemuDatagram11 $peerUdp 200
+                            if ($null -eq $candidate) { continue }
+                            Write-Phase87QemuDatagram11 $icmpTxCaptureLog `
+                                $icmpTxCaptureBinary $frameSequence $candidate
+                            Require11 (Test-Phase87EchoReply11 $candidate `
+                                $guestMacBytes $requesterMac ([uint32]$frameSequence) `
+                                $sentinel) `
+                                "Phase 87 captured reply $frameSequence failed Ethernet, IPv4, ICMP, or payload validation."
+                            $reply = $candidate
+                        }
+                        Require11 ($null -ne $reply) `
+                            "Phase 87 hardware Echo Reply $frameSequence was not captured from QEMU E1000 TX."
+                        $capturedReplies++
+                        $quietDeadline = [DateTime]::UtcNow.AddMilliseconds(150)
+                        while ([DateTime]::UtcNow -lt $quietDeadline) {
+                            [byte[]]$extra = Receive-Phase85QemuDatagram11 $peerUdp 25
+                            if ($null -ne $extra) {
+                                Write-Phase87QemuDatagram11 $icmpTxCaptureLog `
+                                    $icmpTxCaptureBinary $frameSequence $extra
+                                throw "Phase 87 observed a duplicate or unrelated TX datagram after reply $frameSequence."
+                            }
+                        }
+                        $replyHashAlgorithm = [Security.Cryptography.SHA256]::Create()
+                        try {
+                            $replyHash = ([BitConverter]::ToString(
+                                $replyHashAlgorithm.ComputeHash($reply))).Replace('-', '')
+                        } finally { $replyHashAlgorithm.Dispose() }
+                        $replyHex = ([BitConverter]::ToString($reply)).Replace('-', '')
+                        $injectionLog.WriteLine((
+                            'PHASE87_QEMU_ICMP_ECHO_REPLY_CAPTURED=PASS sequence={0} source_mac={1} destination_mac={2} source_ipv4=10.15.0.1 destination_ipv4=10.15.0.2 ipv4_total_length=45 ipv4_ttl={3} protocol=1 icmp_type=0 icmp_code=0 identifier=8701 icmp_sequence={0} payload={4} sha256={5} bytes={6}' -f `
+                            $frameSequence, $destinationMac, $requesterMacText,
+                            $reply[22], [Text.Encoding]::ASCII.GetString($sentinel),
+                            $replyHash, $replyHex))
+                        $injectionLog.Flush()
+                        Write-Timeline11 $timeline 'PHASE87_QEMU_ICMP_ECHO_REPLY_CAPTURED' `
+                            "sequence=$frameSequence ttl=$($reply[22]) sha256=$replyHash"
+                    }
+                    Require11 ($capturedReplies -eq 3) `
+                        'Phase 87 did not capture exactly three replies.'
+                    Wait-Marker11 'GXOS_NET10:PHASE87_HARDWARE_ICMP_ECHO_PASS=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Require11 (([regex]::Matches($text.ToString(),
+                        'GXOS_NET10:PHASE87_ICMP_DELIVERY=')).Count -eq 3) `
+                        'Phase 87 managed handler did not report exactly three Echo Requests.'
+                    Require11 (([regex]::Matches($text.ToString(),
+                        'GXOS_NET10:PHASE87_TX_SUBMIT=1')).Count -eq 3 -and
+                        ([regex]::Matches($text.ToString(),
+                        'GXOS_NET10:PHASE87_TX_DD_POLL_COMPLETE=1')).Count -eq 3) `
+                        'Phase 87 did not report successful submit and DD polling for every reply.'
+                    $txdwMatch = [regex]::Match($text.ToString(),
+                        'GXOS_NET10:PHASE87_TXDW_DELIVERIES=0x([0-9A-Fa-f]+)')
+                    Require11 ($txdwMatch.Success -and
+                        [Convert]::ToUInt64($txdwMatch.Groups[1].Value, 16) -ge 3) `
+                        'Phase 87 did not observe three natural TXDW events.'
+                    $injectionLog.WriteLine(
+                        'PHASE87_ICMP_ECHO_SUMMARY=PASS requests=3 captured_replies={0} duplicate_replies=0 external_network=false' -f `
+                        $capturedReplies)
+                    $injectionLog.Flush()
+                } elseif ($EnablePhase85Arp) {
                     $guestMacBytes = [byte[]]@(
                         [Convert]::ToByte($destinationMac.Substring(0, 2), 16),
                         [Convert]::ToByte($destinationMac.Substring(2, 2), 16),
@@ -6036,7 +6279,10 @@ try {
         $serialHash = (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant()
         $injectionHash = (Get-FileHash -LiteralPath $injections -Algorithm SHA256).Hash.ToUpperInvariant()
         $timelineHash = (Get-FileHash -LiteralPath $timelinePath -Algorithm SHA256).Hash.ToUpperInvariant()
-        if ($EnablePhase85Arp) {
+        if ($EnablePhase87Icmpv4) {
+            $captureHash = (Get-FileHash -LiteralPath $icmpTxCaptureBinary -Algorithm SHA256).Hash.ToUpperInvariant()
+            Write-Output ("MANAGED_KERNEL_PHASE87_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} icmp_tx_capture_sha256={5} timeline_sha256={6} serial={7}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $captureHash, $timelineHash, $serial)
+        } elseif ($EnablePhase85Arp) {
             $arpCaptureHash = (Get-FileHash -LiteralPath $arpTxCaptureBinary -Algorithm SHA256).Hash.ToUpperInvariant()
             Write-Output ("MANAGED_KERNEL_PHASE85_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} arp_tx_capture_sha256={5} timeline_sha256={6} serial={7}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $arpCaptureHash, $timelineHash, $serial)
         } elseif ($EnablePhase86Ipv4) {

@@ -55,6 +55,7 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase83ModeEnabled;
     private static bool s_phase85ArpModeEnabled;
     private static bool s_phase86Ipv4ModeEnabled;
+    private static bool s_phase87IcmpModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -84,12 +85,15 @@ internal sealed class ManagedE1000Driver
     private uint _phase85ArpDeliveryCount;
     private uint _phase85ReplyTxCount;
     private uint _phase86Ipv4DeliveryCount;
+    private uint _phase87IcmpDeliveryCount;
+    private uint _phase87IcmpTxDwCount;
     private ulong _phase80LastSequence;
     private uint _phase82TransmitSequence;
     private bool _phase80Requested;
     private bool _phase83Requested;
     private bool _phase85ArpRequested;
     private bool _phase86Ipv4Requested;
+    private bool _phase87IcmpRequested;
     private bool _interruptSubscribed;
     private ulong _macValue;
     private bool _phase16Passed;
@@ -161,6 +165,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase83Passed;
     private bool _phase85ArpPassed;
     private bool _phase86Ipv4Passed;
+    private bool _phase87IcmpPassed;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -212,6 +217,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase83Passed => _phase83Passed;
     internal bool Phase85ArpPassed => _phase85ArpPassed;
     internal bool Phase86Ipv4Passed => _phase86Ipv4Passed;
+    internal bool Phase87IcmpPassed => _phase87IcmpPassed;
     internal uint Phase80DeliveryCount => _phase80DeliveryCount;
 
     internal static void EnablePhase35Mode()
@@ -336,6 +342,12 @@ internal sealed class ManagedE1000Driver
         s_phase86Ipv4ModeEnabled = true;
     }
 
+    internal static void EnablePhase87IcmpMode()
+    {
+        s_phase83ModeEnabled = true;
+        s_phase87IcmpModeEnabled = true;
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -381,6 +393,7 @@ internal sealed class ManagedE1000Driver
         _phase83Requested = s_phase83ModeEnabled;
         _phase85ArpRequested = s_phase85ArpModeEnabled;
         _phase86Ipv4Requested = s_phase86Ipv4ModeEnabled;
+        _phase87IcmpRequested = s_phase87IcmpModeEnabled;
         return TryStartCore();
     }
 
@@ -445,7 +458,7 @@ internal sealed class ManagedE1000Driver
                         ((uint)_mac[4] << 8) | _mac[5];
         _ethernet!.InitializeMac();
         if (_phase83Requested && !_phase85ArpRequested &&
-            !_phase86Ipv4Requested)
+            !_phase86Ipv4Requested && !_phase87IcmpRequested)
             _ethernet.EnablePhase84TestConsumer();
         if (_phase85ArpRequested &&
             (!_ethernet.TryEnablePhase85ArpAcceptance() ||
@@ -461,6 +474,14 @@ internal sealed class ManagedE1000Driver
                  _ethernet.LocalIpv4Value) ||
              !KernelLog.Write(
                  "GXOS_NET10:PHASE86_IPV4_PARSER_READY=1\r\n"u8)))
+            return AbortStart();
+        if (_phase87IcmpRequested &&
+            (!_ethernet.TryEnablePhase87IcmpAcceptance() ||
+             !KernelLog.WriteHexLine(
+                 "GXOS_NET10:PHASE87_LOCAL_IPV4=0x"u8,
+                 _ethernet.LocalIpv4Value) ||
+             !KernelLog.Write(
+                 "GXOS_NET10:PHASE87_ICMP_HANDLER_READY=1\r\n"u8)))
             return AbortStart();
         if (!AllocateDma() ||
             !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_CAPABILITY_READY\r\n"u8))
@@ -774,6 +795,7 @@ internal sealed class ManagedE1000Driver
         s_phase83ModeEnabled = false;
         s_phase85ArpModeEnabled = false;
         s_phase86Ipv4ModeEnabled = false;
+        s_phase87IcmpModeEnabled = false;
         bool safe = true;
         if (_interruptSubscribed &&
             !ManagedSerialDriverSubsystem.TryUnsubscribeE1000Interrupt(this))
@@ -879,6 +901,7 @@ internal sealed class ManagedE1000Driver
         s_phase83ModeEnabled = false;
         s_phase85ArpModeEnabled = false;
         s_phase86Ipv4ModeEnabled = false;
+        s_phase87IcmpModeEnabled = false;
         return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED\r\n"u8);
     }
 
@@ -1250,6 +1273,7 @@ internal sealed class ManagedE1000Driver
         _phase80LastCause = value.Status;
         _phase80LastUnrelatedCause = unrelated;
         _phase80DeliveryCount++;
+        if (_phase87IcmpRequested && hasTxCause) _phase87IcmpTxDwCount++;
         return true;
     }
 
@@ -1316,6 +1340,10 @@ internal sealed class ManagedE1000Driver
         _phase83LastFrameLength = length;
         if (_phase86Ipv4Requested)
             return RecordPhase86Ipv4Delivery(
+                receiveResult, networkResult, descriptorIndex, status, errors,
+                length, value.Sequence);
+        if (_phase87IcmpRequested)
+            return RecordPhase87IcmpDelivery(
                 receiveResult, networkResult, descriptorIndex, status, errors,
                 length, value.Sequence);
         if (_phase85ArpRequested)
@@ -1872,6 +1900,171 @@ internal sealed class ManagedE1000Driver
             KernelLog.Write(
                 "GXOS_NET10:PHASE86_HARDWARE_IPV4_INGRESS_PASS=1\r\n"u8);
         _phase86Ipv4Passed = passed;
+        _phase83Passed = passed;
+        return passed;
+    }
+
+    private bool RecordPhase87IcmpDelivery(
+        ManagedEthernetReceiveResult receiveResult,
+        ManagedNetworkDispatchResult networkResult,
+        uint descriptorIndex, byte status, byte errors, ushort length,
+        ulong eventSequence)
+    {
+        uint ordinal = _phase87IcmpDeliveryCount + 1U;
+        if (_ethernet == null || ordinal > 3U ||
+            receiveResult != ManagedEthernetReceiveResult.Consumed ||
+            networkResult != ManagedNetworkDispatchResult.IcmpResponderReplySent ||
+            (status & (ManagedE1000Protocol.RxStatusDone |
+                       ManagedE1000Protocol.RxStatusEop)) !=
+                      (ManagedE1000Protocol.RxStatusDone |
+                       ManagedE1000Protocol.RxStatusEop) ||
+            errors != 0 || length != 60 || descriptorIndex != ordinal - 1U ||
+            _ethernet.LastReceivedEtherType != ManagedIpv4Protocol.EtherType ||
+            _ethernet.Phase87IcmpEchoRequestCount != ordinal)
+            return false;
+
+        ManagedIpv4Phase87Metadata metadata =
+            _ethernet.Phase87IcmpLastMetadata;
+        if (metadata.SourceIpv4 != 0x0A0F0002U ||
+            metadata.DestinationIpv4 != 0x0A0F0001U ||
+            metadata.TotalLength != 45 || metadata.Identifier != 0x8701 ||
+            metadata.Sequence != ordinal || metadata.IcmpLength != 25 ||
+            metadata.RequestTtl != 63 || metadata.ReplyTtl != 64 ||
+            metadata.PayloadLength != 17 || !metadata.ReplyIcmpChecksumValid ||
+            !metadata.ReplyIpv4ChecksumValid)
+            return false;
+
+        _phase87IcmpDeliveryCount = ordinal;
+        return KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_ICMP_DELIVERY=0x"u8, ordinal) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_RX_EVENT_SEQUENCE=0x"u8,
+                   eventSequence) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_RX_DESCRIPTOR_INDEX=0x"u8,
+                   descriptorIndex) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_IPV4_TOTAL_LENGTH=0x"u8,
+                   metadata.TotalLength) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_REQUEST_TTL=0x"u8,
+                   metadata.RequestTtl) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_ICMP_REQUEST_CHECKSUM=0x"u8,
+                   metadata.RequestIcmpChecksum) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_ICMP_REPLY_CHECKSUM=0x"u8,
+                   metadata.ReplyIcmpChecksum) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_IPV4_REPLY_CHECKSUM=0x"u8,
+                   metadata.ReplyIpv4Checksum) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_ICMP_IDENTIFIER=0x"u8,
+                   metadata.Identifier) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_ICMP_SEQUENCE=0x"u8,
+                   metadata.Sequence) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_ICMP_PAYLOAD_LENGTH=0x"u8,
+                   metadata.PayloadLength) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_REPLY_TTL=0x"u8,
+                   metadata.ReplyTtl) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE87_TX_INDEX=0x"u8,
+                   _lastSubmittedTxIndex) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE87_TX_SUBMIT=1\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE87_TX_DD_POLL_COMPLETE=1\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE87_RX_DESCRIPTOR_RECYCLED=1\r\n"u8);
+    }
+
+    internal bool TryRunPhase87IcmpProof()
+    {
+        if (!_phase87IcmpRequested || !_phase80Requested || !_interruptSubscribed ||
+            _state != ManagedE1000DriverState.Running ||
+            _phase80DeliveryCount < 4 || _phase87IcmpDeliveryCount != 0 ||
+            _phase83RxDescriptorCount != 0 || _rxRing == null ||
+            _rxBuffers == null || _ethernet == null || _mmio == null ||
+            _ethernet.LocalIpv4Value != 0x0A0F0001U)
+            return false;
+        uint phase87TxDwBaseline = _phase87IcmpTxDwCount;
+
+        if (!KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE87_GUEST_MAC=0x"u8, _macValue) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE87_LOCAL_IPV4=0x"u8,
+                _ethernet.LocalIpv4Value) ||
+            !KernelLog.Write(
+                "GXOS_NET10:PHASE87_ICMP_RX_READY=1\r\n"u8))
+            return false;
+
+        for (uint poll = 0; poll != Phase83InterruptPollLimit &&
+             _phase87IcmpDeliveryCount != 3U; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                    this, out uint delivered, out uint rejected) ||
+                rejected != 0 || delivered > 1)
+                return false;
+        }
+
+        if (_phase87IcmpDeliveryCount != 3U ||
+            _phase83RxDescriptorCount != 3U ||
+            _ethernet.Phase87IcmpEchoRequestCount != 3U ||
+            _ethernet.ReceivedFrameCount != 3U ||
+            _ethernet.ParsedFrameCount != 3U ||
+            _ethernet.MalformedFrameCount != 0U ||
+            _ethernet.UnsupportedEtherTypeDropCount != 0U ||
+            _rxIndex != 3U ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescTail,
+                             out uint postedTail) || postedTail != 2U)
+            return false;
+
+        /* Let any natural TXDW notifications produced by the three completed
+           replies reach the existing typed E1000 route.  TX success itself
+           remains the driver's descriptor-DD polling result. */
+        for (uint poll = 0; poll != Phase83InterruptPollLimit &&
+             _phase87IcmpTxDwCount < phase87TxDwBaseline + 3U; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                    this, out uint delivered, out uint rejected) || rejected != 0)
+                return false;
+            if (delivered == 0) continue;
+        }
+        if (_phase87IcmpTxDwCount < phase87TxDwBaseline + 3U) return false;
+        uint phase87TxDwDeliveries =
+            _phase87IcmpTxDwCount - phase87TxDwBaseline;
+
+        uint emptyBatches = 0;
+        for (uint poll = 0; poll != 16U && emptyBatches != 3U; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                    this, out uint delivered, out uint rejected) || rejected != 0)
+                return false;
+            emptyBatches = delivered == 0 ? emptyBatches + 1U : 0U;
+        }
+        if (emptyBatches != 3U) return false;
+
+        bool passed =
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE87_ICMP_MANAGED_DELIVERIES=0x"u8,
+                _phase87IcmpDeliveryCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE87_RX_DESCRIPTORS_COMPLETED=0x"u8,
+                _phase83RxDescriptorCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE87_RX_RDT_AFTER_RECYCLE=0x"u8,
+                postedTail) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE87_TXDW_DELIVERIES=0x"u8,
+                phase87TxDwDeliveries) &&
+            KernelLog.Write(
+                "GXOS_NET10:PHASE87_RX_DESCRIPTOR_RECYCLE_PASS=1\r\n"u8) &&
+            KernelLog.Write(
+                "GXOS_NET10:PHASE87_HARDWARE_ICMP_ECHO_PASS=1\r\n"u8);
+        _phase87IcmpPassed = passed;
         _phase83Passed = passed;
         return passed;
     }

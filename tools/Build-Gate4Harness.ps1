@@ -65,6 +65,7 @@ param(
     [switch]$EnablePhase83E1000Rx,
     [switch]$EnablePhase85ManagedArp,
     [switch]$EnablePhase86ManagedIpv4,
+    [switch]$EnablePhase87ManagedIcmpv4,
     [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
@@ -138,6 +139,12 @@ if ($EnablePhase86ManagedIpv4 -and
 if ($Phase69FixtureMode -ne 'None' -and
     ($PayloadMode -ne 'ManagedKernel' -or -not $EnablePhase69PersistentServiceOwner)) {
     throw 'Phase 69 guest fixtures require the ManagedKernel payload and persistent-service owner.'
+}
+if ($EnablePhase87ManagedIcmpv4 -and
+    (-not $EnablePhase83E1000Rx -or $EnablePhase85ManagedArp -or
+     $EnablePhase86ManagedIpv4 -or $PayloadMode -ne 'ManagedKernel' -or
+     -not $EnableNativeAotStartup -or $Scenario -ne 'ManagedKernelPhase11')) {
+    throw 'Phase 87 ICMP acceptance requires Phase 83 E1000 RX, the ManagedKernel payload, NativeAOT startup, and ManagedKernelPhase11 scenario; it is exclusive with Phase 85 and Phase 86 modes.'
 }
 if ($Phase70FixtureMode -ne 'None' -and
     ($PayloadMode -ne 'ManagedKernel' -or
@@ -1726,6 +1733,9 @@ if ($EnablePhase85ManagedArp) {
 }
 if ($EnablePhase86ManagedIpv4) {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE86_IPV4'
+}
+if ($EnablePhase87ManagedIcmpv4) {
+    $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE87_ICMPV4'
 }
 if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE11'

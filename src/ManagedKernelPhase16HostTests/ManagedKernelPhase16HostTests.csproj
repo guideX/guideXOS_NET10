@@ -16,5 +16,6 @@
     <Compile Include="..\ManagedKernel\ManagedArp.cs" Link="ManagedArp.cs" />
     <Compile Include="..\ManagedKernel\ManagedArpLayer.cs" Link="ManagedArpLayer.cs" />
     <Compile Include="..\ManagedKernel\ManagedIpv4.cs" Link="ManagedIpv4.cs" />
+    <Compile Include="..\ManagedKernel\ManagedIcmpv4.cs" Link="ManagedIcmpv4.cs" />
   </ItemGroup>
 </Project>

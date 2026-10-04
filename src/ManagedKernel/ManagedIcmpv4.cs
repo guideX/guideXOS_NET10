@@ -30,14 +30,25 @@ internal static class ManagedIcmpv4Protocol
     internal const int HeaderLength = 8;
     internal const int MaximumEchoPayloadLength = 256;
 
+    internal static ManagedIcmpv4Disposition Classify(
+        in ManagedIcmpv4Packet packet)
+    {
+        if (packet.Code != EchoCode) return ManagedIcmpv4Disposition.Unsupported;
+        return packet.Type switch
+        {
+            EchoRequest => ManagedIcmpv4Disposition.EchoRequest,
+            EchoReply => ManagedIcmpv4Disposition.EchoReply,
+            _ => ManagedIcmpv4Disposition.Unsupported
+        };
+    }
+
     internal static bool TryParse(ReadOnlySpan<byte> packet,
                                   out ManagedIcmpv4Packet parsed)
     {
         parsed = default;
         if (packet.Length < HeaderLength ||
             packet.Length > HeaderLength + MaximumEchoPayloadLength ||
-            (packet[0] != EchoRequest && packet[0] != EchoReply) ||
-            packet[1] != EchoCode || ComputeChecksum(packet) != 0)
+            ComputeChecksum(packet) != 0)
             return false;
         parsed = new ManagedIcmpv4Packet(packet);
         return true;
@@ -104,4 +115,11 @@ internal static class ManagedIcmpv4Protocol
         length = (ushort)requiredLength;
         return true;
     }
+}
+
+internal enum ManagedIcmpv4Disposition : byte
+{
+    Unsupported = 0,
+    EchoRequest = 1,
+    EchoReply = 2
 }

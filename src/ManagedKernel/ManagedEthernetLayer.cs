@@ -323,10 +323,11 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
         _ipv4.InitializeMac();
     }
 
-    internal bool TryTransmit(ushort etherType, byte[] destination,
+    internal bool TryTransmit(ushort etherType, ReadOnlySpan<byte> destination,
                               byte[] payload, int payloadLength)
     {
-        if (!_accepting || destination == null || payload == null ||
+        if (!_accepting || destination.Length != ManagedEthernetProtocol.MacLength ||
+            payload == null ||
             payloadLength < 0 || payloadLength > payload.Length) return false;
         if (ManagedEthernetProtocol.IsBroadcast(destination)) return false;
         Span<byte> frame = _txFrame;
@@ -474,6 +475,13 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
         return true;
     }
 
+    internal bool TryEnablePhase87IcmpAcceptance()
+    {
+        if (!_arp.TryInstallLocalIpv4(_arp.LocalIpv4)) return false;
+        _ipv4.EnablePhase87IcmpAcceptance();
+        return true;
+    }
+
     internal uint Phase86Ipv4ParsedFrameCount =>
         _ipv4.Phase86ParsedFrameCount;
     internal uint Phase86Ipv4LocalDeliveryCount =>
@@ -483,6 +491,9 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
         _ipv4.UnsupportedProtocolCount;
     internal ManagedIpv4Phase86Metadata Phase86Ipv4LastMetadata =>
         _ipv4.Phase86LastMetadata;
+    internal uint Phase87IcmpEchoRequestCount => _ipv4.Phase87EchoRequestCount;
+    internal ManagedIpv4Phase87Metadata Phase87IcmpLastMetadata =>
+        _ipv4.Phase87LastMetadata;
 
     internal uint LocalIpv4Value =>
         ManagedEthernetProtocol.ReadUInt32Network(_arp.LocalIpv4, 0);
@@ -564,7 +575,8 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
 
         if (dispatchKind == ManagedEthernetDispatchKind.Ipv4)
         {
-            ManagedIpv4HandleResult ipv4Result = _ipv4.TryHandle(parsed.Payload);
+            ManagedIpv4HandleResult ipv4Result = _ipv4.TryHandle(
+                parsed.Payload, parsed.Source);
             networkResult = (ManagedNetworkDispatchResult)ipv4Result;
             return ipv4Result == ManagedIpv4HandleResult.Failed
                 ? ManagedEthernetReceiveResult.DispatchFailed
@@ -649,7 +661,8 @@ internal enum ManagedNetworkDispatchResult : byte
     DnsResponseMalformed = 15,
     DnsResponseTruncated = 16,
     DnsNxDomain = 17,
-    DnsResolved = 18
+    DnsResolved = 18,
+    IcmpUnsupported = 29
 }
 
 internal enum ManagedEthernetReceiveResult : byte

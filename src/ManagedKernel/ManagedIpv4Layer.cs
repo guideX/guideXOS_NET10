@@ -32,7 +32,8 @@ internal enum ManagedIpv4HandleResult : byte
     TcpOutOfOrder = 25,
     TcpRstReceived = 26,
     TcpFinReceived = 27,
-    TcpReceiveUnavailable = 28
+    TcpReceiveUnavailable = 28,
+    IcmpUnsupported = 29
 }
 
 internal readonly struct ManagedIpv4Phase86Metadata
@@ -63,6 +64,51 @@ internal readonly struct ManagedIpv4Phase86Metadata
         PayloadLength = (byte)packet.Payload.Length;
         Sequence = sequence;
         IsLocal = isLocal;
+    }
+}
+
+internal readonly struct ManagedIpv4Phase87Metadata
+{
+    internal readonly uint SourceIpv4;
+    internal readonly uint DestinationIpv4;
+    internal readonly ushort TotalLength;
+    internal readonly ushort Identifier;
+    internal readonly ushort Sequence;
+    internal readonly ushort IcmpLength;
+    internal readonly ushort RequestIcmpChecksum;
+    internal readonly ushort ReplyIcmpChecksum;
+    internal readonly ushort ReplyIpv4Checksum;
+    internal readonly byte RequestTtl;
+    internal readonly byte ReplyTtl;
+    internal readonly byte PayloadLength;
+    internal readonly bool ReplyIcmpChecksumValid;
+    internal readonly bool ReplyIpv4ChecksumValid;
+
+    internal ManagedIpv4Phase87Metadata(in ManagedIpv4Packet packet,
+                                        in ManagedIcmpv4Packet request,
+                                        ReadOnlySpan<byte> replyIcmp,
+                                        ReadOnlySpan<byte> replyIpv4)
+    {
+        SourceIpv4 = ManagedEthernetProtocol.ReadUInt32Network(
+            packet.SourceAddress, 0);
+        DestinationIpv4 = ManagedEthernetProtocol.ReadUInt32Network(
+            packet.DestinationAddress, 0);
+        TotalLength = packet.TotalLength;
+        Identifier = request.Identifier;
+        Sequence = request.Sequence;
+        IcmpLength = (ushort)replyIcmp.Length;
+        RequestIcmpChecksum = request.Checksum;
+        ReplyIcmpChecksum = ManagedEthernetProtocol.ReadUInt16Network(
+            replyIcmp, 2);
+        ReplyIpv4Checksum = ManagedEthernetProtocol.ReadUInt16Network(
+            replyIpv4, 10);
+        RequestTtl = packet.Ttl;
+        ReplyTtl = replyIpv4[8];
+        PayloadLength = (byte)request.Payload.Length;
+        ReplyIcmpChecksumValid =
+            ManagedIcmpv4Protocol.ComputeChecksum(replyIcmp) == 0;
+        ReplyIpv4ChecksumValid =
+            ManagedIpv4Protocol.ComputeChecksum(replyIpv4.Slice(0, 20)) == 0;
     }
 }
 
@@ -181,6 +227,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private uint _phase86LocalDeliveryCount;
     private uint _phase86NotForUsCount;
     private ManagedIpv4Phase86Metadata _phase86LastMetadata;
+    private uint _phase87EchoRequestCount;
+    private ManagedIpv4Phase87Metadata _phase87LastMetadata;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -272,10 +320,18 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal uint Phase86NotForUsCount => _phase86NotForUsCount;
     internal ManagedIpv4Phase86Metadata Phase86LastMetadata =>
         _phase86LastMetadata;
+    internal uint Phase87EchoRequestCount => _phase87EchoRequestCount;
+    internal ManagedIpv4Phase87Metadata Phase87LastMetadata =>
+        _phase87LastMetadata;
 
     internal void EnablePhase86AcceptanceObserver()
     {
         _phase86ObserverEnabled = true;
+    }
+
+    internal void EnablePhase87IcmpAcceptance()
+    {
+        _active = true;
     }
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
@@ -1639,7 +1695,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                                                _txPacket, packetLength);
     }
 
-    internal ManagedIpv4HandleResult TryHandle(ReadOnlySpan<byte> packet)
+    internal ManagedIpv4HandleResult TryHandle(ReadOnlySpan<byte> packet,
+                                               ReadOnlySpan<byte> ethernetSourceMac)
     {
         if (packet.Length >= 1 && (packet[0] & 0x0F) >
             ManagedIpv4Protocol.SupportedHeaderWords)
@@ -1690,9 +1747,13 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
             _malformedPacketCount++;
             return ManagedIpv4HandleResult.Malformed;
         }
-        if (icmp.Type == ManagedIcmpv4Protocol.EchoReply)
+        ManagedIcmpv4Disposition disposition =
+            ManagedIcmpv4Protocol.Classify(in icmp);
+        if (disposition == ManagedIcmpv4Disposition.EchoReply)
             return TryHandleEchoReply(parsed, icmp);
-        return TryHandleEchoRequest(parsed, icmp);
+        if (disposition != ManagedIcmpv4Disposition.EchoRequest)
+            return ManagedIpv4HandleResult.IcmpUnsupported;
+        return TryHandleEchoRequest(parsed, icmp, ethernetSourceMac);
     }
 
     private bool TryObservePhase86Packet(in ManagedIpv4Packet packet,
@@ -2430,12 +2491,14 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     }
 
     private ManagedIpv4HandleResult TryHandleEchoRequest(
-        ManagedIpv4Packet packet, ManagedIcmpv4Packet icmp)
+        ManagedIpv4Packet packet, ManagedIcmpv4Packet icmp,
+        ReadOnlySpan<byte> ethernetSourceMac)
     {
         uint sourceIpv4 = ManagedEthernetProtocol.ReadUInt32Network(
             packet.SourceAddress, 0);
         if (!ManagedIpv4Protocol.IsDirectlyReachable(
-                _localIpv4Value, _subnetMaskValue, sourceIpv4))
+                _localIpv4Value, _subnetMaskValue, sourceIpv4) ||
+            !ManagedEthernetProtocol.IsUsableSourceMac(ethernetSourceMac))
             return ManagedIpv4HandleResult.Ignored;
         if (!ManagedIcmpv4Protocol.TryBuildEchoReply(
                 _txIcmp, icmp.Identifier, icmp.Sequence, icmp.Payload,
@@ -2445,10 +2508,15 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                 ManagedIpv4Protocol.DefaultTtl, ManagedIpv4Protocol.IcmpProtocol,
                 _localIpv4, packet.SourceAddress,
                 _txIcmp.AsSpan(0, icmpLength), out ushort packetLength) ||
-            !TrySendPacket(packet.SourceAddress,
-                            _txPacket.AsSpan(0, packetLength)))
+            !_ethernet.TryTransmit(ManagedIpv4Protocol.EtherType,
+                                   ethernetSourceMac, _txPacket,
+                                   packetLength))
             return ManagedIpv4HandleResult.Failed;
         _responderReplySent = true;
+        _phase87LastMetadata = new ManagedIpv4Phase87Metadata(
+            in packet, in icmp, _txIcmp.AsSpan(0, icmpLength),
+            _txPacket.AsSpan(0, packetLength));
+        _phase87EchoRequestCount++;
         if (!KernelLog.Write("GXOS_NET10:MANAGED_IPV4_RX_ECHO_REQUEST\r\n"u8) ||
             !KernelLog.Write("GXOS_NET10:MANAGED_ICMP_ECHO_REPLY_SENT\r\n"u8))
             return ManagedIpv4HandleResult.Failed;
