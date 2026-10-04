@@ -17,11 +17,132 @@ internal static class Program
     private static int Main()
     {
         EthernetTests();
+        Ipv4IngressTests();
         ArpTests();
         ArpHandlerTests();
         CacheTests();
         Console.WriteLine($"MANAGED_KERNEL_PHASE16_HOST_TESTS_PASS cases={s_cases}");
         return 0;
+    }
+
+    private static void Ipv4IngressTests()
+    {
+        uint local = ManagedEthernetProtocol.ReadUInt32Network(s_guestIp, 0);
+        uint peer = ManagedEthernetProtocol.ReadUInt32Network(s_hostIp, 0);
+        byte[] payload = { 0xA6, 0x86, 0x01 };
+        byte[] packet = BuildIpv4(0x8601, 0, 63, 253,
+                                  s_hostIp, s_guestIp, payload);
+        byte[] frame = new byte[60];
+        ManagedEthernetFrame ethernet = default;
+        ManagedIpv4Packet parsed = default;
+        Check(ManagedEthernetProtocol.TryBuildFrame(
+                  frame, s_guestMac, s_hostMac,
+                  ManagedIpv4Protocol.EtherType, packet,
+                  out ushort frameLength) && frameLength == 60 &&
+              ManagedEthernetProtocol.TryParseFrame(
+                  frame, s_guestMac, out ethernet) &&
+              ethernet.EtherType == 0x0800 &&
+              ManagedIpv4Protocol.TryParse(ethernet.Payload,
+                  out parsed) &&
+              parsed.Version == 4 && parsed.HeaderLength == 20 &&
+              parsed.TotalLength == 23 && parsed.Identification == 0x8601 &&
+              parsed.Ttl == 63 && parsed.Protocol == 253 &&
+              ManagedEthernetProtocol.ReadUInt32Network(
+                  parsed.SourceAddress, 0) == peer &&
+              ManagedEthernetProtocol.ReadUInt32Network(
+                  parsed.DestinationAddress, 0) == local &&
+              parsed.Payload.SequenceEqual(payload),
+              "ipv4-hardware-boundary-fields-and-padding-slice");
+        Check(ethernet.Payload.Length == 46 && parsed.Payload.Length == 3 &&
+              parsed.Payload[0] == 0xA6 && parsed.Payload[2] == 0x01,
+              "ipv4-total-length-excludes-ethernet-padding");
+
+        byte[] notForUs = BuildIpv4(0x8602, 0, 62, 253,
+                                    s_hostIp, new byte[] { 10, 15, 1, 2 },
+                                    payload);
+        Check(ManagedIpv4Protocol.TryParse(notForUs,
+                  out ManagedIpv4Packet other) &&
+              ManagedEthernetProtocol.ReadUInt32Network(
+                  other.DestinationAddress, 0) != local &&
+              !ManagedIpv4Protocol.TryParse(notForUs, local, out _),
+              "valid-not-for-us-parses-before-owner-filter");
+
+        byte[] exactHeader = BuildIpv4(0x8603, 0, 64, 253,
+                                       s_hostIp, s_guestIp, Array.Empty<byte>());
+        Check(exactHeader.Length == 20 &&
+              ManagedIpv4Protocol.TryParse(exactHeader, out ManagedIpv4Packet empty) &&
+              empty.TotalLength == 20 && empty.Payload.IsEmpty,
+              "ipv4-exact-header-zero-payload");
+
+        byte[] malformed = (byte[])packet.Clone();
+        malformed[0] = 0x65;
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-version-mismatch-rejected");
+        malformed = (byte[])packet.Clone(); malformed[0] = 0x40;
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-zero-ihl-rejected");
+        malformed = (byte[])packet.Clone(); malformed[0] = 0x44;
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-ihl-below-five-rejected");
+        malformed = (byte[])packet.Clone(); malformed[0] = 0x46;
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-options-rejected-explicitly");
+        malformed = (byte[])packet.Clone(); malformed[2] = 0; malformed[3] = 19;
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-total-length-below-header-rejected");
+        malformed = (byte[])packet.Clone(); malformed[2] = 0; malformed[3] = 24;
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-truncated-total-length-rejected");
+        Check(!ManagedIpv4Protocol.TryParse(packet.AsSpan(0, 19), out _),
+              "ipv4-truncated-header-rejected");
+        malformed = (byte[])packet.Clone(); malformed[10] ^= 1;
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-bad-network-order-checksum-rejected");
+        malformed = (byte[])packet.Clone(); malformed[6] = 0x20;
+        RecomputeIpv4Checksum(malformed);
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-more-fragments-rejected");
+        malformed = (byte[])packet.Clone(); malformed[7] = 1;
+        RecomputeIpv4Checksum(malformed);
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-fragment-offset-rejected");
+        malformed = (byte[])packet.Clone(); malformed[8] = 0;
+        RecomputeIpv4Checksum(malformed);
+        Check(!ManagedIpv4Protocol.TryParse(malformed, out _),
+              "ipv4-zero-ttl-not-delivered");
+        Check(ManagedIpv4Protocol.TryParse(packet, out ManagedIpv4Packet unsupported) &&
+              unsupported.Protocol == 253 && unsupported.Payload.Length == 3,
+              "ipv4-unsupported-protocol-remains-valid");
+
+        byte[] maximum = new byte[ManagedIpv4Protocol.MaximumPacketLength];
+        Check(ManagedIpv4Protocol.TryBuild(
+                  maximum, 0x86FF, 0x4000, 64, 253, s_hostIp, s_guestIp,
+                  new byte[ManagedIpv4Protocol.MaximumPacketLength - 20],
+                  out ushort maximumLength) &&
+              maximumLength == ManagedIpv4Protocol.MaximumPacketLength &&
+              ManagedIpv4Protocol.TryParse(
+                  maximum.AsSpan(0, maximumLength), out ManagedIpv4Packet max) &&
+              max.TotalLength == maximumLength,
+              "ipv4-maximum-bounded-packet");
+    }
+
+    private static byte[] BuildIpv4(ushort identification, ushort flags,
+                                    byte ttl, byte protocol, byte[] source,
+                                    byte[] destination, byte[] payload)
+    {
+        byte[] packet = new byte[ManagedIpv4Protocol.MaximumPacketLength];
+        if (!ManagedIpv4Protocol.TryBuild(packet, identification, flags, ttl,
+                protocol, source, destination, payload, out ushort length))
+            throw new InvalidOperationException("Could not build IPv4 host vector.");
+        return packet.AsSpan(0, length).ToArray();
+    }
+
+    private static void RecomputeIpv4Checksum(byte[] packet)
+    {
+        packet[10] = 0;
+        packet[11] = 0;
+        ManagedEthernetProtocol.WriteUInt16Network(packet, 10,
+            ManagedIpv4Protocol.ComputeChecksum(packet.AsSpan(0, 20)));
     }
 
     private static void EthernetTests()

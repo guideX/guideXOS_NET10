@@ -64,6 +64,7 @@ param(
     [switch]$EnablePhase82ConcurrentManagedInterrupts,
     [switch]$EnablePhase83E1000Rx,
     [switch]$EnablePhase85ManagedArp,
+    [switch]$EnablePhase86ManagedIpv4,
     [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
@@ -127,6 +128,12 @@ if ($EnablePhase85ManagedArp -and
     (-not $EnablePhase83E1000Rx -or $PayloadMode -ne 'ManagedKernel' -or
      -not $EnableNativeAotStartup -or $Scenario -ne 'ManagedKernelPhase11')) {
     throw 'Phase 85 ARP acceptance requires Phase 83 E1000 RX, the ManagedKernel payload, NativeAOT startup, and ManagedKernelPhase11 scenario.'
+}
+if ($EnablePhase86ManagedIpv4 -and
+    (-not $EnablePhase83E1000Rx -or $EnablePhase85ManagedArp -or
+     $PayloadMode -ne 'ManagedKernel' -or -not $EnableNativeAotStartup -or
+     $Scenario -ne 'ManagedKernelPhase11')) {
+    throw 'Phase 86 IPv4 acceptance requires Phase 83 E1000 RX, the ManagedKernel payload, NativeAOT startup, and ManagedKernelPhase11 scenario; it is exclusive with Phase 85 mode.'
 }
 if ($Phase69FixtureMode -ne 'None' -and
     ($PayloadMode -ne 'ManagedKernel' -or -not $EnablePhase69PersistentServiceOwner)) {
@@ -1716,6 +1723,9 @@ if ($EnablePhase83E1000Rx) {
 }
 if ($EnablePhase85ManagedArp) {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE85_ARP'
+}
+if ($EnablePhase86ManagedIpv4) {
+    $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE86_IPV4'
 }
 if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE11'

@@ -35,6 +35,37 @@ internal enum ManagedIpv4HandleResult : byte
     TcpReceiveUnavailable = 28
 }
 
+internal readonly struct ManagedIpv4Phase86Metadata
+{
+    internal readonly uint SourceAddress;
+    internal readonly uint DestinationAddress;
+    internal readonly ushort Identification;
+    internal readonly ushort TotalLength;
+    internal readonly byte HeaderLength;
+    internal readonly byte Ttl;
+    internal readonly byte Protocol;
+    internal readonly byte PayloadLength;
+    internal readonly byte Sequence;
+    internal readonly bool IsLocal;
+
+    internal ManagedIpv4Phase86Metadata(in ManagedIpv4Packet packet,
+                                        byte sequence, bool isLocal)
+    {
+        SourceAddress = ManagedEthernetProtocol.ReadUInt32Network(
+            packet.SourceAddress, 0);
+        DestinationAddress = ManagedEthernetProtocol.ReadUInt32Network(
+            packet.DestinationAddress, 0);
+        Identification = packet.Identification;
+        TotalLength = packet.TotalLength;
+        HeaderLength = packet.HeaderLength;
+        Ttl = packet.Ttl;
+        Protocol = packet.Protocol;
+        PayloadLength = (byte)packet.Payload.Length;
+        Sequence = sequence;
+        IsLocal = isLocal;
+    }
+}
+
 internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
 {
     private const int MaximumProtocolFrames = 16;
@@ -145,6 +176,11 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private bool _phase51ResetReusePassed;
     private bool _phase52Passed;
     private bool _phase53Passed;
+    private bool _phase86ObserverEnabled;
+    private uint _phase86ParsedFrameCount;
+    private uint _phase86LocalDeliveryCount;
+    private uint _phase86NotForUsCount;
+    private ManagedIpv4Phase86Metadata _phase86LastMetadata;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -231,6 +267,16 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal bool Phase51ResetReusePassed => _phase51ResetReusePassed;
     internal bool Phase52Passed => _phase52Passed;
     internal bool Phase53Passed => _phase53Passed;
+    internal uint Phase86ParsedFrameCount => _phase86ParsedFrameCount;
+    internal uint Phase86LocalDeliveryCount => _phase86LocalDeliveryCount;
+    internal uint Phase86NotForUsCount => _phase86NotForUsCount;
+    internal ManagedIpv4Phase86Metadata Phase86LastMetadata =>
+        _phase86LastMetadata;
+
+    internal void EnablePhase86AcceptanceObserver()
+    {
+        _phase86ObserverEnabled = true;
+    }
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
     internal uint TcpGeneration => _tcp.Generation;
@@ -1595,7 +1641,6 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
 
     internal ManagedIpv4HandleResult TryHandle(ReadOnlySpan<byte> packet)
     {
-        if (!_active) return ManagedIpv4HandleResult.Failed;
         if (packet.Length >= 1 && (packet[0] & 0x0F) >
             ManagedIpv4Protocol.SupportedHeaderWords)
             _unsupportedOptionsCount++;
@@ -1603,22 +1648,42 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
             packet.Length >= ManagedIpv4Protocol.MinimumHeaderLength &&
             packet[9] == ManagedUdpProtocol.Protocol &&
             ManagedEthernetProtocol.ReadUInt32Network(packet, 16) == 0xFFFFFFFFU;
-        if (!ManagedIpv4Protocol.TryParse(packet, _localIpv4Value,
-                                          allowDhcpBroadcast,
+        if (!ManagedIpv4Protocol.TryParse(packet,
                                           out ManagedIpv4Packet parsed))
         {
             _malformedPacketCount++;
             return ManagedIpv4HandleResult.Malformed;
         }
-        if (parsed.Protocol == ManagedTcpProtocol.Protocol)
-            return TryHandleTcp(parsed);
-        if (parsed.Protocol != ManagedIpv4Protocol.IcmpProtocol)
+        uint destinationAddress = ManagedEthernetProtocol.ReadUInt32Network(
+            parsed.DestinationAddress, 0);
+        bool isLocal = destinationAddress == _localIpv4Value ||
+            (allowDhcpBroadcast && destinationAddress == 0xFFFFFFFFU);
+        if (_phase86ObserverEnabled)
         {
-            if (parsed.Protocol == ManagedUdpProtocol.Protocol)
-                return TryHandleUdp(parsed);
+            if (!TryObservePhase86Packet(in parsed, isLocal))
+            {
+                _malformedPacketCount++;
+                return ManagedIpv4HandleResult.Malformed;
+            }
+        }
+        if (!isLocal)
+            return ManagedIpv4HandleResult.Ignored;
+        bool supportedProtocol = parsed.Protocol == ManagedTcpProtocol.Protocol ||
+            parsed.Protocol == ManagedUdpProtocol.Protocol ||
+            parsed.Protocol == ManagedIpv4Protocol.IcmpProtocol;
+        if (!supportedProtocol)
+        {
             _unsupportedProtocolCount++;
             return ManagedIpv4HandleResult.Ignored;
         }
+        /* Structural IPv4 validation and local ownership are available as
+           soon as Ethernet ingress starts.  Protocol handlers remain gated
+           until their transport-facing layer is activated. */
+        if (!_active) return ManagedIpv4HandleResult.Ignored;
+        if (parsed.Protocol == ManagedTcpProtocol.Protocol)
+            return TryHandleTcp(parsed);
+        if (parsed.Protocol == ManagedUdpProtocol.Protocol)
+            return TryHandleUdp(parsed);
         if (!ManagedIcmpv4Protocol.TryParse(parsed.Payload,
                                             out ManagedIcmpv4Packet icmp))
         {
@@ -1628,6 +1693,33 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         if (icmp.Type == ManagedIcmpv4Protocol.EchoReply)
             return TryHandleEchoReply(parsed, icmp);
         return TryHandleEchoRequest(parsed, icmp);
+    }
+
+    private bool TryObservePhase86Packet(in ManagedIpv4Packet packet,
+                                         bool isLocal)
+    {
+        uint ordinal = _phase86ParsedFrameCount + 1U;
+        if (ordinal > 4U || packet.Protocol != 253 ||
+            packet.Payload.Length != 4 || packet.Payload[0] != 0x86 ||
+            packet.Payload[1] != ordinal || packet.Payload[2] != 0xA5 ||
+            packet.Payload[3] != 0x5A ||
+            packet.Identification != (ushort)(0x8600U + ordinal) ||
+            packet.Ttl != 63 || packet.FlagsFragmentOffset != 0 ||
+            packet.TotalLength != 24 || packet.HeaderLength != 20 ||
+            (isLocal != (ordinal <= 3U)) ||
+            ManagedEthernetProtocol.ReadUInt32Network(
+                packet.SourceAddress, 0) != 0x0A0F0000U + ordinal + 1U ||
+            ManagedEthernetProtocol.ReadUInt32Network(
+                packet.DestinationAddress, 0) !=
+                (isLocal ? _localIpv4Value : 0x0A0F0063U))
+            return false;
+
+        _phase86LastMetadata = new ManagedIpv4Phase86Metadata(
+            in packet, (byte)ordinal, isLocal);
+        _phase86ParsedFrameCount = ordinal;
+        if (isLocal) _phase86LocalDeliveryCount++;
+        else _phase86NotForUsCount++;
+        return true;
     }
 
     internal bool TryReleasePendingAfterArp()

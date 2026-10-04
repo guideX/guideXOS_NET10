@@ -55,9 +55,10 @@ internal static class ManagedIpv4Protocol
         return TryParse(packet, localAddress, false, out parsed);
     }
 
+    /* Structural parsing is independent of local-address ownership.  Ethernet
+       ingress uses this overload first, then applies ownership before protocol
+       dispatch so a valid packet for another host is not mislabeled malformed. */
     internal static bool TryParse(ReadOnlySpan<byte> packet,
-                                  uint localAddress,
-                                  bool allowBootstrapBroadcast,
                                   out ManagedIpv4Packet parsed)
     {
         parsed = default;
@@ -70,10 +71,9 @@ internal static class ManagedIpv4Protocol
             return false;
 
         int headerLength = headerWords * 4;
-        if (packet.Length < headerLength) return false;
         ushort totalLength = ManagedEthernetProtocol.ReadUInt16Network(packet, 2);
         if (totalLength < headerLength || totalLength > packet.Length ||
-            totalLength > MaximumPacketLength)
+            totalLength > MaximumPacketLength || packet[8] == 0)
             return false;
 
         ushort flagsFragmentOffset =
@@ -82,13 +82,25 @@ internal static class ManagedIpv4Protocol
             return false;
         if (ComputeChecksum(packet.Slice(0, headerLength)) != 0)
             return false;
-        uint destinationAddress = ManagedEthernetProtocol.ReadUInt32Network(
-            packet, 16);
-        if (destinationAddress != localAddress &&
-            (!allowBootstrapBroadcast || destinationAddress != 0xFFFFFFFFU))
-            return false;
 
         parsed = new ManagedIpv4Packet(packet, totalLength);
+        return true;
+    }
+
+    internal static bool TryParse(ReadOnlySpan<byte> packet,
+                                  uint localAddress,
+                                  bool allowBootstrapBroadcast,
+                                  out ManagedIpv4Packet parsed)
+    {
+        if (!TryParse(packet, out parsed)) return false;
+        uint destinationAddress = ManagedEthernetProtocol.ReadUInt32Network(
+            parsed.DestinationAddress, 0);
+        if (destinationAddress != localAddress &&
+            (!allowBootstrapBroadcast || destinationAddress != 0xFFFFFFFFU))
+        {
+            parsed = default;
+            return false;
+        }
         return true;
     }
 

@@ -12,6 +12,7 @@ param(
     [switch]$EnablePhase82,
     [switch]$EnablePhase83,
     [switch]$EnablePhase85Arp,
+    [switch]$EnablePhase86Ipv4,
     [string]$Phase15InjectorPath = '',
     [ValidateSet('dgram', 'user')]
     [string]$Phase15NetworkBackend = 'dgram',
@@ -87,6 +88,13 @@ if ($EnablePhase85Arp -and (-not $EnablePhase83 -or
 }
 if ($EnablePhase85Arp -and $RunCount -ne 3) {
     throw 'Phase 85 hardware acceptance requires exactly three fresh boots.'
+}
+if ($EnablePhase86Ipv4 -and (-not $EnablePhase83 -or
+    -not $EnablePhase80E1000 -or $EnablePhase15Rx -or $EnablePhase85Arp)) {
+    throw '-EnablePhase86Ipv4 requires the Phase 83 local dgram/e1000e receive path and is exclusive with Phase 85 ARP mode.'
+}
+if ($EnablePhase86Ipv4 -and $RunCount -ne 3) {
+    throw 'Phase 86 hardware acceptance requires exactly three fresh boots.'
 }
 if ($EnablePhase82 -and -not $EnablePhase80E1000) {
     throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
@@ -658,6 +666,43 @@ function New-Phase85ArpFrame11([uint32]$sequence) {
     } else {
         $frame[41] = 99
     }
+    return ,$frame
+}
+
+function New-Phase86Ipv4Frame11([string]$destinationMac,
+                                [uint32]$sequence) {
+    Require11 ($destinationMac -match '^[0-9A-Fa-f]{12}$') `
+        'Phase 86 destination MAC must contain exactly six octets.'
+    Require11 ($sequence -ge 1 -and $sequence -le 4) `
+        'Phase 86 sequence must be in the bounded range 1 through 4.'
+    [byte[]]$frame = New-Object byte[] 60
+    for ($index = 0; $index -lt 6; $index++) {
+        $frame[$index] = [Convert]::ToByte(
+            $destinationMac.Substring($index * 2, 2), 16)
+    }
+    [byte[]]$sourceMac = 0x02, 0x15, 0, 0, 0, [byte]$sequence
+    [Array]::Copy($sourceMac, 0, $frame, 6, 6)
+    $frame[12] = 0x08; $frame[13] = 0x00
+    $frame[14] = 0x45; $frame[15] = 0
+    $frame[16] = 0; $frame[17] = 24
+    $frame[18] = 0x86; $frame[19] = [byte]$sequence
+    $frame[20] = 0; $frame[21] = 0
+    $frame[22] = 63; $frame[23] = 253
+    $frame[26] = 10; $frame[27] = 15; $frame[28] = 0
+    $frame[29] = [byte]($sequence + 1)
+    $frame[30] = 10; $frame[31] = 15; $frame[32] = 0
+    $frame[33] = if ($sequence -le 3) { 1 } else { 99 }
+    $frame[34] = 0x86; $frame[35] = [byte]$sequence
+    $frame[36] = 0xA5; $frame[37] = 0x5A
+    $sum = 0
+    for ($offset = 14; $offset -lt 34; $offset += 2) {
+        $sum += ([int]$frame[$offset] -shl 8) -bor
+                [int]$frame[$offset + 1]
+    }
+    while ($sum -gt 0xFFFF) { $sum = ($sum -band 0xFFFF) + ($sum -shr 16) }
+    $checksum = (-bnot $sum) -band 0xFFFF
+    $frame[24] = [byte](($checksum -shr 8) -band 0xFF)
+    $frame[25] = [byte]($checksum -band 0xFF)
     return ,$frame
 }
 
@@ -3474,6 +3519,15 @@ if ($EnablePhase85Arp) {
         'GXOS_NET10:PHASE85_ARP_REQUEST_NOT_FOR_US=1',
         'GXOS_NET10:PHASE85_HARDWARE_ARP_INGRESS_PASS=1')
 }
+if ($EnablePhase86Ipv4) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE86_IPV4_MODE_SELECTED=1',
+        'GXOS_NET10:PHASE86_IPV4_PARSER_READY=1',
+        'GXOS_NET10:PHASE86_IPV4_RX_READY=1',
+        'GXOS_NET10:PHASE86_IPV4_NOT_FOR_US=1',
+        'GXOS_NET10:PHASE86_RX_DESCRIPTOR_RECYCLE_PASS=1',
+        'GXOS_NET10:PHASE86_HARDWARE_IPV4_INGRESS_PASS=1')
+}
 
 $owned = @()
 try {
@@ -3655,6 +3709,9 @@ try {
                 if ($EnablePhase85Arp) {
                     Wait-Marker11 'GXOS_NET10:PHASE85_ARP_RX_READY=1' `
                         $deadline $process $stream $logStream $text $buffer
+                } elseif ($EnablePhase86Ipv4) {
+                    Wait-Marker11 'GXOS_NET10:PHASE86_IPV4_RX_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
                 } else {
                     Wait-Marker11 'GXOS_NET10:PHASE83_RX_READY=1' `
                         $deadline $process $stream $logStream $text $buffer
@@ -3753,6 +3810,47 @@ try {
                     $injectionLog.WriteLine(
                         'PHASE85_ARP_INJECTION_SUMMARY=PASS requests=4 local_targets=3 not_for_us=1 captured_replies={0} external_network=false' -f `
                         $replyCount)
+                    $injectionLog.Flush()
+                } elseif ($EnablePhase86Ipv4) {
+                    $localIpMatch = [regex]::Match($text.ToString(),
+                        'GXOS_NET10:PHASE86_LOCAL_IPV4=0x([0-9A-Fa-f]{16})')
+                    Require11 ($localIpMatch.Success -and
+                        [Convert]::ToUInt32($localIpMatch.Groups[1].Value, 16) -eq 0x0A0F0001) `
+                        'Phase 86 did not reuse the existing local IPv4 authority.'
+                    for ($frameSequence = 1; $frameSequence -le 4; $frameSequence++) {
+                        [byte[]]$frame = New-Phase86Ipv4Frame11 `
+                            $destinationMac ([uint32]$frameSequence)
+                        $sent = $peerUdp.Send($frame, $frame.Length,
+                                              '127.0.0.1', $rxPort)
+                        Require11 ($sent -eq $frame.Length) `
+                            'Phase 86 local UDP injector sent a short IPv4 Ethernet frame.'
+                        $hash = [Security.Cryptography.SHA256]::Create()
+                        try {
+                            $frameHash = ([BitConverter]::ToString(
+                                $hash.ComputeHash($frame))).Replace('-', '')
+                        } finally { $hash.Dispose() }
+                        $sourceMac = ([BitConverter]::ToString(
+                            $frame[6..11])).Replace('-', '')
+                        $destinationIp = if ($frameSequence -le 3) {
+                            '10.15.0.1'
+                        } else { '10.15.0.99' }
+                        $injectionLog.WriteLine((
+                            'PHASE86_IPV4_FRAME_INJECTED=PASS sequence={0} length={1} destination_mac={2} source_mac={3} source_ipv4=10.15.0.{4} destination_ipv4={5} ethertype=0800 version=4 ihl=5 total_length=24 identification=0x860{0} flags_offset=0 ttl=63 protocol=253 checksum={6:X4} payload=860{0}A55A backend=dgram host=127.0.0.1 guest_port={7} source_port={8} sha256={9}' -f `
+                            $frameSequence, $frame.Length, $destinationMac,
+                            $sourceMac, ($frameSequence + 1), $destinationIp,
+                            (([int]$frame[24] -shl 8) -bor [int]$frame[25]),
+                            $rxPort, $peerPort, $frameHash))
+                        $injectionLog.Flush()
+                        Write-Timeline11 $timeline 'PHASE86_IPV4_FRAME_INJECTED' `
+                            "sequence=$frameSequence destination=$destinationIp sha256=$frameHash backend=dgram"
+                        $accepted = 'GXOS_NET10:PHASE86_IPV4_DELIVERY=0x{0:X16}' -f $frameSequence
+                        Wait-Marker11 $accepted $deadline $process $stream $logStream $text $buffer
+                    }
+                    Wait-Marker11 'GXOS_NET10:PHASE86_HARDWARE_IPV4_INGRESS_PASS=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $injectionLog.WriteLine(
+                        'PHASE86_IPV4_INJECTION_SUMMARY=PASS frames=4 local=3 not_for_us=1 destination_mac={0} local_ipv4=10.15.0.1 protocol=253 external_network=false' -f `
+                        $destinationMac)
                     $injectionLog.Flush()
                 } else {
                     for ($frameSequence = 1; $frameSequence -le 4; $frameSequence++) {
@@ -5941,6 +6039,8 @@ try {
         if ($EnablePhase85Arp) {
             $arpCaptureHash = (Get-FileHash -LiteralPath $arpTxCaptureBinary -Algorithm SHA256).Hash.ToUpperInvariant()
             Write-Output ("MANAGED_KERNEL_PHASE85_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} arp_tx_capture_sha256={5} timeline_sha256={6} serial={7}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $arpCaptureHash, $timelineHash, $serial)
+        } elseif ($EnablePhase86Ipv4) {
+            Write-Output ("MANAGED_KERNEL_PHASE86_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} timeline_sha256={5} serial={6}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $timelineHash, $serial)
         } else {
             Write-Output ("MANAGED_KERNEL_PHASE11_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} timeline_sha256={5} serial={6}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $timelineHash, $serial)
         }

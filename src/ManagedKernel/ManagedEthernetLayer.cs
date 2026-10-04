@@ -19,6 +19,7 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
     private uint _malformedFrameCount;
     private uint _receivedFrameCount;
     private uint _parsedFrameCount;
+    private ushort _lastReceivedEtherType;
     private uint _unsupportedEtherTypeDropCount;
     private uint _phase84TestConsumerDeliveryCount;
     private uint _phase84TestConsumerFailureCount;
@@ -49,6 +50,7 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
     internal uint MalformedFrameCount => _malformedFrameCount;
     internal uint ReceivedFrameCount => _receivedFrameCount;
     internal uint ParsedFrameCount => _parsedFrameCount;
+    internal ushort LastReceivedEtherType => _lastReceivedEtherType;
     internal uint UnsupportedEtherTypeDropCount => _unsupportedEtherTypeDropCount;
     internal uint Phase84TestConsumerDeliveryCount =>
         _phase84TestConsumerDeliveryCount;
@@ -465,6 +467,23 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
         return _arp.TryInstallLocalIpv4(_arp.LocalIpv4);
     }
 
+    internal bool TryEnablePhase86Ipv4Acceptance()
+    {
+        if (!_arp.TryInstallLocalIpv4(_arp.LocalIpv4)) return false;
+        _ipv4.EnablePhase86AcceptanceObserver();
+        return true;
+    }
+
+    internal uint Phase86Ipv4ParsedFrameCount =>
+        _ipv4.Phase86ParsedFrameCount;
+    internal uint Phase86Ipv4LocalDeliveryCount =>
+        _ipv4.Phase86LocalDeliveryCount;
+    internal uint Phase86Ipv4NotForUsCount => _ipv4.Phase86NotForUsCount;
+    internal uint Phase86UnsupportedProtocolCount =>
+        _ipv4.UnsupportedProtocolCount;
+    internal ManagedIpv4Phase86Metadata Phase86Ipv4LastMetadata =>
+        _ipv4.Phase86LastMetadata;
+
     internal uint LocalIpv4Value =>
         ManagedEthernetProtocol.ReadUInt32Network(_arp.LocalIpv4, 0);
 
@@ -488,6 +507,7 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
             return ManagedEthernetReceiveResult.MalformedFrame;
         }
         _parsedFrameCount++;
+        _lastReceivedEtherType = parsed.EtherType;
         ManagedEthernetDispatchKind dispatchKind =
             ManagedEthernetProtocol.ClassifyEtherType(
                 parsed.EtherType, _phase84TestConsumerEnabled);
