@@ -10,6 +10,7 @@ param(
     [switch]$EnablePhase15Rx,
     [switch]$EnablePhase80E1000,
     [switch]$EnablePhase82,
+    [switch]$EnablePhase83,
     [string]$Phase15InjectorPath = '',
     [ValidateSet('dgram', 'user')]
     [string]$Phase15NetworkBackend = 'dgram',
@@ -72,6 +73,12 @@ if ($EnablePhase32NegativeControl -and -not $EnablePhase32Protocol) {
 }
 if ($EnablePhase80E1000 -and $EnablePhase15Rx) {
     throw 'Phase 80 uses a local user-mode backend and does not combine with Phase 15 RX injection.'
+}
+if ($EnablePhase83 -and (-not $EnablePhase80E1000 -or $EnablePhase15Rx)) {
+    throw '-EnablePhase83 requires the Phase 80 E1000 fixture and uses its own local dgram injector.'
+}
+if ($EnablePhase83 -and $RunCount -ne 3) {
+    throw 'Phase 83 hardware acceptance requires exactly three fresh boots.'
 }
 if ($EnablePhase82 -and -not $EnablePhase80E1000) {
     throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
@@ -590,6 +597,30 @@ function New-Phase15Frame11([string]$destinationMac, [bool]$phase17 = $false,
     $frame[$sequenceOffset + 2] = [byte](($sequence -shr 8) -band 0xFF)
     $frame[$sequenceOffset + 3] = [byte]($sequence -band 0xFF)
     return $frame
+}
+
+function New-Phase83RxFrame11([string]$destinationMac, [uint32]$sequence) {
+    Require11 ($destinationMac -match '^[0-9A-Fa-f]{12}$') `
+        'Phase 83 destination MAC must contain exactly six octets.'
+    Require11 ($sequence -ge 1 -and $sequence -le 4) `
+        'Phase 83 fixture sequence must be in the bounded range 1 through 4.'
+    [byte[]]$frame = New-Object byte[] 60
+    for ($index = 0; $index -lt 6; $index++) {
+        $frame[$index] = [Convert]::ToByte($destinationMac.Substring($index * 2, 2), 16)
+    }
+    [byte[]]$sourceMac = 0x02, 0x15, 0, 0, 0, 1
+    [Array]::Copy($sourceMac, 0, $frame, 6, 6)
+    $frame[12] = 0x88
+    $frame[13] = 0xB5
+    [byte[]]$sentinel = [Text.Encoding]::ASCII.GetBytes('guideXOS Phase83 RX')
+    [Array]::Copy($sentinel, 0, $frame, 14, $sentinel.Length)
+    [uint32]$frameSequence = $sequence
+    $sequenceOffset = 14 + $sentinel.Length
+    $frame[$sequenceOffset] = [byte](($frameSequence -shr 24) -band 0xFF)
+    $frame[$sequenceOffset + 1] = [byte](($frameSequence -shr 16) -band 0xFF)
+    $frame[$sequenceOffset + 2] = [byte](($frameSequence -shr 8) -band 0xFF)
+    $frame[$sequenceOffset + 3] = [byte]($frameSequence -band 0xFF)
+    return ,$frame
 }
 
 function Send-Phase15DgramFrame11([Net.Sockets.UdpClient]$peerUdp,
@@ -3365,15 +3396,17 @@ try {
         $probe.Start(); $monitorPort = ([Net.IPEndPoint]$probe.LocalEndpoint).Port; $probe.Stop()
         $rxPort = 0
         $peerPort = 0
-        if ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') {
+        if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
+            $EnablePhase83) {
             $rxPort = Get-FreeUdpPort11
             $peerPort = Get-FreeUdpPort11
         }
         $peerUdp = $null
-        if ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') {
-            # QEMU's dgram backend requires a live remote endpoint.  Keep the
-            # host peer bound before QEMU starts so e1000 TX cannot stall on a
-            # missing peer; the one test frame is sent later after RX_READY.
+        if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
+            $EnablePhase83) {
+            # QEMU's dgram backend requires a live remote endpoint. Keep the
+            # host peer bound before QEMU starts so E1000 TX cannot stall; the
+            # controlled RX frames are sent later after the guest is ready.
             $peerUdp = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
             $peerUdp.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $peerPort))
         }
@@ -3387,7 +3420,12 @@ try {
             '-serial', 'none', '-device', 'isa-serial,chardev=serial0,iobase=0x3f8,irq=4,wakeup=on',
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
             '-display', $(if ($CaptureQemuScreen) { 'gtk' } else { 'none' }), '-no-reboot', '-no-shutdown')
-        if ($EnablePhase80E1000) {
+        if ($EnablePhase83) {
+            $arguments += @('-nic', 'none')
+            $arguments += @(
+                '-netdev', "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$rxPort,remote.type=inet,remote.host=127.0.0.1,remote.port=$peerPort")
+            $arguments += @('-device', 'e1000e,netdev=net0,addr=2')
+        } elseif ($EnablePhase80E1000) {
             $arguments += @('-nic', 'none', '-netdev', 'user,id=net0')
             $arguments += @('-device', 'e1000e,netdev=net0,addr=2')
         } elseif ($EnablePhase15Rx) {
@@ -3441,7 +3479,8 @@ try {
             $timeline = [IO.StreamWriter]::new($timelinePath, $false, [Text.Encoding]::ASCII)
             $script:phase11Timeline = $timeline
             $listenerDetail = "serial_port=$serialPort monitor_port=$monitorPort"
-            if ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') {
+            if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
+                $EnablePhase83) {
                 $listenerDetail += " rx_port=$rxPort peer_port=$peerPort"
             }
             Write-Timeline11 $timeline 'HOST_LISTENERS_READY' $listenerDetail
@@ -3489,6 +3528,43 @@ try {
                 Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_DRIVER_BURST_OK' $deadline $process $stream $logStream $text $buffer
             }
             Wait-Marker11 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS' $deadline $process $stream $logStream $text $buffer
+            if ($EnablePhase83) {
+                Wait-Marker11 'GXOS_NET10:PHASE83_RX_READY=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                $macMatch = [regex]::Match($text.ToString(),
+                    'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
+                Require11 $macMatch.Success 'Phase 83 did not publish the runtime e1000 MAC.'
+                $destinationMac = ($macMatch.Groups[1].Value +
+                                   $macMatch.Groups[2].Value).ToUpperInvariant()
+                for ($frameSequence = 1; $frameSequence -le 4; $frameSequence++) {
+                    [byte[]]$frame = New-Phase83RxFrame11 `
+                        $destinationMac ([uint32]$frameSequence)
+                    $sent = $peerUdp.Send($frame, $frame.Length,
+                                          '127.0.0.1', $rxPort)
+                    Require11 ($sent -eq $frame.Length) `
+                        'Phase 83 local UDP injector sent a short Ethernet frame.'
+                    $hash = [Security.Cryptography.SHA256]::Create()
+                    try {
+                        $frameHash = ([BitConverter]::ToString(
+                            $hash.ComputeHash($frame))).Replace('-', '')
+                    } finally { $hash.Dispose() }
+                    $injectionLog.WriteLine((
+                        'PHASE83_FRAME_INJECTED=PASS sequence={0} length={1} destination={2} source=021500000001 ethertype=88B5 sentinel="guideXOS Phase83 RX" hash={3} backend=dgram host=127.0.0.1 guest_port={4} source_port={5}' -f `
+                        $frameSequence, $frame.Length, $destinationMac,
+                        $frameHash, $rxPort, $peerPort))
+                    $injectionLog.Flush()
+                    Write-Timeline11 $timeline 'PHASE83_LOCAL_RX_FRAME_INJECTED' `
+                        "sequence=$frameSequence length=$($frame.Length) destination=$destinationMac sha256=$frameHash backend=dgram"
+                    $accepted = 'GXOS_NET10:PHASE83_RX_ACCEPTED=0x{0:X16}' -f $frameSequence
+                    Wait-Marker11 $accepted $deadline $process $stream $logStream $text $buffer
+                }
+                Wait-Marker11 'GXOS_NET10:PHASE83_RX_MANAGED_PROOF=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                $injectionLog.WriteLine(
+                    'PHASE83_INJECTION_SUMMARY=PASS attempted=4 frame_length=60 destination={0} backend=dgram external_network=false' -f `
+                    $destinationMac)
+                $injectionLog.Flush()
+            }
             if ($EnablePhase82) {
                 Wait-Marker11 'GXOS_NET10:PHASE82_INTERLEAVING_READY=1' `
                     $deadline $process $stream $logStream $text $buffer

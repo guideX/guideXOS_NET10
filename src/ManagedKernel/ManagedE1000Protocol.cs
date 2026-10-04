@@ -26,8 +26,12 @@ internal static class ManagedE1000Protocol
     internal const byte TxStatusDone = 0x01;
     internal const uint InterruptEventType = 3;
     internal const uint InterruptCauseTxDescriptorWriteback = 1U << 0;
+    internal const uint InterruptCauseRxTimer = 1U << 7;
+    internal const uint InterruptCauseManagedMask =
+        InterruptCauseTxDescriptorWriteback | InterruptCauseRxTimer;
     internal const uint InterruptMaskTxDescriptorWriteback =
         InterruptCauseTxDescriptorWriteback;
+    internal const uint InterruptMaskRxTimer = InterruptCauseRxTimer;
     internal const byte RxStatusDone = 0x01;
     internal const byte RxStatusEop = 0x02;
     internal const byte RxErrorMask = 0xFF;
@@ -80,6 +84,9 @@ internal static class ManagedE1000Protocol
 
     internal static ReadOnlySpan<byte> RxPayloadSignature =>
         "guideXOS ManagedKernel Phase15 RX"u8;
+
+    internal static ReadOnlySpan<byte> Phase83RxPayloadSignature =>
+        "guideXOS Phase83 RX"u8;
 
     private static readonly byte[] s_rxSourceMac =
         { 0x02, 0x15, 0x00, 0x00, 0x00, 0x01 };
@@ -212,7 +219,8 @@ internal static class ManagedE1000Protocol
         errors = descriptor[13];
         return (status & (RxStatusDone | RxStatusEop)) ==
                    (RxStatusDone | RxStatusEop) &&
-               (errors & RxErrorMask) == 0 && length != 0 &&
+               (errors & RxErrorMask) == 0 &&
+               length >= MinimumEthernetFrameLength &&
                length <= bufferCapacity;
     }
 
@@ -225,8 +233,8 @@ internal static class ManagedE1000Protocol
     internal static bool TryClassifyInterruptCause(uint cause,
                                                     out uint unrelated)
     {
-        unrelated = cause & ~InterruptCauseTxDescriptorWriteback;
-        return (cause & InterruptCauseTxDescriptorWriteback) != 0;
+        unrelated = cause & ~InterruptCauseManagedMask;
+        return (cause & InterruptCauseManagedMask) != 0;
     }
 
     internal static bool TryValidateInterruptEvent(
@@ -333,6 +341,49 @@ internal static class ManagedE1000Protocol
             sequence != Phase32RxTestSequence && sequence != Phase33RxTestSequence &&
             sequence != Phase34RxTestSequence)
             return false;
+        for (int index = sequenceOffset + 4; index != frame.Length; ++index)
+            if (frame[index] != 0) return false;
+        return true;
+    }
+
+    internal static bool TryBuildPhase83RxTestFrame(Span<byte> frame,
+                                                     ReadOnlySpan<byte> destination,
+                                                     uint sequence)
+    {
+        if (frame.Length != RxFrameLength || destination.Length != 6 ||
+            IsInvalidMac(destination) || sequence == 0) return false;
+        frame.Clear();
+        destination.CopyTo(frame.Slice(0, 6));
+        RxSourceMac.CopyTo(frame.Slice(6, 6));
+        frame[12] = (byte)(ProofEtherType >> 8);
+        frame[13] = (byte)(ProofEtherType & 0xFF);
+        Phase83RxPayloadSignature.CopyTo(frame.Slice(14));
+        int sequenceOffset = 14 + Phase83RxPayloadSignature.Length;
+        frame[sequenceOffset] = (byte)(sequence >> 24);
+        frame[sequenceOffset + 1] = (byte)(sequence >> 16);
+        frame[sequenceOffset + 2] = (byte)(sequence >> 8);
+        frame[sequenceOffset + 3] = (byte)sequence;
+        return true;
+    }
+
+    internal static bool TryValidatePhase83RxTestFrame(
+        ReadOnlySpan<byte> frame, ReadOnlySpan<byte> destination,
+        uint expectedSequence)
+    {
+        if (frame.Length != RxFrameLength || destination.Length != 6 ||
+            IsInvalidMac(destination) || expectedSequence == 0 ||
+            !frame.Slice(0, 6).SequenceEqual(destination) ||
+            !frame.Slice(6, 6).SequenceEqual(RxSourceMac) ||
+            frame[12] != (byte)(ProofEtherType >> 8) ||
+            frame[13] != (byte)(ProofEtherType & 0xFF) ||
+            !frame.Slice(14, Phase83RxPayloadSignature.Length)
+                .SequenceEqual(Phase83RxPayloadSignature)) return false;
+        int sequenceOffset = 14 + Phase83RxPayloadSignature.Length;
+        uint sequence = ((uint)frame[sequenceOffset] << 24) |
+                        ((uint)frame[sequenceOffset + 1] << 16) |
+                        ((uint)frame[sequenceOffset + 2] << 8) |
+                        frame[sequenceOffset + 3];
+        if (sequence != expectedSequence) return false;
         for (int index = sequenceOffset + 4; index != frame.Length; ++index)
             if (frame[index] != 0) return false;
         return true;

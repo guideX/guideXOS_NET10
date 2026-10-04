@@ -22,6 +22,7 @@ internal sealed class ManagedE1000Driver
     internal const uint DriverId = 0xD014;
     private const uint PollLimit = 100000;
     private const uint Phase80InterruptPollLimit = 100000;
+    private const uint Phase83InterruptPollLimit = 100000000;
     /* The host observes RX_READY over a serial socket before sending the one
        frame.  Keep this bounded window long enough for that handshake without
        adding a wall-clock sleep to the guest. */
@@ -51,6 +52,7 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase52ModeEnabled;
     private static bool s_phase53ModeEnabled;
     private static bool s_phase80ModeEnabled;
+    private static bool s_phase83ModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -65,14 +67,22 @@ internal sealed class ManagedE1000Driver
     private readonly byte[] _mac = new byte[6];
     private readonly byte[] _txFrame = new byte[60];
     private readonly byte[] _phase80Frame = new byte[60];
+    private readonly byte[] _phase83Frame = new byte[60];
+    private readonly uint[] _phase83DescriptorIndices = new uint[4];
     private ManagedInterruptDispatcher? _interruptDispatcher;
     private uint _lastSubmittedTxIndex;
     private uint _phase80LastCause;
     private uint _phase80LastUnrelatedCause;
     private uint _phase80DeliveryCount;
+    private uint _phase83RxDeliveryCount;
+    private uint _phase83LastDescriptorStatus;
+    private uint _phase83LastDescriptorErrors;
+    private uint _phase83LastFrameLength;
+    private uint _phase83LastDescriptorIndex;
     private ulong _phase80LastSequence;
     private uint _phase82TransmitSequence;
     private bool _phase80Requested;
+    private bool _phase83Requested;
     private bool _interruptSubscribed;
     private ulong _macValue;
     private bool _phase16Passed;
@@ -141,6 +151,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase52Requested;
     private bool _phase53Requested;
     private bool _phase80Passed;
+    private bool _phase83Passed;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -189,6 +200,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase52Passed => _phase52Passed;
     internal bool Phase53Passed => _phase53Passed;
     internal bool Phase80Passed => _phase80Passed;
+    internal bool Phase83Passed => _phase83Passed;
     internal uint Phase80DeliveryCount => _phase80DeliveryCount;
 
     internal static void EnablePhase35Mode()
@@ -296,6 +308,11 @@ internal sealed class ManagedE1000Driver
         s_phase80ModeEnabled = true;
     }
 
+    internal static void EnablePhase83Mode()
+    {
+        s_phase83ModeEnabled = true;
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -338,6 +355,7 @@ internal sealed class ManagedE1000Driver
         _phase52Requested = s_phase52ModeEnabled;
         _phase53Requested = s_phase53ModeEnabled;
         _phase80Requested = s_phase80ModeEnabled;
+        _phase83Requested = s_phase83ModeEnabled;
         return TryStartCore();
     }
 
@@ -437,6 +455,12 @@ internal sealed class ManagedE1000Driver
                     "GXOS_NET10:MANAGED_PUBLIC_HTTPS_START_FAILED\r\n"u8);
                 return AbortStart();
             }
+        }
+        else if (_phase83Requested)
+        {
+            if (!KernelLog.Write(
+                    "GXOS_NET10:MANAGED_E1000_RX_HARNESS_DEFERRED_TO_PHASE83\r\n"u8))
+                return AbortStart();
         }
         else if (_phase80Requested)
         {
@@ -700,6 +724,7 @@ internal sealed class ManagedE1000Driver
         s_phase52ModeEnabled = false;
         s_phase53ModeEnabled = false;
         s_phase80ModeEnabled = false;
+        s_phase83ModeEnabled = false;
         bool safe = true;
         if (_interruptSubscribed &&
             !ManagedSerialDriverSubsystem.TryUnsubscribeE1000Interrupt(this))
@@ -802,6 +827,7 @@ internal sealed class ManagedE1000Driver
         _claimHandle = 0;
         _nativeClaimHandle = 0;
         _state = ManagedE1000DriverState.Stopped;
+        s_phase83ModeEnabled = false;
         return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED\r\n"u8);
     }
 
@@ -1152,21 +1178,85 @@ internal sealed class ManagedE1000Driver
     internal bool TryHandleInterrupt(in GxManagedKernelInterruptEventV1 value)
     {
         if (!_phase80Requested || !_interruptSubscribed || _state != ManagedE1000DriverState.Running ||
-            _txRing == null ||
             !ManagedE1000Protocol.TryValidateInterruptEvent(
-                in value, _phase80LastSequence, out uint unrelated) ||
-            !_txRing.TryRead8(
-                (ulong)_lastSubmittedTxIndex * ManagedE1000Protocol.DescriptorSize + 12,
-                out byte txStatus) ||
-            (txStatus & ManagedE1000Protocol.TxStatusDone) == 0)
+                in value, _phase80LastSequence, out uint unrelated))
         {
             return false;
         }
+        bool hasTxCause = (value.Status &
+            ManagedE1000Protocol.InterruptCauseTxDescriptorWriteback) != 0;
+        bool hasRxCause = (value.Status &
+            ManagedE1000Protocol.InterruptCauseRxTimer) != 0;
+        if (hasTxCause && (_txRing == null || !_txRing.TryRead8(
+                (ulong)_lastSubmittedTxIndex * ManagedE1000Protocol.DescriptorSize + 12,
+                out byte txStatus) ||
+            (txStatus & ManagedE1000Protocol.TxStatusDone) == 0))
+            return false;
+        if (hasRxCause && (!_phase83Requested || !TryHandlePhase83RxCause(value)))
+            return false;
         _phase80LastSequence = value.Sequence;
         _phase80LastCause = value.Status;
         _phase80LastUnrelatedCause = unrelated;
         _phase80DeliveryCount++;
         return true;
+    }
+
+    private bool TryHandlePhase83RxCause(
+        in GxManagedKernelInterruptEventV1 value)
+    {
+        if (_rxRing == null || _rxBuffers == null ||
+            _phase83RxDeliveryCount >= _phase83DescriptorIndices.Length)
+            return false;
+
+        uint descriptorIndex = _rxIndex;
+        Span<byte> descriptor = stackalloc byte[(int)ManagedE1000Protocol.DescriptorSize];
+        if (!_rxRing.TryRead(
+                (ulong)descriptorIndex * ManagedE1000Protocol.DescriptorSize,
+                descriptor) ||
+            (descriptor[12] & ManagedE1000Protocol.RxStatusDone) == 0 ||
+            !ManagedE1000Protocol.TryReadRxDescriptor(
+                descriptor, descriptorIndex, ManagedE1000Protocol.RingCount,
+                ManagedE1000Protocol.PacketBufferSize, out ushort length,
+                out byte status, out byte errors) ||
+            length != ManagedE1000Protocol.RxFrameLength ||
+            !_rxBuffers.TryRead(
+                (ulong)descriptorIndex * ManagedE1000Protocol.PacketBufferSize,
+                _phase83Frame.AsSpan(0, length)) ||
+            !ManagedE1000Protocol.TryValidatePhase83RxTestFrame(
+                _phase83Frame.AsSpan(0, length), _mac,
+                _phase83RxDeliveryCount + 1U))
+            return false;
+
+        if (!RecycleRxDescriptor(descriptorIndex)) return false;
+        uint ordinal = _phase83RxDeliveryCount + 1U;
+        _phase83DescriptorIndices[ordinal - 1U] = descriptorIndex;
+        _phase83LastDescriptorIndex = descriptorIndex;
+        _phase83LastDescriptorStatus = status;
+        _phase83LastDescriptorErrors = errors;
+        _phase83LastFrameLength = length;
+        _phase83RxDeliveryCount = ordinal;
+        return KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_ACCEPTED=0x"u8, ordinal) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_EVENT_SEQUENCE=0x"u8,
+                   value.Sequence) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_CAUSE=0x"u8, value.Status) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_DESCRIPTOR_INDEX=0x"u8,
+                   descriptorIndex) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_DESCRIPTOR_STATUS=0x"u8,
+                   status) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_DESCRIPTOR_ERRORS=0x"u8,
+                   errors) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_FRAME_LENGTH=0x"u8, length) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE83_RX_FRAME_FIELDS_VALID=1\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE83_RX_DESCRIPTOR_RECYCLED=1\r\n"u8);
     }
 
     internal bool TryRunPhase80Proof()
@@ -1209,6 +1299,85 @@ internal sealed class ManagedE1000Driver
             return false;
         _phase80Passed = true;
         return KernelLog.Write("GXOS_NET10:PHASE80_E1000_MANAGED_DELIVERY=4\r\n"u8);
+    }
+
+    internal bool TryRunPhase83RxProof()
+    {
+        if (!_phase83Requested || !_phase80Requested || !_interruptSubscribed ||
+            _state != ManagedE1000DriverState.Running ||
+            _phase80DeliveryCount != 4 || _phase83RxDeliveryCount != 0 ||
+            _rxRing == null || _rxBuffers == null || _mmio == null)
+            return false;
+
+        if (!KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE83_RX_RING_DESCRIPTORS=0x"u8,
+                ManagedE1000Protocol.RingCount) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE83_RX_BUFFER_SIZE=0x"u8,
+                ManagedE1000Protocol.PacketBufferSize) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE83_RX_MAX_ACCEPTED_LENGTH=0x"u8,
+                ManagedE1000Protocol.PacketBufferSize) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE83_RX_MASK=0x"u8,
+                ManagedE1000Protocol.InterruptMaskTxDescriptorWriteback |
+                ManagedE1000Protocol.InterruptMaskRxTimer) ||
+            !KernelLog.Write(
+                "GXOS_NET10:PHASE83_RX_READY=1\r\n"u8))
+            return false;
+
+        for (uint poll = 0; poll != Phase83InterruptPollLimit &&
+             _phase83RxDeliveryCount != _phase83DescriptorIndices.Length; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                    this, out uint delivered, out uint rejected) ||
+                rejected != 0 || delivered > 1)
+                return false;
+        }
+
+        if (_phase83RxDeliveryCount != _phase83DescriptorIndices.Length ||
+            _phase80DeliveryCount != 8 ||
+            (_phase80LastCause &
+             ManagedE1000Protocol.InterruptCauseRxTimer) == 0 ||
+            _rxIndex != _phase83DescriptorIndices.Length ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescTail,
+                             out uint postedTail) || postedTail != 3U)
+            return false;
+        for (uint index = 0; index != _phase83DescriptorIndices.Length; ++index)
+            if (_phase83DescriptorIndices[index] != index) return false;
+
+        bool passed = KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_MANAGED_DELIVERIES=0x"u8,
+                   _phase83RxDeliveryCount) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_LAST_EVENT_SEQUENCE=0x"u8,
+                   _phase80LastSequence) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_LAST_CAUSE=0x"u8,
+                   _phase80LastCause) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_LAST_DESCRIPTOR_INDEX=0x"u8,
+                   _phase83LastDescriptorIndex) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_LAST_DESCRIPTOR_STATUS=0x"u8,
+                   _phase83LastDescriptorStatus) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_LAST_DESCRIPTOR_ERRORS=0x"u8,
+                   _phase83LastDescriptorErrors) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_LAST_FRAME_LENGTH=0x"u8,
+                   _phase83LastFrameLength) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE83_RX_RDT_AFTER_RECYCLE=0x"u8,
+                   postedTail) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE83_RX_REPEAT_FRAMES=3\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE83_RX_RING_ADVANCE_AND_RECYCLE_OK=1\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE83_RX_MANAGED_PROOF=1\r\n"u8);
+        _phase83Passed = passed;
+        return passed;
     }
 
     internal bool TryRunPhase82Transmit()

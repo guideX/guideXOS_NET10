@@ -129,11 +129,16 @@ static int secondary_capture_source(void *context, uint8_t *payload_byte,
                                     uint32_t *status)
 {
     ROUTE_SOURCE_FIXTURE *fixture = (ROUTE_SOURCE_FIXTURE *)context;
+    uint8_t cause;
     if (fixture == 0 || fixture->bytes == 0 ||
         fixture->index >= fixture->length || payload_byte == 0 ||
         status == 0) return 0;
-    *payload_byte = (uint8_t)fixture->bytes[fixture->index++];
-    *status = 0x40U | *payload_byte;
+    cause = (uint8_t)fixture->bytes[fixture->index++];
+    if (cause == 'R') cause = 0x80U;
+    else if (cause == 'B') cause = 0x81U;
+    *payload_byte = cause;
+    *status = cause == 0x80U || cause == 0x81U
+        ? cause : 0x40U | cause;
     return 1;
 }
 
@@ -393,6 +398,31 @@ int main(void)
                    g_events[0].DeviceId == 0x808610D3U &&
                    g_events[0].PayloadByte == 'E',
                "bound E1000 PCI subscription receives its own typed record");
+        eoi_before = g_secondary_source.eoi_calls;
+        set_secondary_source("R");
+        gxos_managed_kernel_interrupt_capture_route(&context, 2U);
+        g_drained = 0;
+        result = gxos_managed_kernel_interrupt_drain_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)g_events, sizeof(g_events),
+            (uintptr_t)&g_drained, sizeof(g_drained));
+        expect(result == GX_MANAGED_OK && g_drained == 1U &&
+                   g_events[0].PayloadByte == 0x80U &&
+                   g_events[0].Status == 0x80U &&
+                   g_secondary_source.eoi_calls == eoi_before + 1U,
+               "RX-type RXT0 cause is captured, queued, and acknowledged");
+        set_secondary_source("B");
+        gxos_managed_kernel_interrupt_capture_route(&context, 2U);
+        g_drained = 0;
+        result = gxos_managed_kernel_interrupt_drain_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)g_events, sizeof(g_events),
+            (uintptr_t)&g_drained, sizeof(g_drained));
+        expect(result == GX_MANAGED_OK && g_drained == 1U &&
+                   g_events[0].PayloadByte == 0x81U &&
+                   g_events[0].Status == 0x81U &&
+                   g_secondary_source.eoi_calls == eoi_before + 2U,
+               "simultaneous RX/TX cause bits survive native queueing and acknowledgement");
         expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
                    &context, first_token) == GX_MANAGED_OK,
                "E1000 generation can be unsubscribed");

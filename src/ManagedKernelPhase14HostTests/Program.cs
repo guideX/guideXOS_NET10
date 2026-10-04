@@ -78,6 +78,15 @@ internal static class Program
                   ManagedE1000Protocol.InterruptCauseTxDescriptorWriteback | 0x20,
                   out uint unrelated) && unrelated == 0x20,
             "e1000-unrelated-cause-preserved");
+        Check(ManagedE1000Protocol.TryClassifyInterruptCause(
+                  ManagedE1000Protocol.InterruptCauseRxTimer,
+                  out uint rxUnrelated) && rxUnrelated == 0,
+            "e1000-rxt0-cause-classified");
+        Check(ManagedE1000Protocol.TryClassifyInterruptCause(
+                  ManagedE1000Protocol.InterruptCauseTxDescriptorWriteback |
+                  ManagedE1000Protocol.InterruptCauseRxTimer | 0x20,
+                  out uint combinedUnrelated) && combinedUnrelated == 0x20,
+            "e1000-simultaneous-txdw-rxt0-causes-preserved");
 
         GxManagedKernelInterruptEventV1 e1000Event = new()
         {
@@ -103,6 +112,111 @@ internal static class Program
         e1000Event.Status = 0;
         Check(!ManagedE1000Protocol.TryValidateInterruptEvent(
                   in e1000Event, 6, out _), "e1000-unbound-or-empty-cause-rejected");
+        e1000Event.Status = ManagedE1000Protocol.InterruptCauseRxTimer | 0x20;
+        e1000Event.PayloadByte = 0xA0;
+        Check(ManagedE1000Protocol.TryValidateInterruptEvent(
+                  in e1000Event, 6, out uint rxEventUnrelated) &&
+              rxEventUnrelated == 0x20,
+            "e1000-rxt0-typed-event-preserves-unrelated-cause");
+        e1000Event.Status = ManagedE1000Protocol.InterruptCauseRxTimer |
+                            ManagedE1000Protocol.InterruptCauseTxDescriptorWriteback;
+        e1000Event.PayloadByte = 0x81;
+        Check(ManagedE1000Protocol.TryValidateInterruptEvent(
+                  in e1000Event, 6, out _),
+            "e1000-typed-event-retains-simultaneous-rx-and-tx-cause-bits");
+        e1000Event.Status = ManagedE1000Protocol.InterruptCauseRxTimer;
+        e1000Event.PayloadByte = 0x80;
+        e1000Event.Sequence = 8;
+        Check(!ManagedE1000Protocol.TryValidateInterruptEvent(
+                  in e1000Event, 8, out _),
+            "e1000-duplicate-or-stale-rx-sequence-rejected");
+
+        byte[] rxDescriptor = new byte[(int)ManagedE1000Protocol.DescriptorSize];
+        Check(ManagedE1000Protocol.TryBuildRxDescriptor(
+                  rxDescriptor, 0x12346000, 60,
+                  ManagedE1000Protocol.RxStatusDone |
+                  ManagedE1000Protocol.RxStatusEop, 0) &&
+              ManagedE1000Protocol.TryReadRxDescriptor(
+                  rxDescriptor, 0, ManagedE1000Protocol.RingCount,
+                  ManagedE1000Protocol.PacketBufferSize, out ushort rxLength,
+                  out byte rxStatus, out byte rxErrors) &&
+              rxLength == 60 && rxStatus == 0x03 && rxErrors == 0,
+            "e1000-rx-dd-eop-valid-length-and-errors-accepted");
+        rxDescriptor[12] = ManagedE1000Protocol.RxStatusEop;
+        Check(!ManagedE1000Protocol.TryReadRxDescriptor(
+                  rxDescriptor, 0, ManagedE1000Protocol.RingCount,
+                  ManagedE1000Protocol.PacketBufferSize, out _, out _, out _),
+            "e1000-rx-empty-descriptor-does-not-deliver");
+        rxDescriptor[12] = ManagedE1000Protocol.RxStatusDone;
+        Check(!ManagedE1000Protocol.TryReadRxDescriptor(
+                  rxDescriptor, 0, ManagedE1000Protocol.RingCount,
+                  ManagedE1000Protocol.PacketBufferSize, out _, out _, out _),
+            "e1000-rx-dd-without-eop-rejected");
+        rxDescriptor[12] = ManagedE1000Protocol.RxStatusDone |
+                           ManagedE1000Protocol.RxStatusEop;
+        rxDescriptor[13] = 1;
+        Check(!ManagedE1000Protocol.TryReadRxDescriptor(
+                  rxDescriptor, 0, ManagedE1000Protocol.RingCount,
+                  ManagedE1000Protocol.PacketBufferSize, out _, out _, out _),
+            "e1000-rx-fatal-error-bits-rejected");
+        rxDescriptor[13] = 0;
+        rxDescriptor[8] = 59;
+        rxDescriptor[9] = 0;
+        Check(!ManagedE1000Protocol.TryReadRxDescriptor(
+                  rxDescriptor, 0, ManagedE1000Protocol.RingCount,
+                  ManagedE1000Protocol.PacketBufferSize, out _, out _, out _),
+            "e1000-rx-short-reported-length-rejected");
+        rxDescriptor[8] = 0x01;
+        rxDescriptor[9] = 0x08;
+        Check(!ManagedE1000Protocol.TryReadRxDescriptor(
+                  rxDescriptor, 0, ManagedE1000Protocol.RingCount,
+                  ManagedE1000Protocol.PacketBufferSize, out _, out _, out _),
+            "e1000-rx-length-over-buffer-capacity-rejected");
+
+        byte[] phase83Frame = new byte[60];
+        Check(ManagedE1000Protocol.TryBuildPhase83RxTestFrame(
+                  phase83Frame, mac, 1) &&
+              ManagedE1000Protocol.TryValidatePhase83RxTestFrame(
+                  phase83Frame, mac, 1),
+            "phase83-rx-frame-has-bounded-expected-fields");
+        Check(!ManagedE1000Protocol.TryValidatePhase83RxTestFrame(
+                  phase83Frame, mac, 2),
+            "phase83-rx-frame-sequence-sentinel-validated");
+        phase83Frame[0] ^= 1;
+        Check(!ManagedE1000Protocol.TryValidatePhase83RxTestFrame(
+                  phase83Frame, mac, 1),
+            "phase83-wrong-destination-mac-rejected");
+        phase83Frame[0] ^= 1;
+        phase83Frame[6] ^= 1;
+        Check(!ManagedE1000Protocol.TryValidatePhase83RxTestFrame(
+                  phase83Frame, mac, 1),
+            "phase83-wrong-source-mac-rejected");
+        phase83Frame[6] ^= 1;
+        phase83Frame[13] ^= 1;
+        Check(!ManagedE1000Protocol.TryValidatePhase83RxTestFrame(
+                  phase83Frame, mac, 1),
+            "phase83-wrong-ethertype-rejected");
+        phase83Frame[13] ^= 1;
+        phase83Frame[14] ^= 1;
+        Check(!ManagedE1000Protocol.TryValidatePhase83RxTestFrame(
+                  phase83Frame, mac, 1),
+            "phase83-payload-sentinel-rejected");
+
+        Check(ManagedE1000Protocol.TryPrepareRxDescriptor(
+                  rxDescriptor, 0x12346000) &&
+              (rxDescriptor[12] & ManagedE1000Protocol.RxStatusDone) == 0 &&
+              rxDescriptor[8] == 0 && rxDescriptor[13] == 0 &&
+              !ManagedE1000Protocol.TryReadRxDescriptor(
+                  rxDescriptor, 0, ManagedE1000Protocol.RingCount,
+                  ManagedE1000Protocol.PacketBufferSize, out _, out _, out _),
+            "e1000-rx-recycle-clears-completion-and-prevents-duplicate-delivery");
+        Check(ManagedE1000Protocol.TryAcceptRxDescriptorIndex(
+                  15, 15, ManagedE1000Protocol.RingCount, out uint wrappedRx) &&
+              wrappedRx == 0 &&
+              ManagedE1000Protocol.TryAcceptRxDescriptorIndex(
+                  0, 0, ManagedE1000Protocol.RingCount, out uint nextRx) &&
+              nextRx == 1,
+            "e1000-rx-ring-wrap-and-recycle-index-logic");
 
         byte[] phase80Frame = new byte[60];
         byte[] phase80Repeat = new byte[60];

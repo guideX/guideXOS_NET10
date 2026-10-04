@@ -62,6 +62,7 @@ param(
     [switch]$EnableManagedKernelPhase52,
     [switch]$EnableManagedKernelPhase53,
     [switch]$EnablePhase82ConcurrentManagedInterrupts,
+    [switch]$EnablePhase83E1000Rx,
     [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
@@ -112,6 +113,14 @@ if ($PayloadMode -eq 'ManagedKernel' -and -not $EnableNativeAotStartup) {
 if ($EnablePhase82ConcurrentManagedInterrupts -and
     ($PayloadMode -ne 'ManagedKernel' -or -not $EnableNativeAotStartup)) {
     throw 'Phase 82 acceptance mode requires the ManagedKernel payload and NativeAOT startup.'
+}
+if ($EnablePhase83E1000Rx -and
+    ($PayloadMode -ne 'ManagedKernel' -or -not $EnableNativeAotStartup -or
+     $Scenario -ne 'ManagedKernelPhase11')) {
+    throw 'Phase 83 E1000 RX acceptance requires the ManagedKernel payload, NativeAOT startup, and ManagedKernelPhase11 scenario.'
+}
+if ($EnablePhase83E1000Rx -and $EnablePhase82ConcurrentManagedInterrupts) {
+    throw 'Phase 83 uses its own bounded RX fixture and cannot be combined with the Phase 82 interleaving fixture.'
 }
 if ($Phase69FixtureMode -ne 'None' -and
     ($PayloadMode -ne 'ManagedKernel' -or -not $EnablePhase69PersistentServiceOwner)) {
@@ -1695,6 +1704,9 @@ if ($EnablePhase53VGuardProbe) {
 if ($PayloadMode -eq 'ManagedKernel') { $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL' }
 if ($EnablePhase82ConcurrentManagedInterrupts) {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE82'
+}
+if ($EnablePhase83E1000Rx) {
+    $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE83_RX'
 }
 if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE11'
