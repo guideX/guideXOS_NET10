@@ -99,21 +99,21 @@ internal sealed class ManagedArpLayer
     }
 
     internal ManagedArpHandleResult TryHandleEthernetArp(
-        byte[] frame, int destinationOffset, int sourceOffset,
+        ReadOnlySpan<byte> frame, int destinationOffset, int sourceOffset,
         int payloadOffset, int payloadLength)
     {
-        if (frame == null || destinationOffset < 0 || sourceOffset < 0 ||
+        if (destinationOffset < 0 || sourceOffset < 0 ||
             payloadOffset < 0 || destinationOffset > frame.Length -
             ManagedEthernetProtocol.MacLength || sourceOffset > frame.Length -
             ManagedEthernetProtocol.MacLength || payloadLength < 0 ||
             payloadOffset > frame.Length - payloadLength)
             return ManagedArpHandleResult.Invalid;
 
-        ReadOnlySpan<byte> ethernetDestination = frame.AsSpan(
+        ReadOnlySpan<byte> ethernetDestination = frame.Slice(
             destinationOffset, ManagedEthernetProtocol.MacLength);
-        ReadOnlySpan<byte> ethernetSource = frame.AsSpan(
+        ReadOnlySpan<byte> ethernetSource = frame.Slice(
             sourceOffset, ManagedEthernetProtocol.MacLength);
-        ReadOnlySpan<byte> payload = frame.AsSpan(payloadOffset, payloadLength);
+        ReadOnlySpan<byte> payload = frame.Slice(payloadOffset, payloadLength);
         if (!_active || !ManagedArpProtocol.TryParse(payload,
                                                      out ManagedArpPacket packet) ||
             !ethernetSource.SequenceEqual(packet.SenderMac) ||

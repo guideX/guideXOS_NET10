@@ -67,7 +67,6 @@ internal sealed class ManagedE1000Driver
     private readonly byte[] _mac = new byte[6];
     private readonly byte[] _txFrame = new byte[60];
     private readonly byte[] _phase80Frame = new byte[60];
-    private readonly byte[] _phase83Frame = new byte[60];
     private readonly uint[] _phase83DescriptorIndices = new uint[4];
     private ManagedInterruptDispatcher? _interruptDispatcher;
     private uint _lastSubmittedTxIndex;
@@ -75,6 +74,7 @@ internal sealed class ManagedE1000Driver
     private uint _phase80LastUnrelatedCause;
     private uint _phase80DeliveryCount;
     private uint _phase83RxDeliveryCount;
+    private uint _phase83RxDescriptorCount;
     private uint _phase83LastDescriptorStatus;
     private uint _phase83LastDescriptorErrors;
     private uint _phase83LastFrameLength;
@@ -415,6 +415,11 @@ internal sealed class ManagedE1000Driver
 
         if (!ReadMac() || !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC_VALID\r\n"u8))
             return AbortStart();
+        Phase16MacHigh = ((uint)_mac[0] << 8) | _mac[1];
+        Phase16MacLow = ((uint)_mac[2] << 24) | ((uint)_mac[3] << 16) |
+                        ((uint)_mac[4] << 8) | _mac[5];
+        _ethernet!.InitializeMac();
+        if (_phase83Requested) _ethernet.EnablePhase84TestConsumer();
         if (!AllocateDma() ||
             !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_CAPABILITY_READY\r\n"u8))
             return AbortStart();
@@ -1192,7 +1197,8 @@ internal sealed class ManagedE1000Driver
                 out byte txStatus) ||
             (txStatus & ManagedE1000Protocol.TxStatusDone) == 0))
             return false;
-        if (hasRxCause && (!_phase83Requested || !TryHandlePhase83RxCause(value)))
+        if (hasRxCause && (!_phase83Requested ||
+                           !TryHandleManagedEthernetRxCause(value)))
             return false;
         _phase80LastSequence = value.Sequence;
         _phase80LastCause = value.Status;
@@ -1201,42 +1207,78 @@ internal sealed class ManagedE1000Driver
         return true;
     }
 
-    private bool TryHandlePhase83RxCause(
+    private bool TryHandleManagedEthernetRxCause(
         in GxManagedKernelInterruptEventV1 value)
     {
-        if (_rxRing == null || _rxBuffers == null ||
-            _phase83RxDeliveryCount >= _phase83DescriptorIndices.Length)
+        if (_rxRing == null || _rxBuffers == null || _ethernet == null)
             return false;
 
         uint descriptorIndex = _rxIndex;
         Span<byte> descriptor = stackalloc byte[(int)ManagedE1000Protocol.DescriptorSize];
         if (!_rxRing.TryRead(
                 (ulong)descriptorIndex * ManagedE1000Protocol.DescriptorSize,
-                descriptor) ||
-            (descriptor[12] & ManagedE1000Protocol.RxStatusDone) == 0 ||
-            !ManagedE1000Protocol.TryReadRxDescriptor(
-                descriptor, descriptorIndex, ManagedE1000Protocol.RingCount,
-                ManagedE1000Protocol.PacketBufferSize, out ushort length,
-                out byte status, out byte errors) ||
-            length != ManagedE1000Protocol.RxFrameLength ||
-            !_rxBuffers.TryRead(
-                (ulong)descriptorIndex * ManagedE1000Protocol.PacketBufferSize,
-                _phase83Frame.AsSpan(0, length)) ||
-            !ManagedE1000Protocol.TryValidatePhase83RxTestFrame(
-                _phase83Frame.AsSpan(0, length), _mac,
-                _phase83RxDeliveryCount + 1U))
+                descriptor))
             return false;
 
+        byte status = descriptor[12];
+        byte errors = descriptor[13];
+        ushort length = (ushort)(descriptor[8] | (descriptor[9] << 8));
+        if ((status & ManagedE1000Protocol.RxStatusDone) == 0)
+        {
+            /* Consume the typed event sequence, but do not inspect or invent a
+               frame when the expected descriptor has no DD completion. */
+            return KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE84_RX_EVENT_WITHOUT_DD=0x"u8,
+                value.Sequence);
+        }
+
+        _phase83RxDescriptorCount++;
+        ManagedEthernetReceiveResult receiveResult;
+        if ((status & ManagedE1000Protocol.RxStatusEop) == 0 || errors != 0 ||
+            length < ManagedE1000Protocol.MinimumRxEthernetHeaderLength ||
+            length > ManagedE1000Protocol.PacketBufferSize ||
+            !ManagedE1000Protocol.TryReadRxDescriptor(
+                descriptor, descriptorIndex, ManagedE1000Protocol.RingCount,
+                ManagedE1000Protocol.PacketBufferSize, out _, out _, out _))
+        {
+            _ethernet.RecordDriverRejectedFrame();
+            receiveResult = ManagedEthernetReceiveResult.MalformedFrame;
+        }
+        else if (!_rxBuffers.TryRead(
+                     (ulong)descriptorIndex * ManagedE1000Protocol.PacketBufferSize,
+                     _ethernet.DriverReceiveBuffer.Slice(0, length)))
+        {
+            receiveResult = ManagedEthernetReceiveResult.DriverError;
+        }
+        else
+        {
+            receiveResult = _ethernet.ProcessDriverReceivedFrame(length);
+        }
+
+        /* Ethernet dispatch is synchronous.  Recycle every DD descriptor only
+           after that call returns, regardless of protocol or consumer result. */
         if (!RecycleRxDescriptor(descriptorIndex)) return false;
         uint ordinal = _phase83RxDeliveryCount + 1U;
-        _phase83DescriptorIndices[ordinal - 1U] = descriptorIndex;
         _phase83LastDescriptorIndex = descriptorIndex;
         _phase83LastDescriptorStatus = status;
         _phase83LastDescriptorErrors = errors;
         _phase83LastFrameLength = length;
-        _phase83RxDeliveryCount = ordinal;
-        return KernelLog.WriteHexLine(
-                   "GXOS_NET10:PHASE83_RX_ACCEPTED=0x"u8, ordinal) &&
+        bool testConsumerAccepted =
+            receiveResult == ManagedEthernetReceiveResult.Consumed &&
+            _ethernet.Phase84TestConsumerDeliveryCount == ordinal &&
+            ordinal <= _phase83DescriptorIndices.Length;
+        if (testConsumerAccepted)
+        {
+            _phase83DescriptorIndices[ordinal - 1U] = descriptorIndex;
+            _phase83RxDeliveryCount = ordinal;
+        }
+        return (!testConsumerAccepted ||
+                (KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE83_RX_ACCEPTED=0x"u8, ordinal) &&
+                 KernelLog.Write(
+                    "GXOS_NET10:PHASE83_RX_FRAME_FIELDS_VALID=1\r\n"u8) &&
+                 KernelLog.Write(
+                    "GXOS_NET10:PHASE84_NORMAL_ETHERNET_PATH=1\r\n"u8))) &&
                KernelLog.WriteHexLine(
                    "GXOS_NET10:PHASE83_RX_EVENT_SEQUENCE=0x"u8,
                    value.Sequence) &&
@@ -1253,8 +1295,6 @@ internal sealed class ManagedE1000Driver
                    errors) &&
                KernelLog.WriteHexLine(
                    "GXOS_NET10:PHASE83_RX_FRAME_LENGTH=0x"u8, length) &&
-               KernelLog.Write(
-                   "GXOS_NET10:PHASE83_RX_FRAME_FIELDS_VALID=1\r\n"u8) &&
                KernelLog.Write(
                    "GXOS_NET10:PHASE83_RX_DESCRIPTOR_RECYCLED=1\r\n"u8);
     }
@@ -1336,6 +1376,15 @@ internal sealed class ManagedE1000Driver
         }
 
         if (_phase83RxDeliveryCount != _phase83DescriptorIndices.Length ||
+            _phase83RxDescriptorCount != _phase83DescriptorIndices.Length ||
+            _ethernet == null ||
+            _ethernet.ReceivedFrameCount != _phase83DescriptorIndices.Length ||
+            _ethernet.ParsedFrameCount != _phase83DescriptorIndices.Length ||
+            _ethernet.Phase84TestConsumerDeliveryCount !=
+                _phase83DescriptorIndices.Length ||
+            _ethernet.MalformedFrameCount != 0 ||
+            _ethernet.UnsupportedEtherTypeDropCount != 0 ||
+            _ethernet.Phase84TestConsumerFailureCount != 0 ||
             _phase80DeliveryCount != 8 ||
             (_phase80LastCause &
              ManagedE1000Protocol.InterruptCauseRxTimer) == 0 ||
@@ -1349,6 +1398,46 @@ internal sealed class ManagedE1000Driver
         bool passed = KernelLog.WriteHexLine(
                    "GXOS_NET10:PHASE83_RX_MANAGED_DELIVERIES=0x"u8,
                    _phase83RxDeliveryCount) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_RX_DESCRIPTORS_COMPLETED=0x"u8,
+                   _phase83RxDescriptorCount) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_ETHERNET_RECEIVED=0x"u8,
+                   _ethernet.ReceivedFrameCount) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_ETHERNET_PARSED=0x"u8,
+                   _ethernet.ParsedFrameCount) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_TEST_CONSUMER_DELIVERIES=0x"u8,
+                   _ethernet.Phase84TestConsumerDeliveryCount) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_MALFORMED_DROPS=0x"u8,
+                   _ethernet.MalformedFrameCount) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_UNSUPPORTED_ETHER_TYPE_DROPS=0x"u8,
+                   _ethernet.UnsupportedEtherTypeDropCount) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_CONSUMER_FAILURES=0x"u8,
+                   _ethernet.Phase84TestConsumerFailureCount) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_LAST_DESTINATION=0x"u8,
+                   _ethernet.Phase84LastMetadata.DestinationMac) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_LAST_SOURCE=0x"u8,
+                   _ethernet.Phase84LastMetadata.SourceMac) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_LAST_ETHERTYPE=0x"u8,
+                   _ethernet.Phase84LastMetadata.EtherType) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_LAST_PAYLOAD_LENGTH=0x"u8,
+                   _ethernet.Phase84LastMetadata.PayloadLength) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_LAST_SENTINEL=0x"u8,
+                   _ethernet.Phase84LastMetadata.Sentinel) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE84_CROSS_FRAME_SENTINELS_DISTINCT=1\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE84_ETHERNET_INTEGRATION_PASS=1\r\n"u8) &&
                KernelLog.WriteHexLine(
                    "GXOS_NET10:PHASE83_RX_LAST_EVENT_SEQUENCE=0x"u8,
                    _phase80LastSequence) &&

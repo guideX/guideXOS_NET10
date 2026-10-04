@@ -39,7 +39,7 @@ $normalOutput = @(& $gateBuild -OutputDirectory $normalGate `
     -ManagedArtifact $payload -PayloadMode ManagedKernel -EnableNativeAotStartup)
 $normalOutput | Set-Content -LiteralPath (Join-Path $build 'gate4-normal-build-output.log') -Encoding ascii
 
-# The RXT0 mask and local injector are restricted to this explicit acceptance build.
+# The Phase83 RXT0 injector drives the Phase84 managed Ethernet receive path.
 $phase83Output = @(& $gateBuild -OutputDirectory $phase83Gate `
     -ManagedArtifact $payload -PayloadMode ManagedKernel `
     -Scenario ManagedKernelPhase11 -EnableNativeAotStartup `
@@ -75,6 +75,8 @@ for ($boot = 1; $boot -le 3; $boot++) {
         'GXOS_NET10:PHASE83_TXDW_REGRESSION=4',
         'GXOS_NET10:PHASE83_RX_READY=1',
         'GXOS_NET10:PHASE83_RX_MANAGED_PROOF=1',
+        'GXOS_NET10:PHASE84_ETHERNET_INTEGRATION_PASS=1',
+        'GXOS_NET10:PHASE84_CROSS_FRAME_SENTINELS_DISTINCT=1',
         'GXOS_NET10:PHASE83_RX_RING_ADVANCE_AND_RECYCLE_OK=1',
         'GXOS_NET10:PHASE83_COM1_ROUTE_ACTIVE_DURING_RX=1',
         'GXOS_NET10:PHASE83_COM1_REMAINS_ISOLATED=1',
@@ -127,6 +129,44 @@ for ($boot = 1; $boot -le 3; $boot++) {
     Require83 ($managedRx -eq 4 -and $rxStatus -eq 3 -and
                $rxErrors -eq 0 -and $rxLength -eq 60) `
         "Boot $boot managed descriptor completion or frame bounds failed."
+
+    $phase84Expected = @{
+        'GXOS_NET10:PHASE84_RX_DESCRIPTORS_COMPLETED' = 4
+        'GXOS_NET10:PHASE84_ETHERNET_RECEIVED' = 4
+        'GXOS_NET10:PHASE84_ETHERNET_PARSED' = 4
+        'GXOS_NET10:PHASE84_TEST_CONSUMER_DELIVERIES' = 4
+        'GXOS_NET10:PHASE84_MALFORMED_DROPS' = 0
+        'GXOS_NET10:PHASE84_UNSUPPORTED_ETHER_TYPE_DROPS' = 0
+        'GXOS_NET10:PHASE84_CONSUMER_FAILURES' = 0
+        'GXOS_NET10:PHASE84_LAST_DESTINATION' = 0x525400123456
+        'GXOS_NET10:PHASE84_LAST_SOURCE' = 0x021500000001
+        'GXOS_NET10:PHASE84_LAST_ETHERTYPE' = 0x88B5
+        'GXOS_NET10:PHASE84_LAST_PAYLOAD_LENGTH' = 46
+        'GXOS_NET10:PHASE84_LAST_SENTINEL' = 4
+    }
+    foreach ($markerName in $phase84Expected.Keys) {
+        $observed = Get-MarkerHex83 $serial $markerName
+        Require83 ($observed -eq $phase84Expected[$markerName]) `
+            "Boot $boot Phase84 marker $markerName was $observed."
+    }
+    foreach ($markerName in @(
+        'GXOS_NET10:PHASE84_NORMAL_ETHERNET_PATH=1',
+        'GXOS_NET10:PHASE84_ETHERTYPE_CONSUMED=1',
+        'GXOS_NET10:PHASE84_ETHERNET_DESTINATION=0x0000525400123456',
+        'GXOS_NET10:PHASE84_ETHERNET_SOURCE=0x0000021500000001',
+        'GXOS_NET10:PHASE84_ETHERNET_ETHERTYPE=0x00000000000088B5',
+        'GXOS_NET10:PHASE84_ETHERNET_PAYLOAD_LENGTH=0x000000000000002E')) {
+        Require83 (([regex]::Matches($serial, [regex]::Escape($markerName))).Count -eq 4) `
+            "Boot $boot did not record four consistent Phase84 metadata values for $markerName."
+    }
+    $sentinels = [regex]::Matches(
+        $serial, 'GXOS_NET10:PHASE84_ETHERNET_SENTINEL=0x([0-9A-Fa-f]+)')
+    Require83 ($sentinels.Count -eq 4) `
+        "Boot $boot did not record four payload sentinels in the Ethernet consumer."
+    for ($index = 0; $index -lt $sentinels.Count; $index++) {
+        Require83 ([Convert]::ToUInt64($sentinels[$index].Groups[1].Value, 16) -eq ($index + 1)) `
+            "Boot $boot repeated or reordered a Phase84 payload sentinel."
+    }
     $serialHash = (Get-FileHash -LiteralPath $serialPath -Algorithm SHA256).Hash.ToUpperInvariant()
     $injectionHash = (Get-FileHash -LiteralPath $injectionPath -Algorithm SHA256).Hash.ToUpperInvariant()
     $timelinePath = Join-Path $run 'timeline.log'

@@ -21,6 +21,7 @@ internal static class ManagedE1000Protocol
     internal const uint RingCount = 16;
     internal const uint PacketBufferSize = 2048;
     internal const uint MinimumEthernetFrameLength = 60;
+    internal const uint MinimumRxEthernetHeaderLength = 14;
     internal const ushort ProofEtherType = 0x88B5;
     internal const uint TxCommandEopIfcsRs = 0x0B;
     internal const byte TxStatusDone = 0x01;
@@ -220,7 +221,7 @@ internal static class ManagedE1000Protocol
         return (status & (RxStatusDone | RxStatusEop)) ==
                    (RxStatusDone | RxStatusEop) &&
                (errors & RxErrorMask) == 0 &&
-               length >= MinimumEthernetFrameLength &&
+               length >= MinimumRxEthernetHeaderLength &&
                length <= bufferCapacity;
     }
 

@@ -160,12 +160,27 @@ internal static class Program
                   ManagedE1000Protocol.PacketBufferSize, out _, out _, out _),
             "e1000-rx-fatal-error-bits-rejected");
         rxDescriptor[13] = 0;
-        rxDescriptor[8] = 59;
+        rxDescriptor[8] = 13;
         rxDescriptor[9] = 0;
         Check(!ManagedE1000Protocol.TryReadRxDescriptor(
                   rxDescriptor, 0, ManagedE1000Protocol.RingCount,
                   ManagedE1000Protocol.PacketBufferSize, out _, out _, out _),
             "e1000-rx-short-reported-length-rejected");
+        rxDescriptor[8] = (byte)ManagedE1000Protocol.MinimumRxEthernetHeaderLength;
+        Check(ManagedE1000Protocol.TryReadRxDescriptor(
+                  rxDescriptor, 0, ManagedE1000Protocol.RingCount,
+                  ManagedE1000Protocol.PacketBufferSize,
+                  out ushort headerOnlyLength, out _, out _) &&
+              headerOnlyLength == ManagedE1000Protocol.MinimumRxEthernetHeaderLength,
+            "e1000-rx-exact-ethernet-header-length-bounded");
+        rxDescriptor[8] = 0;
+        rxDescriptor[9] = (byte)(ManagedE1000Protocol.PacketBufferSize >> 8);
+        Check(ManagedE1000Protocol.TryReadRxDescriptor(
+                  rxDescriptor, 0, ManagedE1000Protocol.RingCount,
+                  ManagedE1000Protocol.PacketBufferSize,
+                  out ushort maximumRxLength, out _, out _) &&
+              maximumRxLength == ManagedE1000Protocol.PacketBufferSize,
+            "e1000-rx-exact-owned-buffer-capacity-accepted");
         rxDescriptor[8] = 0x01;
         rxDescriptor[9] = 0x08;
         Check(!ManagedE1000Protocol.TryReadRxDescriptor(

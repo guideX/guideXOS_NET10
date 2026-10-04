@@ -27,6 +27,7 @@ internal static class ManagedEthernetProtocol
     internal const int HeaderLength = 14;
     internal const int MinimumFrameLength = 60;
     internal const ushort ArpEtherType = 0x0806;
+    internal const ushort Ipv4EtherType = 0x0800;
     internal const int ProtocolAddressLength = 4;
     internal const int MaximumFrameLength = (int)ManagedE1000Protocol.PacketBufferSize;
 
@@ -64,7 +65,7 @@ internal static class ManagedEthernetProtocol
                                        out ManagedEthernetFrame parsed)
     {
         parsed = default;
-        if (frame.Length < MinimumFrameLength || frame.Length > MaximumFrameLength ||
+        if (frame.Length < HeaderLength || frame.Length > MaximumFrameLength ||
             localMac.Length != MacLength || IsInvalidMac(localMac) ||
             !IsValidDestination(frame.Slice(0, MacLength), localMac) ||
             !IsUsableSourceMac(frame.Slice(6, MacLength)))
@@ -119,6 +120,18 @@ internal static class ManagedEthernetProtocol
         return (ushort)((bytes[offset] << 8) | bytes[offset + 1]);
     }
 
+    internal static ManagedEthernetDispatchKind ClassifyEtherType(
+        ushort etherType, bool phase84TestConsumerEnabled)
+    {
+        if (etherType == ArpEtherType) return ManagedEthernetDispatchKind.Arp;
+        if (etherType == Ipv4EtherType)
+            return ManagedEthernetDispatchKind.Ipv4;
+        if (etherType == ManagedEthernetPhase84TestConsumer.EtherType &&
+            phase84TestConsumerEnabled)
+            return ManagedEthernetDispatchKind.Phase84TestConsumer;
+        return ManagedEthernetDispatchKind.Unsupported;
+    }
+
     internal static uint ReadUInt32Network(ReadOnlySpan<byte> bytes, int offset)
     {
         return ((uint)bytes[offset] << 24) | ((uint)bytes[offset + 1] << 16) |
@@ -139,5 +152,76 @@ internal static class ManagedEthernetProtocol
         bytes[offset + 1] = (byte)(value >> 16);
         bytes[offset + 2] = (byte)(value >> 8);
         bytes[offset + 3] = (byte)value;
+    }
+}
+
+internal enum ManagedEthernetDispatchKind : byte
+{
+    Unsupported = 0,
+    Arp = 1,
+    Ipv4 = 2,
+    Phase84TestConsumer = 3
+}
+
+internal readonly struct ManagedEthernetTestFrameMetadata
+{
+    internal readonly ulong DestinationMac;
+    internal readonly ulong SourceMac;
+    internal readonly ushort EtherType;
+    internal readonly ushort PayloadLength;
+    internal readonly uint Sentinel;
+
+    internal ManagedEthernetTestFrameMetadata(
+        ulong destinationMac, ulong sourceMac, ushort etherType,
+        ushort payloadLength, uint sentinel)
+    {
+        DestinationMac = destinationMac;
+        SourceMac = sourceMac;
+        EtherType = etherType;
+        PayloadLength = payloadLength;
+        Sentinel = sentinel;
+    }
+}
+
+/* Registered only by the Phase 84 acceptance fixture.  The Ethernet parser
+   and EtherType dispatch remain production code; this validates the bounded
+   private payload used to prove that dispatch reached a consumer. */
+internal static class ManagedEthernetPhase84TestConsumer
+{
+    internal const ushort EtherType = 0x88B5;
+
+    internal static bool TryConsume(in ManagedEthernetFrame frame,
+                                    uint expectedSequence,
+                                    out ManagedEthernetTestFrameMetadata metadata)
+    {
+        metadata = default;
+        ReadOnlySpan<byte> payload = frame.Payload;
+        ReadOnlySpan<byte> signature = ManagedE1000Protocol.Phase83RxPayloadSignature;
+        if (frame.EtherType != EtherType || expectedSequence == 0 ||
+            payload.Length < signature.Length + 4 ||
+            !payload.Slice(0, signature.Length).SequenceEqual(signature))
+            return false;
+
+        int sentinelOffset = signature.Length;
+        uint sentinel = ((uint)payload[sentinelOffset] << 24) |
+                        ((uint)payload[sentinelOffset + 1] << 16) |
+                        ((uint)payload[sentinelOffset + 2] << 8) |
+                        payload[sentinelOffset + 3];
+        if (sentinel != expectedSequence) return false;
+        for (int index = sentinelOffset + 4; index != payload.Length; ++index)
+            if (payload[index] != 0) return false;
+
+        metadata = new ManagedEthernetTestFrameMetadata(
+            ReadMacValue(frame.Destination), ReadMacValue(frame.Source),
+            frame.EtherType, (ushort)payload.Length, sentinel);
+        return true;
+    }
+
+    private static ulong ReadMacValue(ReadOnlySpan<byte> mac)
+    {
+        ulong value = 0;
+        for (int index = 0; index != ManagedEthernetProtocol.MacLength; ++index)
+            value = (value << 8) | mac[index];
+        return value;
     }
 }

@@ -17,7 +17,14 @@ internal sealed class ManagedEthernetLayer
     private readonly byte[] _rxFrame;
     private uint _unknownEtherTypeCount;
     private uint _malformedFrameCount;
+    private uint _receivedFrameCount;
+    private uint _parsedFrameCount;
+    private uint _unsupportedEtherTypeDropCount;
+    private uint _phase84TestConsumerDeliveryCount;
+    private uint _phase84TestConsumerFailureCount;
+    private ManagedEthernetTestFrameMetadata _phase84LastMetadata;
     private bool _accepting = true;
+    private bool _phase84TestConsumerEnabled;
     private bool _phase34Polling;
     private uint _phase34PollLimit = Phase34ReceivePollLimit;
 
@@ -40,6 +47,16 @@ internal sealed class ManagedEthernetLayer
 
     internal uint UnknownEtherTypeCount => _unknownEtherTypeCount;
     internal uint MalformedFrameCount => _malformedFrameCount;
+    internal uint ReceivedFrameCount => _receivedFrameCount;
+    internal uint ParsedFrameCount => _parsedFrameCount;
+    internal uint UnsupportedEtherTypeDropCount => _unsupportedEtherTypeDropCount;
+    internal uint Phase84TestConsumerDeliveryCount =>
+        _phase84TestConsumerDeliveryCount;
+    internal uint Phase84TestConsumerFailureCount =>
+        _phase84TestConsumerFailureCount;
+    internal ManagedEthernetTestFrameMetadata Phase84LastMetadata =>
+        _phase84LastMetadata;
+    internal Span<byte> DriverReceiveBuffer => _rxFrame;
     internal bool Phase16Passed => _arp.Phase16Passed;
     internal bool Phase17Passed => _ipv4.Phase17Passed;
     internal bool Phase18Passed => _ipv4.Phase18Passed;
@@ -86,6 +103,11 @@ internal sealed class ManagedEthernetLayer
     {
         _phase34Polling = true;
         _phase34PollLimit = Phase34ReceivePollLimit;
+    }
+
+    internal void EnablePhase84TestConsumer()
+    {
+        _phase84TestConsumerEnabled = true;
     }
     internal ReadOnlySpan<byte> LocalMac => _localMac;
     internal bool IsAccepting => _accepting;
@@ -347,27 +369,11 @@ internal sealed class ManagedEthernetLayer
             _malformedFrameCount++;
             return true;
         }
-        ReadOnlySpan<byte> received = _rxFrame.AsSpan(0, frameLength);
-        if (!ManagedEthernetProtocol.TryParseFrame(
-                received, _localMac, out ManagedEthernetFrame parsed))
-        {
-            _malformedFrameCount++;
-            return true;
-        }
-
-        if (parsed.EtherType != ManagedEthernetProtocol.ArpEtherType)
-        {
-            _unknownEtherTypeCount++;
-            result = ManagedArpHandleResult.Ignored;
-            return true;
-        }
-
-        result = arp.TryHandleEthernetArp(
-            _rxFrame, 0, 6, ManagedEthernetProtocol.HeaderLength,
-            parsed.Payload.Length);
-        if (result == ManagedArpHandleResult.ReplySatisfied)
-            _ipv4.TryReleasePendingAfterArp();
-        return result != ManagedArpHandleResult.Failed;
+        ManagedEthernetReceiveResult dispatch = TryDispatchFrame(
+            _rxFrame.AsSpan(0, frameLength), arp,
+            out ManagedNetworkDispatchResult _, out result);
+        return dispatch != ManagedEthernetReceiveResult.DispatchFailed &&
+               dispatch != ManagedEthernetReceiveResult.DriverError;
     }
 
     internal bool TryReceiveAndDispatch(out ManagedNetworkDispatchResult result)
@@ -385,45 +391,150 @@ internal sealed class ManagedEthernetLayer
             result = ManagedNetworkDispatchResult.Malformed;
             return true;
         }
-        ReadOnlySpan<byte> received = _rxFrame.AsSpan(0, frameLength);
-        if (!ManagedEthernetProtocol.TryParseFrame(
-                received, _localMac, out ManagedEthernetFrame parsed))
+        ManagedEthernetReceiveResult dispatch = TryDispatchFrame(
+            _rxFrame.AsSpan(0, frameLength), _arp,
+            out result, out ManagedArpHandleResult _);
+        return dispatch != ManagedEthernetReceiveResult.DispatchFailed &&
+               dispatch != ManagedEthernetReceiveResult.DriverError;
+    }
+
+    /* Called by the E1000 driver while the completed descriptor is still
+       software-owned.  The driver has copied bytes into this layer's fixed
+       buffer; all spans below are consumed synchronously and are not retained. */
+    internal ManagedEthernetReceiveResult ProcessDriverReceivedFrame(
+        ushort frameLength)
+    {
+        if (!_accepting || frameLength > _rxFrame.Length)
+            return ManagedEthernetReceiveResult.DriverError;
+        if (frameLength == 0)
         {
             _malformedFrameCount++;
-            result = ManagedNetworkDispatchResult.Malformed;
-            return true;
+            return ManagedEthernetReceiveResult.MalformedFrame;
+        }
+        return TryDispatchFrame(_rxFrame.AsSpan(0, frameLength), _arp,
+                                out _, out _);
+    }
+
+    internal void RecordDriverRejectedFrame()
+    {
+        _malformedFrameCount++;
+    }
+
+    internal ManagedEthernetReceiveResult ProcessReceivedFrameForHostTest(
+        ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length > _rxFrame.Length)
+        {
+            _malformedFrameCount++;
+            return ManagedEthernetReceiveResult.MalformedFrame;
+        }
+        frame.CopyTo(_rxFrame);
+        return ProcessDriverReceivedFrame((ushort)frame.Length);
+    }
+
+    private ManagedEthernetReceiveResult TryDispatchFrame(
+        ReadOnlySpan<byte> frame, ManagedArpLayer arp,
+        out ManagedNetworkDispatchResult networkResult,
+        out ManagedArpHandleResult arpResult)
+    {
+        networkResult = ManagedNetworkDispatchResult.Invalid;
+        arpResult = ManagedArpHandleResult.Invalid;
+        _receivedFrameCount++;
+        if (frame.Length < ManagedEthernetProtocol.HeaderLength ||
+            frame.Length > ManagedEthernetProtocol.MaximumFrameLength ||
+            !ManagedEthernetProtocol.TryParseFrame(
+                frame, _localMac, out ManagedEthernetFrame parsed))
+        {
+            _malformedFrameCount++;
+            networkResult = ManagedNetworkDispatchResult.Malformed;
+            return ManagedEthernetReceiveResult.MalformedFrame;
+        }
+        _parsedFrameCount++;
+        ManagedEthernetDispatchKind dispatchKind =
+            ManagedEthernetProtocol.ClassifyEtherType(
+                parsed.EtherType, _phase84TestConsumerEnabled);
+
+        if (dispatchKind == ManagedEthernetDispatchKind.Phase84TestConsumer)
+        {
+            uint expectedSequence = _phase84TestConsumerDeliveryCount + 1U;
+            if (!ManagedEthernetPhase84TestConsumer.TryConsume(
+                    in parsed, expectedSequence,
+                    out ManagedEthernetTestFrameMetadata metadata))
+            {
+                _phase84TestConsumerFailureCount++;
+                return ManagedEthernetReceiveResult.ConsumerRejected;
+            }
+            _phase84LastMetadata = metadata;
+            _phase84TestConsumerDeliveryCount++;
+            if (!LogPhase84Metadata(metadata))
+                return ManagedEthernetReceiveResult.DispatchFailed;
+            return ManagedEthernetReceiveResult.Consumed;
         }
 
-        if (parsed.EtherType == ManagedEthernetProtocol.ArpEtherType)
+        if (dispatchKind == ManagedEthernetDispatchKind.Arp)
         {
-            ManagedArpHandleResult arpResult = _arp.TryHandleEthernetArp(
-                _rxFrame, 0, 6, ManagedEthernetProtocol.HeaderLength,
+            arpResult = arp.TryHandleEthernetArp(
+                frame, 0, 6, ManagedEthernetProtocol.HeaderLength,
                 parsed.Payload.Length);
             if (arpResult == ManagedArpHandleResult.ReplySatisfied)
             {
                 _ipv4.TryReleasePendingAfterArp();
-                result = ManagedNetworkDispatchResult.ArpReplySatisfied;
+                networkResult = ManagedNetworkDispatchResult.ArpReplySatisfied;
+                return ManagedEthernetReceiveResult.Consumed;
             }
-            else if (arpResult == ManagedArpHandleResult.ResponderReplySent)
-                result = ManagedNetworkDispatchResult.ArpResponderReplySent;
-            else if (arpResult == ManagedArpHandleResult.Ignored)
-                result = ManagedNetworkDispatchResult.Ignored;
-            else
-                result = ManagedNetworkDispatchResult.Malformed;
-            return arpResult != ManagedArpHandleResult.Failed;
+            if (arpResult == ManagedArpHandleResult.ResponderReplySent)
+            {
+                networkResult = ManagedNetworkDispatchResult.ArpResponderReplySent;
+                return ManagedEthernetReceiveResult.Consumed;
+            }
+            if (arpResult == ManagedArpHandleResult.Ignored)
+            {
+                networkResult = ManagedNetworkDispatchResult.Ignored;
+                return ManagedEthernetReceiveResult.Consumed;
+            }
+            networkResult = arpResult == ManagedArpHandleResult.Failed
+                ? ManagedNetworkDispatchResult.Failed
+                : ManagedNetworkDispatchResult.Malformed;
+            return arpResult == ManagedArpHandleResult.Failed
+                ? ManagedEthernetReceiveResult.DispatchFailed
+                : ManagedEthernetReceiveResult.MalformedFrame;
         }
 
-        if (parsed.EtherType == ManagedIpv4Protocol.EtherType)
+        if (dispatchKind == ManagedEthernetDispatchKind.Ipv4)
         {
-            ManagedIpv4HandleResult ipv4Result = _ipv4.TryHandle(
-                parsed.Payload);
-            result = (ManagedNetworkDispatchResult)ipv4Result;
-            return ipv4Result != ManagedIpv4HandleResult.Failed;
+            ManagedIpv4HandleResult ipv4Result = _ipv4.TryHandle(parsed.Payload);
+            networkResult = (ManagedNetworkDispatchResult)ipv4Result;
+            return ipv4Result == ManagedIpv4HandleResult.Failed
+                ? ManagedEthernetReceiveResult.DispatchFailed
+                : ManagedEthernetReceiveResult.Consumed;
         }
 
         _unknownEtherTypeCount++;
-        result = ManagedNetworkDispatchResult.Ignored;
-        return true;
+        _unsupportedEtherTypeDropCount++;
+        networkResult = ManagedNetworkDispatchResult.Ignored;
+        return ManagedEthernetReceiveResult.UnsupportedEtherType;
+    }
+
+    private static bool LogPhase84Metadata(
+        ManagedEthernetTestFrameMetadata metadata)
+    {
+        return KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_ETHERNET_DESTINATION=0x"u8,
+                   metadata.DestinationMac) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_ETHERNET_SOURCE=0x"u8,
+                   metadata.SourceMac) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_ETHERNET_ETHERTYPE=0x"u8,
+                   metadata.EtherType) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_ETHERNET_PAYLOAD_LENGTH=0x"u8,
+                   metadata.PayloadLength) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE84_ETHERNET_SENTINEL=0x"u8,
+                   metadata.Sentinel) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE84_ETHERTYPE_CONSUMED=1\r\n"u8);
     }
 
     internal bool TryVerifyTransportAfterGc()
@@ -474,4 +585,14 @@ internal enum ManagedNetworkDispatchResult : byte
     DnsResponseTruncated = 16,
     DnsNxDomain = 17,
     DnsResolved = 18
+}
+
+internal enum ManagedEthernetReceiveResult : byte
+{
+    Consumed = 0,
+    UnsupportedEtherType = 1,
+    MalformedFrame = 2,
+    ConsumerRejected = 3,
+    DispatchFailed = 4,
+    DriverError = 5
 }
