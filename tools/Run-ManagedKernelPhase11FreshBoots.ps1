@@ -90,6 +90,9 @@ if ($EnablePhase85Arp -and (-not $EnablePhase83 -or
 if ($EnablePhase85Arp -and $RunCount -ne 3) {
     throw 'Phase 85 hardware acceptance requires exactly three fresh boots.'
 }
+if ($EnablePhase85Arp -and $EnablePhase82) {
+    throw 'Phase 85 ARP fixture requires the dedicated Phase 80 baseline and cannot be combined with Phase 82.'
+}
 if ($EnablePhase86Ipv4 -and (-not $EnablePhase83 -or
     -not $EnablePhase80E1000 -or $EnablePhase15Rx -or $EnablePhase85Arp)) {
     throw '-EnablePhase86Ipv4 requires the Phase 83 local dgram/e1000e receive path and is exclusive with Phase 85 ARP mode.'

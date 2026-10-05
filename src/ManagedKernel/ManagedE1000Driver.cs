@@ -76,6 +76,8 @@ internal sealed class ManagedE1000Driver
     private uint _phase80LastCause;
     private uint _phase80LastUnrelatedCause;
     private uint _phase80DeliveryCount;
+    private uint _phase85TxDwCount;
+    private uint _phase85RxEventCount;
     private uint _phase83RxDeliveryCount;
     private uint _phase83RxDescriptorCount;
     private uint _phase83LastDescriptorStatus;
@@ -1274,6 +1276,11 @@ internal sealed class ManagedE1000Driver
         _phase80LastUnrelatedCause = unrelated;
         _phase80DeliveryCount++;
         if (_phase87IcmpRequested && hasTxCause) _phase87IcmpTxDwCount++;
+        if (_phase85ArpRequested)
+        {
+            if (hasTxCause) _phase85TxDwCount++;
+            if (hasRxCause) _phase85RxEventCount++;
+        }
         return true;
     }
 
@@ -1781,7 +1788,7 @@ internal sealed class ManagedE1000Driver
             _ethernet.MalformedFrameCount != 0U ||
             _ethernet.UnsupportedEtherTypeDropCount != 0U ||
             _ethernet.Phase84TestConsumerDeliveryCount != 0U ||
-            _phase80DeliveryCount < 8U || _rxIndex != 4U ||
+            _phase85RxEventCount != 4U || _rxIndex != 4U ||
             !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescTail,
                              out uint postedTail) || postedTail != 3U)
             return false;
@@ -1810,7 +1817,10 @@ internal sealed class ManagedE1000Driver
                 postedTail) &&
             KernelLog.WriteHexLine(
                 "GXOS_NET10:PHASE85_TXDW_DELIVERIES=0x"u8,
-                _phase80DeliveryCount - 4U) &&
+                _phase85TxDwCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE85_RX_EVENT_DELIVERIES=0x"u8,
+                _phase85RxEventCount) &&
             KernelLog.Write(
                 "GXOS_NET10:PHASE85_RX_DESCRIPTOR_RECYCLE_PASS=1\r\n"u8) &&
             KernelLog.Write(

@@ -515,6 +515,47 @@ internal static class Program
               ethernet.TransmitCount == 1 && arp.Cache.Count == 0,
               "valid-not-for-us-request-is-classified-without-reply");
 
+        FakeArpEthernet negativeFirstEthernet = new();
+        ManagedArpLayer negativeFirstArp = new(negativeFirstEthernet);
+        negativeFirstArp.InitializeMac();
+        Check(negativeFirstArp.TryInstallLocalIpv4(s_guestIp),
+              "arp-negative-first-local-address-installed");
+        ManagedArpHandleResult negativeFirstResult =
+            negativeFirstArp.TryHandleEthernetArp(in unrelatedFrame, out _);
+        Check(negativeFirstResult == ManagedArpHandleResult.RequestNotForUs &&
+              negativeFirstEthernet.TransmitCount == 0 &&
+              negativeFirstArp.Cache.Count == 0,
+              "negative-first-request-is-parsed-with-zero-replies");
+
+        ManagedArpHandleResult negativeFirstLiveness =
+            negativeFirstArp.TryHandleEthernetArp(in localFrame, out _);
+        Check(negativeFirstLiveness == ManagedArpHandleResult.ResponderReplySent &&
+              negativeFirstEthernet.TransmitCount == 1,
+              "local-request-after-negative-first-replies");
+
+        FakeArpEthernet positiveFirstEthernet = new();
+        ManagedArpLayer positiveFirstArp = new(positiveFirstEthernet);
+        positiveFirstArp.InitializeMac();
+        Check(positiveFirstArp.TryInstallLocalIpv4(s_guestIp),
+              "arp-positive-first-local-address-installed");
+        ManagedArpHandleResult positiveFirstLocal =
+            positiveFirstArp.TryHandleEthernetArp(in localFrame, out _);
+        int positiveReplyCount = positiveFirstEthernet.TransmitCount;
+        ManagedArpHandleResult positiveFirstNegative =
+            positiveFirstArp.TryHandleEthernetArp(
+                in unrelatedFrame, out ManagedArpReceiveMetadata positiveFirstMetadata);
+        Check(positiveFirstLocal == ManagedArpHandleResult.ResponderReplySent &&
+              positiveReplyCount == 1 &&
+              positiveFirstNegative == ManagedArpHandleResult.RequestNotForUs &&
+              positiveFirstEthernet.TransmitCount == positiveReplyCount &&
+              positiveFirstMetadata.TargetIpv4 == 0x0A0F0063,
+              "positive-then-not-for-us-adds-zero-replies");
+        ManagedArpHandleResult positiveFirstLiveness =
+            positiveFirstArp.TryHandleEthernetArp(in localFrame, out _);
+        Check(positiveFirstLiveness == ManagedArpHandleResult.ResponderReplySent &&
+              positiveFirstEthernet.TransmitCount == 2,
+              "positive-after-not-for-us-liveness-replies");
+
         foreach ((int offset, int value, string name) in new[]
         {
             (0, 2, "unsupported-hardware-type"),
