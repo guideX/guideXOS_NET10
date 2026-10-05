@@ -25,6 +25,7 @@ internal static class ManagedE1000Protocol
     internal const ushort ProofEtherType = 0x88B5;
     internal const uint TxCommandEopIfcsRs = 0x0B;
     internal const byte TxStatusDone = 0x01;
+    internal const byte TxStatusErrorMask = 0x0E;
     internal const uint InterruptEventType = 3;
     internal const uint InterruptCauseTxDescriptorWriteback = 1U << 0;
     internal const uint InterruptCauseRxTimer = 1U << 7;
@@ -120,6 +121,27 @@ internal static class ManagedE1000Protocol
         if (count == 0 || index >= count) return false;
         next = index + 1 == count ? 0U : index + 1;
         return true;
+    }
+
+    internal static bool TryBuildAsyncTxRequestId(uint descriptorIndex,
+        uint generation, uint ringCount, out ulong requestId)
+    {
+        requestId = 0;
+        if (ringCount == 0 || descriptorIndex >= ringCount || generation == 0)
+            return false;
+        requestId = ((ulong)generation << 32) | ((ulong)descriptorIndex + 1UL);
+        return true;
+    }
+
+    internal static bool TryDecodeAsyncTxRequestId(ulong requestId,
+        uint ringCount, out uint descriptorIndex, out uint generation)
+    {
+        descriptorIndex = (uint)requestId;
+        generation = (uint)(requestId >> 32);
+        if (descriptorIndex == 0 || generation == 0 || ringCount == 0)
+            return false;
+        descriptorIndex--;
+        return descriptorIndex < ringCount;
     }
 
     internal static bool TryAcceptRxDescriptorIndex(uint expectedIndex,

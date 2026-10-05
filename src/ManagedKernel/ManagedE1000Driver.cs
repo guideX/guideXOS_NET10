@@ -14,6 +14,10 @@ internal enum ManagedE1000DriverState : uint
     Stopped = 7
 }
 
+internal enum ManagedE1000AsyncTxOwnership : byte { Free, Prepared, HardwareOwned, Completed }
+internal enum ManagedE1000AsyncTxResult : byte { Pending, Success, HardwareError, InvalidOrStale, AlreadyConsumed }
+internal enum ManagedE1000AsyncTxSubmitResult : byte { Accepted, Busy, InvalidArgument, Unavailable }
+
 /* Bounded polling driver for the QEMU e1000e/82574L-compatible device.  The
    driver owns policy and descriptor bytes; native owns only validated MMIO,
    PCI command, and DMA capabilities. */
@@ -21,6 +25,7 @@ internal sealed class ManagedE1000Driver
 {
     internal const uint DriverId = 0xD014;
     private const uint PollLimit = 100000;
+    internal const uint AsyncTxCapacity = 4;
     private const uint Phase80InterruptPollLimit = 100000;
     private const uint Phase83InterruptPollLimit = 100000000;
     /* The host observes RX_READY over a serial socket before sending the one
@@ -58,6 +63,7 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase86Ipv4ModeEnabled;
     private static bool s_phase87IcmpModeEnabled;
     private static bool s_phase89UdpModeEnabled;
+    private static bool s_phase90AsyncTxModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -73,6 +79,12 @@ internal sealed class ManagedE1000Driver
     private readonly byte[] _txFrame = new byte[60];
     private readonly byte[] _phase80Frame = new byte[60];
     private readonly uint[] _phase83DescriptorIndices = new uint[4];
+    private readonly ManagedE1000AsyncTxOwnership[] _asyncTxOwnership =
+        new ManagedE1000AsyncTxOwnership[(int)ManagedE1000Protocol.RingCount];
+    private readonly uint[] _asyncTxGeneration =
+        new uint[(int)ManagedE1000Protocol.RingCount];
+    private readonly ManagedE1000AsyncTxResult[] _asyncTxResult =
+        new ManagedE1000AsyncTxResult[(int)ManagedE1000Protocol.RingCount];
     private ManagedInterruptDispatcher? _interruptDispatcher;
     private uint _lastSubmittedTxIndex;
     private uint _phase80LastCause;
@@ -102,6 +114,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase86Ipv4Requested;
     private bool _phase87IcmpRequested;
     private bool _phase89UdpRequested;
+    private bool _phase90AsyncTxRequested;
     private bool _interruptSubscribed;
     private ulong _macValue;
     private bool _phase16Passed;
@@ -136,6 +149,10 @@ internal sealed class ManagedE1000Driver
     private uint _resultingCommand;
     private bool _pciCommandLive;
     private uint _txIndex;
+    private uint _asyncTxOutstanding;
+    private uint _asyncTxCompleted;
+    private uint _asyncTxUnmatchedTxdw;
+    private ulong _asyncTxLastEventSequence;
     private uint _rxIndex;
     private int _rxProofReceived;
     private int _rxPhase15Received;
@@ -175,6 +192,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase86Ipv4Passed;
     private bool _phase87IcmpPassed;
     private bool _phase89UdpPassed;
+    private bool _phase90AsyncTxPassed;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -228,6 +246,10 @@ internal sealed class ManagedE1000Driver
     internal bool Phase86Ipv4Passed => _phase86Ipv4Passed;
     internal bool Phase87IcmpPassed => _phase87IcmpPassed;
     internal bool Phase89UdpPassed => _phase89UdpPassed;
+    internal bool Phase90AsyncTxPassed => _phase90AsyncTxPassed;
+    internal uint AsyncTxOutstanding => _asyncTxOutstanding;
+    internal uint AsyncTxCompleted => _asyncTxCompleted;
+    internal uint AsyncTxUnmatchedTxdw => _asyncTxUnmatchedTxdw;
     internal uint Phase80DeliveryCount => _phase80DeliveryCount;
 
     internal static void EnablePhase35Mode()
@@ -364,6 +386,12 @@ internal sealed class ManagedE1000Driver
         s_phase89UdpModeEnabled = true;
     }
 
+    internal static void EnablePhase90AsyncTxMode()
+    {
+        s_phase80ModeEnabled = true;
+        s_phase90AsyncTxModeEnabled = true;
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -411,6 +439,7 @@ internal sealed class ManagedE1000Driver
         _phase86Ipv4Requested = s_phase86Ipv4ModeEnabled;
         _phase87IcmpRequested = s_phase87IcmpModeEnabled;
         _phase89UdpRequested = s_phase89UdpModeEnabled;
+        _phase90AsyncTxRequested = s_phase90AsyncTxModeEnabled;
         return TryStartCore();
     }
 
@@ -1199,13 +1228,131 @@ internal sealed class ManagedE1000Driver
         return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_TX_COMPLETED\r\n"u8);
     }
 
+    internal ManagedE1000AsyncTxSubmitResult TrySubmitFrame(
+        byte[]? frame, int length, out ulong requestId)
+    {
+        requestId = 0;
+        if (_state != ManagedE1000DriverState.Running || !_phase90AsyncTxRequested ||
+            !_interruptSubscribed || _txRing == null || _txBuffers == null)
+            return ManagedE1000AsyncTxSubmitResult.Unavailable;
+        if (frame == null || length <= 0 || length > frame.Length ||
+            length > ManagedE1000Protocol.PacketBufferSize)
+            return ManagedE1000AsyncTxSubmitResult.InvalidArgument;
+        if (_asyncTxOutstanding >= AsyncTxCapacity || _txIndex >= ManagedE1000Protocol.RingCount ||
+            _asyncTxOwnership[_txIndex] != ManagedE1000AsyncTxOwnership.Free)
+            return ManagedE1000AsyncTxSubmitResult.Busy;
+
+        uint index = _txIndex;
+        ulong bufferOffset = (ulong)index * ManagedE1000Protocol.PacketBufferSize;
+        if (bufferOffset > _txBuffers.ByteLength ||
+            (ulong)length > _txBuffers.ByteLength - bufferOffset ||
+            _txBuffers.BusAddress > ulong.MaxValue - bufferOffset ||
+            !ManagedE1000Protocol.TryAdvanceRing(index,
+                ManagedE1000Protocol.RingCount, out uint nextIndex))
+            return ManagedE1000AsyncTxSubmitResult.InvalidArgument;
+
+        uint generation = unchecked(_asyncTxGeneration[index] + 1U);
+        if (generation == 0) return ManagedE1000AsyncTxSubmitResult.Busy;
+        _asyncTxGeneration[index] = generation;
+        if (!ManagedE1000Protocol.TryBuildAsyncTxRequestId(index, generation,
+                ManagedE1000Protocol.RingCount, out requestId))
+        {
+            _asyncTxOwnership[index] = ManagedE1000AsyncTxOwnership.Free;
+            return ManagedE1000AsyncTxSubmitResult.Unavailable;
+        }
+        _asyncTxOwnership[index] = ManagedE1000AsyncTxOwnership.Prepared;
+        _asyncTxOutstanding++;
+
+        Span<byte> descriptor = stackalloc byte[(int)ManagedE1000Protocol.DescriptorSize];
+        if (!_txBuffers.TryWrite(bufferOffset, frame.AsSpan(0, length)) ||
+            !ManagedE1000Protocol.TryBuildTxDescriptor(
+                descriptor, _txBuffers.BusAddress + bufferOffset, (ushort)length) ||
+            !_txRing.TryWrite((ulong)index * ManagedE1000Protocol.DescriptorSize,
+                              descriptor))
+        {
+            _asyncTxOwnership[index] = ManagedE1000AsyncTxOwnership.Free;
+            _asyncTxOutstanding--;
+            requestId = 0;
+            return ManagedE1000AsyncTxSubmitResult.Unavailable;
+        }
+
+        _lastSubmittedTxIndex = index;
+        _asyncTxOwnership[index] = ManagedE1000AsyncTxOwnership.HardwareOwned;
+        if (!WriteRegister(ManagedE1000Protocol.RegTxDescTail, nextIndex))
+            return ManagedE1000AsyncTxSubmitResult.Unavailable;
+        _txIndex = nextIndex;
+        return ManagedE1000AsyncTxSubmitResult.Accepted;
+    }
+
+    internal ManagedE1000AsyncTxResult TryGetTransmitCompletion(
+        ulong requestId)
+    {
+        if (_state != ManagedE1000DriverState.Running || !_phase90AsyncTxRequested ||
+            !TryDecodeAsyncTxRequest(requestId, out uint index, out uint generation) ||
+            _asyncTxGeneration[index] != generation ||
+            _asyncTxOwnership[index] == ManagedE1000AsyncTxOwnership.Free)
+            return ManagedE1000AsyncTxResult.InvalidOrStale;
+        return _asyncTxOwnership[index] == ManagedE1000AsyncTxOwnership.Completed
+            ? _asyncTxResult[index]
+            : ManagedE1000AsyncTxResult.Pending;
+    }
+
+    internal ManagedE1000AsyncTxResult TryConsumeTransmitCompletion(ulong requestId)
+    {
+        ManagedE1000AsyncTxResult result = TryGetTransmitCompletion(requestId);
+        if (result != ManagedE1000AsyncTxResult.Success &&
+            result != ManagedE1000AsyncTxResult.HardwareError) return result;
+        TryDecodeAsyncTxRequest(requestId, out uint index, out _);
+        _asyncTxOwnership[index] = ManagedE1000AsyncTxOwnership.Free;
+        _asyncTxOutstanding--;
+        return result;
+    }
+
+    private static bool TryDecodeAsyncTxRequest(
+        ulong requestId, out uint index, out uint generation)
+    {
+        return ManagedE1000Protocol.TryDecodeAsyncTxRequestId(requestId,
+            ManagedE1000Protocol.RingCount, out index, out generation);
+    }
+
+    private bool TryCompleteAsyncTxFromTxdw(
+        ulong eventSequence, out uint completed)
+    {
+        completed = 0;
+        if (eventSequence <= _asyncTxLastEventSequence) return false;
+        _asyncTxLastEventSequence = eventSequence;
+        if (_asyncTxOutstanding == 0)
+        {
+            _asyncTxUnmatchedTxdw++;
+            return true;
+        }
+        if (_txRing == null) return false;
+        for (uint index = 0; index < ManagedE1000Protocol.RingCount; index++)
+        {
+            if (_asyncTxOwnership[index] != ManagedE1000AsyncTxOwnership.HardwareOwned)
+                continue;
+            ulong descriptorOffset = (ulong)index * ManagedE1000Protocol.DescriptorSize;
+            if (!_txRing.TryRead8(descriptorOffset + 12, out byte status)) return false;
+            if ((status & ManagedE1000Protocol.TxStatusDone) == 0) continue;
+            _asyncTxOwnership[index] = ManagedE1000AsyncTxOwnership.Completed;
+            _asyncTxResult[index] = (status & ManagedE1000Protocol.TxStatusErrorMask) != 0
+                ? ManagedE1000AsyncTxResult.HardwareError
+                : ManagedE1000AsyncTxResult.Success;
+            _asyncTxCompleted++;
+            completed++;
+        }
+        return true;
+    }
+
     internal bool TryTransmitFrame(byte[] frame, int length)
     {
         if (_state != ManagedE1000DriverState.Running || _txRing == null ||
             _txBuffers == null || frame == null || length <= 0 ||
             length > frame.Length ||
             length > ManagedE1000Protocol.PacketBufferSize ||
-            _txIndex >= ManagedE1000Protocol.RingCount)
+            _txIndex >= ManagedE1000Protocol.RingCount ||
+            (_phase90AsyncTxRequested &&
+             _asyncTxOwnership[_txIndex] != ManagedE1000AsyncTxOwnership.Free))
         {
             KernelLog.Write("GXOS_NET10:MANAGED_E1000_TX_PROTOCOL_PRECONDITION_FAILED\r\n"u8);
             return false;
@@ -1293,7 +1440,11 @@ internal sealed class ManagedE1000Driver
             ManagedE1000Protocol.InterruptCauseTxDescriptorWriteback) != 0;
         bool hasRxCause = (value.Status &
             ManagedE1000Protocol.InterruptCauseRxTimer) != 0;
-        if (hasTxCause && (_txRing == null || !_txRing.TryRead8(
+        if (hasTxCause && _phase90AsyncTxRequested &&
+            !TryCompleteAsyncTxFromTxdw(value.Sequence, out _))
+            return false;
+        if (hasTxCause && !_phase90AsyncTxRequested &&
+            (_txRing == null || !_txRing.TryRead8(
                 (ulong)_lastSubmittedTxIndex * ManagedE1000Protocol.DescriptorSize + 12,
                 out byte txStatus) ||
             (txStatus & ManagedE1000Protocol.TxStatusDone) == 0))
