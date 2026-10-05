@@ -29,6 +29,7 @@ internal sealed class ManagedE1000Driver
     private const uint RxPhase15PollLimit = 1000000000;
     private const uint RxReadyPollLimit = 5000000;
     private const uint RxRearmInterval = 64;
+    private const ushort Phase89BoundPort = 15890;
     internal static uint Phase16MacHigh;
     internal static uint Phase16MacLow;
     private static bool s_phase35ModeEnabled;
@@ -56,6 +57,7 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase85ArpModeEnabled;
     private static bool s_phase86Ipv4ModeEnabled;
     private static bool s_phase87IcmpModeEnabled;
+    private static bool s_phase89UdpModeEnabled;
 
     private readonly ManagedDevice _device;
     private ManagedDeviceResource _resource;
@@ -89,6 +91,9 @@ internal sealed class ManagedE1000Driver
     private uint _phase86Ipv4DeliveryCount;
     private uint _phase87IcmpDeliveryCount;
     private uint _phase87IcmpTxDwCount;
+    private uint _phase89UdpDeliveryCount;
+    private uint _phase89UdpRxEventCount;
+    private uint _phase89UdpTxDwCount;
     private ulong _phase80LastSequence;
     private uint _phase82TransmitSequence;
     private bool _phase80Requested;
@@ -96,6 +101,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase85ArpRequested;
     private bool _phase86Ipv4Requested;
     private bool _phase87IcmpRequested;
+    private bool _phase89UdpRequested;
     private bool _interruptSubscribed;
     private ulong _macValue;
     private bool _phase16Passed;
@@ -168,6 +174,7 @@ internal sealed class ManagedE1000Driver
     private bool _phase85ArpPassed;
     private bool _phase86Ipv4Passed;
     private bool _phase87IcmpPassed;
+    private bool _phase89UdpPassed;
     private ManagedE1000DriverState _state;
 
     private ManagedE1000Driver(in ManagedDevice device)
@@ -220,6 +227,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase85ArpPassed => _phase85ArpPassed;
     internal bool Phase86Ipv4Passed => _phase86Ipv4Passed;
     internal bool Phase87IcmpPassed => _phase87IcmpPassed;
+    internal bool Phase89UdpPassed => _phase89UdpPassed;
     internal uint Phase80DeliveryCount => _phase80DeliveryCount;
 
     internal static void EnablePhase35Mode()
@@ -350,6 +358,12 @@ internal sealed class ManagedE1000Driver
         s_phase87IcmpModeEnabled = true;
     }
 
+    internal static void EnablePhase89UdpMode()
+    {
+        s_phase83ModeEnabled = true;
+        s_phase89UdpModeEnabled = true;
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -396,6 +410,7 @@ internal sealed class ManagedE1000Driver
         _phase85ArpRequested = s_phase85ArpModeEnabled;
         _phase86Ipv4Requested = s_phase86Ipv4ModeEnabled;
         _phase87IcmpRequested = s_phase87IcmpModeEnabled;
+        _phase89UdpRequested = s_phase89UdpModeEnabled;
         return TryStartCore();
     }
 
@@ -460,7 +475,8 @@ internal sealed class ManagedE1000Driver
                         ((uint)_mac[4] << 8) | _mac[5];
         _ethernet!.InitializeMac();
         if (_phase83Requested && !_phase85ArpRequested &&
-            !_phase86Ipv4Requested && !_phase87IcmpRequested)
+            !_phase86Ipv4Requested && !_phase87IcmpRequested &&
+            !_phase89UdpRequested)
             _ethernet.EnablePhase84TestConsumer();
         if (_phase85ArpRequested &&
             (!_ethernet.TryEnablePhase85ArpAcceptance() ||
@@ -484,6 +500,18 @@ internal sealed class ManagedE1000Driver
                  _ethernet.LocalIpv4Value) ||
              !KernelLog.Write(
                  "GXOS_NET10:PHASE87_ICMP_HANDLER_READY=1\r\n"u8)))
+            return AbortStart();
+        if (_phase89UdpRequested &&
+            (!_ethernet.TryEnablePhase89UdpAcceptance() ||
+             _ethernet.BindPhase89UdpPort(Phase89BoundPort) !=
+                 NetworkOperationResult.Started ||
+             !KernelLog.WriteHexLine(
+                 "GXOS_NET10:PHASE89_LOCAL_IPV4=0x"u8,
+                 _ethernet.LocalIpv4Value) ||
+             !KernelLog.Write(
+                 "GXOS_NET10:PHASE89_UDP_BOUND_PORT=0x3E12\r\n"u8) ||
+             !KernelLog.Write(
+                 "GXOS_NET10:PHASE89_UDP_DISPATCH_READY=1\r\n"u8)))
             return AbortStart();
         if (!AllocateDma() ||
             !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_DMA_CAPABILITY_READY\r\n"u8))
@@ -798,6 +826,7 @@ internal sealed class ManagedE1000Driver
         s_phase85ArpModeEnabled = false;
         s_phase86Ipv4ModeEnabled = false;
         s_phase87IcmpModeEnabled = false;
+        s_phase89UdpModeEnabled = false;
         bool safe = true;
         if (_interruptSubscribed &&
             !ManagedSerialDriverSubsystem.TryUnsubscribeE1000Interrupt(this))
@@ -904,6 +933,7 @@ internal sealed class ManagedE1000Driver
         s_phase85ArpModeEnabled = false;
         s_phase86Ipv4ModeEnabled = false;
         s_phase87IcmpModeEnabled = false;
+        s_phase89UdpModeEnabled = false;
         return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED\r\n"u8);
     }
 
@@ -1276,6 +1306,8 @@ internal sealed class ManagedE1000Driver
         _phase80LastUnrelatedCause = unrelated;
         _phase80DeliveryCount++;
         if (_phase87IcmpRequested && hasTxCause) _phase87IcmpTxDwCount++;
+        if (_phase89UdpRequested && hasTxCause) _phase89UdpTxDwCount++;
+        if (_phase89UdpRequested && hasRxCause) _phase89UdpRxEventCount++;
         if (_phase85ArpRequested)
         {
             if (hasTxCause) _phase85TxDwCount++;
@@ -1351,6 +1383,10 @@ internal sealed class ManagedE1000Driver
                 length, value.Sequence);
         if (_phase87IcmpRequested)
             return RecordPhase87IcmpDelivery(
+                receiveResult, networkResult, descriptorIndex, status, errors,
+                length, value.Sequence);
+        if (_phase89UdpRequested)
+            return RecordPhase89UdpDelivery(
                 receiveResult, networkResult, descriptorIndex, status, errors,
                 length, value.Sequence);
         if (_phase85ArpRequested)
@@ -1989,6 +2025,225 @@ internal sealed class ManagedE1000Driver
                    "GXOS_NET10:PHASE87_TX_DD_POLL_COMPLETE=1\r\n"u8) &&
                KernelLog.Write(
                    "GXOS_NET10:PHASE87_RX_DESCRIPTOR_RECYCLED=1\r\n"u8);
+    }
+
+    private bool RecordPhase89UdpDelivery(
+        ManagedEthernetReceiveResult receiveResult,
+        ManagedNetworkDispatchResult networkResult,
+        uint descriptorIndex, byte status, byte errors, ushort length,
+        ulong eventSequence)
+    {
+        if (_ethernet == null || _rxRing == null || _rxBuffers == null)
+            return false;
+        uint ordinal = _phase89UdpDeliveryCount + 1U;
+        bool unbound = ordinal == 4U;
+        if (ordinal > 4U || receiveResult != ManagedEthernetReceiveResult.Consumed ||
+            networkResult != (unbound ? ManagedNetworkDispatchResult.Ignored
+                : ManagedNetworkDispatchResult.UdpServiceReceived) ||
+            (status & (ManagedE1000Protocol.RxStatusDone |
+                       ManagedE1000Protocol.RxStatusEop)) !=
+                (ManagedE1000Protocol.RxStatusDone |
+                 ManagedE1000Protocol.RxStatusEop) || errors != 0 ||
+            length != 60 || descriptorIndex != ordinal - 1U ||
+            _ethernet.LastReceivedEtherType != ManagedIpv4Protocol.EtherType ||
+            _ethernet.Phase89UdpParsedCount != ordinal ||
+            _ethernet.Phase89UdpBoundCount != (unbound ? 3U : ordinal) ||
+            _ethernet.Phase89UdpUnboundCount != (unbound ? 1U : 0U))
+            return false;
+
+        ManagedIpv4Phase89Metadata metadata = _ethernet.Phase89UdpLastMetadata;
+        if (metadata.SourceIpv4 != 0x0A0F0002U + ordinal - 1U ||
+            metadata.DestinationIpv4 != 0x0A0F0001U ||
+            metadata.SourcePort != 24000 + ordinal ||
+            metadata.DestinationPort != (unbound ? 15891 : 15890) ||
+            metadata.UdpLength != 14 || metadata.UdpChecksum == 0 ||
+            metadata.PayloadLength != 6 || metadata.Sequence != ordinal ||
+            metadata.Bound == unbound)
+            return false;
+
+        byte[] copiedPayload = new byte[ManagedNetworkService.MaximumUdpPayloadLength];
+        if (unbound)
+        {
+            if (_ethernet.NetworkService.HasReceivedUdp) return false;
+        }
+        else if (!_ethernet.TryReceivePhase89Udp(copiedPayload,
+                     out Ipv4Address source, out ushort sourcePort,
+                     out ushort destinationPort, out int payloadLength) ||
+                 source.Value != metadata.SourceIpv4 ||
+                 sourcePort != metadata.SourcePort ||
+                 destinationPort != metadata.DestinationPort ||
+                 payloadLength != 6 || copiedPayload[0] != 0x89 ||
+                 copiedPayload[1] != ordinal || copiedPayload[2] != 0xA5 ||
+                 copiedPayload[3] != (byte)(0x50 + ordinal) ||
+                 copiedPayload[4] != 0xC3 || copiedPayload[5] != 0x3C)
+            return false;
+
+        if (!_rxRing.TryRead8((ulong)descriptorIndex *
+                ManagedE1000Protocol.DescriptorSize + 12, out byte recycledStatus) ||
+            recycledStatus != 0)
+            return false;
+        _phase89UdpDeliveryCount = ordinal;
+        return KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_UDP_DELIVERY=0x"u8, ordinal) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_RX_EVENT_SEQUENCE=0x"u8, eventSequence) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_RX_DESCRIPTOR_INDEX=0x"u8,
+                   descriptorIndex) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_SOURCE_PORT=0x"u8, metadata.SourcePort) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_DESTINATION_PORT=0x"u8,
+                   metadata.DestinationPort) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_UDP_LENGTH=0x"u8, metadata.UdpLength) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_UDP_CHECKSUM=0x"u8,
+                   metadata.UdpChecksum) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_PAYLOAD_LENGTH=0x"u8,
+                   metadata.PayloadLength) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_SEQUENCE=0x"u8, metadata.Sequence) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_SOURCE_IPV4=0x"u8,
+                   metadata.SourceIpv4) &&
+               KernelLog.WriteHexLine(
+                   "GXOS_NET10:PHASE89_DESTINATION_IPV4=0x"u8,
+                   metadata.DestinationIpv4) &&
+               KernelLog.Write(metadata.Bound
+                   ? "GXOS_NET10:PHASE89_UDP_BOUND_DELIVERY=1\r\n"u8
+                   : "GXOS_NET10:PHASE89_UDP_UNBOUND_IGNORED=1\r\n"u8) &&
+               KernelLog.Write(
+                   "GXOS_NET10:PHASE89_RX_DESCRIPTOR_RECYCLED=1\r\n"u8);
+    }
+
+    internal bool TryRunPhase89UdpProof()
+    {
+        if (!_phase89UdpRequested || !_phase80Requested || !_interruptSubscribed ||
+            _state != ManagedE1000DriverState.Running ||
+            _phase80DeliveryCount < 4 || _phase89UdpDeliveryCount != 0 ||
+            _phase83RxDescriptorCount != 0 || _rxRing == null ||
+            _rxBuffers == null || _ethernet == null || _mmio == null ||
+            _ethernet.LocalIpv4Value != 0x0A0F0001U)
+            return false;
+
+        if (!KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_GUEST_MAC=0x"u8, _macValue) ||
+            !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_LOCAL_IPV4=0x"u8,
+                _ethernet.LocalIpv4Value) ||
+            !KernelLog.Write(
+                "GXOS_NET10:PHASE89_UDP_RX_READY=1\r\n"u8))
+            return false;
+
+        for (uint poll = 0; poll != Phase83InterruptPollLimit &&
+             _phase89UdpDeliveryCount != 4U; ++poll)
+        {
+            bool dispatched = ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                this, out uint delivered, out uint rejected);
+            if (!dispatched || rejected != 0 || delivered > 1)
+            {
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE89_DISPATCH_FAILURE=0x"u8,
+                    dispatched ? (rejected != 0 ? 2U : 3U) : 1U);
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE89_DISPATCH_REJECTED=0x"u8,
+                    rejected);
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE89_DISPATCH_DELIVERED=0x"u8,
+                    delivered);
+                return false;
+            }
+        }
+
+        if (_phase89UdpDeliveryCount != 4U)
+        {
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_RX_POLL_TIMEOUT_RXT0_EVENTS=0x"u8,
+                _phase89UdpRxEventCount);
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_RX_POLL_TIMEOUT_DELIVERIES=0x"u8,
+                _phase89UdpDeliveryCount);
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_RX_POLL_TIMEOUT_RX_INDEX=0x"u8,
+                _rxIndex);
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_RX_POLL_TIMEOUT_PARSED=0x"u8,
+                _ethernet.Phase89UdpParsedCount);
+        }
+
+        if (_phase89UdpDeliveryCount != 4U ||
+            _phase83RxDescriptorCount != 4U ||
+            _ethernet.Phase89UdpParsedCount != 4U ||
+            _ethernet.Phase89UdpBoundCount != 3U ||
+            _ethernet.Phase89UdpUnboundCount != 1U ||
+            _ethernet.Phase89UdpValidCount != 4U ||
+            _ethernet.Phase89UdpMalformedCount != 0U ||
+            _ethernet.Phase89UdpChecksumFailureCount != 0U ||
+            _ethernet.Phase89UdpUnknownPortCount != 1U ||
+            _ethernet.Phase89UdpEndpointDispatchCount != 3U ||
+            _ethernet.ReceivedFrameCount != 4U ||
+            _ethernet.ParsedFrameCount != 4U ||
+            _ethernet.MalformedFrameCount != 0U ||
+            _ethernet.UnsupportedEtherTypeDropCount != 0U ||
+            _rxIndex != 4U ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegRxDescTail,
+                             out uint postedTail) || postedTail != 3U)
+            return false;
+
+        uint emptyBatches = 0;
+        for (uint poll = 0; poll != 16U && emptyBatches != 3U; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                    this, out uint delivered, out uint rejected) || rejected != 0)
+                return false;
+            emptyBatches = delivered == 0 ? emptyBatches + 1U : 0U;
+        }
+        bool passed = emptyBatches == 3U &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_MANAGED_DELIVERIES=0x"u8,
+                _phase89UdpDeliveryCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_RX_DESCRIPTORS_COMPLETED=0x"u8,
+                _phase83RxDescriptorCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_PACKETS_PARSED=0x"u8,
+                _ethernet.Phase89UdpParsedCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_VALID_PACKETS=0x"u8,
+                _ethernet.Phase89UdpValidCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_RX_EVENTS=0x"u8,
+                _phase89UdpRxEventCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_TXDW_EVENTS=0x"u8,
+                _phase89UdpTxDwCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_BOUND_CLASSIFICATIONS=0x"u8,
+                _ethernet.Phase89UdpBoundCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_UNBOUND_CLASSIFICATIONS=0x"u8,
+                _ethernet.Phase89UdpUnboundCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_MALFORMED_DROPS=0x"u8,
+                _ethernet.Phase89UdpMalformedCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_CHECKSUM_FAILURES=0x"u8,
+                _ethernet.Phase89UdpChecksumFailureCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_UNKNOWN_PORTS=0x"u8,
+                _ethernet.Phase89UdpUnknownPortCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_UDP_BOUND_CONSUMER_DELIVERIES=0x"u8,
+                _ethernet.Phase89UdpEndpointDispatchCount) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE89_RX_RDT_AFTER_RECYCLE=0x"u8,
+                postedTail) &&
+            KernelLog.Write(
+                "GXOS_NET10:PHASE89_UDP_HARDWARE_INGRESS_PASS=1\r\n"u8);
+        _phase89UdpPassed = passed;
+        return passed;
     }
 
     internal bool TryRunPhase87IcmpProof()

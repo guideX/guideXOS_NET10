@@ -482,6 +482,37 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
         return true;
     }
 
+    internal bool TryEnablePhase89UdpAcceptance()
+    {
+        if (!_arp.TryInstallLocalIpv4(_arp.LocalIpv4)) return false;
+        _ipv4.EnablePhase89UdpAcceptance();
+        return true;
+    }
+
+    internal NetworkOperationResult BindPhase89UdpPort(ushort port) =>
+        _ipv4.BindPhase89UdpPort(port);
+
+    internal bool TryReceivePhase89Udp(Span<byte> payload,
+                                       out Ipv4Address source,
+                                       out ushort sourcePort,
+                                       out ushort destinationPort,
+                                       out int length) =>
+        _ipv4.TryReceivePhase89Udp(payload, out source, out sourcePort,
+                                   out destinationPort, out length);
+
+    internal uint Phase89UdpParsedCount => _ipv4.Phase89ParsedCount;
+    internal uint Phase89UdpBoundCount => _ipv4.Phase89BoundCount;
+    internal uint Phase89UdpUnboundCount => _ipv4.Phase89UnboundCount;
+    internal uint Phase89UdpValidCount => _ipv4.UdpRxValidCount;
+    internal uint Phase89UdpMalformedCount => _ipv4.UdpRxMalformedCount;
+    internal uint Phase89UdpChecksumFailureCount =>
+        _ipv4.UdpChecksumFailureCount;
+    internal uint Phase89UdpUnknownPortCount => _ipv4.UdpUnknownPortCount;
+    internal uint Phase89UdpEndpointDispatchCount =>
+        _ipv4.UdpEndpointDispatchCount;
+    internal ManagedIpv4Phase89Metadata Phase89UdpLastMetadata =>
+        _ipv4.Phase89LastMetadata;
+
     internal uint Phase86Ipv4ParsedFrameCount =>
         _ipv4.Phase86ParsedFrameCount;
     internal uint Phase86Ipv4LocalDeliveryCount =>

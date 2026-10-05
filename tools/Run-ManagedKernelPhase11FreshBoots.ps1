@@ -14,7 +14,9 @@ param(
     [switch]$EnablePhase85Arp,
     [switch]$EnablePhase86Ipv4,
     [switch]$EnablePhase87Icmpv4,
+    [switch]$EnablePhase89Udp,
     [string]$Phase15InjectorPath = '',
+    [string]$Phase89InjectorPath = '',
     [ValidateSet('dgram', 'user')]
     [string]$Phase15NetworkBackend = 'dgram',
     [switch]$Phase15KeepDefaultNic,
@@ -80,7 +82,7 @@ if ($EnablePhase80E1000 -and $EnablePhase15Rx) {
 if ($EnablePhase83 -and (-not $EnablePhase80E1000 -or $EnablePhase15Rx)) {
     throw '-EnablePhase83 requires the Phase 80 E1000 fixture and uses its own local dgram injector.'
 }
-if ($EnablePhase83 -and $RunCount -ne 3) {
+if ($EnablePhase83 -and $RunCount -ne 3 -and -not ($EnablePhase89Udp -and $RunCount -eq 1)) {
     throw 'Phase 83 hardware acceptance requires exactly three fresh boots.'
 }
 if ($EnablePhase85Arp -and (-not $EnablePhase83 -or
@@ -107,6 +109,14 @@ if ($EnablePhase87Icmpv4 -and (-not $EnablePhase83 -or
 }
 if ($EnablePhase87Icmpv4 -and $RunCount -ne 3) {
     throw 'Phase 87 hardware acceptance requires exactly three fresh boots.'
+}
+if ($EnablePhase89Udp -and (-not $EnablePhase83 -or
+    -not $EnablePhase80E1000 -or $EnablePhase15Rx -or
+    $EnablePhase85Arp -or $EnablePhase86Ipv4 -or $EnablePhase87Icmpv4)) {
+    throw '-EnablePhase89Udp requires the Phase 83 local dgram/e1000e receive path and is exclusive with Phase 85 through Phase 87 modes.'
+}
+if ($EnablePhase89Udp -and $RunCount -ne 1 -and $RunCount -ne 3) {
+    throw 'Phase 89 UDP harness permits one diagnostic boot or exactly three acceptance boots.'
 }
 if ($EnablePhase82 -and -not $EnablePhase80E1000) {
     throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
@@ -218,6 +228,9 @@ $expectedHash = $PayloadSha256.ToUpperInvariant()
 $phase15Injector = if ([string]::IsNullOrEmpty($Phase15InjectorPath)) {
     Join-Path $PSScriptRoot 'Inject-ManagedE1000Phase15Frame.ps1'
 } else { [IO.Path]::GetFullPath($Phase15InjectorPath) }
+$phase89Injector = if ([string]::IsNullOrEmpty($Phase89InjectorPath)) {
+    Join-Path $PSScriptRoot 'Inject-ManagedKernelPhase89Udp.ps1'
+} else { [IO.Path]::GetFullPath($Phase89InjectorPath) }
 
 function Require11([bool]$condition, [string]$message) {
     if (!$condition) { throw $message }
@@ -3552,8 +3565,9 @@ function Write-Phase18Frame([IO.StreamWriter]$log, [string]$name,
     $log.Flush()
 }
 
-Require11 ($RunCount -ge 3 -or $EnablePhase45CapacityControl -or $EnablePhase46CapacityControl -or $EnablePhase51ResetReuseControl -or $EnablePhase52BadPngCrcControl) `
+Require11 ($RunCount -ge 3 -or $EnablePhase45CapacityControl -or $EnablePhase46CapacityControl -or $EnablePhase51ResetReuseControl -or $EnablePhase52BadPngCrcControl -or ($EnablePhase89Udp -and $RunCount -eq 1)) `
     'Three fresh ManagedKernel Phase 11 boots are required unless running a single capacity negative control or the Phase 51 reset/reuse lifecycle proof.'
+if ($EnablePhase89Udp) { Require11 ($RunCount -eq 1 -or $RunCount -eq 3) 'Phase 89 diagnostic/acceptance boot count is invalid.' }
 Require11 ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
     'ManagedKernel EFI or payload is missing.'
 Require11 ($expectedHash -match '^[0-9A-F]{64}$') 'Payload SHA-256 must be 64 hex characters.'
@@ -3573,13 +3587,17 @@ Require11 ((Test-Path -LiteralPath $ovmf) -and (Test-Path -LiteralPath $varsTemp
 if ($EnablePhase15Rx) {
     Require11 (Test-Path -LiteralPath $phase15Injector) "Phase 15 injector is missing: $phase15Injector"
 }
+if ($EnablePhase89Udp) {
+    Require11 (Test-Path -LiteralPath $phase89Injector) "Phase 89 UDP injector is missing: $phase89Injector"
+}
 if ($Phase15EnableFilterDump) {
     Require11 ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') `
         'Phase 15 filter-dump requires the dgram RX backend.'
 }
 if ($Phase15EnableQemuReceiveTrace) {
-    Require11 ($EnablePhase15Rx -and
-        ($Phase15NetworkBackend -eq 'dgram' -or $EnableManagedKernelPhase35)) `
+    Require11 (($EnablePhase15Rx -and
+        ($Phase15NetworkBackend -eq 'dgram' -or $EnableManagedKernelPhase35)) -or
+        $EnablePhase89Udp) `
         'Phase 15 QEMU receive tracing requires an active RX backend.'
 }
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
@@ -3655,6 +3673,13 @@ if ($EnablePhase87Icmpv4) {
         'GXOS_NET10:PHASE87_ICMP_RX_READY=1',
         'GXOS_NET10:PHASE87_RX_DESCRIPTOR_RECYCLE_PASS=1',
         'GXOS_NET10:PHASE87_HARDWARE_ICMP_ECHO_PASS=1')
+}
+if ($EnablePhase89Udp) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE89_UDP_MODE_SELECTED=1',
+        'GXOS_NET10:PHASE89_UDP_DISPATCH_READY=1',
+        'GXOS_NET10:PHASE89_UDP_RX_READY=1',
+        'GXOS_NET10:PHASE89_UDP_HARDWARE_INGRESS_PASS=1')
 }
 
 $owned = @()
@@ -3736,6 +3761,27 @@ try {
             $arguments += @(
                 '-netdev', "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$rxPort,remote.type=inet,remote.host=127.0.0.1,remote.port=$peerPort")
             $arguments += @('-device', 'e1000e,netdev=net0,addr=2')
+            if ($Phase15EnableQemuReceiveTrace) {
+                Set-Content -LiteralPath $traceEventsPath -Value @(
+                    'e1000e_rx_can_recv',
+                    'e1000e_rx_can_recv_rings_full',
+                    'e1000e_rx_has_buffers',
+                    'e1000x_rx_link_down',
+                    'e1000x_rx_disabled',
+                    'e1000x_rx_oversized',
+                    'e1000e_rx_flt_dropped',
+                    'e1000e_rx_receive_iov',
+                    'e1000e_rx_start_recv',
+                    'e1000e_rx_descr',
+                    'e1000e_rx_desc_buff_write',
+                    'e1000e_rx_written_to_guest',
+                    'e1000e_rx_not_written_to_guest',
+                    'e1000e_rx_set_rctl',
+                    'e1000e_rx_set_rdt',
+                    'e1000e_core_write') -Encoding ascii
+                $arguments += @('-trace',
+                    "events=$traceEventsPath,file=$tracePath")
+            }
         } elseif ($EnablePhase80E1000) {
             $arguments += @('-nic', 'none', '-netdev', 'user,id=net0')
             $arguments += @('-device', 'e1000e,netdev=net0,addr=2')
@@ -3843,6 +3889,9 @@ try {
                 if ($EnablePhase85Arp) {
                     Wait-Marker11 'GXOS_NET10:PHASE85_ARP_RX_READY=1' `
                         $deadline $process $stream $logStream $text $buffer
+                } elseif ($EnablePhase89Udp) {
+                    Wait-Marker11 'GXOS_NET10:PHASE89_UDP_RX_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
                 } elseif ($EnablePhase87Icmpv4) {
                     Wait-Marker11 'GXOS_NET10:PHASE87_ICMP_RX_READY=1' `
                         $deadline $process $stream $logStream $text $buffer
@@ -3858,7 +3907,22 @@ try {
                 Require11 $macMatch.Success 'Phase 83 did not publish the runtime e1000 MAC.'
                 $destinationMac = ($macMatch.Groups[1].Value +
                                    $macMatch.Groups[2].Value).ToUpperInvariant()
-                if ($EnablePhase87Icmpv4) {
+                if ($EnablePhase89Udp) {
+                    $localIpMatch = [regex]::Match($text.ToString(),
+                        'GXOS_NET10:PHASE89_LOCAL_IPV4=0x([0-9A-Fa-f]{16})')
+                    Require11 ($localIpMatch.Success -and
+                        [Convert]::ToUInt64($localIpMatch.Groups[1].Value, 16) -eq 0x0A0F0001) `
+                        'Phase 89 UDP dispatch did not use local IPv4 10.15.0.1.'
+                    $injectorOutput = @(& $phase89Injector `
+                        -GuestPort $rxPort -GuestMac $destinationMac `
+                        -PeerUdp $peerUdp)
+                    foreach ($line in $injectorOutput) { $injectionLog.WriteLine([string]$line) }
+                    $injectionLog.Flush()
+                    Write-Timeline11 $timeline 'PHASE89_UDP_INJECTOR_COMPLETED' `
+                        "guest_port=$rxPort guest_mac=$destinationMac frames=4"
+                    Wait-Marker11 'GXOS_NET10:PHASE89_UDP_HARDWARE_INGRESS_PASS=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                } elseif ($EnablePhase87Icmpv4) {
                     $guestMacBytes = [byte[]]@(
                         [Convert]::ToByte($destinationMac.Substring(0, 2), 16),
                         [Convert]::ToByte($destinationMac.Substring(2, 2), 16),
@@ -6282,7 +6346,9 @@ try {
         $serialHash = (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant()
         $injectionHash = (Get-FileHash -LiteralPath $injections -Algorithm SHA256).Hash.ToUpperInvariant()
         $timelineHash = (Get-FileHash -LiteralPath $timelinePath -Algorithm SHA256).Hash.ToUpperInvariant()
-        if ($EnablePhase87Icmpv4) {
+        if ($EnablePhase89Udp) {
+            Write-Output ("MANAGED_KERNEL_PHASE89_QEMU_RUN_{0}=PASS bytes={1} serial_sha256={2} injections_sha256={3} timeline_sha256={4} serial={5}" -f $sequence, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $timelineHash, $serial)
+        } elseif ($EnablePhase87Icmpv4) {
             $captureHash = (Get-FileHash -LiteralPath $icmpTxCaptureBinary -Algorithm SHA256).Hash.ToUpperInvariant()
             Write-Output ("MANAGED_KERNEL_PHASE87_QEMU_RUN_{0}=PASS outcome={1} bytes={2} serial_sha256={3} injections_sha256={4} icmp_tx_capture_sha256={5} timeline_sha256={6} serial={7}" -f $sequence, $phase15Outcome, ([Text.Encoding]::ASCII.GetByteCount($finalText)), $serialHash, $injectionHash, $captureHash, $timelineHash, $serial)
         } elseif ($EnablePhase85Arp) {

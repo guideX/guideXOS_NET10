@@ -112,6 +112,36 @@ internal readonly struct ManagedIpv4Phase87Metadata
     }
 }
 
+internal readonly struct ManagedIpv4Phase89Metadata
+{
+    internal readonly uint SourceIpv4;
+    internal readonly uint DestinationIpv4;
+    internal readonly ushort SourcePort;
+    internal readonly ushort DestinationPort;
+    internal readonly ushort UdpLength;
+    internal readonly ushort UdpChecksum;
+    internal readonly byte PayloadLength;
+    internal readonly byte Sequence;
+    internal readonly bool Bound;
+
+    internal ManagedIpv4Phase89Metadata(in ManagedIpv4Packet packet,
+                                        in ManagedUdpDatagram datagram,
+                                        byte sequence, bool bound)
+    {
+        SourceIpv4 = ManagedEthernetProtocol.ReadUInt32Network(
+            packet.SourceAddress, 0);
+        DestinationIpv4 = ManagedEthernetProtocol.ReadUInt32Network(
+            packet.DestinationAddress, 0);
+        SourcePort = datagram.SourcePort;
+        DestinationPort = datagram.DestinationPort;
+        UdpLength = datagram.Length;
+        UdpChecksum = datagram.Checksum;
+        PayloadLength = (byte)datagram.Payload.Length;
+        Sequence = sequence;
+        Bound = bound;
+    }
+}
+
 internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
 {
     private const int MaximumProtocolFrames = 16;
@@ -229,6 +259,11 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     private ManagedIpv4Phase86Metadata _phase86LastMetadata;
     private uint _phase87EchoRequestCount;
     private ManagedIpv4Phase87Metadata _phase87LastMetadata;
+    private bool _phase89ObserverEnabled;
+    private uint _phase89ParsedCount;
+    private uint _phase89BoundCount;
+    private uint _phase89UnboundCount;
+    private ManagedIpv4Phase89Metadata _phase89LastMetadata;
     private uint _tcpGeneration;
     private uint _tcpRxValidCount;
     private uint _tcpRxMalformedCount;
@@ -323,6 +358,11 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal uint Phase87EchoRequestCount => _phase87EchoRequestCount;
     internal ManagedIpv4Phase87Metadata Phase87LastMetadata =>
         _phase87LastMetadata;
+    internal uint Phase89ParsedCount => _phase89ParsedCount;
+    internal uint Phase89BoundCount => _phase89BoundCount;
+    internal uint Phase89UnboundCount => _phase89UnboundCount;
+    internal ManagedIpv4Phase89Metadata Phase89LastMetadata =>
+        _phase89LastMetadata;
 
     internal void EnablePhase86AcceptanceObserver()
     {
@@ -332,6 +372,28 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     internal void EnablePhase87IcmpAcceptance()
     {
         _active = true;
+    }
+
+    internal void EnablePhase89UdpAcceptance()
+    {
+        _active = true;
+        _phase89ObserverEnabled = true;
+        PublishNetworkServiceStatus();
+    }
+
+    internal NetworkOperationResult BindPhase89UdpPort(ushort port)
+    {
+        return _networkService.BindUdpEndpoint(port);
+    }
+
+    internal bool TryReceivePhase89Udp(Span<byte> payload,
+                                       out Ipv4Address source,
+                                       out ushort sourcePort,
+                                       out ushort destinationPort,
+                                       out int length)
+    {
+        return _networkService.TryReceiveUdp(payload, out source,
+            out sourcePort, out destinationPort, out length);
     }
     internal ManagedTcpConnectionState TcpState => _tcp.State;
     internal bool TcpHasInFlight => _tcp.HasInFlight;
@@ -1905,7 +1967,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
 
     internal bool TryRegisterServiceEndpoint(ushort port)
     {
-        return _active && _dhcp.State == ManagedDhcpv4State.Bound &&
+        return _active && ManagedArpProtocol.IsUsableIpv4(_localIpv4) &&
                _udpEndpoints.TryRegister(port,
                                           ManagedUdpEndpointHandler.Phase21Service);
     }
@@ -2094,6 +2156,9 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
                                      out ManagedUdpEndpointHandler handler))
         {
             _udpUnknownPortCount++;
+            if (_phase89ObserverEnabled &&
+                !TryObservePhase89Datagram(packet, in datagram, false))
+                return ManagedIpv4HandleResult.Failed;
             return ManagedIpv4HandleResult.Ignored;
         }
         _udpEndpointDispatchCount++;
@@ -2108,6 +2173,36 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         return TryHandlePhase18Udp(packet, datagram);
     }
 
+    private bool TryObservePhase89Datagram(ManagedIpv4Packet packet,
+                                            in ManagedUdpDatagram datagram,
+                                            bool bound)
+    {
+        uint ordinal = _phase89ParsedCount + 1U;
+        bool unbound = ordinal == 4U;
+        if (ordinal > 4U || datagram.SourcePort != 24000 + ordinal ||
+            datagram.DestinationPort != (bound ? 15890 : 15891) ||
+            datagram.Length != (ushort)(8 + 6) ||
+            datagram.Payload.Length != 6 || datagram.Payload[0] != 0x89 ||
+            datagram.Payload[1] != ordinal ||
+            datagram.Payload[2] != 0xA5 ||
+            datagram.Payload[3] != (byte)(0x50 + ordinal) ||
+            datagram.Payload[4] != 0xC3 || datagram.Payload[5] != 0x3C ||
+            packet.Protocol != ManagedUdpProtocol.Protocol ||
+            packet.TotalLength != 34 || packet.Ttl != 63 ||
+            packet.Identification != (ushort)(0x8900U + ordinal) ||
+            ManagedEthernetProtocol.ReadUInt32Network(packet.SourceAddress, 0) !=
+                0x0A0F0002U + ordinal - 1U ||
+            ManagedEthernetProtocol.ReadUInt32Network(packet.DestinationAddress, 0) !=
+                _localIpv4Value || unbound == bound)
+            return false;
+        _phase89LastMetadata = new ManagedIpv4Phase89Metadata(
+            in packet, in datagram, (byte)ordinal, bound);
+        _phase89ParsedCount = ordinal;
+        if (bound) _phase89BoundCount++;
+        else _phase89UnboundCount++;
+        return true;
+    }
+
     private ManagedIpv4HandleResult TryHandleServiceUdp(
         ManagedIpv4Packet packet, ManagedUdpDatagram datagram)
     {
@@ -2116,11 +2211,14 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
             ManagedEthernetProtocol.ReadUInt32Network(packet.SourceAddress, 0));
         Ipv4Address destination = new Ipv4Address(
             ManagedEthernetProtocol.ReadUInt32Network(packet.DestinationAddress, 0));
-        return _networkService.TryCaptureReceivedUdp(
-                   source, destination, datagram.SourcePort,
-                   datagram.DestinationPort, datagram.Payload)
-            ? ManagedIpv4HandleResult.UdpServiceReceived
-            : ManagedIpv4HandleResult.UdpReceiveOverflow;
+        bool captured = _networkService.TryCaptureReceivedUdp(
+            source, destination, datagram.SourcePort,
+            datagram.DestinationPort, datagram.Payload);
+        if (_phase89ObserverEnabled &&
+            !TryObservePhase89Datagram(packet, in datagram, true))
+            return ManagedIpv4HandleResult.Failed;
+        return captured ? ManagedIpv4HandleResult.UdpServiceReceived
+                        : ManagedIpv4HandleResult.UdpReceiveOverflow;
     }
 
     private ManagedIpv4HandleResult TryHandleDhcpUdp(

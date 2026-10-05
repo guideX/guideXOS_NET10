@@ -1,6 +1,27 @@
 using System;
+using System.Linq;
 using GuideXOS.Net10.ManagedKernel;
 
+internal sealed class FakeArpEthernet : IManagedArpEthernet
+{
+    internal int TransmitCount;
+    internal int LastEtherType;
+    internal byte[] LastDestination = Array.Empty<byte>();
+    internal byte[] LastPayload = Array.Empty<byte>();
+    public bool TryTransmit(ushort etherType, byte[] destination, byte[] payload, int payloadLength)
+    {
+        LastEtherType = etherType;
+        LastDestination = destination.AsSpan().ToArray();
+        LastPayload = payload.AsSpan(0, payloadLength).ToArray();
+        TransmitCount++;
+        return true;
+    }
+    public bool TryTransmitBroadcast(ushort etherType, byte[] payload, int payloadLength) =>
+        TryTransmit(etherType, new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }, payload, payloadLength);
+    public bool TryReceiveAndDispatch(ManagedArpLayer arp, out ManagedArpHandleResult result)
+    { result = ManagedArpHandleResult.Invalid; return false; }
+    public bool TryVerifyTransportAfterGc() => true;
+}
 internal static class Program
 {
     private static readonly byte[] s_guestMac =
@@ -13,15 +34,19 @@ internal static class Program
         { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
     private static int s_cases;
+    internal static int CaseCount => s_cases;
+    internal static void CheckUdp(bool condition, string name) => Check(condition, name);
 
     private static int Main()
     {
         EthernetTests();
         Ipv4IngressTests();
+        UdpIngressParserTests();
         Icmpv4Tests();
         ArpTests();
         ArpHandlerTests();
         CacheTests();
+        Console.WriteLine($"MANAGED_KERNEL_PHASE16_UDP_CASES={ManagedKernelPhase16UdpHostTests.Run()}");
         Console.WriteLine($"MANAGED_KERNEL_PHASE16_HOST_TESTS_PASS cases={s_cases}");
         return 0;
     }
@@ -125,6 +150,90 @@ internal static class Program
                   maximum.AsSpan(0, maximumLength), out ManagedIpv4Packet max) &&
               max.TotalLength == maximumLength,
               "ipv4-maximum-bounded-packet");
+    }
+
+    private static void UdpIngressParserTests()
+    {
+        byte[] sequence = { 0x89, 1, 0xA5, 0x51, 0xC3, 0x3C };
+        byte[] udp = new byte[ManagedUdpProtocol.MaximumDatagramLength];
+        Check(ManagedUdpProtocol.TryBuild(udp, 24001, 15890, s_hostIp,
+                  s_guestIp, sequence, out ushort udpLength) &&
+              udpLength == 14 && ManagedUdpProtocol.ComputeChecksum(
+                  s_hostIp, s_guestIp, udp.AsSpan(0, udpLength)) == 0 &&
+              ManagedUdpProtocol.TryParse(udp.AsSpan(0, udpLength), s_hostIp,
+                  s_guestIp, out ManagedUdpDatagram parsed) &&
+              parsed.SourcePort == 24001 && parsed.DestinationPort == 15890 &&
+              parsed.Length == 14 && parsed.Payload.SequenceEqual(sequence),
+              "udp-production-parser-bound-port-source-payload-and-nonzero-checksum");
+
+        byte[] ip = BuildIpv4(0x8901, 0, 63, ManagedUdpProtocol.Protocol,
+            s_hostIp, s_guestIp, udp.AsSpan(0, udpLength).ToArray());
+        byte[] padded = new byte[60];
+        Check(ManagedEthernetProtocol.TryBuildFrame(padded, s_guestMac,
+                  s_hostMac, ManagedIpv4Protocol.EtherType, ip, out _) &&
+              ManagedEthernetProtocol.TryParseFrame(padded, s_guestMac,
+                  out ManagedEthernetFrame ethernet) &&
+              ManagedIpv4Protocol.TryParse(ethernet.Payload,
+                  out ManagedIpv4Packet ipv4) && ipv4.Protocol == 17 &&
+              ipv4.TotalLength == 34 && ipv4.Payload.Length == 14 &&
+              ManagedUdpProtocol.TryParse(ipv4.Payload, ipv4.SourceAddress,
+                  ipv4.DestinationAddress, out ManagedUdpDatagram bounded) &&
+              bounded.Payload.Length == 6 && ethernet.Payload.Length > ipv4.TotalLength,
+              "udp-ipv4-boundary-excludes-ethernet-padding");
+
+        byte[] zeroChecksum = udp.AsSpan(0, udpLength).ToArray();
+        zeroChecksum[6] = zeroChecksum[7] = 0;
+        Check(ManagedUdpProtocol.TryParse(zeroChecksum, s_hostIp, s_guestIp,
+                  out ManagedUdpDatagram omitted) && omitted.Checksum == 0,
+              "udp-ipv4-zero-checksum-accepted");
+
+        byte[] invalid = udp.AsSpan(0, udpLength).ToArray();
+        invalid[6] ^= 1;
+        Check(!ManagedUdpProtocol.TryParse(invalid, s_hostIp, s_guestIp, out _),
+              "udp-invalid-nonzero-checksum-rejected");
+        Check(!ManagedUdpProtocol.TryParse(udp.AsSpan(0, 7), s_hostIp,
+                  s_guestIp, out _), "udp-truncated-header-rejected");
+        invalid = udp.AsSpan(0, udpLength).ToArray();
+        invalid[5] = 7;
+        Check(!ManagedUdpProtocol.TryParse(invalid, s_hostIp, s_guestIp, out _),
+              "udp-length-underflow-rejected");
+        invalid = udp.AsSpan(0, udpLength).ToArray();
+        invalid[5] = 15;
+        Check(!ManagedUdpProtocol.TryParse(invalid, s_hostIp, s_guestIp, out _),
+              "udp-length-overflow-rejected");
+
+        byte[] oddPayload = { 0x89, 2, 0xA5, 0x52, 0xC3 };
+        Check(ManagedUdpProtocol.TryBuild(udp, 24002, 15890, s_hostIp,
+                  s_guestIp, oddPayload, out ushort oddLength) &&
+              (oddLength & 1) == 1 && ManagedUdpProtocol.ComputeChecksum(
+                  s_hostIp, s_guestIp, udp.AsSpan(0, oddLength)) == 0 &&
+              ManagedUdpProtocol.TryParse(udp.AsSpan(0, oddLength), s_hostIp,
+                  s_guestIp, out ManagedUdpDatagram odd) &&
+              odd.Payload.Length == oddPayload.Length,
+              "udp-odd-payload-zero-pad-checksum-without-phantom-byte");
+
+        Check(ManagedUdpProtocol.TryBuild(udp, 24003, 15890, s_hostIp,
+                  s_guestIp, Array.Empty<byte>(), out ushort emptyLength) &&
+              ManagedUdpProtocol.TryParse(udp.AsSpan(0, emptyLength), s_hostIp,
+                  s_guestIp, out ManagedUdpDatagram empty) &&
+              empty.Payload.IsEmpty && empty.Length == 8,
+              "udp-zero-payload-valid");
+        Check(ManagedUdpProtocol.TryBuild(udp, 24004, 15890, s_hostIp,
+                  s_guestIp, new byte[ManagedUdpProtocol.MaximumPayloadLength],
+                  out ushort maxLength) && maxLength == 1032 &&
+              ManagedIpv4Protocol.MaximumPacketLength == 2034 &&
+              ManagedUdpProtocol.TryParse(udp.AsSpan(0, maxLength), s_hostIp,
+                  s_guestIp, out ManagedUdpDatagram max) &&
+              max.Payload.Length == 1024,
+              "udp-maximum-existing-service-payload-bound");
+        ManagedUdpEndpointTable endpoints = new ManagedUdpEndpointTable();
+        Check(ManagedUdpProtocol.TryBuild(udp, 24005, 15891, s_hostIp,
+                  s_guestIp, Array.Empty<byte>(), out emptyLength) &&
+              ManagedUdpProtocol.TryParse(udp.AsSpan(0, emptyLength), s_hostIp,
+                  s_guestIp, out ManagedUdpDatagram validUnbound) &&
+              !endpoints.TryLookup(validUnbound.DestinationPort, out _) &&
+              validUnbound.Length == 8,
+              "udp-unbound-port-remains-separate-from-valid-parser-result");
     }
 
     private static byte[] BuildIpv4(ushort identification, ushort flags,
@@ -714,35 +823,4 @@ internal static class Program
         s_cases++;
         Console.WriteLine("PASS: " + name);
     }
-}
-
-internal sealed class FakeArpEthernet : IManagedArpEthernet
-{
-    internal int TransmitCount { get; private set; }
-    internal ushort LastEtherType { get; private set; }
-    internal byte[] LastDestination { get; private set; } = Array.Empty<byte>();
-    internal byte[] LastPayload { get; private set; } = Array.Empty<byte>();
-
-    public bool TryTransmit(ushort etherType, byte[] destination,
-                            byte[] payload, int payloadLength)
-    {
-        if (payloadLength < 0 || payloadLength > payload.Length) return false;
-        TransmitCount++;
-        LastEtherType = etherType;
-        LastDestination = destination.AsSpan().ToArray();
-        LastPayload = payload.AsSpan(0, payloadLength).ToArray();
-        return true;
-    }
-
-    public bool TryTransmitBroadcast(ushort etherType, byte[] payload,
-                                     int payloadLength) => false;
-
-    public bool TryReceiveAndDispatch(ManagedArpLayer arp,
-                                     out ManagedArpHandleResult result)
-    {
-        result = ManagedArpHandleResult.Invalid;
-        return false;
-    }
-
-    public bool TryVerifyTransportAfterGc() => true;
 }
