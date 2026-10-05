@@ -84,6 +84,27 @@ internal static class ManagedE1000Protocol
     internal static ReadOnlySpan<byte> ProofSignature =>
         "guideXOS ManagedKernel Phase14 TX"u8;
 
+    internal static ReadOnlySpan<byte> Phase90TxSignature =>
+        "GXOS_PHASE90_TX"u8;
+
+    internal static bool TryBuildPhase90Frame(Span<byte> frame,
+        ReadOnlySpan<byte> sourceMac, uint sequence)
+    {
+        if (frame.Length != MinimumEthernetFrameLength || sourceMac.Length != 6 ||
+            IsInvalidMac(sourceMac) || sequence == 0) return false;
+        frame.Clear();
+        frame[..6].Fill(0xFF);
+        sourceMac.CopyTo(frame.Slice(6, 6));
+        frame[12] = 0x88;
+        frame[13] = 0xB5;
+        Phase90TxSignature.CopyTo(frame.Slice(14));
+        frame[30] = (byte)(sequence >> 24);
+        frame[31] = (byte)(sequence >> 16);
+        frame[32] = (byte)(sequence >> 8);
+        frame[33] = (byte)sequence;
+        return true;
+    }
+
     internal static ReadOnlySpan<byte> RxPayloadSignature =>
         "guideXOS ManagedKernel Phase15 RX"u8;
 

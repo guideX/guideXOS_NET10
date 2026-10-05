@@ -895,6 +895,7 @@ internal static unsafe class ManagedKernelContract
     private static int s_phase86Ipv4Mode;
     private static int s_phase87IcmpMode;
     private static int s_phase89UdpMode;
+    private static int s_phase90AsyncTxMode;
     private static int s_phase82Mode;
     private static int s_framebufferInstalled;
     private static GxManagedKernelFramebufferV1 s_framebuffer;
@@ -2975,12 +2976,31 @@ internal static unsafe class ManagedKernelContract
                 "GXOS_NET10:PHASE89_UDP_MODE_SELECTED=1\r\n"u8)
                 ? ManagedOk : InvalidState;
         }
+        if (stage == 38)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_phase80Mode == 0 || s_phase83Mode != 0 ||
+                s_phase85ArpMode != 0 || s_phase86Ipv4Mode != 0 ||
+                s_phase87IcmpMode != 0 || s_phase89UdpMode != 0 ||
+                s_phase90AsyncTxMode != 0 || s_dmaServicesInstalled == 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            s_phase90AsyncTxMode = 1;
+            ManagedE1000Driver.EnablePhase90AsyncTxMode();
+            return KernelLog.Write(
+                "GXOS_NET10:PHASE90_ASYNC_TX_MODE_SELECTED=1\r\n"u8)
+                ? ManagedOk : InvalidState;
+        }
         if (stage == 33)
         {
-            if (s_phase83Mode == 0 || s_phase14Driver == null ||
+            if ((s_phase83Mode == 0 && s_phase90AsyncTxMode == 0) ||
+                s_phase14Driver == null ||
                 s_phase14Driver.State != ManagedE1000DriverState.Running)
                 return InvalidState;
-            bool passed = s_phase89UdpMode != 0
+            bool passed = s_phase90AsyncTxMode != 0
+                ? s_phase14Driver.TryRunPhase90AsyncTxProof()
+                : s_phase89UdpMode != 0
                 ? s_phase14Driver.TryRunPhase89UdpProof()
                 : s_phase87IcmpMode != 0
                 ? s_phase14Driver.TryRunPhase87IcmpProof()
@@ -3009,6 +3029,7 @@ internal static unsafe class ManagedKernelContract
                  s_phase83Mode == 0 && s_phase85ArpMode == 0 &&
                  s_phase86Ipv4Mode == 0 &&
                  s_phase87IcmpMode == 0 && s_phase89UdpMode == 0 &&
+                 s_phase90AsyncTxMode == 0 &&
                  ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0))
                 return InvalidState;
             ManagedE1000Driver? candidate = ManagedE1000Driver.TryCreate();
@@ -3042,6 +3063,9 @@ internal static unsafe class ManagedKernelContract
                 return InvalidState;
             if (s_phase89UdpMode != 0 && !s_phase14Driver.Phase89UdpPassed)
                 return InvalidState;
+            if (s_phase90AsyncTxMode != 0 &&
+                !s_phase14Driver.Phase90AsyncTxPassed)
+                return InvalidState;
             if (!s_phase14Driver.TryStop() ||
                 s_phase14Driver.State != ManagedE1000DriverState.Stopped ||
                 !ManagedVirtioRngKernelProof.StopPhase35Provider() ||
@@ -3073,6 +3097,7 @@ internal static unsafe class ManagedKernelContract
             s_phase86Ipv4Mode = 0;
             s_phase87IcmpMode = 0;
             s_phase89UdpMode = 0;
+            s_phase90AsyncTxMode = 0;
             bool rxProof = s_phase14Driver.RxProofReceived;
             bool phase15RxProof = s_phase14Driver.RxPhase15Received;
             bool phase16Proof = s_phase14Driver.Phase16Passed;

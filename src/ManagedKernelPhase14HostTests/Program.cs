@@ -262,6 +262,18 @@ internal static class Program
         Check(!ManagedE1000Protocol.TryBuildPhase80Frame(
                   phase80Frame, mac, 0), "phase80-zero-sequence-rejected");
 
+        byte[] phase90Frame = new byte[60];
+        Check(ManagedE1000Protocol.TryBuildPhase90Frame(
+                  phase90Frame, mac, 0x12345678) &&
+              phase90Frame[0] == 0xFF && phase90Frame[6] == mac[0] &&
+              phase90Frame[12] == 0x88 && phase90Frame[13] == 0xB5 &&
+              phase90Frame[30] == 0x12 && phase90Frame[31] == 0x34 &&
+              phase90Frame[32] == 0x56 && phase90Frame[33] == 0x78,
+            "phase90-transmit-frame-contains-mac-ethertype-and-sequence");
+        Check(!ManagedE1000Protocol.TryBuildPhase90Frame(
+                  phase90Frame, mac, 0),
+            "phase90-zero-sequence-rejected");
+
         Console.WriteLine("MANAGED_KERNEL_PHASE14_HOST_TESTS_PASS");
         return 0;
     }

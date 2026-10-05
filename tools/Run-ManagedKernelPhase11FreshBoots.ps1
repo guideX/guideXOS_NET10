@@ -15,6 +15,7 @@ param(
     [switch]$EnablePhase86Ipv4,
     [switch]$EnablePhase87Icmpv4,
     [switch]$EnablePhase89Udp,
+    [switch]$EnablePhase90AsyncTx,
     [string]$Phase15InjectorPath = '',
     [string]$Phase89InjectorPath = '',
     [ValidateSet('dgram', 'user')]
@@ -117,6 +118,14 @@ if ($EnablePhase89Udp -and (-not $EnablePhase83 -or
 }
 if ($EnablePhase89Udp -and $RunCount -ne 1 -and $RunCount -ne 3) {
     throw 'Phase 89 UDP harness permits one diagnostic boot or exactly three acceptance boots.'
+}
+if ($EnablePhase90AsyncTx -and (-not $EnablePhase80E1000 -or
+    $EnablePhase83 -or $EnablePhase82 -or $EnablePhase85Arp -or
+    $EnablePhase86Ipv4 -or $EnablePhase87Icmpv4 -or $EnablePhase89Udp)) {
+    throw '-EnablePhase90AsyncTx requires the Phase 80 route and is exclusive with Phase 82/83+ fixtures.'
+}
+if ($EnablePhase90AsyncTx -and $RunCount -ne 3) {
+    throw 'Phase 90 hardware acceptance requires exactly three fresh boots.'
 }
 if ($EnablePhase82 -and -not $EnablePhase80E1000) {
     throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
@@ -3590,6 +3599,14 @@ if ($EnablePhase15Rx) {
 if ($EnablePhase89Udp) {
     Require11 (Test-Path -LiteralPath $phase89Injector) "Phase 89 UDP injector is missing: $phase89Injector"
 }
+if ($EnablePhase90AsyncTx) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE90_ASYNC_TX_MODE_SELECTED=1',
+        'GXOS_NET10:PHASE90_PENDING_AND_CAPACITY_PASS=1',
+        'GXOS_NET10:PHASE90_SYNC_TX_REGRESSION=PASS',
+        'PHASE90_ASYNC_TX_COMPLETION_PASS=1',
+        'GXOS_NET10:PHASE90_COM1_ROUTE_ACTIVE=1')
+}
 if ($Phase15EnableFilterDump) {
     Require11 ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') `
         'Phase 15 filter-dump requires the dgram RX backend.'
@@ -3705,6 +3722,12 @@ try {
             [IO.File]::WriteAllText($icmpTxCaptureLog, '')
             [IO.File]::WriteAllBytes($icmpTxCaptureBinary, [byte[]]@())
         }
+        $phase90CaptureLog = Join-Path $run 'phase90-tx-capture.log'
+        $phase90CaptureBinary = Join-Path $run 'phase90-tx-capture.bin'
+        if ($EnablePhase90AsyncTx) {
+            [IO.File]::WriteAllText($phase90CaptureLog, '')
+            [IO.File]::WriteAllBytes($phase90CaptureBinary, [byte[]]@())
+        }
         $timelinePath = Join-Path $run 'timeline.log'
         $commandLinePath = Join-Path $run 'qemu-commandline.log'
         $firmwareIdentityPath = Join-Path $run 'firmware-identity.log'
@@ -3733,13 +3756,13 @@ try {
         $rxPort = 0
         $peerPort = 0
         if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
-            $EnablePhase83) {
+            $EnablePhase83 -or $EnablePhase90AsyncTx) {
             $rxPort = Get-FreeUdpPort11
             $peerPort = Get-FreeUdpPort11
         }
         $peerUdp = $null
         if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
-            $EnablePhase83) {
+            $EnablePhase83 -or $EnablePhase90AsyncTx) {
             # QEMU's dgram backend requires a live remote endpoint. Keep the
             # host peer bound before QEMU starts so E1000 TX cannot stall; the
             # controlled RX frames are sent later after the guest is ready.
@@ -3756,7 +3779,7 @@ try {
             '-serial', 'none', '-device', 'isa-serial,chardev=serial0,iobase=0x3f8,irq=4,wakeup=on',
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
             '-display', $(if ($CaptureQemuScreen) { 'gtk' } else { 'none' }), '-no-reboot', '-no-shutdown')
-        if ($EnablePhase83) {
+        if ($EnablePhase83 -or $EnablePhase90AsyncTx) {
             $arguments += @('-nic', 'none')
             $arguments += @(
                 '-netdev', "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$rxPort,remote.type=inet,remote.host=127.0.0.1,remote.port=$peerPort")
@@ -4192,6 +4215,66 @@ try {
                         $destinationMac)
                     $injectionLog.Flush()
                 }
+            }
+            if ($EnablePhase90AsyncTx) {
+                Wait-Marker11 'PHASE90_ASYNC_TX_COMPLETION_PASS=1' `
+                    $deadline $process $stream $logStream $text $buffer
+                $macMatch = [regex]::Match($text.ToString(),
+                    'GXOS_NET10:MANAGED_KERNEL_PHASE14_MAC=0x[0-9A-Fa-f]{4}([0-9A-Fa-f]{4})\s*([0-9A-Fa-f]{8})')
+                Require11 $macMatch.Success 'Phase 90 did not publish the E1000 MAC.'
+                [byte[]]$guestMac = for ($macOffset = 0; $macOffset -lt 12; $macOffset += 2) {
+                    [Convert]::ToByte(($macMatch.Groups[1].Value +
+                        $macMatch.Groups[2].Value).Substring($macOffset, 2), 16)
+                }
+                $seenSequences = [Collections.Generic.HashSet[uint32]]::new()
+                $captureDeadline = [DateTime]::UtcNow.AddSeconds(20)
+                while ($seenSequences.Count -lt 18 -and
+                       [DateTime]::UtcNow -lt $captureDeadline) {
+                    [byte[]]$candidate = Receive-Phase85QemuDatagram11 $peerUdp 250
+                    if ($null -eq $candidate) { continue }
+                    if ($candidate.Length -lt 34 -or
+                        $candidate[12] -ne 0x88 -or $candidate[13] -ne 0xB5) { continue }
+                    $signature = [Text.Encoding]::ASCII.GetString($candidate, 14, 15)
+                    if ($signature -ne 'GXOS_PHASE90_TX') { continue }
+                    Require11 ($candidate.Length -eq 60 -and
+                        (Bytes-Equal16 $candidate 0 ([byte[]]@(255,255,255,255,255,255))) -and
+                        (Bytes-Equal16 $candidate 6 $guestMac)) `
+                        'Phase 90 captured an unexpected frame size or MAC address.'
+                    [uint32]$frameSequence =
+                        ([uint32]$candidate[30] -shl 24) -bor
+                        ([uint32]$candidate[31] -shl 16) -bor
+                        ([uint32]$candidate[32] -shl 8) -bor
+                        [uint32]$candidate[33]
+                    Require11 ($frameSequence -ge 1 -and $frameSequence -le 18 -and
+                        $seenSequences.Add($frameSequence)) `
+                        'Phase 90 host capture found an invalid or duplicate request sentinel.'
+                    $hashAlgorithm = [Security.Cryptography.SHA256]::Create()
+                    try {
+                        $frameHash = ([BitConverter]::ToString(
+                            $hashAlgorithm.ComputeHash($candidate))).Replace('-', '')
+                    } finally { $hashAlgorithm.Dispose() }
+                    $captureWriter = [IO.StreamWriter]::new($phase90CaptureLog, $true,
+                        [Text.Encoding]::ASCII)
+                    try {
+                        $captureWriter.WriteLine(('PHASE90_TX_CAPTURED=PASS sequence={0} length={1} destination_mac=FFFFFFFFFFFF source_mac={2} ethertype=88B5 payload=GXOS_PHASE90_TX sha256={3}' -f `
+                            $frameSequence, $candidate.Length,
+                            ([BitConverter]::ToString($guestMac)).Replace('-', ''),
+                            $frameHash))
+                    } finally { $captureWriter.Dispose() }
+                    $binary = [IO.File]::Open($phase90CaptureBinary,
+                        [IO.FileMode]::Append, [IO.FileAccess]::Write,
+                        [IO.FileShare]::Read)
+                    try {
+                        $prefix = [BitConverter]::GetBytes([uint32]$candidate.Length)
+                        $binary.Write($prefix, 0, $prefix.Length)
+                        $binary.Write($candidate, 0, $candidate.Length)
+                        $binary.Flush()
+                    } finally { $binary.Dispose() }
+                }
+                Require11 ($seenSequences.Count -eq 18) `
+                    "Phase 90 captured $($seenSequences.Count)/18 expected real E1000 frames."
+                Write-Timeline11 $timeline 'PHASE90_HOST_TX_CAPTURE_COMPLETED' `
+                    "frames=$($seenSequences.Count) distinct_sequences=1-18"
             }
             if ($EnablePhase82) {
                 Wait-Marker11 'GXOS_NET10:PHASE82_INTERLEAVING_READY=1' `

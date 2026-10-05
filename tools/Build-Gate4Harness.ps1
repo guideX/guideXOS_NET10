@@ -67,6 +67,7 @@ param(
     [switch]$EnablePhase86ManagedIpv4,
     [switch]$EnablePhase87ManagedIcmpv4,
     [switch]$EnablePhase89ManagedUdp,
+    [switch]$EnablePhase90AsyncTx,
     [switch]$AssumeUnspecifiedTimezoneUtc
 )
 
@@ -153,6 +154,13 @@ if ($EnablePhase89ManagedUdp -and
      $PayloadMode -ne 'ManagedKernel' -or -not $EnableNativeAotStartup -or
      $Scenario -ne 'ManagedKernelPhase11')) {
     throw 'Phase 89 UDP acceptance requires Phase 83 E1000 RX, the ManagedKernel payload, NativeAOT startup, and ManagedKernelPhase11 scenario; it is exclusive with Phase 85 through Phase 87 modes.'
+}
+if ($EnablePhase90AsyncTx -and
+    ($EnablePhase83E1000Rx -or $EnablePhase85ManagedArp -or
+     $EnablePhase86ManagedIpv4 -or $EnablePhase87ManagedIcmpv4 -or
+     $EnablePhase89ManagedUdp -or $PayloadMode -ne 'ManagedKernel' -or
+     -not $EnableNativeAotStartup -or $Scenario -ne 'ManagedKernelPhase11')) {
+    throw 'Phase 90 async TX acceptance uses the Phase 80 route and is exclusive with Phase 83+ fixtures.'
 }
 if ($Phase70FixtureMode -ne 'None' -and
     ($PayloadMode -ne 'ManagedKernel' -or
@@ -1747,6 +1755,9 @@ if ($EnablePhase87ManagedIcmpv4) {
 }
 if ($EnablePhase89ManagedUdp) {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE89_UDP'
+}
+if ($EnablePhase90AsyncTx) {
+    $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE90_ASYNC_TX'
 }
 if ($PayloadMode -eq 'ManagedKernel' -and $Scenario -eq 'ManagedKernelPhase11') {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE11'

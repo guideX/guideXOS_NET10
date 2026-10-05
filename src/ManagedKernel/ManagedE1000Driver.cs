@@ -28,6 +28,7 @@ internal sealed class ManagedE1000Driver
     internal const uint AsyncTxCapacity = 4;
     private const uint Phase80InterruptPollLimit = 100000;
     private const uint Phase83InterruptPollLimit = 100000000;
+    private const uint Phase90CompletionPollLimit = 100000000;
     /* The host observes RX_READY over a serial socket before sending the one
        frame.  Keep this bounded window long enough for that handshake without
        adding a wall-clock sleep to the guest. */
@@ -856,6 +857,7 @@ internal sealed class ManagedE1000Driver
         s_phase86Ipv4ModeEnabled = false;
         s_phase87IcmpModeEnabled = false;
         s_phase89UdpModeEnabled = false;
+        s_phase90AsyncTxModeEnabled = false;
         bool safe = true;
         if (_interruptSubscribed &&
             !ManagedSerialDriverSubsystem.TryUnsubscribeE1000Interrupt(this))
@@ -963,6 +965,7 @@ internal sealed class ManagedE1000Driver
         s_phase86Ipv4ModeEnabled = false;
         s_phase87IcmpModeEnabled = false;
         s_phase89UdpModeEnabled = false;
+        s_phase90AsyncTxModeEnabled = false;
         return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED\r\n"u8);
     }
 
@@ -1810,6 +1813,170 @@ internal sealed class ManagedE1000Driver
             return false;
         _phase80Passed = true;
         return KernelLog.Write("GXOS_NET10:PHASE80_E1000_MANAGED_DELIVERY=4\r\n"u8);
+    }
+
+    internal bool TryRunPhase90AsyncTxProof()
+    {
+        if (!_phase90AsyncTxRequested || !_phase80Requested ||
+            !_interruptSubscribed || _state != ManagedE1000DriverState.Running ||
+            _phase80DeliveryCount != 4 || _asyncTxOutstanding != 0 ||
+            _txRing == null || _mmio == null) return false;
+
+        Span<ulong> initialRequests = stackalloc ulong[(int)AsyncTxCapacity];
+        Span<uint> initialIndices = stackalloc uint[(int)AsyncTxCapacity];
+        uint completionBase = _asyncTxCompleted;
+        if (!KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE90_TX_CAPACITY=0x"u8, AsyncTxCapacity) ||
+            !KernelLog.Write("GXOS_NET10:PHASE90_ASYNC_TX_READY=1\r\n"u8))
+            return false;
+
+        for (uint request = 0; request != AsyncTxCapacity; ++request)
+        {
+            if (!ManagedE1000Protocol.TryBuildPhase90Frame(
+                    _phase80Frame, _mac, request + 1) ||
+                TrySubmitFrame(_phase80Frame, _phase80Frame.Length,
+                    out ulong requestId) != ManagedE1000AsyncTxSubmitResult.Accepted ||
+                TryGetTransmitCompletion(requestId) !=
+                    ManagedE1000AsyncTxResult.Pending ||
+                !TryDecodeAsyncTxRequest(requestId, out uint index,
+                    out uint generation)) return false;
+            for (uint prior = 0; prior != request; ++prior)
+                if (initialRequests[(int)prior] == requestId) return false;
+            initialRequests[(int)request] = requestId;
+            initialIndices[(int)request] = index;
+            if (!KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE90_SUBMITTED_ID=0x"u8, requestId) ||
+                !KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE90_SUBMITTED_INDEX=0x"u8, index) ||
+                !KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE90_SUBMITTED_GENERATION=0x"u8, generation))
+                return false;
+        }
+
+        if (TrySubmitFrame(_phase80Frame, _phase80Frame.Length, out _) !=
+                ManagedE1000AsyncTxSubmitResult.Busy ||
+            _asyncTxOutstanding != AsyncTxCapacity)
+            return false;
+        if (!KernelLog.Write(
+                "GXOS_NET10:PHASE90_PENDING_AND_CAPACITY_PASS=1\r\n"u8))
+            return false;
+
+        if (!TryDrainPhase90Completions(AsyncTxCapacity,
+                completionBase)) return false;
+        for (uint request = 0; request != AsyncTxCapacity; ++request)
+        {
+            ulong requestId = initialRequests[(int)request];
+            if (TryGetTransmitCompletion(requestId) !=
+                    ManagedE1000AsyncTxResult.Success ||
+                TryGetTransmitCompletion(requestId) !=
+                    ManagedE1000AsyncTxResult.Success ||
+                TryConsumeTransmitCompletion(requestId) !=
+                    ManagedE1000AsyncTxResult.Success ||
+                TryConsumeTransmitCompletion(requestId) !=
+                    ManagedE1000AsyncTxResult.InvalidOrStale)
+                return false;
+        }
+
+        // Walk the ring once to return to the first async descriptor, then
+        // prove that its old generation cannot observe the new request.
+        uint expectedReusedIndex = initialIndices[0];
+        for (uint sequence = AsyncTxCapacity + 1;
+             sequence <= ManagedE1000Protocol.RingCount;
+             ++sequence)
+        {
+            if (!TrySubmitAndCompletePhase90Frame(sequence, out _)) return false;
+        }
+        uint reusedCompletionBase = _asyncTxCompleted;
+        if (!ManagedE1000Protocol.TryBuildPhase90Frame(
+                _phase80Frame, _mac, ManagedE1000Protocol.RingCount + 1) ||
+            TrySubmitFrame(_phase80Frame, _phase80Frame.Length,
+                out ulong reusedRequest) != ManagedE1000AsyncTxSubmitResult.Accepted ||
+            !TryDecodeAsyncTxRequest(reusedRequest, out uint reusedIndex,
+                out uint reusedGeneration) || reusedIndex != expectedReusedIndex ||
+            reusedGeneration == 1 ||
+            TryGetTransmitCompletion(initialRequests[0]) !=
+                ManagedE1000AsyncTxResult.InvalidOrStale ||
+            TryConsumeTransmitCompletion(initialRequests[0]) !=
+                ManagedE1000AsyncTxResult.InvalidOrStale ||
+            !TryDrainPhase90Completions(1, reusedCompletionBase) ||
+            TryGetTransmitCompletion(reusedRequest) !=
+                ManagedE1000AsyncTxResult.Success ||
+            TryConsumeTransmitCompletion(reusedRequest) !=
+                ManagedE1000AsyncTxResult.Success ||
+            TryGetTransmitCompletion(initialRequests[0]) !=
+                ManagedE1000AsyncTxResult.InvalidOrStale)
+            return false;
+
+        uint syncEventBase = _phase80DeliveryCount;
+        if (!ManagedE1000Protocol.TryBuildPhase90Frame(
+                _phase80Frame, _mac, ManagedE1000Protocol.RingCount + 2) ||
+            !TryTransmitFrame(_phase80Frame, _phase80Frame.Length))
+            return false;
+        for (uint poll = 0; poll != Phase90CompletionPollLimit &&
+             _phase80DeliveryCount == syncEventBase; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                    this, out _, out uint rejected) || rejected != 0)
+                return false;
+        }
+        if (_phase80DeliveryCount != syncEventBase + 1 ||
+            _asyncTxOutstanding != 0 || _asyncTxCompleted !=
+                completionBase + ManagedE1000Protocol.RingCount + 1 ||
+            _asyncTxUnmatchedTxdw == 0)
+            return false;
+
+        bool passed = KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE90_REQUESTS_COMPLETED=0x"u8,
+                _asyncTxCompleted - completionBase) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE90_TXDW_EVENTS=0x"u8,
+                _phase80DeliveryCount - 4) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE90_UNMATCHED_TXDW=0x"u8,
+                _asyncTxUnmatchedTxdw) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE90_REUSED_DESCRIPTOR=0x"u8, reusedIndex) &&
+            KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE90_REUSED_GENERATION=0x"u8, reusedGeneration) &&
+            KernelLog.Write(
+                "GXOS_NET10:PHASE90_SYNC_TX_REGRESSION=PASS\r\n"u8) &&
+            KernelLog.Write(
+                "PHASE90_ASYNC_TX_COMPLETION_PASS=1\r\n"u8);
+        _phase90AsyncTxPassed = passed;
+        return passed;
+    }
+
+    private bool TrySubmitAndCompletePhase90Frame(uint sequence,
+        out ulong requestId)
+    {
+        requestId = 0;
+        uint completionBase = _asyncTxCompleted;
+        if (!ManagedE1000Protocol.TryBuildPhase90Frame(
+                _phase80Frame, _mac, sequence) ||
+            TrySubmitFrame(_phase80Frame, _phase80Frame.Length,
+                out requestId) != ManagedE1000AsyncTxSubmitResult.Accepted ||
+            TryGetTransmitCompletion(requestId) !=
+                ManagedE1000AsyncTxResult.Pending ||
+            !TryDrainPhase90Completions(1, completionBase) ||
+            TryGetTransmitCompletion(requestId) !=
+                ManagedE1000AsyncTxResult.Success ||
+            TryConsumeTransmitCompletion(requestId) !=
+                ManagedE1000AsyncTxResult.Success)
+            return false;
+        return true;
+    }
+
+    private bool TryDrainPhase90Completions(uint expected,
+        uint completionBase)
+    {
+        for (uint poll = 0; poll != Phase90CompletionPollLimit &&
+             _asyncTxCompleted < completionBase + expected; ++poll)
+        {
+            if (!ManagedSerialDriverSubsystem.TryDispatchE1000InterruptBatch(
+                    this, out _, out uint rejected) || rejected != 0)
+                return false;
+        }
+        return _asyncTxCompleted == completionBase + expected;
     }
 
     internal bool TryRunPhase83RxProof()

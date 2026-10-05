@@ -16032,6 +16032,10 @@ static void managed_kernel_phase14_driver(
     status = run_phase14(37U);
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase89-udp-mode");
     serial_text("GXOS_NET10:PHASE89_UDP_MODE_SELECTED=1\r\n");
+#elif defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE90_ASYNC_TX)
+    status = run_phase14(38U);
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase90-async-tx-mode");
+    serial_text("GXOS_NET10:PHASE90_ASYNC_TX_MODE_SELECTED=1\r\n");
 #elif defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE87_ICMPV4)
     status = run_phase14(36U);
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase87-icmp-mode");
@@ -16053,6 +16057,7 @@ static void managed_kernel_phase14_driver(
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE86_IPV4) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE87_ICMPV4) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE89_UDP) || \
+    defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE90_ASYNC_TX) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE83_RX)
 #ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE82
     status = run_phase14(25U);
@@ -16334,6 +16339,58 @@ static void managed_kernel_phase14_driver(
         serial_text("GXOS_NET10:PHASE83_COM1_REMAINS_ISOLATED=1\r\n");
     }
 #endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE90_ASYNC_TX
+    {
+        GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *e1000 =
+            &g_managed_kernel_e1000_interrupt_context;
+        GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route =
+            &g_managed_kernel_interrupt_context.routes[
+                GXOS_MANAGED_KERNEL_E1000_IRQ_ROUTE_INDEX];
+        uint64_t hardware_before = __atomic_load_n(
+            &e1000->hardware_irq_entry_count, __ATOMIC_ACQUIRE);
+        uint64_t dispatch_before = __atomic_load_n(
+            &e1000->native_dispatch_count, __ATOMIC_ACQUIRE);
+        uint64_t ack_before = e1000->last_cause_acknowledgements;
+        uint64_t route_before = __atomic_load_n(
+            &route->source_event_count, __ATOMIC_ACQUIRE);
+        uint64_t txdw_before = e1000->txdw_capture_count;
+        status = run_phase14(33U);
+        if (status != GX_MANAGED_OK) {
+            serial_field_hex("GXOS_NET10:PHASE90_MANAGED_STATUS=0x", status);
+            serial_text("\r\n");
+            fail("managed-kernel-phase90-async-tx-proof");
+        }
+        uint64_t hardware_after = __atomic_load_n(
+            &e1000->hardware_irq_entry_count, __ATOMIC_ACQUIRE);
+        uint64_t dispatch_after = __atomic_load_n(
+            &e1000->native_dispatch_count, __ATOMIC_ACQUIRE);
+        uint64_t route_after = __atomic_load_n(
+            &route->source_event_count, __ATOMIC_ACQUIRE);
+        uint64_t txdw_after = e1000->txdw_capture_count;
+        if (dispatch_after <= dispatch_before ||
+            hardware_after < hardware_before ||
+            route_after - route_before != dispatch_after - dispatch_before ||
+            e1000->last_cause_acknowledgements - ack_before !=
+                dispatch_after - dispatch_before ||
+            txdw_after <= txdw_before ||
+            __atomic_load_n(&route->hardware_capture_count,
+                            __ATOMIC_ACQUIRE) != hardware_after ||
+            __atomic_load_n(&route->eoi_count,
+                            __ATOMIC_ACQUIRE) != hardware_after ||
+            e1000->last_cause_clear_read != 0U ||
+            __atomic_load_n(&g_managed_kernel_interrupt_context.dropped_count,
+                            __ATOMIC_ACQUIRE) != e1000->dropped_before_enable) {
+            fail("phase90-native-txdw-accounting");
+        }
+        serial_text("GXOS_NET10:PHASE90_NATIVE_MSI_ENTRIES=0x");
+        serial_hex64(hardware_after - hardware_before);
+        serial_text("\r\nGXOS_NET10:PHASE90_NATIVE_TXDW_CAPTURES=0x");
+        serial_hex64(txdw_after - txdw_before);
+        serial_text("\r\nGXOS_NET10:PHASE90_NATIVE_MANAGED_EVENTS=0x");
+        serial_hex64(dispatch_after - dispatch_before);
+        serial_text("\r\nGXOS_NET10:PHASE90_COM1_ROUTE_ACTIVE=1\r\n");
+    }
+#endif
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE82
     {
         GXOS_MANAGED_KERNEL_E1000_INTERRUPT_CONTEXT *e1000 =
@@ -16406,6 +16463,29 @@ static void managed_kernel_phase14_driver(
             g_managed_kernel_interrupt_context.read_index !=
                 g_managed_kernel_interrupt_context.write_index) {
             fail("phase82-final-e1000-route-accounting");
+        }
+#elif defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE90_ASYNC_TX)
+        if (hardware_count <= phase80_hardware_snapshot ||
+            dispatch_count <= 4U ||
+            __atomic_load_n(&route->source_event_count,
+                            __ATOMIC_ACQUIRE) != dispatch_count ||
+            e1000->last_native_sequence != route->last_event_sequence ||
+            g_managed_kernel_interrupt_context.next_sequence !=
+                e1000->first_event_sequence + dispatch_count ||
+            enqueued_count - e1000->enqueued_before_enable != dispatch_count ||
+            drained_count - e1000->drained_before_enable != dispatch_count ||
+            dropped_count != e1000->dropped_before_enable ||
+            e1000->last_cause_acknowledgements != dispatch_count ||
+            e1000->txdw_capture_count <= 4U ||
+            (e1000->last_mask_readback &
+             GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_TXDW) == 0U ||
+            e1000->last_cause_clear_read != 0U ||
+            route->subscription_active != 0U || route->hardware_enabled != 0U ||
+            route->accepting_events != 0U || e1000->route_enabled != 0U ||
+            e1000->msi_original_valid != 0U ||
+            g_managed_kernel_interrupt_context.read_index !=
+                g_managed_kernel_interrupt_context.write_index) {
+            fail("phase90-final-e1000-route-accounting");
         }
 #elif defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE85_ARP) || \
       defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE86_IPV4) || \
