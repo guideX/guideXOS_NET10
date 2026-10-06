@@ -2,75 +2,38 @@
 
 Date: 2026-10-05  
 Prompt phase: 90  
-Outcome: **E — Phase 90 implementation and hardware acceptance remain incomplete**
+Outcome: **A — non-blocking TXDW completion validated**
 
-## Preflight
+## Current execution preflight
 
 - Repository: `D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration`
 - Branch: `nativeaot-managed-kernel-integration`
-- Starting HEAD: `8f77c33b1f16024555d0beb09727a2e640f61ee6` — `Validate hardware-backed managed UDP ingress`
+- Prompt-expected starting HEAD: `8f77c33b1f16024555d0beb09727a2e640f61ee6` — `Validate hardware-backed managed UDP ingress`
+- Live starting HEAD: `56bcc8ee76ac6a97fb060a35082c23082b783a60` — `Validate TXDW-driven E1000 async completion`
 - Upstream: `origin/nativeaot-managed-kernel-integration`
 - Starting divergence: 1 ahead / 0 behind
 - Starting worktree: clean
-- `.phase`: absent before this work; remains absent
+- `.phase`: absent before and after
 
-The Phase 80, Phase 81, and Phase 81R2 reports were inspected. Phase 80 established the typed E1000 TXDW route. Phase 81 documents that TXDW is notification and descriptor DD is authoritative, while synchronous callers cannot wait safely. Phase 81R2 remains unaccepted and is outside this work.
+The expected and live starting HEAD differed; live Git state was authoritative. The implementation and its initial acceptance commit were already present at the live starting HEAD. This execution reran the mandatory host suites, NativeAOT and Gate4 builds, three Phase 90 QEMU boots, and focused ARP, ICMP, and UDP QEMU regressions against that commit.
 
-## Existing TX ownership
+The Phase 80, Phase 81, and Phase 81R2 reports were inspected. Phase 80 established the typed E1000 TXDW route. Phase 81 documents that TXDW is notification and descriptor DD is authoritative, while synchronous callers cannot wait safely. Phase 81 and Phase 81R2 remain unaccepted and outside this work.
 
-The E1000 TX ring has 16 descriptors. Startup initializes descriptors with DD set. `TryTransmitFrame` uses `_txIndex`, writes the frame and descriptor, stores `_lastSubmittedTxIndex`, advances TDT, polls the selected descriptor's DD bit up to `PollLimit`, and advances `_txIndex` only after DD. It remains the normal synchronous TX API.
+## Current TX ownership
 
-Phase 80's managed interrupt handler validates the typed event sequence and cause, then checks DD at `_lastSubmittedTxIndex`. It does not maintain multiple request identities or scan a bounded outstanding window.
+The E1000 TX ring has 16 descriptors. Startup initializes descriptors with DD set. `TryTransmitFrame` remains the normal synchronous transmit API: it advances TDT and polls the selected descriptor's DD status before advancing `_txIndex`. Phase 90 adds a separate internal non-blocking `TrySubmitFrame` API, bounded to four outstanding requests. Its fixed ledger encodes descriptor index and generation, records ownership before TDT, scans every hardware-owned descriptor after typed TXDW events, and closes each request only when descriptor DD is authoritative. Query is non-blocking; consume releases a completed entry and makes its prior generation stale.
 
-## Work implemented, not accepted
-
-The working tree contains an initial internal async path in `ManagedE1000Driver`:
-
-- `TrySubmitFrame` returns an internal submit result and a 64-bit identity made from descriptor index plus a nonzero generation.
-- Outstanding requests are bounded to four and use fixed arrays sized to the 16-entry TX ring.
-- Ownership values are `Free`, `Prepared`, `HardwareOwned`, and `Completed`.
-- The request record is established and descriptor status cleared by descriptor construction before TDT is written.
-- Deferred typed TXDW handling scans all hardware-owned descriptors and uses DD as completion authority. Completion is retained in the ledger until consumed.
-- Query returns `Pending`, `Success`, `HardwareError`, or invalid/stale. Consume frees only an authoritatively completed descriptor. A reused slot increments its generation.
-- The existing synchronous method remains DD-polling and refuses to overwrite a slot still owned by the async ledger.
-- No wait, timer, scheduler, or GC behavior was changed.
-
-These changes are plumbing only. They are not wired into a Phase 90 guest mode or proven through real QEMU TX traffic. In particular, there is no Phase 90 acceptance marker, no host-side frame capture/validation, and no three-boot run. Coalescing, capacity-full behavior, duplicate/stale event handling against the live ledger, shutdown with outstanding work, same-slot reuse, and synchronous regressions have not been proven end to end. The current host assertions cover request-ID encoding and generation distinction, not the full driver ledger.
-
-## Checks run
-
-- ManagedKernel NativeAOT build: passed with .NET SDK 10.0.401.
-- Normal Gate4 build: passed.
-- Phase 14 E1000 host suite: passed; request identity/generation assertions added.
-- Managed interrupt host suite: passed, 15/15.
-- Native interrupt host suite: passed.
-- Driver-binding host suite: passed.
-- Phase 16 networking suite: passed, 139 cases including 55 UDP cases.
-- Managed host services suite: passed.
-- `git diff --check`: passed.
-- Phase 90 QEMU boots: 0/3 attempted.
-
-## Outcome and limits
-
-This work does not satisfy the Phase 90 success boundary because real QEMU transmissions, TXDW-driven managed completion, host frame capture, same-slot reuse, and the required three fresh boots were not exercised. Phase 90 is **not accepted**. No commit or push was made.
-
-Phase 81 accepted: **No**.  
-Phase 81R2 accepted: **No**.  
-Synchronous normal TX still DD-polls: **Yes**.  
-The new async implementation has no timeout or reset recovery proof; a request can remain pending if hardware does not complete it.
-
-Phase 90 adds and validates a non-blocking TXDW-driven completion path. It does not resolve the scheduler-wait blocker or convert the existing synchronous transmit API away from DD polling.
+**Phase 90 adds and validates a non-blocking TXDW-driven completion path. It does not resolve the scheduler-wait blocker or convert the existing synchronous transmit API away from DD polling.**
 
 ---
-
 ## Phase 90 continuation — hardware acceptance completed
 
 **Execution date:** 2026-10-05
 **Current outcome:** **A — non-blocking TXDW completion validated**
 
-This continuation records the completed qualification. The earlier Outcome E section above is retained as the initial investigation snapshot; its statement that no acceptance boots were attempted was true at that time and is superseded by the results below.
+This section records the implementation commit original acceptance run. Independent verification from the already committed tree follows it below.
 
-### Live repository preflight
+### Original implementation preflight (historical)
 
 The pasted prompt expected starting HEAD `8f77c33b1f16024555d0beb09727a2e640f61ee6` and divergence `1 ahead / 0 behind`. Live Git state was authoritative and differed:
 
@@ -162,4 +125,47 @@ The 17 async completions are the four-request batch, twelve one-at-a-time wrapar
 
 **Outcome A — non-blocking TXDW-driven completion validated.** Real e1000e hardware transmitted the async frames; deferred managed TXDW processing scanned authoritative DD state; all request results were queried and consumed; full capacity, pending results, same-slot reuse, and stale generations were exercised; and all three fresh boots reached the later progress marker. The normal synchronous API still DD-polls. Phase 81 accepted: **No**. Phase 81R2 accepted: **No**.
 
-`git diff --check` passed. No unrelated Phase 90 behavior was enabled in ordinary builds. Production changes are limited to the gated Phase 90 acceptance path/proof hooks and frame construction; no scheduler, timer, timeout, GC, or network-service API was changed. No remaining Phase 90 release-blocking defect was observed. The earlier host capture parser mistake was corrected and the accepted result comes only from the final 3/3 run above. Local commit and push results are recorded in the task closeout.
+`git diff --check` passed. No unrelated Phase 90 behavior was enabled in ordinary builds. Production changes are limited to the gated Phase 90 acceptance path/proof hooks and frame construction; no scheduler, timer, timeout, GC, or network-service API was changed. No remaining Phase 90 release-blocking defect was observed. The earlier host capture parser mistake was corrected and the accepted result comes only from the final 3/3 run above.
+
+## Independent revalidation from live committed HEAD `56bcc8e`
+
+### Builds and host regressions
+
+- ManagedKernel NativeAOT build: PASS, SDK 10.0.401; payload size 4,882,432 bytes; SHA-256 `3373566805137B4C9B337E4523278E3C71C12B3CC0C2360970DC5CFB3BBDBC4A`.
+- Ordinary Gate4 build with Phase 90 disabled: PASS; `BOOTX64.EFI` SHA-256 `D53E21539286F90208850A3450CBDC6830070200A856E5DBEC6ABE2C4682CD98`.
+- Phase 90 Gate4 build: PASS; `BOOTX64.EFI` SHA-256 `34F667294B027212D3F7768197AB7182C9E92C28A3E6FD81FD0C201DEFC9096E`.
+- Phase 14 E1000 host suite: PASS, including request identity/generation and frame construction assertions.
+- Managed interrupt harness: PASS; toolchain discovery, source completeness (84 production sources, 85 compile items, no duplicates), and all 15 assertions.
+- Native interrupt tests: PASS.
+- Driver-binding tests: PASS.
+- Managed network-service tests: PASS.
+- Phase 16 networking tests: PASS, 139 cases including 55 UDP cases.
+- Phase 88 ARP QEMU regression: PASS, 3/3; four frames parsed, three replies captured, and four descriptors recycled on each boot.
+- Phase 87 ICMP QEMU regression: PASS, 3/3; three replies captured on each boot.
+- Phase 89 UDP QEMU regression: PASS, 1/1; four frames parsed, three bound, one unbound, four descriptors recycled.
+
+### Fresh Phase 90 QEMU evidence
+
+The run used the ordinary and Phase 90 Gate4 builds above with the local QEMU network endpoint. Three fresh boots each submitted and completed 17 async requests, captured all 18 expected frames (the extra frame is the legacy synchronous TX regression), reported the explicit `PHASE90_ASYNC_TX_COMPLETION_PASS=1` marker, kept the COM1 route active, and reached `GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS`.
+
+Each host-captured frame was 60 bytes and validated destination MAC `FF:FF:FF:FF:FF:FF`, source MAC `52:54:00:12:34:56`, EtherType `88B5`, `GXOS_PHASE90_TX` signature, and unique sequence sentinel 1 through 18. The capture binary is 1,152 bytes on each boot with SHA-256 `B999AB748647B00E4B0B19DB06589392B549A1DCC7B5708EFED8DBF89DA58B7E`; the capture validation log hash is `EDAC11069B242CAC0BABCD349093E87A353FAD21045DAF2297D252E3ADAD8A3D`.
+
+| Boot | Async requests submitted/completed | Host frames captured | Native TXDW MSI captures | Managed typed TXDW events | Unmatched TXDW | Pass marker |
+|---:|---:|---:|---:|---:|---:|---|
+| 1 | 17 / 17 | 18 | 15 | 15 | 5 | PASS |
+| 2 | 17 / 17 | 18 | 17 | 17 | 5 | PASS |
+| 3 | 17 / 17 | 18 | 15 | 15 | 5 | PASS |
+
+The 15/17/15 event counts against 18 transmitted frames confirm that TXDW notifications are not one-to-one with submissions. DD scanning still completed all 17 async requests. Same-slot reuse used descriptor index 4 at generation 2; the guest rejected the old generation-1 identity. Each run verified four simultaneous submissions, immediate Pending queries, Busy at capacity, successful completion query/consume, rejection after consume, unmatched TXDW handling, and a successful synchronous TX regression. No Phase 90 caller DD busy-wait was used. COM1 remained active. RX activity and the later guest progress marker were healthy.
+
+| Boot | Serial log SHA-256 | Capture binary SHA-256 | Capture log SHA-256 | Timeline SHA-256 |
+|---:|---|---|---|---|
+| 1 | `7B7A9D3A22F7E1981E3C63221EC638FDED72E0AC09EB948BF105663107A5292` | `B999AB748647B00E4B0B19DB06589392B549A1DCC7B5708EFED8DBF89DA58B7E` | `EDAC11069B242CAC0BABCD349093E87A353FAD21045DAF2297D252E3ADAD8A3D` | `006EC567525E6E0980580E3F006C237BDB79913C5357C39A6004E28575F1F312` |
+| 2 | `B35E394471779654DBB8383533E4EC545E44D774B38DB51B495FE014CF39AF97` | `B999AB748647B00E4B0B19DB06589392B549A1DCC7B5708EFED8DBF89DA58B7E` | `EDAC11069B242CAC0BABCD349093E87A353FAD21045DAF2297D252E3ADAD8A3D` | `ADA254E6F5C8B20398B88938A88F63DDA40E2E329CB258D90574F4333155E6F3` |
+| 3 | `45350F99139278B3EC323F9E69256F16977FEFC0CA88A12D14034B47475BF5CA` | `B999AB748647B00E4B0B19DB06589392B549A1DCC7B5708EFED8DBF89DA58B7E` | `EDAC11069B242CAC0BABCD349093E87A353FAD21045DAF2297D252E3ADAD8A3D` | `2557B8AA95BEB94A81FFEC1E1C362FB864E57057622A50847F2FDF5C6080ED4F` |
+
+Evidence directory: `artifacts/phase90-verify-qemu`; regression evidence: `artifacts/phase90-verify-arp-evidence`, `artifacts/phase90-verify-icmp-evidence`, and `artifacts/phase90-verify-udp-evidence`. Generated evidence remains untracked/ignored under `artifacts/`.
+
+### Final classification and Git closeout
+
+Outcome A. Phase 90 accepted: **Yes**. Phase 81 accepted: **No**. Phase 81R2 accepted: **No**. The existing synchronous API still DD-polls: **Yes**. Scheduler, timer, timeout, GC, and wait behavior were not changed. SyntheticScheduler was not required. No production defect was found in the exercised path. No prohibited branch, worktree, remote, credential, Git identity, or history operations occurred.
