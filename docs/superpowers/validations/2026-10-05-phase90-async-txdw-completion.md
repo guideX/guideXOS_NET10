@@ -169,3 +169,5 @@ Evidence directory: `artifacts/phase90-verify-qemu`; regression evidence: `artif
 ### Final classification and Git closeout
 
 Outcome A. Phase 90 accepted: **Yes**. Phase 81 accepted: **No**. Phase 81R2 accepted: **No**. The existing synchronous API still DD-polls: **Yes**. Scheduler, timer, timeout, GC, and wait behavior were not changed. SyntheticScheduler was not required. No production defect was found in the exercised path. No prohibited branch, worktree, remote, credential, Git identity, or history operations occurred.
+
+Git closeout: the implementation and initial acceptance were already committed at live starting HEAD `56bcc8ee76ac6a97fb060a35082c23082b783a60`. The independent evidence/report update was committed as `052519ed07fb3184ee41cb60b55549302c81f8cc` (`Record Phase 90 TXDW revalidation`). One normal push attempt for `nativeaot-managed-kernel-integration` failed with `Permission denied (publickey)`. No retry or credential/remote change was made. The final report-only commit remains local; final divergence is 3 ahead / 0 behind and the worktree is clean.
