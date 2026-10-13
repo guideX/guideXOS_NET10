@@ -30,6 +30,10 @@
     <AssemblyName>gxos-managed-kernel</AssemblyName>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(EnablePhase91Diagnostics)' == 'true'">
+    <DefineConstants>$(DefineConstants);GXOS_ENABLE_PHASE91_DIAGNOSTICS</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
     <LinkerArg Include="/Brepro" Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
   </ItemGroup>

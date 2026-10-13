@@ -10,6 +10,7 @@
     <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase21HostTests</PathMap>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\ManagedKernel\ManagedInterruptEvent.cs" Link="ManagedInterruptEvent.cs" />
     <Compile Include="..\ManagedKernel\ManagedNetworkService.cs" Link="ManagedNetworkService.cs" />
     <Compile Include="..\ManagedKernel\ManagedEthernet.cs" Link="ManagedEthernet.cs" />
     <Compile Include="..\ManagedKernel\ManagedE1000Protocol.cs" Link="ManagedE1000Protocol.cs" />

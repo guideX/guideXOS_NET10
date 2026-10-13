@@ -424,18 +424,18 @@ int main(void)
                    g_secondary_source.eoi_calls == eoi_before + 2U,
                "simultaneous RX/TX cause bits survive native queueing and acknowledgement");
         expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
-                   &context, first_token) == GX_MANAGED_OK,
-               "E1000 generation can be unsubscribed");
+                    &context, first_token) == GX_MANAGED_OK,
+                "E1000 generation can be unsubscribed");
         result = gxos_managed_kernel_interrupt_subscribe_input_v1(
             &context, GX_MANAGED_INTERRUPT_EVENT_TYPE_E1000_CAUSE,
             GX_MANAGED_DEVICE_KIND_PCI, 0x808610D3U,
             (uintptr_t)&g_token, sizeof(g_token));
         replacement_token = g_token;
         expect(result == GX_MANAGED_OK && replacement_token != first_token &&
-                   gxos_managed_kernel_interrupt_unsubscribe_input_v1(
-                       &context, first_token) == GX_MANAGED_NOT_FOUND &&
-                   context.routes[2].subscription_active != 0U,
-               "stale E1000 generation token cannot unsubscribe its replacement");
+                    gxos_managed_kernel_interrupt_unsubscribe_input_v1(
+                        &context, first_token) == GX_MANAGED_NOT_FOUND &&
+                    context.routes[2].subscription_active != 0U,
+                "stale E1000 generation token cannot unsubscribe its replacement");
         set_secondary_source("F");
         gxos_managed_kernel_interrupt_capture_route(&context, 2U);
         g_drained = 0;
@@ -559,9 +559,9 @@ int main(void)
                    context.routes[2].subscription_active != 0U,
                "COM1 unsubscribe leaves the E1000 route active");
         expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
-                   &context, serial_token) == GX_MANAGED_NOT_FOUND &&
-                   context.routes[2].subscription_active != 0U,
-               "stale COM1 token cannot unsubscribe E1000");
+                    &context, serial_token) == GX_MANAGED_NOT_FOUND &&
+                    context.routes[2].subscription_active != 0U,
+                "stale COM1 token cannot unsubscribe E1000");
         result = gxos_managed_kernel_interrupt_subscribe_v1(
             &context, GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX,
             GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL,
@@ -571,7 +571,13 @@ int main(void)
         expect(result == GX_MANAGED_OK &&
                    replacement_serial_token != serial_token &&
                    context.routes[2].subscription_active != 0U,
-               "COM1 replacement binds without replacing E1000");
+                "COM1 replacement binds without replacing E1000");
+        set_secondary_source("S");
+        gxos_managed_kernel_interrupt_capture_route(&context, 2U);
+        set_source("C");
+        gxos_managed_kernel_interrupt_capture_route(&context, 0U);
+        expect(context.write_index - context.read_index == 2U,
+               "old E1000 and live COM1 records share the queue before replacement");
         expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
                    &context, e1000_token) == GX_MANAGED_OK &&
                    context.routes[0].subscription_active != 0U,
@@ -590,8 +596,22 @@ int main(void)
                    gxos_managed_kernel_interrupt_unsubscribe_input_v1(
                        &context, e1000_token) == GX_MANAGED_NOT_FOUND &&
                    context.routes[0].subscription_active != 0U &&
-                   context.routes[2].subscription_active != 0U,
-               "stale E1000 token cannot remove its replacement or COM1");
+                    context.routes[2].subscription_active != 0U,
+                "stale E1000 token cannot remove its replacement or COM1");
+
+        g_drained = 0;
+        result = gxos_managed_kernel_interrupt_drain_v1(
+            &context, GX_MANAGED_KERNEL_INTERRUPT_SERVICES_ABI_V1,
+            (uintptr_t)g_events, sizeof(g_events),
+            (uintptr_t)&g_drained, sizeof(g_drained));
+        expect(result == GX_MANAGED_OK && g_drained == 1U &&
+                   g_events[0].EventType ==
+                       GX_MANAGED_INTERRUPT_EVENT_TYPE_SERIAL_RX &&
+                   g_events[0].DeviceKind ==
+                       GX_MANAGED_DEVICE_KIND_PLATFORM_SERIAL &&
+                   g_events[0].DeviceId == GX_MANAGED_SERIAL_DEVICE_ID_COM1 &&
+                   g_events[0].PayloadByte == 'C',
+               "replacement E1000 subscription invalidates stale E1000 records and preserves COM1 FIFO data");
 
         expect(gxos_managed_kernel_interrupt_unsubscribe_input_v1(
                    &context, replacement_e1000_token) == GX_MANAGED_OK &&

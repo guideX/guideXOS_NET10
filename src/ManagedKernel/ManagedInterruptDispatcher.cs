@@ -87,6 +87,15 @@ internal unsafe sealed class ManagedInterruptDispatcher
     private readonly GxManagedKernelInterruptServicesV1 _services;
     private ulong _subscriptionId;
     private ulong _e1000SubscriptionId;
+    private ulong _e1000LastSequence;
+    private bool _e1000SequenceBaselineCaptured;
+    private uint _phase91LastBatchDrained;
+    private uint _phase91LastBatchDelivered;
+    private uint _phase91LastBatchRejected;
+    private GxManagedKernelInterruptEventV1 _phase91LastRejectedEvent;
+    private uint _phase91LastRejectedShapeMask;
+    private uint _phase91LastRejectedRouteMask;
+    private uint _phase91LastRejectedDriverMask;
     private GxManagedKernelInputServicesV1 _inputServices;
     private ulong _inputSubscriptionId;
     private bool _inputAttached;
@@ -98,7 +107,21 @@ internal unsafe sealed class ManagedInterruptDispatcher
 
     internal ulong SubscriptionId => _subscriptionId;
     internal ulong E1000SubscriptionId => _e1000SubscriptionId;
+    internal ulong E1000LastSequence => _e1000LastSequence;
+    internal bool E1000SequenceBaselineCaptured =>
+        _e1000SequenceBaselineCaptured;
     internal ulong InputSubscriptionId => _inputSubscriptionId;
+    internal uint Phase91LastBatchDrained => _phase91LastBatchDrained;
+    internal uint Phase91LastBatchDelivered => _phase91LastBatchDelivered;
+    internal uint Phase91LastBatchRejected => _phase91LastBatchRejected;
+    internal GxManagedKernelInterruptEventV1 Phase91LastRejectedEvent =>
+        _phase91LastRejectedEvent;
+    internal uint Phase91LastRejectedShapeMask =>
+        _phase91LastRejectedShapeMask;
+    internal uint Phase91LastRejectedRouteMask =>
+        _phase91LastRejectedRouteMask;
+    internal uint Phase91LastRejectedDriverMask =>
+        _phase91LastRejectedDriverMask;
 
     internal static ManagedInterruptDispatcher? TryCreate(
         in GxManagedKernelInterruptServicesV1 services)
@@ -186,6 +209,8 @@ internal unsafe sealed class ManagedInterruptDispatcher
     {
         subscriptionId = 0;
         if (_e1000SubscriptionId != 0) return false;
+        _e1000LastSequence = 0;
+        _e1000SequenceBaselineCaptured = false;
         delegate* unmanaged<uint, uint, uint, nuint, nuint, uint> subscribe =
             (delegate* unmanaged<uint, uint, uint, nuint, nuint, uint>)(nuint)
                 _services.SubscribeAddress;
@@ -301,6 +326,19 @@ internal unsafe sealed class ManagedInterruptDispatcher
         uint drained = 0;
         delivered = 0;
         rejected = 0;
+        bool capturePhase91Diagnostics =
+            e1000Driver?.Phase91DiagnosticsActive == true;
+        if (capturePhase91Diagnostics)
+        {
+            e1000Driver!.ResetPhase91InterruptRejectMask();
+            _phase91LastBatchDrained = 0;
+            _phase91LastBatchDelivered = 0;
+            _phase91LastBatchRejected = 0;
+            _phase91LastRejectedEvent = default;
+            _phase91LastRejectedShapeMask = 0;
+            _phase91LastRejectedRouteMask = 0;
+            _phase91LastRejectedDriverMask = 0;
+        }
         delegate* unmanaged<uint, nuint, uint, nuint, nuint, uint> drain =
             (delegate* unmanaged<uint, nuint, uint, nuint, nuint, uint>)
                 (nuint)_services.DrainAddress;
@@ -315,14 +353,68 @@ internal unsafe sealed class ManagedInterruptDispatcher
         for (uint index = 0; index != drained; ++index)
         {
             ref GxManagedKernelInterruptEventV1 value = ref events[(int)index];
+            if (value.EventType == ManagedE1000Protocol.InterruptEventType &&
+                value.DeviceKind == ManagedE1000Protocol.PciDeviceKind &&
+                value.DeviceId == ManagedE1000Protocol.PciOwnerId)
+            {
+                if (!_e1000SequenceBaselineCaptured)
+                {
+                    _e1000LastSequence = value.Sequence - 1;
+                    _e1000SequenceBaselineCaptured = true;
+                }
+                if (value.Sequence > _e1000LastSequence)
+                    _e1000LastSequence = value.Sequence;
+            }
             if (!TryRouteEvent(in value, serialDriver, keyboardDriver, e1000Driver))
             {
                 rejected++;
+                if (capturePhase91Diagnostics)
+                {
+                    _phase91LastRejectedEvent = value;
+                    _phase91LastRejectedShapeMask =
+                        GetEventShapeFailureMask(in value);
+                    _phase91LastRejectedRouteMask =
+                        GetE1000RouteFailureMask(in value, e1000Driver);
+                    _phase91LastRejectedDriverMask =
+                        e1000Driver?.Phase91LastInterruptRejectMask ?? 0;
+                }
                 continue;
             }
             delivered++;
         }
+        if (capturePhase91Diagnostics)
+        {
+            _phase91LastBatchDrained = drained;
+            _phase91LastBatchDelivered = delivered;
+            _phase91LastBatchRejected = rejected;
+        }
         return true;
+    }
+
+    private static uint GetEventShapeFailureMask(
+        in GxManagedKernelInterruptEventV1 value)
+    {
+        uint mask = 0;
+        if (value.Size != GxManagedKernelInterruptEventV1.ExpectedSize) mask |= 1U << 0;
+        if (value.AbiVersion != GxManagedKernelInterruptEventV1.AbiVersionCurrent) mask |= 1U << 1;
+        if (value.Flags != GxManagedKernelInterruptEventV1.EventFlagHardwareCapture) mask |= 1U << 2;
+        if (value.PayloadLength != 1) mask |= 1U << 3;
+        if (value.Reserved0 != 0) mask |= 1U << 4;
+        if (value.Timestamp != 0) mask |= 1U << 5;
+        if (value.Sequence == 0) mask |= 1U << 6;
+        return mask;
+    }
+
+    private static uint GetE1000RouteFailureMask(
+        in GxManagedKernelInterruptEventV1 value,
+        ManagedE1000Driver? e1000Driver)
+    {
+        uint mask = 0;
+        if (value.EventType != ManagedE1000Protocol.InterruptEventType) mask |= 1U << 0;
+        if (value.DeviceKind != ManagedE1000Protocol.PciDeviceKind) mask |= 1U << 1;
+        if (value.DeviceId != ManagedE1000Protocol.PciOwnerId) mask |= 1U << 2;
+        if (e1000Driver == null) mask |= 1U << 3;
+        return mask;
     }
 
     private bool TryRouteEvent(in GxManagedKernelInterruptEventV1 value,

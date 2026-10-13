@@ -896,6 +896,7 @@ internal static unsafe class ManagedKernelContract
     private static int s_phase87IcmpMode;
     private static int s_phase89UdpMode;
     private static int s_phase90AsyncTxMode;
+    private static int s_phase91LifecycleMode;
     private static int s_phase82Mode;
     private static int s_framebufferInstalled;
     private static GxManagedKernelFramebufferV1 s_framebuffer;
@@ -2992,6 +2993,24 @@ internal static unsafe class ManagedKernelContract
                 "GXOS_NET10:PHASE90_ASYNC_TX_MODE_SELECTED=1\r\n"u8)
                 ? ManagedOk : InvalidState;
         }
+        if (stage == 39)
+        {
+            if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
+                s_phase80Mode == 0 || s_phase83Mode != 0 ||
+                s_phase85ArpMode != 0 || s_phase86Ipv4Mode != 0 ||
+                s_phase87IcmpMode != 0 || s_phase89UdpMode != 0 ||
+                s_phase90AsyncTxMode != 0 || s_phase91LifecycleMode != 0 ||
+                s_dmaServicesInstalled == 0 ||
+                !ManagedDeviceResourceRuntimeCatalog.IsInstalled ||
+                ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0)
+                return InvalidState;
+            s_phase90AsyncTxMode = 1;
+            s_phase91LifecycleMode = 1;
+            ManagedE1000Driver.EnablePhase91LifecycleMode();
+            return KernelLog.Write(
+                "GXOS_NET10:PHASE91_ASYNC_TX_RESET_MODE_SELECTED=1\r\n"u8)
+                ? ManagedOk : InvalidState;
+        }
         if (stage == 33)
         {
             if ((s_phase83Mode == 0 && s_phase90AsyncTxMode == 0) ||
@@ -3012,6 +3031,24 @@ internal static unsafe class ManagedKernelContract
             return passed
                 ? ManagedOk : InvalidState;
         }
+        if (stage == 40)
+        {
+            if (s_phase91LifecycleMode == 0 || s_phase14Run == 0 ||
+                s_phase14Driver == null ||
+                s_phase14Driver.State != ManagedE1000DriverState.Running ||
+                !s_phase14Driver.Phase90AsyncTxPassed ||
+                !s_phase14Driver.TryRunPhase91Lifecycle(
+                    out ManagedE1000Driver? restarted) || restarted == null ||
+                restarted.State != ManagedE1000DriverState.Running ||
+                !restarted.Phase91Passed ||
+                !restarted.Phase90AsyncTxPassed ||
+                restarted.AsyncTxOutstanding != 0)
+                return InvalidState;
+            s_phase14Driver = restarted;
+            return KernelLog.Write(
+                "GXOS_NET10:PHASE91_LIFECYCLE_RECONCILED=1\r\n"u8)
+                ? ManagedOk : InvalidState;
+        }
         if (stage == 1)
         {
             if (s_phase14Run != 0 || s_phase14TeardownRun != 0 ||
@@ -3030,6 +3067,7 @@ internal static unsafe class ManagedKernelContract
                  s_phase86Ipv4Mode == 0 &&
                  s_phase87IcmpMode == 0 && s_phase89UdpMode == 0 &&
                  s_phase90AsyncTxMode == 0 &&
+                 s_phase91LifecycleMode == 0 &&
                  ManagedDeviceResourceRuntimeCatalog.ActiveClaimCount != 0))
                 return InvalidState;
             ManagedE1000Driver? candidate = ManagedE1000Driver.TryCreate();
@@ -3098,6 +3136,7 @@ internal static unsafe class ManagedKernelContract
             s_phase87IcmpMode = 0;
             s_phase89UdpMode = 0;
             s_phase90AsyncTxMode = 0;
+            s_phase91LifecycleMode = 0;
             bool rxProof = s_phase14Driver.RxProofReceived;
             bool phase15RxProof = s_phase14Driver.RxPhase15Received;
             bool phase16Proof = s_phase14Driver.Phase16Passed;
@@ -3128,6 +3167,7 @@ internal static unsafe class ManagedKernelContract
             bool phase52Proof = s_phase14Driver.Phase52Passed;
             bool phase53Proof = s_phase14Driver.Phase53Passed;
             bool phase80Passed = s_phase14Driver.Phase80Passed;
+            bool phase91Passed = s_phase14Driver.Phase91Passed;
             s_phase14TeardownRun = 1;
             if (!KernelLog.Write(rxProof
                     ? "PHASE 14 FIRST MANAGED PCI DRIVER COMPLETE — DMA TX/RX PROVEN\r\n"u8
@@ -3193,13 +3233,16 @@ internal static unsafe class ManagedKernelContract
                  !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE52_PASS\r\n"u8)) ||
                 (phase53Proof &&
                  !KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE53_PASS\r\n"u8)) ||
+                (s_phase91LifecycleMode != 0 && !phase91Passed) ||
                 (phase80Proof && !phase80Passed))
                 return InvalidState;
             s_phase14Driver = null;
+            s_phase91LifecycleMode = 0;
             return ManagedOk;
         }
         return InvalidArgument;
     }
+
 
     [UnmanagedCallersOnly(EntryPoint = "GxManagedKernelInstallPciServices")]
     internal static uint InstallPciServices(uint requestedAbiVersion,

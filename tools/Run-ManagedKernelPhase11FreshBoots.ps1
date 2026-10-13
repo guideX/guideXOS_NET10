@@ -16,6 +16,7 @@ param(
     [switch]$EnablePhase87Icmpv4,
     [switch]$EnablePhase89Udp,
     [switch]$EnablePhase90AsyncTx,
+    [switch]$EnablePhase91AsyncTxLifecycle,
     [string]$Phase15InjectorPath = '',
     [string]$Phase89InjectorPath = '',
     [ValidateSet('dgram', 'user')]
@@ -72,6 +73,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:phase11RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$script:phase91RequireQemuIsolation = [bool]$EnablePhase91AsyncTxLifecycle
+$script:phase11ExpectedQemuPid = 0
+$script:phase11QemuInventoryPath = $null
+$script:phase11LastIsolationCheckUtc = [datetime]::MinValue
 $script:phase11RunDeadline = $null
 $script:phase11StderrPath = $null
 if ($EnablePhase32NegativeControl -and -not $EnablePhase32Protocol) {
@@ -126,6 +131,12 @@ if ($EnablePhase90AsyncTx -and (-not $EnablePhase80E1000 -or
 }
 if ($EnablePhase90AsyncTx -and $RunCount -ne 3) {
     throw 'Phase 90 hardware acceptance requires exactly three fresh boots.'
+}
+if ($EnablePhase91AsyncTxLifecycle -and (-not $EnablePhase80E1000 -or
+    $EnablePhase83 -or $EnablePhase82 -or $EnablePhase85Arp -or
+    $EnablePhase86Ipv4 -or $EnablePhase87Icmpv4 -or $EnablePhase89Udp -or
+    $EnablePhase90AsyncTx -or ($RunCount -ne 1 -and $RunCount -ne 3))) {
+    throw 'Phase 91 lifecycle acceptance requires the Phase 80 route, one diagnostic or three fresh boots, and no other E1000 fixture.'
 }
 if ($EnablePhase82 -and -not $EnablePhase80E1000) {
     throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
@@ -247,17 +258,20 @@ function Require11([bool]$condition, [string]$message) {
 
 function Get-QemuInventory11 {
     try {
-        $entries = @(Get-CimInstance Win32_Process -Filter "Name = 'qemu-system-x86_64.exe'")
+        $entries = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'qemu%'")
     } catch {
         # Command-line ownership is required before a process may be stopped.
         # If Windows denies that inspection, report UNKNOWN and refuse cleanup.
-        return @(Get-Process -Name qemu-system-x86_64 -ErrorAction SilentlyContinue |
+        return @(Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProcessName -match '(?i)^qemu(?:-system-.+)?$' } |
             ForEach-Object {
                 [pscustomobject]@{
                     Process = $_
                     ProcessId = $_.Id
                     ParentProcessId = 0
                     CreationDate = ''
+                    ExecutablePath = ''
+                    ProjectPaths = ''
                     Ownership = 'UNKNOWN'
                     CpuSeconds = $null
                     CommandLine = 'UNAVAILABLE'
@@ -269,6 +283,9 @@ function Get-QemuInventory11 {
         $underRepository = $commandLine.IndexOf($script:phase11RepositoryRoot,
             [StringComparison]::OrdinalIgnoreCase) -ge 0
         $hasFixturePath = $commandLine -match '(?i)(\\artifacts\\|\\evidence\\|fat:rw:ESP)'
+        $projectPaths = @([regex]::Matches($commandLine,
+                '(?i)[A-Z]:\\dev\\[^\\"]+') |
+            ForEach-Object { $_.Value } | Select-Object -Unique) -join ';'
         $process = Get-Process -Id ([int]$entry.ProcessId) -ErrorAction SilentlyContinue
         $cpuSeconds = $null
         if ($null -ne $process) {
@@ -279,6 +296,8 @@ function Get-QemuInventory11 {
             ProcessId = [int]$entry.ProcessId
             ParentProcessId = [int]$entry.ParentProcessId
             CreationDate = [string]$entry.CreationDate
+            ExecutablePath = [string]$entry.ExecutablePath
+            ProjectPaths = $projectPaths
             Ownership = if ($underRepository -and $hasFixturePath) { 'OWNED' } else { 'UNRELATED' }
             CpuSeconds = $cpuSeconds
             CommandLine = $commandLine
@@ -291,8 +310,9 @@ function Write-QemuInventory11([string]$path, [string]$phase) {
     Add-Content -LiteralPath $path -Value ("phase={0} qemu_count={1}" -f $phase, $inventory.Count) -Encoding ascii
     foreach ($entry in $inventory) {
         $cpu = if ($null -eq $entry.CpuSeconds) { 'unavailable' } else { [string]$entry.CpuSeconds }
-        Add-Content -LiteralPath $path -Value ("pid={0} ownership={1} cpu_seconds={2} command_line={3}" -f `
-            $entry.ProcessId, $entry.Ownership, $cpu, $entry.CommandLine) -Encoding ascii
+        Add-Content -LiteralPath $path -Value ("pid={0} ownership={1} executable={2} created={3} project_paths={4} cpu_seconds={5} command_line={6}" -f `
+            $entry.ProcessId, $entry.Ownership, $entry.ExecutablePath, $entry.CreationDate,
+            $entry.ProjectPaths, $cpu, $entry.CommandLine) -Encoding ascii
     }
 }
 
@@ -306,14 +326,49 @@ function Get-OwnedQemu11 {
 function Ensure-CleanQemuState11([string]$inventoryPath, [string]$phase) {
     Write-QemuInventory11 $inventoryPath ("{0}_BEFORE" -f $phase)
     $before = @(Get-QemuInventory11)
+    if ($script:phase91RequireQemuIsolation) {
+        Require11 ($before.Count -eq 0) `
+            "Phase 91 QEMU isolation is not clear at $phase; see $inventoryPath. No QEMU process was stopped."
+        Write-QemuInventory11 $inventoryPath ("{0}_AFTER" -f $phase)
+        Require11 (@(Get-QemuInventory11).Count -eq 0) `
+            "A QEMU process appeared during the Phase 91 $phase preflight; see $inventoryPath. No QEMU process was stopped."
+        return
+    }
     $unknown = @($before | Where-Object { $_.Ownership -eq 'UNKNOWN' })
     Require11 ($unknown.Count -eq 0) 'QEMU ownership is unavailable; refusing to stop an unclassified process.'
     foreach ($entry in @($before | Where-Object { $_.Ownership -eq 'OWNED' })) {
         Stop-OwnedQemu11 $entry.Process
     }
     Write-QemuInventory11 $inventoryPath ("{0}_AFTER" -f $phase)
-    $remaining = @(Get-QemuInventory11 | Where-Object { $_.Ownership -eq 'OWNED' })
-    Require11 ($remaining.Count -eq 0) 'Repository-owned QEMU cleanup failed.'
+    $remaining = @(Get-QemuInventory11)
+    $remainingOwned = @($remaining | Where-Object { $_.Ownership -eq 'OWNED' })
+    Require11 ($remainingOwned.Count -eq 0) 'Repository-owned QEMU cleanup failed.'
+}
+
+function Assert-Phase91QemuIsolation11([string]$phase) {
+    if (-not $script:phase91RequireQemuIsolation -or
+        [string]::IsNullOrWhiteSpace([string]$script:phase11QemuInventoryPath)) { return }
+    $now = [datetime]::UtcNow
+    if (($now - $script:phase11LastIsolationCheckUtc).TotalMilliseconds -lt 250) { return }
+    $script:phase11LastIsolationCheckUtc = $now
+    $inventory = @(Get-QemuInventory11)
+    $unexpected = @($inventory | Where-Object {
+        $_.ProcessId -ne $script:phase11ExpectedQemuPid
+    })
+    if ($unexpected.Count -gt 0) {
+        Write-QemuInventory11 $script:phase11QemuInventoryPath ("OVERLAP_{0}" -f $phase)
+        if ($null -ne $script:phase11Timeline) {
+            Write-Timeline11 $script:phase11Timeline 'QEMU_ISOLATION_OVERLAP' `
+                ("phase={0} unexpected_pids={1}" -f $phase,
+                    (($unexpected | ForEach-Object { $_.ProcessId }) -join ','))
+        }
+        throw "Unexpected overlapping QEMU during Phase 91 $phase; the boot is invalid. See $($script:phase11QemuInventoryPath)."
+    }
+    if ($null -ne $script:phase11Timeline) {
+        Write-Timeline11 $script:phase11Timeline 'QEMU_ISOLATION_CHECK' `
+            ("phase={0} qemu_count={1} expected_pid={2}" -f $phase,
+                $inventory.Count, $script:phase11ExpectedQemuPid)
+    }
 }
 
 function Stop-OwnedQemu11([System.Diagnostics.Process]$process) {
@@ -342,6 +397,7 @@ function Get-QemuFault11 {
 function Connect-Tcp11([int]$port, [System.Diagnostics.Process]$process,
                        [datetime]$deadline, [string]$name) {
     while ((Get-Date) -lt $deadline) {
+        Assert-Phase91QemuIsolation11 'QEMU_CONNECT'
         if ($process.HasExited) { throw "QEMU exited before $name connection on port $port." }
         $qemuFault = Get-QemuFault11
         if ($qemuFault -match '(?i)X64 Exception Type|Triple fault|CPU exception') {
@@ -374,6 +430,7 @@ function Get-Phase11Deadline11([int]$seconds) {
 
 function Pump-Serial11([System.IO.Stream]$stream, [IO.FileStream]$logStream,
                        [Text.StringBuilder]$text, [byte[]]$buffer) {
+    Assert-Phase91QemuIsolation11 'SERIAL_PUMP'
     while ($stream.DataAvailable) {
         $count = $stream.Read($buffer, 0, $buffer.Length)
         if ($count -le 0) { return }
@@ -850,6 +907,7 @@ function Write-Phase87QemuDatagram11([string]$captureLogPath,
 
 function Receive-Phase85QemuDatagram11([Net.Sockets.UdpClient]$peerUdp,
                                        [int]$timeoutMs) {
+    Assert-Phase91QemuIsolation11 'DATAGRAM_WAIT'
     $peerUdp.Client.ReceiveTimeout = [Math]::Max(1, $timeoutMs)
     $remote = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 0)
     try {
@@ -3574,7 +3632,7 @@ function Write-Phase18Frame([IO.StreamWriter]$log, [string]$name,
     $log.Flush()
 }
 
-Require11 ($RunCount -ge 3 -or $EnablePhase45CapacityControl -or $EnablePhase46CapacityControl -or $EnablePhase51ResetReuseControl -or $EnablePhase52BadPngCrcControl -or ($EnablePhase89Udp -and $RunCount -eq 1)) `
+Require11 ($RunCount -ge 3 -or $EnablePhase45CapacityControl -or $EnablePhase46CapacityControl -or $EnablePhase51ResetReuseControl -or $EnablePhase52BadPngCrcControl -or (($EnablePhase89Udp -or $EnablePhase91AsyncTxLifecycle) -and $RunCount -eq 1)) `
     'Three fresh ManagedKernel Phase 11 boots are required unless running a single capacity negative control or the Phase 51 reset/reuse lifecycle proof.'
 if ($EnablePhase89Udp) { Require11 ($RunCount -eq 1 -or $RunCount -eq 3) 'Phase 89 diagnostic/acceptance boot count is invalid.' }
 Require11 ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
@@ -3606,6 +3664,51 @@ if ($EnablePhase90AsyncTx) {
         'GXOS_NET10:PHASE90_SYNC_TX_REGRESSION=PASS',
         'PHASE90_ASYNC_TX_COMPLETION_PASS=1',
         'GXOS_NET10:PHASE90_COM1_ROUTE_ACTIVE=1')
+}
+if ($EnablePhase91AsyncTxLifecycle) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE90_PENDING_AND_CAPACITY_PASS=1',
+        'GXOS_NET10:PHASE90_SYNC_TX_REGRESSION=PASS',
+        'PHASE90_ASYNC_TX_COMPLETION_PASS=1',
+        'GXOS_NET10:PHASE90_COM1_ROUTE_ACTIVE=1',
+        'GXOS_NET10:PHASE91_ASYNC_TX_RESET_MODE_SELECTED=1',
+        'GXOS_NET10:PHASE91_STOP_BEGINS=1',
+        'GXOS_NET10:PHASE91_STOP_ADMISSION_CLOSED=1',
+        'GXOS_NET10:PHASE91_STOP_LATE_TXDW_IGNORED=1',
+        'GXOS_NET10:PHASE91_STOP_ROUTE_REMOVED=1',
+        'GXOS_NET10:PHASE91_STOP_HARDWARE_RESET_COMPLETE=1',
+        'GXOS_NET10:PHASE91_STOP_BUS_MASTER_DISABLED=1',
+        'GXOS_NET10:PHASE91_DMA_RELEASE_AFTER_RESET=1',
+        'GXOS_NET10:PHASE91_STOP_LEDGER_INVALIDATED=1',
+        'GXOS_NET10:PHASE91_OLD_COMPLETED_LEDGER_INVALIDATED=1',
+        'GXOS_NET10:PHASE90_SYNC_TX_DD_POLL_FRAMES=0x0000000000000001',
+        'GXOS_NET10:PHASE91_RESTART_BEGINS=1',
+        'GXOS_NET10:PHASE91_RESTART_DRIVER_RUNNING=1',
+        'GXOS_NET10:PHASE91_ROUTE_TOKEN_CHANGED=1',
+        'GXOS_NET10:PHASE91_RESTART_ROUTE_PROOF_COMPLETE=1',
+        'GXOS_NET10:PHASE91_RESTART_ROUTE_REINSTALLED=1',
+        'GXOS_NET10:PHASE91_RESTART_PHASE80_DD_ROUTE_PASS=1',
+        'GXOS_NET10:PHASE91_RESTART_SAME_SLOT_READY=1',
+        'GXOS_NET10:PHASE91_SAME_SLOT_NEW_ID_NO_ALIAS=1',
+        'GXOS_NET10:PHASE91_RESTART_ASYNC_CAPACITY_FOUR_AND_FIFTH_BUSY=1',
+        'GXOS_NET10:PHASE91_RESTART_OLD_IDS_REJECTED_WHILE_ACTIVE=1',
+        'GXOS_NET10:PHASE91_RESTART_STALE_IDS_NO_MUTATION=1',
+        'GXOS_NET10:PHASE91_RESTART_FIRST_ASYNC_TX_PASS=1',
+        'GXOS_NET10:PHASE91_RESTART_ASYNC_FOUR_COMPLETED_CONSUMED=1',
+        'GXOS_NET10:PHASE91_RESTART_ASYNC_CAPACITY_RESTORED=1',
+        'GXOS_NET10:PHASE91_RESTART_SYNC_TX_DD_POLL_PASS=1',
+        'GXOS_NET10:PHASE91_RESTART_SYNC_TX_DD_POLL_FRAMES=0x0000000000000001',
+        'GXOS_NET10:PHASE91_RESTART_RX_READY=1',
+        'GXOS_NET10:PHASE91_RESTART_TXDW_ROUTE_READY=1',
+        'GXOS_NET10:PHASE91_POST_RESTART_RX_PASS=1',
+        'GXOS_NET10:PHASE91_LIFECYCLE_RECONCILED=1',
+        'GXOS_NET10:PHASE91_TXDW_MASK_RESTORED=1',
+        'GXOS_NET10:PHASE91_REAL_RX_LIVENESS=1',
+        'GXOS_NET10:PHASE91_COM1_ROUTE_ACTIVE=1',
+        'GXOS_NET10:PHASE91_NATIVE_COUNTERS_RECONCILED=1',
+        'GXOS_NET10:PHASE91_NO_INTERRUPT_STORM=1',
+        'GXOS_NET10:PHASE91_FINAL_TEARDOWN_RECONCILED=1',
+        'PHASE91_ASYNC_TX_RESET_CONTAINMENT_PASS=1')
 }
 if ($Phase15EnableFilterDump) {
     Require11 ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') `
@@ -3705,6 +3808,9 @@ try {
         $run = Join-Path $evidence ("runs\run-{0}" -f $sequence)
         New-Item -ItemType Directory -Force -Path $run | Out-Null
         Ensure-CleanQemuState11 (Join-Path $run 'qemu-process-preflight.log') ("BOOT_{0}_PREFLIGHT" -f $sequence)
+        $script:phase11QemuInventoryPath = Join-Path $run 'qemu-process-preflight.log'
+        $script:phase11ExpectedQemuPid = 0
+        $script:phase11LastIsolationCheckUtc = [datetime]::MinValue
         $code = Join-Path $run 'edk2-code.fd'
         $vars = Join-Path $run 'edk2-vars.fd'
         $serial = Join-Path $run 'serial.log'
@@ -3724,7 +3830,7 @@ try {
         }
         $phase90CaptureLog = Join-Path $run 'phase90-tx-capture.log'
         $phase90CaptureBinary = Join-Path $run 'phase90-tx-capture.bin'
-        if ($EnablePhase90AsyncTx) {
+        if ($EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle) {
             [IO.File]::WriteAllText($phase90CaptureLog, '')
             [IO.File]::WriteAllBytes($phase90CaptureBinary, [byte[]]@())
         }
@@ -3756,13 +3862,15 @@ try {
         $rxPort = 0
         $peerPort = 0
         if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
-            $EnablePhase83 -or $EnablePhase90AsyncTx) {
+            $EnablePhase83 -or $EnablePhase90AsyncTx -or
+            $EnablePhase91AsyncTxLifecycle) {
             $rxPort = Get-FreeUdpPort11
             $peerPort = Get-FreeUdpPort11
         }
         $peerUdp = $null
         if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
-            $EnablePhase83 -or $EnablePhase90AsyncTx) {
+            $EnablePhase83 -or $EnablePhase90AsyncTx -or
+            $EnablePhase91AsyncTxLifecycle) {
             # QEMU's dgram backend requires a live remote endpoint. Keep the
             # host peer bound before QEMU starts so E1000 TX cannot stall; the
             # controlled RX frames are sent later after the guest is ready.
@@ -3779,7 +3887,8 @@ try {
             '-serial', 'none', '-device', 'isa-serial,chardev=serial0,iobase=0x3f8,irq=4,wakeup=on',
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
             '-display', $(if ($CaptureQemuScreen) { 'gtk' } else { 'none' }), '-no-reboot', '-no-shutdown')
-        if ($EnablePhase83 -or $EnablePhase90AsyncTx) {
+        if ($EnablePhase83 -or $EnablePhase90AsyncTx -or
+            $EnablePhase91AsyncTxLifecycle) {
             $arguments += @('-nic', 'none')
             $arguments += @(
                 '-netdev', "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$rxPort,remote.type=inet,remote.host=127.0.0.1,remote.port=$peerPort")
@@ -3866,9 +3975,15 @@ try {
             Write-Timeline11 $timeline 'HOST_LISTENERS_READY' $listenerDetail
             Write-Timeline11 $timeline 'HOST_FIXTURE_READY' 'protocol=phase15-dgram-tcp-tls-http state=clean-peer-bound'
             Write-Timeline11 $timeline 'FIRMWARE_IDENTITY' "code_sha256=$codeHash vars_sha256=$varsHash"
+            if ($EnablePhase91AsyncTxLifecycle) {
+                Ensure-CleanQemuState11 $script:phase11QemuInventoryPath `
+                    ("BOOT_{0}_LAUNCH_PREFLIGHT" -f $sequence)
+            }
             $process = Start-Process -FilePath $qemu -ArgumentList $arguments -WorkingDirectory $gate `
                 -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
             $owned += $process
+            $script:phase11ExpectedQemuPid = $process.Id
+            $script:phase11LastIsolationCheckUtc = [datetime]::MinValue
             $script:phase11StderrPath = $stderr
             Write-Timeline11 $timeline 'QEMU_STARTED' "pid=$($process.Id)"
             $script:phase11RunDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -4216,7 +4331,7 @@ try {
                     $injectionLog.Flush()
                 }
             }
-            if ($EnablePhase90AsyncTx) {
+            if ($EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle) {
                 Wait-Marker11 'PHASE90_ASYNC_TX_COMPLETION_PASS=1' `
                     $deadline $process $stream $logStream $text $buffer
                 $macMatch = [regex]::Match($text.ToString(),
@@ -4227,8 +4342,97 @@ try {
                         $macMatch.Groups[2].Value).Substring($macOffset, 2), 16)
                 }
                 $seenSequences = [Collections.Generic.HashSet[uint32]]::new()
-                $captureDeadline = [DateTime]::UtcNow.AddSeconds(20)
-                while ($seenSequences.Count -lt 18 -and
+                $expectedSequences = [Collections.Generic.HashSet[uint32]]::new()
+                if ($EnablePhase91AsyncTxLifecycle) {
+                    foreach ($expected in 1..18) {
+                        [void]$expectedSequences.Add([uint32]$expected)
+                    }
+                    foreach ($hex in @(
+                        '91000101', '91000102', '91000103', '91000104',
+                        '91000201', '91000301', '91000302', '91000303',
+                        '91000304', '91000401')) {
+                        [void]$expectedSequences.Add(
+                            [Convert]::ToUInt32($hex, 16))
+                    }
+                } else {
+                    foreach ($expected in 1..18) {
+                        [void]$expectedSequences.Add([uint32]$expected)
+                    }
+                    $expectedCaptureCount = 18
+                }
+                if ($EnablePhase91AsyncTxLifecycle) {
+                    Wait-Marker11 'GXOS_NET10:PHASE91_RESTART_RX_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $serialSnapshot = $text.ToString()
+                    $phase91Counters = @{}
+                    foreach ($counterName in @(
+                        'PHASE91_ACCEPTED_SUBMISSIONS',
+                        'PHASE91_DD_COMPLETIONS_BEFORE_STOP',
+                        'PHASE91_ASYNC_TX_SUCCESSFUL_FRAMES_BEFORE_STOP',
+                        'PHASE91_OUTSTANDING_UNCONSUMED_AT_STOP',
+                        'PHASE91_COMPLETED_UNCONSUMED_AT_STOP',
+                        'PHASE91_HARDWARE_OWNED_NOT_DD_AT_STOP',
+                        'PHASE91_COMPLETIONS_EXPOSED_BEFORE_STOP',
+                        'PHASE91_COMPLETIONS_CONSUMED_BEFORE_STOP',
+                        'PHASE91_INVALIDATED_BY_STOP',
+                        'PHASE90_SYNC_TX_DD_POLL_FRAMES',
+                        'PHASE91_RESTART_ACCEPTED_SUBMISSIONS',
+                        'PHASE91_RESTART_DD_COMPLETIONS',
+                        'PHASE91_RESTART_ASYNC_TX_SUCCESSFUL_FRAMES',
+                        'PHASE91_RESTART_COMPLETIONS_EXPOSED',
+                        'PHASE91_RESTART_COMPLETIONS_CONSUMED',
+                        'PHASE91_RESTART_SYNC_TX_DD_POLL_FRAMES')) {
+                        $counterPrefix = [regex]::Escape("GXOS_NET10:${counterName}=0x")
+                        $counterMatch = [regex]::Match($serialSnapshot,
+                            $counterPrefix + '([0-9A-Fa-f]{16})')
+                        Require11 $counterMatch.Success `
+                            "Phase 91 semantic counter is missing: $counterName"
+                        $phase91Counters[$counterName] = [Convert]::ToUInt64(
+                            $counterMatch.Groups[1].Value, 16)
+                    }
+
+                    $preStopAsyncAccepted = $phase91Counters['PHASE91_ACCEPTED_SUBMISSIONS']
+                    $preStopAsyncCompleted = $phase91Counters['PHASE91_DD_COMPLETIONS_BEFORE_STOP']
+                    $preStopAsyncTransmitted = $phase91Counters['PHASE91_ASYNC_TX_SUCCESSFUL_FRAMES_BEFORE_STOP']
+                    $atStop = $phase91Counters['PHASE91_OUTSTANDING_UNCONSUMED_AT_STOP']
+                    $completedUnconsumed = $phase91Counters['PHASE91_COMPLETED_UNCONSUMED_AT_STOP']
+                    $hardwareOwned = $phase91Counters['PHASE91_HARDWARE_OWNED_NOT_DD_AT_STOP']
+                    $exposedBeforeStop = $phase91Counters['PHASE91_COMPLETIONS_EXPOSED_BEFORE_STOP']
+                    $consumedBeforeStop = $phase91Counters['PHASE91_COMPLETIONS_CONSUMED_BEFORE_STOP']
+                    $invalidated = $phase91Counters['PHASE91_INVALIDATED_BY_STOP']
+                    $restartAsyncAccepted = $phase91Counters['PHASE91_RESTART_ACCEPTED_SUBMISSIONS']
+                    $restartAsyncCompleted = $phase91Counters['PHASE91_RESTART_DD_COMPLETIONS']
+                    $restartAsyncTransmitted = $phase91Counters['PHASE91_RESTART_ASYNC_TX_SUCCESSFUL_FRAMES']
+                    $restartExposed = $phase91Counters['PHASE91_RESTART_COMPLETIONS_EXPOSED']
+                    $restartConsumed = $phase91Counters['PHASE91_RESTART_COMPLETIONS_CONSUMED']
+
+                    Require11 ($preStopAsyncAccepted -eq $preStopAsyncCompleted -and
+                        $preStopAsyncCompleted -eq $preStopAsyncTransmitted) `
+                        'Pre-stop async accepted/completed/transmitted accounting disagrees.'
+                    Require11 ($atStop -eq $completedUnconsumed + $hardwareOwned -and
+                        $invalidated -eq $atStop -and
+                        $completedUnconsumed -eq $atStop -and $hardwareOwned -eq 0) `
+                        'Stop-boundary requests were not all DD-complete and accounted.'
+                    Require11 ($exposedBeforeStop -eq $preStopAsyncCompleted -and
+                        $consumedBeforeStop + $atStop -eq $exposedBeforeStop) `
+                        'Pre-stop exposed/consumed/outstanding completion accounting disagrees.'
+                    Require11 ($restartAsyncAccepted -eq $restartAsyncCompleted -and
+                        $restartAsyncCompleted -eq $restartAsyncTransmitted -and
+                        $restartExposed -eq $restartAsyncCompleted -and
+                        $restartConsumed -eq $restartExposed) `
+                        'Restart async accepted/completed/transmitted/consumed accounting disagrees.'
+
+                    $expectedCaptureCount = [int](
+                        $preStopAsyncTransmitted +
+                        $phase91Counters['PHASE90_SYNC_TX_DD_POLL_FRAMES'] +
+                        $restartAsyncTransmitted +
+                        $phase91Counters['PHASE91_RESTART_SYNC_TX_DD_POLL_FRAMES'])
+                    Require11 ($expectedCaptureCount -eq $expectedSequences.Count) `
+                        "Lifecycle accounting expects $expectedCaptureCount frames, but the fixture sentinel set has $($expectedSequences.Count)."
+                }
+                $captureWaitSeconds = if ($EnablePhase91AsyncTxLifecycle) { 60 } else { 20 }
+                $captureDeadline = [DateTime]::UtcNow.AddSeconds($captureWaitSeconds)
+                while ($seenSequences.Count -lt $expectedCaptureCount -and
                        [DateTime]::UtcNow -lt $captureDeadline) {
                     [byte[]]$candidate = Receive-Phase85QemuDatagram11 $peerUdp 250
                     if ($null -eq $candidate) { continue }
@@ -4245,9 +4449,9 @@ try {
                         ([uint32]$candidate[31] -shl 16) -bor
                         ([uint32]$candidate[32] -shl 8) -bor
                         [uint32]$candidate[33]
-                    Require11 ($frameSequence -ge 1 -and $frameSequence -le 18 -and
+                    Require11 ($expectedSequences.Contains($frameSequence) -and
                         $seenSequences.Add($frameSequence)) `
-                        'Phase 90 host capture found an invalid or duplicate request sentinel.'
+                        'Async TX host capture found an invalid or duplicate request sentinel.'
                     $hashAlgorithm = [Security.Cryptography.SHA256]::Create()
                     try {
                         $frameHash = ([BitConverter]::ToString(
@@ -4256,7 +4460,7 @@ try {
                     $captureWriter = [IO.StreamWriter]::new($phase90CaptureLog, $true,
                         [Text.Encoding]::ASCII)
                     try {
-                        $captureWriter.WriteLine(('PHASE90_TX_CAPTURED=PASS sequence={0} length={1} destination_mac=FFFFFFFFFFFF source_mac={2} ethertype=88B5 payload=GXOS_PHASE90_TX sha256={3}' -f `
+                        $captureWriter.WriteLine(('PHASE90_TX_CAPTURED=PASS sequence=0x{0:X8} length={1} destination_mac=FFFFFFFFFFFF source_mac={2} ethertype=88B5 payload=GXOS_PHASE90_TX sha256={3}' -f `
                             $frameSequence, $candidate.Length,
                             ([BitConverter]::ToString($guestMac)).Replace('-', ''),
                             $frameHash))
@@ -4271,10 +4475,51 @@ try {
                         $binary.Flush()
                     } finally { $binary.Dispose() }
                 }
-                Require11 ($seenSequences.Count -eq 18) `
-                    "Phase 90 captured $($seenSequences.Count)/18 expected real E1000 frames."
+                Require11 ($seenSequences.Count -eq $expectedCaptureCount) `
+                    "Async TX captured $($seenSequences.Count)/$expectedCaptureCount expected real E1000 frames."
+                if ($EnablePhase91AsyncTxLifecycle) {
+                    $destinationMac = $macMatch.Groups[1].Value +
+                                      $macMatch.Groups[2].Value
+                    [byte[]]$rxFrame = New-Phase83RxFrame11 `
+                        $destinationMac ([uint32]1)
+                    $sent = $peerUdp.Send($rxFrame, $rxFrame.Length,
+                                          '127.0.0.1', $rxPort)
+                    Require11 ($sent -eq $rxFrame.Length) `
+                        'Phase 91 restarted E1000 RX injector sent a short frame.'
+                    $rxHash = [Security.Cryptography.SHA256]::Create()
+                    try {
+                        $rxFrameHash = ([BitConverter]::ToString(
+                            $rxHash.ComputeHash($rxFrame))).Replace('-', '')
+                    } finally { $rxHash.Dispose() }
+                    $injectionLog.WriteLine((
+                        'PHASE91_RESTART_RX_INJECTED=PASS sequence=1 length={0} destination={1} source=021500000001 ethertype=88B5 sha256={2} backend=dgram guest_port={3} source_port={4}' -f `
+                        $rxFrame.Length, $destinationMac, $rxFrameHash,
+                        $rxPort, $peerPort))
+                    $injectionLog.Flush()
+                    Wait-Marker11 'GXOS_NET10:PHASE83_RX_ACCEPTED=0x0000000000000001' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Wait-Marker11 'GXOS_NET10:PHASE91_RESTART_TX_RX_LIVENESS=PASS' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Wait-Marker11 'GXOS_NET10:PHASE91_LIFECYCLE_RECONCILED=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                }
                 Write-Timeline11 $timeline 'PHASE90_HOST_TX_CAPTURE_COMPLETED' `
-                    "frames=$($seenSequences.Count) distinct_sequences=1-18"
+                    "frames=$($seenSequences.Count) distinct_sequences=verified"
+                if ($EnablePhase91AsyncTxLifecycle) {
+                    $accountingDetail = (
+                        ("pre_stop_async_transmitted={0} pre_stop_sync_transmitted={1} " +
+                         "stop_completed_unconsumed={2} stop_hardware_owned_not_dd={3} " +
+                         "stop_invalidated={4} restart_async_transmitted={5} " +
+                         "restart_sync_transmitted={6} expected_capture_frames={7} captured_frames={8}") -f `
+                            $preStopAsyncTransmitted,
+                            $phase91Counters['PHASE90_SYNC_TX_DD_POLL_FRAMES'],
+                            $completedUnconsumed, $hardwareOwned, $invalidated,
+                            $restartAsyncTransmitted,
+                            $phase91Counters['PHASE91_RESTART_SYNC_TX_DD_POLL_FRAMES'],
+                            $expectedCaptureCount, $seenSequences.Count)
+                    Write-Timeline11 $timeline 'PHASE91_REQUEST_STATE_ACCOUNTING_PASS' `
+                        $accountingDetail
+                }
             }
             if ($EnablePhase82) {
                 Wait-Marker11 'GXOS_NET10:PHASE82_INTERLEAVING_READY=1' `
@@ -6065,6 +6310,12 @@ try {
             if ($null -ne $peerUdp) { $peerUdp.Dispose() }
             if ($null -ne $monitor) { $monitor.Dispose() }
             Stop-OwnedQemu11 $process
+            if ($EnablePhase91AsyncTxLifecycle) {
+                $script:phase11ExpectedQemuPid = 0
+                Write-QemuInventory11 $script:phase11QemuInventoryPath ("BOOT_{0}_AFTER" -f $sequence)
+                Require11 (@(Get-QemuInventory11).Count -eq 0) `
+                    "Phase 91 isolation was lost before boot $sequence closed; see $($script:phase11QemuInventoryPath)."
+            }
             if ($null -ne $timeline) { $timeline.Dispose() }
             $script:phase11Timeline = $null
             $script:phase11RunDeadline = $null

@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using GuideXOS.Net10.ManagedKernel;
 
@@ -9,11 +10,16 @@ internal static unsafe class Program
     private static uint s_failures;
     private static uint s_transmitCalls;
     private static bool s_interruptActive;
+    private static bool s_e1000InterruptActive;
     private static ulong s_interruptToken;
+    private static ulong s_e1000InterruptToken;
+    private static ulong s_nextInterruptToken = 0xA900;
     private static uint s_subscribeCalls;
     private static uint s_unsubscribeCalls;
     private static uint s_eventCount;
     private static uint s_drainedCount;
+    private static uint s_enqueuedCount;
+    private static ulong s_nextSequence = 1;
     private static GxManagedKernelInterruptEventV1[] s_events =
         new GxManagedKernelInterruptEventV1[8];
 
@@ -140,25 +146,48 @@ internal static unsafe class Program
     private static uint Subscribe(uint eventType, uint deviceKind, uint deviceId,
                                   nuint tokenAddress, nuint tokenCapacity)
     {
-        if (eventType != GxManagedKernelInterruptEventV1.EventTypeSerialReceive ||
-            deviceKind != GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial ||
-            deviceId != GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1 ||
-            tokenAddress == 0 || tokenCapacity < sizeof(ulong) || s_interruptActive) return 1;
-        s_interruptActive = true;
-        s_interruptToken = 0xA901;
+        if (tokenAddress == 0 || tokenCapacity < sizeof(ulong)) return 1;
+        if (eventType == GxManagedKernelInterruptEventV1.EventTypeSerialReceive &&
+            deviceKind == GxManagedKernelSerialPlatformDeviceV1.DeviceKindPlatformSerial &&
+            deviceId == GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1 &&
+            !s_interruptActive)
+        {
+            s_interruptActive = true;
+            s_interruptToken = ++s_nextInterruptToken;
+            *(ulong*)tokenAddress = s_interruptToken;
+        }
+        else if (eventType == ManagedE1000Protocol.InterruptEventType &&
+                 deviceKind == ManagedE1000Protocol.PciDeviceKind &&
+                 deviceId == ManagedE1000Protocol.PciOwnerId &&
+                 !s_e1000InterruptActive)
+        {
+            s_e1000InterruptActive = true;
+            s_e1000InterruptToken = ++s_nextInterruptToken;
+            *(ulong*)tokenAddress = s_e1000InterruptToken;
+        }
+        else return 1;
         s_subscribeCalls++;
-        *(ulong*)tokenAddress = s_interruptToken;
         return 0;
     }
 
     [UnmanagedCallersOnly]
     private static uint Unsubscribe(ulong token)
     {
-        if (!s_interruptActive || token != s_interruptToken) return 7;
-        s_interruptActive = false;
-        s_unsubscribeCalls++;
-        s_eventCount = 0;
-        return 0;
+        if (s_interruptActive && token == s_interruptToken)
+        {
+            s_interruptActive = false;
+            s_unsubscribeCalls++;
+            s_drainedCount += s_eventCount;
+            s_eventCount = 0;
+            return 0;
+        }
+        if (s_e1000InterruptActive && token == s_e1000InterruptToken)
+        {
+            s_e1000InterruptActive = false;
+            s_unsubscribeCalls++;
+            return 0;
+        }
+        return 7;
     }
 
     [UnmanagedCallersOnly]
@@ -201,10 +230,11 @@ internal static unsafe class Program
             AbiVersion = requestedAbiVersion,
             QueueCapacity = GxManagedKernelInterruptServicesV1.QueueCapacity,
             MaxDrain = GxManagedKernelInterruptServicesV1.MaxDrain,
-            EnqueuedCount = s_eventCount,
+            EnqueuedCount = s_enqueuedCount,
             DrainedCount = s_drainedCount,
-            SubscriptionActive = s_interruptActive ? 1U : 0U,
-            HardwareEnabled = s_interruptActive ? 1U : 0U
+            NextSequence = s_nextSequence,
+            SubscriptionActive = s_interruptActive || s_e1000InterruptActive ? 1U : 0U,
+            HardwareEnabled = s_interruptActive || s_e1000InterruptActive ? 1U : 0U
         };
         return 0;
     }
@@ -265,6 +295,7 @@ internal static unsafe class Program
     private static void QueueEvent(ulong sequence, byte payload,
                                    uint deviceId = GxManagedKernelSerialPlatformDeviceV1.DeviceIdCom1)
     {
+        if (sequence >= s_nextSequence) s_nextSequence = sequence + 1;
         s_events[s_eventCount++] = new GxManagedKernelInterruptEventV1
         {
             Size = GxManagedKernelInterruptEventV1.ExpectedSize,
@@ -277,6 +308,26 @@ internal static unsafe class Program
             PayloadByte = payload,
             PayloadLength = 1
         };
+        s_enqueuedCount++;
+    }
+
+    private static void QueueE1000Event(ulong sequence, uint cause)
+    {
+        if (sequence >= s_nextSequence) s_nextSequence = sequence + 1;
+        s_events[s_eventCount++] = new GxManagedKernelInterruptEventV1
+        {
+            Size = GxManagedKernelInterruptEventV1.ExpectedSize,
+            AbiVersion = GxManagedKernelInterruptEventV1.AbiVersionCurrent,
+            EventType = ManagedE1000Protocol.InterruptEventType,
+            DeviceKind = ManagedE1000Protocol.PciDeviceKind,
+            DeviceId = ManagedE1000Protocol.PciOwnerId,
+            Sequence = sequence,
+            Flags = GxManagedKernelInterruptEventV1.EventFlagHardwareCapture,
+            PayloadByte = (byte)cause,
+            PayloadLength = 1,
+            Status = cause
+        };
+        s_enqueuedCount++;
     }
 
     private static void RunDispatcherAndDriverProof()
@@ -345,9 +396,191 @@ internal static unsafe class Program
         provider.ReleaseAll();
     }
 
+    private static void ResetInterruptFixture()
+    {
+        Array.Clear(s_events);
+        s_interruptActive = false;
+        s_e1000InterruptActive = false;
+        s_interruptToken = 0;
+        s_e1000InterruptToken = 0;
+        s_nextInterruptToken = 0xA900;
+        s_subscribeCalls = 0;
+        s_unsubscribeCalls = 0;
+        s_eventCount = 0;
+        s_drainedCount = 0;
+        s_enqueuedCount = 0;
+        s_nextSequence = 1;
+    }
+
+    private static void SetPrivateField(object target, string name, object value)
+    {
+        FieldInfo? field = target.GetType().GetField(
+            name, BindingFlags.Instance | BindingFlags.NonPublic);
+        if (field == null) throw new InvalidOperationException("Missing field: " + name);
+        field.SetValue(target, value);
+    }
+
+    private static ManagedE1000Driver CreateRunningPhase91Driver(
+        ManagedInterruptDispatcher dispatcher)
+    {
+        ManagedDevice device = default;
+        ConstructorInfo? constructor = null;
+        foreach (ConstructorInfo candidate in typeof(ManagedE1000Driver).GetConstructors(
+                     BindingFlags.Instance | BindingFlags.NonPublic))
+        {
+            ParameterInfo[] parameters = candidate.GetParameters();
+            if (parameters.Length == 2 &&
+                parameters[0].ParameterType == typeof(ManagedDevice).MakeByRefType() &&
+                parameters[1].ParameterType == typeof(uint))
+            {
+                constructor = candidate;
+                break;
+            }
+        }
+        if (constructor == null)
+            throw new InvalidOperationException("Missing E1000 host-test constructor.");
+        var driver = (ManagedE1000Driver)constructor.Invoke(
+            new object[] { device, 0x91U });
+        SetPrivateField(driver, "_phase80Requested", true);
+        SetPrivateField(driver, "_phase90AsyncTxRequested", true);
+        SetPrivateField(driver, "_phase91Requested", true);
+        SetPrivateField(driver, "_interruptSubscribed", true);
+        SetPrivateField(driver, "_interruptDispatcher", dispatcher);
+        SetPrivateField(driver, "_state", ManagedE1000DriverState.Running);
+        return driver;
+    }
+
+    private static bool ArmSyncTxProof(ManagedE1000Driver driver)
+    {
+        MethodInfo? method = typeof(ManagedE1000Driver).GetMethod(
+            "TryArmSyncTxProof", BindingFlags.Instance | BindingFlags.NonPublic);
+        if (method == null) throw new InvalidOperationException("Missing proof arm method.");
+        object?[] arguments = { null };
+        return (bool)(method.Invoke(driver, arguments) ?? false);
+    }
+
+    private static void RunPhase91SyncTxDispatchRegressions()
+    {
+        const uint txdw = ManagedE1000Protocol.InterruptCauseTxDescriptorWriteback;
+        ResetInterruptFixture();
+        BuildBinding(out _, out _, out GxManagedKernelInterruptServicesV1 services);
+        ManagedInterruptDispatcher? dispatcher =
+            ManagedInterruptDispatcher.TryCreate(in services);
+        Expect(dispatcher != null, "phase91 TXDW proof dispatcher is created");
+        if (dispatcher == null) return;
+        Expect(dispatcher.TrySubscribeE1000(out ulong firstRoute) &&
+               firstRoute != 0, "phase91 E1000 route subscribes");
+
+        ManagedE1000Driver immediate = CreateRunningPhase91Driver(dispatcher);
+        Expect(ArmSyncTxProof(immediate),
+            "production sync-TX proof arms from native next-sequence baseline");
+        QueueE1000Event(1, txdw);
+        Expect(dispatcher.TryDispatchBatch(null, null, immediate,
+                   out uint delivered, out uint rejected) &&
+               delivered == 1 && rejected == 0 &&
+               immediate.SyncTxTxdwNotificationObserved &&
+               immediate.IsSyncTxProofAccepted(true, true, rejected),
+            "immediate E1000 TXDW reaches production driver and passes proof");
+
+        ResetInterruptFixture();
+        BuildBinding(out GxManagedKernelSerialPlatformDeviceV1 serialDevice,
+            out GxManagedKernelSerialServicesV1 serialServices,
+            out services);
+        dispatcher = ManagedInterruptDispatcher.TryCreate(in services);
+        Expect(dispatcher != null && dispatcher.TrySubscribeE1000(out _),
+            "COM1 interleaving fixture binds E1000");
+        if (dispatcher == null) return;
+        FakeProvider provider = new();
+        ManagedSerialDriver? serial = ManagedSerialDriver.TryCreate(
+            provider, in serialDevice, in serialServices);
+        Expect(serial != null && serial.TryInitialize() && serial.TryStart() &&
+               serial.TrySubscribeReceive(dispatcher),
+            "COM1 route runs beside the replacement E1000 route");
+        if (serial == null) return;
+        ManagedE1000Driver interleaved = CreateRunningPhase91Driver(dispatcher);
+        Expect(ArmSyncTxProof(interleaved), "interleaved sync-TX proof arms");
+        QueueE1000Event(1, txdw);
+        QueueEvent(2, (byte)'C');
+        QueueE1000Event(3, txdw);
+        bool interleavingDispatched = dispatcher.TryDispatchBatch(
+            serial, null, interleaved, out delivered, out rejected);
+        Expect(interleavingDispatched && delivered == 3 && rejected == 0 &&
+               serial.ReceiveCount == 1 && serial.LastReceiveByte == (byte)'C' &&
+               interleaved.Phase80DeliveryCount == 2 &&
+               interleaved.SyncTxTxdwNotificationCount == 2 &&
+               interleaved.IsSyncTxProofAccepted(true, true, rejected),
+            "COM1 event interleaving preserves serial and E1000 delivery state");
+        Expect(serial.TryUnsubscribeReceive(dispatcher) && serial.TryStop() &&
+               serial.Destroy() && provider.AllocationCalls == provider.ReleaseCalls,
+            "COM1 interleaving fixture releases its resources");
+        provider.ReleaseAll();
+
+        ResetInterruptFixture();
+        dispatcher = ManagedInterruptDispatcher.TryCreate(in services);
+        ulong oldRoute = 0;
+        bool oldRouteSubscribed = dispatcher != null &&
+            dispatcher.TrySubscribeE1000(out oldRoute);
+        Expect(oldRouteSubscribed,
+            "old E1000 route opens for stale-FIFO regression");
+        if (dispatcher == null) return;
+        if (!oldRouteSubscribed) return;
+        QueueE1000Event(1, txdw);
+        Expect(dispatcher.TryUnsubscribeE1000() &&
+               dispatcher.TrySubscribeE1000(out ulong replacementRoute) &&
+               replacementRoute != oldRoute,
+            "replacement E1000 subscription gets a new route token");
+        ManagedE1000Driver restarted = CreateRunningPhase91Driver(dispatcher);
+        Expect(ArmSyncTxProof(restarted),
+            "restarted driver snapshots the replacement sequence boundary");
+        bool oldQueuedEventDispatched = dispatcher.TryDispatchBatch(
+            null, null, restarted, out delivered, out rejected);
+        Expect(oldQueuedEventDispatched && delivered == 1 && rejected == 0 &&
+               !restarted.SyncTxTxdwNotificationObserved &&
+               !restarted.IsSyncTxProofAccepted(true, true, 0),
+            "pre-restart queued E1000 TXDW cannot satisfy restarted proof");
+        QueueE1000Event(2, txdw);
+        bool freshEventDispatched = dispatcher.TryDispatchBatch(
+            null, null, restarted, out delivered, out rejected);
+        Expect(freshEventDispatched && delivered == 1 && rejected == 0 &&
+               restarted.SyncTxTxdwNotificationObserved &&
+               restarted.IsSyncTxProofAccepted(true, true, rejected),
+            "fresh E1000 event after replacement subscription satisfies proof");
+
+        ResetInterruptFixture();
+        dispatcher = ManagedInterruptDispatcher.TryCreate(in services);
+        Expect(dispatcher != null && dispatcher.TrySubscribeE1000(out _),
+            "delayed dispatcher fixture subscribes E1000");
+        if (dispatcher == null) return;
+        ManagedE1000Driver delayed = CreateRunningPhase91Driver(dispatcher);
+        Expect(ArmSyncTxProof(delayed), "delayed dispatch proof arms");
+        QueueE1000Event(1, txdw);
+        bool synchronousDdCompleted = true;
+        Expect(!delayed.IsSyncTxProofAccepted(synchronousDdCompleted, false, 0) &&
+               delayed.SyncTxTxdwNotificationCount == 0,
+            "DD polling completes before the queued event is managed-dispatched");
+        bool delayedDispatched = dispatcher.TryDispatchBatch(
+            null, null, delayed, out delivered, out rejected);
+        Expect(delayedDispatched && delivered == 1 && rejected == 0 &&
+               delayed.IsSyncTxProofAccepted(synchronousDdCompleted, true, rejected),
+            "later managed dispatch completes the already-finished synchronous TX");
+
+        ResetInterruptFixture();
+        dispatcher = ManagedInterruptDispatcher.TryCreate(in services);
+        Expect(dispatcher != null && dispatcher.TrySubscribeE1000(out _),
+            "missing-notification fixture subscribes E1000");
+        if (dispatcher == null) return;
+        ManagedE1000Driver noNotification = CreateRunningPhase91Driver(dispatcher);
+        Expect(ArmSyncTxProof(noNotification), "missing-notification proof arms");
+        bool validDdWithoutEvent = true;
+        Expect(validDdWithoutEvent &&
+               !noNotification.IsSyncTxProofAccepted(validDdWithoutEvent, true, 0),
+            "valid descriptor DD without a new TXDW remains a routing-proof failure");
+    }
+
     public static int Main()
     {
         RunDispatcherAndDriverProof();
+        RunPhase91SyncTxDispatchRegressions();
         if (s_failures != 0)
         {
             Console.WriteLine("MANAGED_KERNEL_INTERRUPT_HOST_TESTS=FAILED assertions=" +

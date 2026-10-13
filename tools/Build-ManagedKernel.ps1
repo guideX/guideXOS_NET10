@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [switch]$EnablePhase91Diagnostics
 )
 
 Set-StrictMode -Version Latest
@@ -53,6 +54,9 @@ try {
         '/p:RuntimeIdentifier=win-x64', '/p:SelfContained=true',
         '/p:PublishAot=true', '/p:OutputType=Library', '/p:NativeLib=Shared',
         "/p:PublishDir=$publish\", "/bl:$binlog")
+    if ($EnablePhase91Diagnostics) {
+        $arguments += '/p:EnablePhase91Diagnostics=true'
+    }
     & $dotnet.Source @arguments 1> (Join-Path $out 'publish.stdout.log') 2> (Join-Path $out 'publish.stderr.log')
     if ($LASTEXITCODE -ne 0) {
         throw "ManagedKernel NativeAOT publish failed (exit $LASTEXITCODE)."

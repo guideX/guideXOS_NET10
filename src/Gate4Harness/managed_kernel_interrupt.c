@@ -390,6 +390,43 @@ static void enqueue_from_route(
     }
 }
 
+/* Queued records identify a device, not a particular subscription token. Drop
+   records for this route before a replacement token can consume them, while
+   retaining FIFO records belonging to other active devices. The removed
+   records count as drained from the shared queue. */
+static uint32_t discard_queued_route_events(
+    GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
+    const GXOS_MANAGED_KERNEL_INTERRUPT_ROUTE *route)
+{
+    uint32_t read_index = load_u32(&context->read_index);
+    uint32_t write_index = load_u32(&context->write_index);
+    uint32_t output_index = read_index;
+    uint32_t discarded = 0;
+    uint32_t scan_index;
+
+    for (scan_index = read_index; scan_index != write_index; ++scan_index) {
+        GX_MANAGED_KERNEL_INTERRUPT_EVENT_V1 event = context->events[
+            scan_index % GX_MANAGED_KERNEL_INTERRUPT_QUEUE_CAPACITY];
+        if (event.EventType == route->event_type &&
+            event.DeviceKind == route->device_kind &&
+            event.DeviceId == route->device_id) {
+            ++discarded;
+            continue;
+        }
+        if (output_index != scan_index) {
+            context->events[output_index %
+                GX_MANAGED_KERNEL_INTERRUPT_QUEUE_CAPACITY] = event;
+        }
+        ++output_index;
+    }
+    if (discarded != 0U) {
+        store_u32(&context->write_index, output_index);
+        __atomic_add_fetch(&context->drained_count, discarded,
+                           __ATOMIC_RELAXED);
+    }
+    return discarded;
+}
+
 void gxos_managed_kernel_interrupt_capture_route(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context, uint32_t route_index)
 {
@@ -474,6 +511,10 @@ static uint32_t subscribe_route(
     if (active_route_count(context) == 0) {
         store_u32(&context->read_index, 0);
         store_u32(&context->write_index, 0);
+    } else {
+        /* Another device may keep the shared FIFO alive across this route's
+           teardown. Such records belong to the previous subscription. */
+        (void)discard_queued_route_events(context, route);
     }
     token = context->next_subscription_id + 1U;
     if (token == 0) token = 1;
@@ -560,6 +601,11 @@ static uint32_t unsubscribe_route(
     sync_legacy_route0(context);
     return GX_MANAGED_OK;
 }
+
+/* Phase 91 deliberately unsubscribes the original E1000 owner before reset,
+   while keeping the route table available for a fresh driver episode. Once
+   the replacement subscribes, resume routes reprograms MSI and opens event
+   acceptance using the existing managed service lifecycle. */
 
 uint32_t GX_MANAGED_KERNEL_MS_ABI gxos_managed_kernel_interrupt_unsubscribe_v1(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context, uint64_t subscription_id)

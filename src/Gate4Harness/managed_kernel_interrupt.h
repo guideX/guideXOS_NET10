@@ -167,6 +167,7 @@ uint32_t GX_MANAGED_KERNEL_MS_ABI gxos_managed_kernel_interrupt_unsubscribe_inpu
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
     uint64_t subscription_id);
 
+
 uint32_t GX_MANAGED_KERNEL_MS_ABI gxos_managed_kernel_interrupt_drain_v1(
     GXOS_MANAGED_KERNEL_INTERRUPT_CONTEXT *context,
     uint32_t requested_abi_version, uintptr_t output_address,

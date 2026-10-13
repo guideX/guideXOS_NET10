@@ -80,6 +80,8 @@ internal static class ManagedE1000Protocol
     internal const uint TransmitPadShort = 1U << 3;
     internal const uint TransmitCollisionThreshold = 0x10U << 4;
     internal const uint TransmitCollisionDistance = 0x40U << 12;
+    internal const uint ControlReset = 1U << 26;
+    internal const uint AsyncTxGenerationMax = 0x0FFFFFFFU;
 
     internal static ReadOnlySpan<byte> ProofSignature =>
         "guideXOS ManagedKernel Phase14 TX"u8;
@@ -145,23 +147,27 @@ internal static class ManagedE1000Protocol
     }
 
     internal static bool TryBuildAsyncTxRequestId(uint descriptorIndex,
-        uint generation, uint ringCount, out ulong requestId)
+        uint generation, uint episode, uint ringCount, out ulong requestId)
     {
         requestId = 0;
-        if (ringCount == 0 || descriptorIndex >= ringCount || generation == 0)
+        if (ringCount == 0 || ringCount > 16 || descriptorIndex >= ringCount ||
+            generation == 0 ||
+            generation > AsyncTxGenerationMax || episode == 0)
             return false;
-        requestId = ((ulong)generation << 32) | ((ulong)descriptorIndex + 1UL);
+        requestId = ((ulong)episode << 32) | ((ulong)generation << 4) |
+                    descriptorIndex;
         return true;
     }
 
     internal static bool TryDecodeAsyncTxRequestId(ulong requestId,
-        uint ringCount, out uint descriptorIndex, out uint generation)
+        uint ringCount, out uint descriptorIndex, out uint generation,
+        out uint episode)
     {
-        descriptorIndex = (uint)requestId;
-        generation = (uint)(requestId >> 32);
-        if (descriptorIndex == 0 || generation == 0 || ringCount == 0)
+        descriptorIndex = (uint)(requestId & 0xFUL);
+        generation = (uint)((requestId >> 4) & AsyncTxGenerationMax);
+        episode = (uint)(requestId >> 32);
+        if (generation == 0 || episode == 0 || ringCount == 0 || ringCount > 16)
             return false;
-        descriptorIndex--;
         return descriptorIndex < ringCount;
     }
 
@@ -271,8 +277,11 @@ internal static class ManagedE1000Protocol
     internal static bool IsDescriptorComplete(ReadOnlySpan<byte> descriptor)
     {
         return descriptor.Length == DescriptorSize &&
-               (descriptor[12] & TxStatusDone) != 0;
+               IsTxDescriptorStatusComplete(descriptor[12]);
     }
+
+    internal static bool IsTxDescriptorStatusComplete(byte status) =>
+        (status & TxStatusDone) != 0;
 
     internal static bool TryClassifyInterruptCause(uint cause,
                                                     out uint unrelated)

@@ -19,21 +19,23 @@ internal static class Program
             "ring-wraparound");
         Check(!ManagedE1000Protocol.TryAdvanceRing(8, 8, out _),
             "ring-index-out-of-range-rejected");
-        Check(ManagedE1000Protocol.TryBuildAsyncTxRequestId(3, 7, 16,
+        Check(ManagedE1000Protocol.TryBuildAsyncTxRequestId(3, 7, 1, 16,
                   out ulong requestId) &&
               ManagedE1000Protocol.TryDecodeAsyncTxRequestId(requestId, 16,
-                  out uint requestIndex, out uint requestGeneration) &&
-              requestIndex == 3 && requestGeneration == 7,
+                  out uint requestIndex, out uint requestGeneration,
+                  out uint requestEpisode) &&
+              requestIndex == 3 && requestGeneration == 7 && requestEpisode == 1,
             "async-request-index-and-generation-round-trip");
-        Check(ManagedE1000Protocol.TryBuildAsyncTxRequestId(3, 8, 16,
+        Check(ManagedE1000Protocol.TryBuildAsyncTxRequestId(3, 8, 1, 16,
                   out ulong reusedRequestId) && requestId != reusedRequestId &&
               ManagedE1000Protocol.TryDecodeAsyncTxRequestId(reusedRequestId, 16,
-                  out requestIndex, out requestGeneration) &&
+                  out requestIndex, out requestGeneration, out requestEpisode) &&
               requestIndex == 3 && requestGeneration == 8,
             "async-request-same-slot-reuse-gets-new-generation");
-        Check(!ManagedE1000Protocol.TryBuildAsyncTxRequestId(16, 1, 16, out _) &&
-              !ManagedE1000Protocol.TryBuildAsyncTxRequestId(0, 0, 16, out _) &&
-              !ManagedE1000Protocol.TryDecodeAsyncTxRequestId(0, 16, out _, out _),
+        Check(!ManagedE1000Protocol.TryBuildAsyncTxRequestId(16, 1, 1, 16, out _) &&
+              !ManagedE1000Protocol.TryBuildAsyncTxRequestId(0, 0, 1, 16, out _) &&
+              !ManagedE1000Protocol.TryBuildAsyncTxRequestId(0, 1, 0, 16, out _) &&
+              !ManagedE1000Protocol.TryDecodeAsyncTxRequestId(0, 16, out _, out _, out _),
             "async-request-invalid-index-and-generation-rejected");
 
         Check(ManagedE1000Protocol.TryValidateMmioWrite(0x1C, 4, 0x20, true),
