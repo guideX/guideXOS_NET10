@@ -14154,6 +14154,9 @@ static uint32_t managed_kernel_e1000_interrupt_mask(void)
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE91_LIFECYCLE
     mask |= GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_RXT0;
 #endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE
+    mask |= GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_RXT0;
+#endif
     return mask;
 }
 
@@ -16060,6 +16063,10 @@ static void managed_kernel_phase14_driver(
     status = run_phase14(37U);
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase89-udp-mode");
     serial_text("GXOS_NET10:PHASE89_UDP_MODE_SELECTED=1\r\n");
+#elif defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE)
+    status = run_phase14(41U);
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase92-mode");
+    serial_text("GXOS_NET10:PHASE92_ASYNC_TX_ENDURANCE_MODE_SELECTED=1\r\n");
 #elif defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE91_LIFECYCLE)
     status = run_phase14(39U);
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase91-mode");
@@ -16090,6 +16097,7 @@ static void managed_kernel_phase14_driver(
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE87_ICMPV4) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE89_UDP) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE91_LIFECYCLE) || \
+    defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE90_ASYNC_TX) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE83_RX)
 #ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE82
@@ -16633,7 +16641,11 @@ static void managed_kernel_phase14_driver(
             com1_route->subscription_active == 0U ||
             com1_route->hardware_enabled == 0U ||
             hardware_after <= phase91_hardware_before ||
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE
+            hardware_after - phase91_hardware_before > 256U ||
+#else
             hardware_after - phase91_hardware_before > 32U ||
+#endif
             route_after <= phase91_route_before ||
             dispatch_after - phase91_dispatch_before !=
                 route_after - phase91_route_before ||
@@ -16718,7 +16730,11 @@ static void managed_kernel_phase14_driver(
             fail("phase91-final-teardown-counter-reconciliation");
         }
         serial_text("GXOS_NET10:PHASE91_FINAL_TEARDOWN_RECONCILED=1\r\n");
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE
+        serial_text("GXOS_NET10:PHASE92_NATIVE_TEARDOWN_RECONCILED=1\r\n");
+#else
         serial_text("PHASE91_ASYNC_TX_RESET_CONTAINMENT_PASS=1\r\n");
+#endif
     }
 #endif
 #ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE15_NETWORKING_REGRESSION

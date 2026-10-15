@@ -17,6 +17,7 @@ param(
     [switch]$EnablePhase89Udp,
     [switch]$EnablePhase90AsyncTx,
     [switch]$EnablePhase91AsyncTxLifecycle,
+    [switch]$EnablePhase92AsyncTxEndurance,
     [string]$Phase15InjectorPath = '',
     [string]$Phase89InjectorPath = '',
     [ValidateSet('dgram', 'user')]
@@ -73,7 +74,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:phase11RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$script:phase91RequireQemuIsolation = [bool]$EnablePhase91AsyncTxLifecycle
+$script:phase91RequireQemuIsolation = [bool]($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance)
 $script:phase11ExpectedQemuPid = 0
 $script:phase11QemuInventoryPath = $null
 $script:phase11LastIsolationCheckUtc = [datetime]::MinValue
@@ -137,6 +138,13 @@ if ($EnablePhase91AsyncTxLifecycle -and (-not $EnablePhase80E1000 -or
     $EnablePhase86Ipv4 -or $EnablePhase87Icmpv4 -or $EnablePhase89Udp -or
     $EnablePhase90AsyncTx -or ($RunCount -ne 1 -and $RunCount -ne 3))) {
     throw 'Phase 91 lifecycle acceptance requires the Phase 80 route, one diagnostic or three fresh boots, and no other E1000 fixture.'
+}
+if ($EnablePhase92AsyncTxEndurance -and (-not $EnablePhase80E1000 -or
+    $EnablePhase83 -or $EnablePhase82 -or $EnablePhase85Arp -or
+    $EnablePhase86Ipv4 -or $EnablePhase87Icmpv4 -or $EnablePhase89Udp -or
+    $EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle -or
+    $RunCount -ne 3)) {
+    throw 'Phase 92 endurance requires the Phase 80 route, exactly three fresh boots, and no other E1000 fixture.'
 }
 if ($EnablePhase82 -and -not $EnablePhase80E1000) {
     throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
@@ -3671,7 +3679,6 @@ if ($EnablePhase91AsyncTxLifecycle) {
         'GXOS_NET10:PHASE90_SYNC_TX_REGRESSION=PASS',
         'PHASE90_ASYNC_TX_COMPLETION_PASS=1',
         'GXOS_NET10:PHASE90_COM1_ROUTE_ACTIVE=1',
-        'GXOS_NET10:PHASE91_ASYNC_TX_RESET_MODE_SELECTED=1',
         'GXOS_NET10:PHASE91_STOP_BEGINS=1',
         'GXOS_NET10:PHASE91_STOP_ADMISSION_CLOSED=1',
         'GXOS_NET10:PHASE91_STOP_LATE_TXDW_IGNORED=1',
@@ -3709,6 +3716,77 @@ if ($EnablePhase91AsyncTxLifecycle) {
         'GXOS_NET10:PHASE91_NO_INTERRUPT_STORM=1',
         'GXOS_NET10:PHASE91_FINAL_TEARDOWN_RECONCILED=1',
         'PHASE91_ASYNC_TX_RESET_CONTAINMENT_PASS=1')
+}
+if ($EnablePhase92AsyncTxEndurance) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE92_ASYNC_TX_ENDURANCE_MODE_SELECTED=1',
+        'GXOS_NET10:PHASE90_PENDING_AND_CAPACITY_PASS=1',
+        'GXOS_NET10:PHASE90_SYNC_TX_REGRESSION=PASS',
+        'PHASE90_ASYNC_TX_COMPLETION_PASS=1',
+        'GXOS_NET10:PHASE92_EPISODE1_RECONCILED=1',
+        'GXOS_NET10:PHASE92_RESTART_COMPLETED=1',
+        'GXOS_NET10:PHASE92_OLD_EPISODE_ID_REJECTED_AFTER_RESTART=1',
+        'GXOS_NET10:PHASE92_OLD_ID_REJECTED_WHILE_ACTIVE=1',
+        'GXOS_NET10:PHASE92_PROGRESS_SUCCESSFUL_TRANSMISSIONS=0x0000000000000020',
+        'GXOS_NET10:PHASE92_PROGRESS_SUCCESSFUL_TRANSMISSIONS=0x0000000000000040',
+        'GXOS_NET10:PHASE92_PROGRESS_SUCCESSFUL_TRANSMISSIONS=0x0000000000000080',
+        'GXOS_NET10:PHASE92_PROGRESS_SUCCESSFUL_TRANSMISSIONS=0x00000000000000C0',
+        'GXOS_NET10:PHASE92_PROGRESS_SUCCESSFUL_TRANSMISSIONS=0x0000000000000100',
+        'GXOS_NET10:PHASE92_EPISODE1_ACCEPTED=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE1_COMPLETED=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE1_SUCCESSFUL_FRAMES=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE1_EXPOSED=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE1_CONSUMED=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE1_BUSY_PROBES=0x0000000000000020',
+        'GXOS_NET10:PHASE92_CAPACITY_RESTORED_AFTER_DRAIN=1',
+        'GXOS_NET10:PHASE92_EPISODE1_MAX_OUTSTANDING=0x0000000000000004',
+        'GXOS_NET10:PHASE92_EPISODE1_FINAL_OUTSTANDING=0x0000000000000000',
+        'GXOS_NET10:PHASE92_EPISODE2_ACCEPTED=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE2_COMPLETED=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE2_SUCCESSFUL_FRAMES=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE2_EXPOSED=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE2_CONSUMED=0x0000000000000080',
+        'GXOS_NET10:PHASE92_EPISODE2_BUSY_PROBES=0x0000000000000020',
+        'GXOS_NET10:PHASE92_EPISODE2_MAX_OUTSTANDING=0x0000000000000004',
+        'GXOS_NET10:PHASE92_EPISODE2_FINAL_OUTSTANDING=0x0000000000000000',
+        'GXOS_NET10:PHASE92_FINAL_OUTSTANDING=0x0000000000000000',
+        'GXOS_NET10:PHASE92_GUEST_RESOURCE_DRAIN_PASS=1',
+        'GXOS_NET10:PHASE92_NATIVE_TEARDOWN_RECONCILED=1',
+        'GXOS_NET10:PHASE91_ASYNC_TX_RESET_MODE_SELECTED=1',
+        'GXOS_NET10:PHASE91_STOP_BEGINS=1',
+        'GXOS_NET10:PHASE91_STOP_ADMISSION_CLOSED=1',
+        'GXOS_NET10:PHASE91_STOP_LATE_TXDW_IGNORED=1',
+        'GXOS_NET10:PHASE91_STOP_ROUTE_REMOVED=1',
+        'GXOS_NET10:PHASE91_STOP_HARDWARE_RESET_COMPLETE=1',
+        'GXOS_NET10:PHASE91_STOP_BUS_MASTER_DISABLED=1',
+        'GXOS_NET10:PHASE91_DMA_RELEASE_AFTER_RESET=1',
+        'GXOS_NET10:PHASE91_STOP_LEDGER_INVALIDATED=1',
+        'GXOS_NET10:PHASE91_OLD_COMPLETED_LEDGER_INVALIDATED=1',
+        'GXOS_NET10:PHASE91_RESTART_BEGINS=1',
+        'GXOS_NET10:PHASE91_RESTART_DRIVER_RUNNING=1',
+        'GXOS_NET10:PHASE91_ROUTE_TOKEN_CHANGED=1',
+        'GXOS_NET10:PHASE91_RESTART_ROUTE_PROOF_COMPLETE=1',
+        'GXOS_NET10:PHASE91_RESTART_ROUTE_REINSTALLED=1',
+        'GXOS_NET10:PHASE91_RESTART_PHASE80_DD_ROUTE_PASS=1',
+        'GXOS_NET10:PHASE91_RESTART_SAME_SLOT_READY=1',
+        'GXOS_NET10:PHASE91_SAME_SLOT_NEW_ID_NO_ALIAS=1',
+        'GXOS_NET10:PHASE91_RESTART_ASYNC_CAPACITY_FOUR_AND_FIFTH_BUSY=1',
+        'GXOS_NET10:PHASE91_RESTART_OLD_IDS_REJECTED_WHILE_ACTIVE=1',
+        'GXOS_NET10:PHASE91_RESTART_STALE_IDS_NO_MUTATION=1',
+        'GXOS_NET10:PHASE91_RESTART_FIRST_ASYNC_TX_PASS=1',
+        'GXOS_NET10:PHASE91_RESTART_ASYNC_FOUR_COMPLETED_CONSUMED=1',
+        'GXOS_NET10:PHASE91_RESTART_ASYNC_CAPACITY_RESTORED=1',
+        'GXOS_NET10:PHASE91_RESTART_SYNC_TX_DD_POLL_PASS=1',
+        'GXOS_NET10:PHASE91_RESTART_SYNC_TX_DD_POLL_FRAMES=0x0000000000000001',
+        'GXOS_NET10:PHASE91_RESTART_RX_READY=1',
+        'GXOS_NET10:PHASE91_RESTART_TXDW_ROUTE_READY=1',
+        'GXOS_NET10:PHASE91_POST_RESTART_RX_PASS=1',
+        'GXOS_NET10:PHASE91_RESTART_TX_RX_LIVENESS=PASS',
+        'GXOS_NET10:PHASE91_LIFECYCLE_RECONCILED=1',
+        'GXOS_NET10:PHASE91_TXDW_MASK_RESTORED=1',
+        'GXOS_NET10:PHASE91_REAL_RX_LIVENESS=1',
+        'GXOS_NET10:PHASE91_NO_INTERRUPT_STORM=1',
+        'GXOS_NET10:PHASE91_COM1_ROUTE_ACTIVE=1')
 }
 if ($Phase15EnableFilterDump) {
     Require11 ($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') `
@@ -3830,7 +3908,8 @@ try {
         }
         $phase90CaptureLog = Join-Path $run 'phase90-tx-capture.log'
         $phase90CaptureBinary = Join-Path $run 'phase90-tx-capture.bin'
-        if ($EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle) {
+        if ($EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle -or
+            $EnablePhase92AsyncTxEndurance) {
             [IO.File]::WriteAllText($phase90CaptureLog, '')
             [IO.File]::WriteAllBytes($phase90CaptureBinary, [byte[]]@())
         }
@@ -3863,14 +3942,14 @@ try {
         $peerPort = 0
         if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
             $EnablePhase83 -or $EnablePhase90AsyncTx -or
-            $EnablePhase91AsyncTxLifecycle) {
+            $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
             $rxPort = Get-FreeUdpPort11
             $peerPort = Get-FreeUdpPort11
         }
         $peerUdp = $null
         if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
             $EnablePhase83 -or $EnablePhase90AsyncTx -or
-            $EnablePhase91AsyncTxLifecycle) {
+            $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
             # QEMU's dgram backend requires a live remote endpoint. Keep the
             # host peer bound before QEMU starts so E1000 TX cannot stall; the
             # controlled RX frames are sent later after the guest is ready.
@@ -3888,7 +3967,7 @@ try {
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
             '-display', $(if ($CaptureQemuScreen) { 'gtk' } else { 'none' }), '-no-reboot', '-no-shutdown')
         if ($EnablePhase83 -or $EnablePhase90AsyncTx -or
-            $EnablePhase91AsyncTxLifecycle) {
+            $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
             $arguments += @('-nic', 'none')
             $arguments += @(
                 '-netdev', "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$rxPort,remote.type=inet,remote.host=127.0.0.1,remote.port=$peerPort")
@@ -3975,7 +4054,7 @@ try {
             Write-Timeline11 $timeline 'HOST_LISTENERS_READY' $listenerDetail
             Write-Timeline11 $timeline 'HOST_FIXTURE_READY' 'protocol=phase15-dgram-tcp-tls-http state=clean-peer-bound'
             Write-Timeline11 $timeline 'FIRMWARE_IDENTITY' "code_sha256=$codeHash vars_sha256=$varsHash"
-            if ($EnablePhase91AsyncTxLifecycle) {
+            if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
                 Ensure-CleanQemuState11 $script:phase11QemuInventoryPath `
                     ("BOOT_{0}_LAUNCH_PREFLIGHT" -f $sequence)
             }
@@ -4331,7 +4410,8 @@ try {
                     $injectionLog.Flush()
                 }
             }
-            if ($EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle) {
+            if ($EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle -or
+                $EnablePhase92AsyncTxEndurance) {
                 Wait-Marker11 'PHASE90_ASYNC_TX_COMPLETION_PASS=1' `
                     $deadline $process $stream $logStream $text $buffer
                 $macMatch = [regex]::Match($text.ToString(),
@@ -4343,7 +4423,7 @@ try {
                 }
                 $seenSequences = [Collections.Generic.HashSet[uint32]]::new()
                 $expectedSequences = [Collections.Generic.HashSet[uint32]]::new()
-                if ($EnablePhase91AsyncTxLifecycle) {
+                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
                     foreach ($expected in 1..18) {
                         [void]$expectedSequences.Add([uint32]$expected)
                     }
@@ -4354,13 +4434,21 @@ try {
                         [void]$expectedSequences.Add(
                             [Convert]::ToUInt32($hex, 16))
                     }
+                    if ($EnablePhase92AsyncTxEndurance) {
+                        $episodeOneBase = [uint64][Convert]::ToUInt32('92010000', 16)
+                        $episodeTwoBase = [uint64][Convert]::ToUInt32('92020000', 16)
+                        for ($request = 1; $request -le 128; ++$request) {
+                            [void]$expectedSequences.Add([uint32]($episodeOneBase + $request))
+                            [void]$expectedSequences.Add([uint32]($episodeTwoBase + $request))
+                        }
+                    }
                 } else {
                     foreach ($expected in 1..18) {
                         [void]$expectedSequences.Add([uint32]$expected)
                     }
                     $expectedCaptureCount = 18
                 }
-                if ($EnablePhase91AsyncTxLifecycle) {
+                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
                     Wait-Marker11 'GXOS_NET10:PHASE91_RESTART_RX_READY=1' `
                         $deadline $process $stream $logStream $text $buffer
                     $serialSnapshot = $text.ToString()
@@ -4422,6 +4510,62 @@ try {
                         $restartConsumed -eq $restartExposed) `
                         'Restart async accepted/completed/transmitted/consumed accounting disagrees.'
 
+                    if ($EnablePhase92AsyncTxEndurance) {
+                        Require11 ($preStopAsyncAccepted -eq 149 -and
+                            $preStopAsyncCompleted -eq 149 -and
+                            $preStopAsyncTransmitted -eq 149 -and
+                            $atStop -eq 4 -and $completedUnconsumed -eq 4 -and
+                            $hardwareOwned -eq 0 -and $invalidated -eq 4 -and
+                            $exposedBeforeStop -eq 149 -and $consumedBeforeStop -eq 145 -and
+                            $restartAsyncAccepted -eq 133 -and
+                            $restartAsyncCompleted -eq 133 -and
+                            $restartAsyncTransmitted -eq 133 -and
+                            $restartExposed -eq 133 -and $restartConsumed -eq 133) `
+                            'Phase 92 per-episode request and teardown invalidation counts disagree.'
+                        $phase92CounterNames = @(
+                            'PHASE92_EPISODE1_ACCEPTED', 'PHASE92_EPISODE1_COMPLETED',
+                            'PHASE92_EPISODE1_SUCCESSFUL_FRAMES', 'PHASE92_EPISODE1_EXPOSED',
+                            'PHASE92_EPISODE1_CONSUMED', 'PHASE92_EPISODE1_BUSY_PROBES',
+                            'PHASE92_EPISODE1_DESCRIPTOR_WRAPS',
+                            'PHASE92_EPISODE1_FINAL_OUTSTANDING', 'PHASE92_EPISODE1_MAX_OUTSTANDING',
+                            'PHASE92_EPISODE2_ACCEPTED', 'PHASE92_EPISODE2_COMPLETED',
+                            'PHASE92_EPISODE2_SUCCESSFUL_FRAMES', 'PHASE92_EPISODE2_EXPOSED',
+                            'PHASE92_EPISODE2_CONSUMED', 'PHASE92_EPISODE2_BUSY_PROBES',
+                            'PHASE92_EPISODE2_DESCRIPTOR_WRAPS',
+                            'PHASE92_EPISODE2_FINAL_OUTSTANDING', 'PHASE92_EPISODE2_MAX_OUTSTANDING',
+                            'PHASE92_FINAL_OUTSTANDING', 'PHASE92_FINAL_HARDWARE_OWNED',
+                            'PHASE92_FINAL_COMPLETED_UNCONSUMED', 'PHASE92_FINAL_EXPOSED',
+                            'PHASE92_FINAL_CONSUMED')
+                        $phase92Counters = @{}
+                        foreach ($counterName in $phase92CounterNames) {
+                            $counterPrefix = [regex]::Escape("GXOS_NET10:${counterName}=0x")
+                            $counterMatch = [regex]::Match($serialSnapshot,
+                                $counterPrefix + '([0-9A-Fa-f]{16})')
+                            Require11 $counterMatch.Success `
+                                "Phase 92 semantic counter is missing: $counterName"
+                            $phase92Counters[$counterName] = [Convert]::ToUInt64(
+                                $counterMatch.Groups[1].Value, 16)
+                        }
+                        foreach ($episodeName in @('EPISODE1', 'EPISODE2')) {
+                            Require11 ($phase92Counters["PHASE92_${episodeName}_ACCEPTED"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_COMPLETED"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_SUCCESSFUL_FRAMES"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_EXPOSED"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_CONSUMED"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_BUSY_PROBES"] -eq 32 -and
+                                $phase92Counters["PHASE92_${episodeName}_DESCRIPTOR_WRAPS"] -ge 7 -and
+                                $phase92Counters["PHASE92_${episodeName}_FINAL_OUTSTANDING"] -eq 0 -and
+                                $phase92Counters["PHASE92_${episodeName}_MAX_OUTSTANDING"] -eq 4) `
+                                "Phase 92 $episodeName ledger accounting did not reconcile."
+                        }
+                        Require11 ($phase92Counters['PHASE92_FINAL_OUTSTANDING'] -eq 0 -and
+                            $phase92Counters['PHASE92_FINAL_HARDWARE_OWNED'] -eq 0 -and
+                            $phase92Counters['PHASE92_FINAL_COMPLETED_UNCONSUMED'] -eq 0 -and
+                            $phase92Counters['PHASE92_FINAL_EXPOSED'] -eq
+                                $phase92Counters['PHASE92_FINAL_CONSUMED']) `
+                            'Phase 92 final resource drain did not reconcile.'
+                    }
+
                     $expectedCaptureCount = [int](
                         $preStopAsyncTransmitted +
                         $phase91Counters['PHASE90_SYNC_TX_DD_POLL_FRAMES'] +
@@ -4430,7 +4574,8 @@ try {
                     Require11 ($expectedCaptureCount -eq $expectedSequences.Count) `
                         "Lifecycle accounting expects $expectedCaptureCount frames, but the fixture sentinel set has $($expectedSequences.Count)."
                 }
-                $captureWaitSeconds = if ($EnablePhase91AsyncTxLifecycle) { 60 } else { 20 }
+                $captureWaitSeconds = if ($EnablePhase92AsyncTxEndurance) { 120 } `
+                    elseif ($EnablePhase91AsyncTxLifecycle) { 60 } else { 20 }
                 $captureDeadline = [DateTime]::UtcNow.AddSeconds($captureWaitSeconds)
                 while ($seenSequences.Count -lt $expectedCaptureCount -and
                        [DateTime]::UtcNow -lt $captureDeadline) {
@@ -4444,6 +4589,14 @@ try {
                         (Bytes-Equal16 $candidate 0 ([byte[]]@(255,255,255,255,255,255))) -and
                         (Bytes-Equal16 $candidate 6 $guestMac)) `
                         'Phase 90 captured an unexpected frame size or MAC address.'
+                    if ($EnablePhase92AsyncTxEndurance) {
+                        Require11 ($candidate[29] -eq 0) `
+                            'Phase 92 frame padding marker changed.'
+                        for ($payloadOffset = 34; $payloadOffset -lt 60; ++$payloadOffset) {
+                            Require11 ($candidate[$payloadOffset] -eq 0) `
+                                'Phase 92 frame payload tail marker changed.'
+                        }
+                    }
                     [uint32]$frameSequence =
                         ([uint32]$candidate[30] -shl 24) -bor
                         ([uint32]$candidate[31] -shl 16) -bor
@@ -4477,7 +4630,71 @@ try {
                 }
                 Require11 ($seenSequences.Count -eq $expectedCaptureCount) `
                     "Async TX captured $($seenSequences.Count)/$expectedCaptureCount expected real E1000 frames."
-                if ($EnablePhase91AsyncTxLifecycle) {
+                if ($EnablePhase92AsyncTxEndurance) {
+                    $duplicateProbeUntil = [DateTime]::UtcNow.AddMilliseconds(1000)
+                    while ([DateTime]::UtcNow -lt $duplicateProbeUntil) {
+                        [byte[]]$extra = Receive-Phase85QemuDatagram11 $peerUdp 50
+                        if ($null -eq $extra -or $extra.Length -lt 29 -or
+                            $extra[12] -ne 0x88 -or $extra[13] -ne 0xB5) { continue }
+                        if ([Text.Encoding]::ASCII.GetString($extra, 14, 15) -eq
+                            'GXOS_PHASE90_TX') {
+                            throw 'Phase 92 host capture received an extra or duplicate TX frame after the expected set was complete.'
+                        }
+                    }
+
+                    [byte[]]$captureBytes = [IO.File]::ReadAllBytes(
+                        $phase90CaptureBinary)
+                    $captureOffset = 0
+                    $phase92CaptureRecords = 0
+                    $phase92CaptureSequences =
+                        [Collections.Generic.HashSet[uint32]]::new()
+                    $phase92OneBase = [uint32][Convert]::ToUInt32('92010000', 16)
+                    $phase92TwoBase = [uint32][Convert]::ToUInt32('92020000', 16)
+                    $phase92SequenceCount = 0
+                    while ($captureOffset -lt $captureBytes.Length) {
+                        Require11 ($captureOffset + 4 -le $captureBytes.Length) `
+                            'Phase 92 capture evidence ended inside a frame length prefix.'
+                        [uint32]$recordLength = [BitConverter]::ToUInt32(
+                            $captureBytes, $captureOffset)
+                        Require11 ($recordLength -eq 60 -and
+                            $captureOffset + 4 + $recordLength -le $captureBytes.Length) `
+                            'Phase 92 capture evidence contains an invalid frame record.'
+                        [byte[]]$recordFrame = [byte[]]::new([int]$recordLength)
+                        [Array]::Copy($captureBytes, $captureOffset + 4,
+                            $recordFrame, 0, [int]$recordLength)
+                        Require11 ($recordFrame[12] -eq 0x88 -and
+                            $recordFrame[13] -eq 0xB5 -and
+                            [Text.Encoding]::ASCII.GetString($recordFrame, 14, 15) -eq
+                                'GXOS_PHASE90_TX' -and
+                            $recordFrame[29] -eq 0) `
+                            'Phase 92 capture evidence lost its frame marker.'
+                        for ($payloadOffset = 34; $payloadOffset -lt 60; ++$payloadOffset) {
+                            Require11 ($recordFrame[$payloadOffset] -eq 0) `
+                                'Phase 92 capture evidence has a damaged payload marker.'
+                        }
+                        [uint32]$recordSequence =
+                            ([uint32]$recordFrame[30] -shl 24) -bor
+                            ([uint32]$recordFrame[31] -shl 16) -bor
+                            ([uint32]$recordFrame[32] -shl 8) -bor
+                            [uint32]$recordFrame[33]
+                        Require11 ($expectedSequences.Contains($recordSequence) -and
+                            $phase92CaptureSequences.Add($recordSequence)) `
+                            'Phase 92 persisted capture contains an unexpected or duplicate sequence.'
+                        if (($recordSequence -gt $phase92OneBase -and
+                             $recordSequence -le $phase92OneBase + 128) -or
+                            ($recordSequence -gt $phase92TwoBase -and
+                             $recordSequence -le $phase92TwoBase + 128)) {
+                            ++$phase92SequenceCount
+                        }
+                        ++$phase92CaptureRecords
+                        $captureOffset += 4 + [int]$recordLength
+                    }
+                    Require11 ($phase92CaptureRecords -eq 284 -and
+                        $phase92CaptureSequences.Count -eq 284 -and
+                        $phase92SequenceCount -eq 256) `
+                        'Phase 92 persisted capture evidence did not independently reconcile 284 unique frames including all 256 endurance frames.'
+                }
+                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
                     $destinationMac = $macMatch.Groups[1].Value +
                                       $macMatch.Groups[2].Value
                     [byte[]]$rxFrame = New-Phase83RxFrame11 `
@@ -4502,10 +4719,22 @@ try {
                         $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'GXOS_NET10:PHASE91_LIFECYCLE_RECONCILED=1' `
                         $deadline $process $stream $logStream $text $buffer
+                    if ($EnablePhase92AsyncTxEndurance) {
+                        $lateDuplicateProbeUntil = [DateTime]::UtcNow.AddMilliseconds(1000)
+                        while ([DateTime]::UtcNow -lt $lateDuplicateProbeUntil) {
+                            [byte[]]$lateFrame = Receive-Phase85QemuDatagram11 $peerUdp 50
+                            if ($null -eq $lateFrame -or $lateFrame.Length -lt 29 -or
+                                $lateFrame[12] -ne 0x88 -or $lateFrame[13] -ne 0xB5) { continue }
+                            if ([Text.Encoding]::ASCII.GetString($lateFrame, 14, 15) -eq
+                                'GXOS_PHASE90_TX') {
+                                throw 'Phase 92 host capture received a late duplicate TX frame after guest liveness completed.'
+                            }
+                        }
+                    }
                 }
                 Write-Timeline11 $timeline 'PHASE90_HOST_TX_CAPTURE_COMPLETED' `
                     "frames=$($seenSequences.Count) distinct_sequences=verified"
-                if ($EnablePhase91AsyncTxLifecycle) {
+                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
                     $accountingDetail = (
                         ("pre_stop_async_transmitted={0} pre_stop_sync_transmitted={1} " +
                          "stop_completed_unconsumed={2} stop_hardware_owned_not_dd={3} " +
@@ -6310,7 +6539,7 @@ try {
             if ($null -ne $peerUdp) { $peerUdp.Dispose() }
             if ($null -ne $monitor) { $monitor.Dispose() }
             Stop-OwnedQemu11 $process
-            if ($EnablePhase91AsyncTxLifecycle) {
+            if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
                 $script:phase11ExpectedQemuPid = 0
                 Write-QemuInventory11 $script:phase11QemuInventoryPath ("BOOT_{0}_AFTER" -f $sequence)
                 Require11 (@(Get-QemuInventory11).Count -eq 0) `
@@ -6677,6 +6906,28 @@ try {
         foreach ($marker in $requiredMarkers) { Require11 $finalText.Contains($marker) "Boot $sequence missing marker: $marker" }
         Require11 (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS')).Count -eq 1) 'Phase 11 pass marker count was not one.'
         Require11 ($finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ENQUEUED_COUNT=0x0000000000000009') -and $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DRAINED_COUNT=0x0000000000000009') -and $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DROPPED_COUNT=0x0000000000000000')) "Boot $sequence did not account for nine shared events without drops."
+        if ($EnablePhase92AsyncTxEndurance) {
+            $phase92HostValidationPath = Join-Path $run 'phase92-host-validation.log'
+            Require11 (!(Test-Path -LiteralPath $phase92HostValidationPath)) `
+                'Phase 92 host-validation evidence already exists.'
+            $phase92CaptureHash = (Get-FileHash -LiteralPath $phase90CaptureBinary `
+                -Algorithm SHA256).Hash.ToUpperInvariant()
+            $phase92HostLines = @(
+                'PHASE92_HOST_CAPTURE_VALIDATION=PASS',
+                ('BOOT={0}' -f $sequence),
+                ('PAYLOAD_SHA256={0}' -f $expectedHash),
+                'PHASE92_ASYNC_TRANSMISSIONS=256',
+                ('TOTAL_UNIQUE_CAPTURED_FRAMES={0}' -f $phase92CaptureRecords),
+                'DUPLICATE_CAPTURED_FRAME_IDENTIFIERS=0',
+                ('CAPTURE_BINARY_SHA256={0}' -f $phase92CaptureHash),
+                'CAPTURE_MARKERS_AND_PAYLOAD_PADDING=PASS',
+                'REQUEST_ACCOUNTING_AND_GUEST_RESOURCE_DRAIN=PASS',
+                'NATIVE_TXDW_ROUTE_COM1_RX_LIVENESS_AND_TEARDOWN=PASS',
+                'PHASE92_ASYNC_TX_ENDURANCE_PASS=1')
+            [IO.File]::WriteAllLines($phase92HostValidationPath,
+                [string[]]$phase92HostLines, [Text.Encoding]::ASCII)
+            Write-Output 'PHASE92_ASYNC_TX_ENDURANCE_PASS=1'
+        }
         $serialHash = (Get-FileHash -LiteralPath $serial -Algorithm SHA256).Hash.ToUpperInvariant()
         $injectionHash = (Get-FileHash -LiteralPath $injections -Algorithm SHA256).Hash.ToUpperInvariant()
         $timelineHash = (Get-FileHash -LiteralPath $timelinePath -Algorithm SHA256).Hash.ToUpperInvariant()

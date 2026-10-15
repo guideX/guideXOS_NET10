@@ -62,6 +62,7 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase89UdpModeEnabled;
     private static bool s_phase90AsyncTxModeEnabled;
     private static bool s_phase91LifecycleModeEnabled;
+    private static bool s_phase92EnduranceModeEnabled;
     private static uint s_nextDriverEpisode;
 
     private readonly ManagedDevice _device;
@@ -196,6 +197,12 @@ internal sealed class ManagedE1000Driver
     private bool _phase90AsyncTxPassed;
     private bool _phase91Requested;
     private bool _phase91Passed;
+    private bool _phase92Requested;
+    private bool _phase92FirstEpisodePassed;
+    private bool _phase92Passed;
+    private uint _phase92BusyProbes;
+    private uint _phase92DescriptorWraps;
+    private ulong _phase92OldEpisodeRequestId;
     private ulong _phase91StopProbeId;
     private ulong _phase90InitialRequestId;
     private ManagedE1000DriverState _state;
@@ -287,6 +294,7 @@ internal sealed class ManagedE1000Driver
     internal bool Phase89UdpPassed => _phase89UdpPassed;
     internal bool Phase90AsyncTxPassed => _phase90AsyncTxPassed;
     internal bool Phase91Passed => _phase91Passed;
+    internal bool Phase92Passed => _phase92Passed;
     internal uint AsyncTxOutstanding => _asyncTxLedger.Outstanding;
     internal uint AsyncTxCompleted => _asyncTxCompleted;
     internal uint AsyncTxUnmatchedTxdw => _asyncTxUnmatchedTxdw;
@@ -460,6 +468,12 @@ internal sealed class ManagedE1000Driver
         EnablePhase90AsyncTxMode();
     }
 
+    internal static void EnablePhase92EnduranceMode()
+    {
+        s_phase92EnduranceModeEnabled = true;
+        EnablePhase91LifecycleMode();
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -511,6 +525,7 @@ internal sealed class ManagedE1000Driver
         _phase89UdpRequested = s_phase89UdpModeEnabled;
         _phase90AsyncTxRequested = s_phase90AsyncTxModeEnabled;
         _phase91Requested = s_phase91LifecycleModeEnabled;
+        _phase92Requested = s_phase92EnduranceModeEnabled;
         return TryStartCore();
     }
 
@@ -1090,6 +1105,7 @@ internal sealed class ManagedE1000Driver
         s_phase89UdpModeEnabled = false;
         s_phase90AsyncTxModeEnabled = false;
         s_phase91LifecycleModeEnabled = false;
+        s_phase92EnduranceModeEnabled = false;
         return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED\r\n"u8);
     }
 
@@ -2231,6 +2247,290 @@ internal sealed class ManagedE1000Driver
         return passed;
     }
 
+    internal bool TryRunPhase92FirstEpisode()
+    {
+        if (!_phase92Requested || !_phase90AsyncTxPassed ||
+            !_phase91Requested || _state != ManagedE1000DriverState.Running ||
+            _asyncTxLedger.Outstanding != 0 || _txRing == null || _mmio == null)
+            return false;
+        _phase92FirstEpisodePassed = TryRunPhase92EnduranceEpisode(
+            1, 0x92010000U, 0);
+        return _phase92FirstEpisodePassed &&
+            KernelLog.Write("GXOS_NET10:PHASE92_EPISODE1_RECONCILED=1\r\n"u8);
+    }
+
+    private bool TryRunPhase92EnduranceEpisode(uint episodeNumber,
+        uint firstSequence, uint completedBeforeEpisode)
+    {
+        if (!_phase92Requested || !_phase90AsyncTxRequested ||
+            !_phase91Requested || _state != ManagedE1000DriverState.Running ||
+            _asyncTxLedger.Outstanding != 0 || _txRing == null || _mmio == null ||
+            _txBuffers == null) return false;
+
+        uint acceptedBase = _asyncTxAccepted;
+        uint completedBase = _asyncTxCompleted;
+        uint successfulBase = _asyncTxSuccessfulFrames;
+        uint exposedBase = _asyncTxLedger.ExposedCompletions;
+        uint consumedBase = _asyncTxLedger.ConsumedCompletions;
+        uint busyBase = _phase92BusyProbes;
+        uint wrapBase = _phase92DescriptorWraps;
+        uint maxOutstanding = 0;
+        uint lastIndex = uint.MaxValue;
+        Span<ulong> lastRequestByDescriptor =
+            stackalloc ulong[(int)ManagedE1000Protocol.RingCount];
+        lastRequestByDescriptor.Clear();
+        Span<ulong> batchIds = stackalloc ulong[(int)AsyncTxCapacity];
+        Span<uint> batchIndices = stackalloc uint[(int)AsyncTxCapacity];
+
+        uint initialTail = 0;
+        if (!_mmio.TryRead32(ManagedE1000Protocol.RegTxDescTail,
+                out initialTail) ||
+            TrySubmitFrame(null, 0, out ulong invalidId) !=
+                ManagedE1000AsyncTxSubmitResult.InvalidArgument || invalidId != 0 ||
+            !_mmio.TryRead32(ManagedE1000Protocol.RegTxDescTail,
+                out uint tailAfterInvalid) || tailAfterInvalid != initialTail ||
+            _asyncTxLedger.Outstanding != 0 || _asyncTxAccepted != acceptedBase)
+            return false;
+
+        for (uint batch = 0; batch != 32; ++batch)
+        {
+            uint completionBase = _asyncTxCompleted;
+            uint acceptedBeforeBatch = _asyncTxAccepted;
+            for (uint request = 0; request != AsyncTxCapacity; ++request)
+            {
+                uint ordinal = batch * AsyncTxCapacity + request + 1;
+                if (!ManagedE1000Protocol.TryBuildPhase90Frame(
+                        _phase80Frame, _mac, firstSequence + ordinal) ||
+                    TrySubmitFrame(_phase80Frame, _phase80Frame.Length,
+                        out ulong requestId) !=
+                        ManagedE1000AsyncTxSubmitResult.Accepted ||
+                    TryGetTransmitCompletion(requestId) !=
+                        ManagedE1000AsyncTxResult.Pending ||
+                    !TryDecodeAsyncTxRequest(requestId, out uint index,
+                        out uint generation) ||
+                    !ManagedE1000Protocol.TryDecodeAsyncTxRequestId(
+                        requestId, ManagedE1000Protocol.RingCount, out _,
+                        out _, out uint requestEpisode) ||
+                    requestEpisode != _driverEpisode || generation == 0)
+                    return false;
+
+                for (uint prior = 0; prior != request; ++prior)
+                    if (batchIds[(int)prior] == requestId) return false;
+                batchIds[(int)request] = requestId;
+                batchIndices[(int)request] = index;
+                if (index < lastIndex) _phase92DescriptorWraps++;
+                lastIndex = index;
+                if (_phase92OldEpisodeRequestId == 0 && episodeNumber == 1 &&
+                    ordinal == 1)
+                    _phase92OldEpisodeRequestId = requestId;
+
+                ulong previousId = lastRequestByDescriptor[(int)index];
+                if (previousId != 0)
+                {
+                    uint outstandingBeforeStale = _asyncTxLedger.Outstanding;
+                    uint exposedBeforeStale = _asyncTxLedger.ExposedCompletions;
+                    uint consumedBeforeStale = _asyncTxLedger.ConsumedCompletions;
+                    uint acceptedBeforeStale = _asyncTxAccepted;
+                    if (!_txRing.TryRead8((ulong)index *
+                            ManagedE1000Protocol.DescriptorSize + 12,
+                            out byte statusBeforeStale) ||
+                        TryGetTransmitCompletion(previousId) !=
+                            ManagedE1000AsyncTxResult.InvalidOrStale ||
+                        TryConsumeTransmitCompletion(previousId) !=
+                            ManagedE1000AsyncTxResult.InvalidOrStale ||
+                        _asyncTxLedger.Outstanding != outstandingBeforeStale ||
+                        _asyncTxLedger.ExposedCompletions != exposedBeforeStale ||
+                        _asyncTxLedger.ConsumedCompletions != consumedBeforeStale ||
+                        _asyncTxAccepted != acceptedBeforeStale ||
+                        _asyncTxLedger.OwnershipAt(index) !=
+                            ManagedE1000AsyncTxOwnership.HardwareOwned ||
+                        !_txRing.TryRead8((ulong)index *
+                            ManagedE1000Protocol.DescriptorSize + 12,
+                            out byte statusAfterStale) ||
+                        (statusAfterStale != statusBeforeStale &&
+                         statusAfterStale != (byte)(statusBeforeStale |
+                             ManagedE1000Protocol.TxStatusDone)))
+                        return false;
+                }
+                lastRequestByDescriptor[(int)index] = requestId;
+                if (_asyncTxLedger.Outstanding > AsyncTxCapacity) return false;
+                if (_asyncTxLedger.Outstanding > maxOutstanding)
+                    maxOutstanding = _asyncTxLedger.Outstanding;
+
+                if (episodeNumber == 2 && ordinal == 1)
+                {
+                    uint outstandingBeforeOldId = _asyncTxLedger.Outstanding;
+                    uint acceptedBeforeOldId = _asyncTxAccepted;
+                    uint completedBeforeOldId = _asyncTxCompleted;
+                    uint exposedBeforeOldId = _asyncTxLedger.ExposedCompletions;
+                    uint consumedBeforeOldId = _asyncTxLedger.ConsumedCompletions;
+                    uint txIndexBeforeOldId = _txIndex;
+                    if (_phase92OldEpisodeRequestId == 0 ||
+                        !_txRing.TryRead8((ulong)index *
+                            ManagedE1000Protocol.DescriptorSize + 12,
+                            out byte statusBeforeOldId) ||
+                        TryGetTransmitCompletion(_phase92OldEpisodeRequestId) !=
+                            ManagedE1000AsyncTxResult.InvalidOrStale ||
+                        TryConsumeTransmitCompletion(_phase92OldEpisodeRequestId) !=
+                            ManagedE1000AsyncTxResult.InvalidOrStale ||
+                        !_txRing.TryRead8((ulong)index *
+                            ManagedE1000Protocol.DescriptorSize + 12,
+                            out byte statusAfterOldId) ||
+                        (statusAfterOldId != statusBeforeOldId &&
+                         statusAfterOldId != (byte)(statusBeforeOldId |
+                             ManagedE1000Protocol.TxStatusDone)) ||
+                        _asyncTxLedger.Outstanding != outstandingBeforeOldId ||
+                        _asyncTxAccepted != acceptedBeforeOldId ||
+                        _asyncTxCompleted != completedBeforeOldId ||
+                        _asyncTxLedger.ExposedCompletions != exposedBeforeOldId ||
+                        _asyncTxLedger.ConsumedCompletions != consumedBeforeOldId ||
+                        _txIndex != txIndexBeforeOldId ||
+                        _asyncTxLedger.OwnershipAt(index) !=
+                            ManagedE1000AsyncTxOwnership.HardwareOwned ||
+                        !KernelLog.Write(
+                            "GXOS_NET10:PHASE92_OLD_ID_REJECTED_WHILE_ACTIVE=1\r\n"u8))
+                        return false;
+                }
+            }
+
+            if (_asyncTxLedger.Outstanding != AsyncTxCapacity ||
+                _asyncTxLedger.HardwareOwned != AsyncTxCapacity ||
+                _asyncTxLedger.CompletedUnconsumed != 0 ||
+                _asyncTxAccepted != acceptedBeforeBatch + AsyncTxCapacity)
+                return false;
+
+            uint txIndexBeforeBusy = _txIndex;
+            uint acceptedBeforeBusy = _asyncTxAccepted;
+            uint completedBeforeBusy = _asyncTxCompleted;
+            uint exposedBeforeBusy = _asyncTxLedger.ExposedCompletions;
+            uint consumedBeforeBusy = _asyncTxLedger.ConsumedCompletions;
+            if (!_mmio.TryRead32(ManagedE1000Protocol.RegTxDescTail,
+                    out uint tailBeforeBusy) ||
+                TrySubmitFrame(_phase80Frame, _phase80Frame.Length,
+                    out ulong rejectedId) != ManagedE1000AsyncTxSubmitResult.Busy ||
+                rejectedId != 0 ||
+                !_mmio.TryRead32(ManagedE1000Protocol.RegTxDescTail,
+                    out uint tailAfterBusy) || tailAfterBusy != tailBeforeBusy ||
+                _txIndex != txIndexBeforeBusy ||
+                _asyncTxAccepted != acceptedBeforeBusy ||
+                _asyncTxCompleted != completedBeforeBusy ||
+                _asyncTxLedger.Outstanding != AsyncTxCapacity ||
+                _asyncTxLedger.HardwareOwned != AsyncTxCapacity ||
+                _asyncTxLedger.CompletedUnconsumed != 0 ||
+                _asyncTxLedger.ExposedCompletions != exposedBeforeBusy ||
+                _asyncTxLedger.ConsumedCompletions != consumedBeforeBusy)
+                return false;
+            _phase92BusyProbes++;
+            for (uint request = 0; request != AsyncTxCapacity; ++request)
+                if (TryGetTransmitCompletion(batchIds[(int)request]) !=
+                        ManagedE1000AsyncTxResult.Pending ||
+                    _asyncTxLedger.OwnershipAt(batchIndices[(int)request]) !=
+                        ManagedE1000AsyncTxOwnership.HardwareOwned)
+                    return false;
+
+            if (!TryDrainPhase90Completions(AsyncTxCapacity,
+                    completionBase) ||
+                _asyncTxCompleted != completionBase + AsyncTxCapacity ||
+                _asyncTxLedger.Outstanding != AsyncTxCapacity ||
+                _asyncTxLedger.CompletedUnconsumed != AsyncTxCapacity ||
+                _asyncTxLedger.HardwareOwned != 0)
+                return false;
+
+            for (uint request = 0; request != AsyncTxCapacity; ++request)
+            {
+                ulong requestId = batchIds[(int)request];
+                uint index = batchIndices[(int)request];
+                if (TryGetTransmitCompletion(requestId) !=
+                        ManagedE1000AsyncTxResult.Success ||
+                    TryGetTransmitCompletion(requestId) !=
+                        ManagedE1000AsyncTxResult.Success ||
+                    TryConsumeTransmitCompletion(requestId) !=
+                        ManagedE1000AsyncTxResult.Success ||
+                    TryConsumeTransmitCompletion(requestId) !=
+                        ManagedE1000AsyncTxResult.InvalidOrStale ||
+                    _asyncTxLedger.OwnershipAt(index) !=
+                        ManagedE1000AsyncTxOwnership.Free)
+                    return false;
+            }
+
+            uint episodeProgress = completedBeforeEpisode +
+                (batch + 1) * AsyncTxCapacity;
+            if (episodeProgress == 32 || episodeProgress == 64 ||
+                episodeProgress == 128 || episodeProgress == 192 ||
+                episodeProgress == 256)
+                if (!KernelLog.WriteHexLine(
+                        "GXOS_NET10:PHASE92_PROGRESS_SUCCESSFUL_TRANSMISSIONS=0x"u8,
+                        episodeProgress)) return false;
+            if (_asyncTxLedger.Outstanding != 0 ||
+                _asyncTxLedger.HardwareOwned != 0 ||
+                _asyncTxLedger.CompletedUnconsumed != 0 ||
+                _asyncTxAccepted != acceptedBeforeBatch + AsyncTxCapacity ||
+                _asyncTxCompleted != completionBase + AsyncTxCapacity)
+                return false;
+        }
+
+        uint accepted = _asyncTxAccepted - acceptedBase;
+        uint completed = _asyncTxCompleted - completedBase;
+        uint successful = _asyncTxSuccessfulFrames - successfulBase;
+        uint exposed = _asyncTxLedger.ExposedCompletions - exposedBase;
+        uint consumed = _asyncTxLedger.ConsumedCompletions - consumedBase;
+        uint busy = _phase92BusyProbes - busyBase;
+        uint wraps = _phase92DescriptorWraps - wrapBase;
+        if (accepted != 128 || completed != accepted || successful != accepted ||
+            exposed != accepted || consumed != exposed || busy != 32 || wraps < 7 ||
+            _asyncTxLedger.Outstanding != 0 || _asyncTxLedger.HardwareOwned != 0 ||
+            _asyncTxLedger.CompletedUnconsumed != 0)
+            return false;
+
+        ReadOnlySpan<byte> prefix = episodeNumber == 1
+            ? "GXOS_NET10:PHASE92_EPISODE1_"u8
+            : "GXOS_NET10:PHASE92_EPISODE2_"u8;
+        return KernelLog.WriteHexLine(JoinPhase92(prefix, "ACCEPTED"u8), accepted) &&
+            KernelLog.WriteHexLine(JoinPhase92(prefix, "COMPLETED"u8), completed) &&
+            KernelLog.WriteHexLine(JoinPhase92(prefix, "SUCCESSFUL_FRAMES"u8), successful) &&
+            KernelLog.WriteHexLine(JoinPhase92(prefix, "EXPOSED"u8), exposed) &&
+            KernelLog.WriteHexLine(JoinPhase92(prefix, "CONSUMED"u8), consumed) &&
+            KernelLog.WriteHexLine(JoinPhase92(prefix, "BUSY_PROBES"u8), busy) &&
+            KernelLog.WriteHexLine(JoinPhase92(prefix, "DESCRIPTOR_WRAPS"u8), wraps) &&
+            KernelLog.WriteHexLine(JoinPhase92(prefix, "FINAL_OUTSTANDING"u8),
+                _asyncTxLedger.Outstanding) &&
+            KernelLog.WriteHexLine(JoinPhase92(prefix, "MAX_OUTSTANDING"u8),
+                maxOutstanding) &&
+            KernelLog.Write("GXOS_NET10:PHASE92_CAPACITY_RESTORED_AFTER_DRAIN=1\r\n"u8);
+    }
+
+    private static ReadOnlySpan<byte> JoinPhase92(ReadOnlySpan<byte> prefix,
+        ReadOnlySpan<byte> suffix)
+    {
+        /* Each returned message is stored in the static literal set below;
+           avoid allocating strings or buffers in the driver fixture. */
+        if (prefix.SequenceEqual("GXOS_NET10:PHASE92_EPISODE1_"u8))
+        {
+            if (suffix.SequenceEqual("ACCEPTED"u8)) return "GXOS_NET10:PHASE92_EPISODE1_ACCEPTED=0x"u8;
+            if (suffix.SequenceEqual("COMPLETED"u8)) return "GXOS_NET10:PHASE92_EPISODE1_COMPLETED=0x"u8;
+            if (suffix.SequenceEqual("SUCCESSFUL_FRAMES"u8)) return "GXOS_NET10:PHASE92_EPISODE1_SUCCESSFUL_FRAMES=0x"u8;
+            if (suffix.SequenceEqual("EXPOSED"u8)) return "GXOS_NET10:PHASE92_EPISODE1_EXPOSED=0x"u8;
+            if (suffix.SequenceEqual("CONSUMED"u8)) return "GXOS_NET10:PHASE92_EPISODE1_CONSUMED=0x"u8;
+            if (suffix.SequenceEqual("BUSY_PROBES"u8)) return "GXOS_NET10:PHASE92_EPISODE1_BUSY_PROBES=0x"u8;
+            if (suffix.SequenceEqual("DESCRIPTOR_WRAPS"u8)) return "GXOS_NET10:PHASE92_EPISODE1_DESCRIPTOR_WRAPS=0x"u8;
+            if (suffix.SequenceEqual("FINAL_OUTSTANDING"u8)) return "GXOS_NET10:PHASE92_EPISODE1_FINAL_OUTSTANDING=0x"u8;
+            if (suffix.SequenceEqual("MAX_OUTSTANDING"u8)) return "GXOS_NET10:PHASE92_EPISODE1_MAX_OUTSTANDING=0x"u8;
+        }
+        else
+        {
+            if (suffix.SequenceEqual("ACCEPTED"u8)) return "GXOS_NET10:PHASE92_EPISODE2_ACCEPTED=0x"u8;
+            if (suffix.SequenceEqual("COMPLETED"u8)) return "GXOS_NET10:PHASE92_EPISODE2_COMPLETED=0x"u8;
+            if (suffix.SequenceEqual("SUCCESSFUL_FRAMES"u8)) return "GXOS_NET10:PHASE92_EPISODE2_SUCCESSFUL_FRAMES=0x"u8;
+            if (suffix.SequenceEqual("EXPOSED"u8)) return "GXOS_NET10:PHASE92_EPISODE2_EXPOSED=0x"u8;
+            if (suffix.SequenceEqual("CONSUMED"u8)) return "GXOS_NET10:PHASE92_EPISODE2_CONSUMED=0x"u8;
+            if (suffix.SequenceEqual("BUSY_PROBES"u8)) return "GXOS_NET10:PHASE92_EPISODE2_BUSY_PROBES=0x"u8;
+            if (suffix.SequenceEqual("DESCRIPTOR_WRAPS"u8)) return "GXOS_NET10:PHASE92_EPISODE2_DESCRIPTOR_WRAPS=0x"u8;
+            if (suffix.SequenceEqual("FINAL_OUTSTANDING"u8)) return "GXOS_NET10:PHASE92_EPISODE2_FINAL_OUTSTANDING=0x"u8;
+            if (suffix.SequenceEqual("MAX_OUTSTANDING"u8)) return "GXOS_NET10:PHASE92_EPISODE2_MAX_OUTSTANDING=0x"u8;
+        }
+        return "GXOS_NET10:PHASE92_INVALID_COUNTER=0x"u8;
+    }
+
     private Phase91SyncSnapshot CapturePhase91SyncSnapshot()
     {
         Phase91SyncSnapshot snapshot = default;
@@ -2500,6 +2800,7 @@ internal sealed class ManagedE1000Driver
     {
         restarted = null;
         if (!_phase91Requested || !_phase90AsyncTxPassed ||
+            (_phase92Requested && !_phase92FirstEpisodePassed) ||
             _state != ManagedE1000DriverState.Running ||
             _asyncTxLedger.Outstanding != 0 || _txRing == null ||
             _txBuffers == null) return false;
@@ -2611,7 +2912,8 @@ internal sealed class ManagedE1000Driver
         if (!KernelLog.Write(
                 "GXOS_NET10:PHASE91_RESTART_BEGINS=1\r\n"u8))
             return false;
-        EnablePhase91LifecycleMode();
+        if (_phase92Requested) EnablePhase92EnduranceMode();
+        else EnablePhase91LifecycleMode();
         ManagedE1000Driver? candidate = TryCreate();
         if (candidate == null || candidate._driverEpisode == _driverEpisode ||
             !candidate.TryStart() ||
@@ -2623,6 +2925,7 @@ internal sealed class ManagedE1000Driver
             return false;
         candidate._phase80Passed = _phase80Passed;
         candidate._phase90AsyncTxPassed = true;
+        candidate._phase92OldEpisodeRequestId = _phase92OldEpisodeRequestId;
         /* Native interrupt sequence numbers are global to the route. The new
            driver must begin below its first post-subscription event rather
            than inherit the previous driver's last sequence. */
@@ -2654,6 +2957,10 @@ internal sealed class ManagedE1000Driver
                 "GXOS_NET10:PHASE91_RESTART_PHASE80_DD_ROUTE_PASS=1\r\n"u8) ||
             !KernelLog.Write(
                 "GXOS_NET10:PHASE91_RESTART_SAME_SLOT_READY=1\r\n"u8))
+            return false;
+        if (candidate._phase92Requested &&
+            !KernelLog.Write(
+                "GXOS_NET10:PHASE92_RESTART_COMPLETED=1\r\n"u8))
             return false;
         restarted = candidate;
 
@@ -2702,6 +3009,34 @@ internal sealed class ManagedE1000Driver
             !KernelLog.Write(
                 "GXOS_NET10:PHASE91_RESTART_FIRST_ASYNC_TX_PASS=1\r\n"u8))
             return false;
+
+        if (candidate._phase92Requested)
+        {
+            uint outstandingBeforeOldEpisodeQuery =
+                candidate._asyncTxLedger.Outstanding;
+            uint acceptedBeforeOldEpisodeQuery = candidate._asyncTxAccepted;
+            uint completedBeforeOldEpisodeQuery = candidate._asyncTxCompleted;
+            uint consumedBeforeOldEpisodeQuery =
+                candidate._asyncTxLedger.ConsumedCompletions;
+            if (_phase92OldEpisodeRequestId == 0 ||
+                candidate.TryGetTransmitCompletion(
+                    _phase92OldEpisodeRequestId) !=
+                    ManagedE1000AsyncTxResult.InvalidOrStale ||
+                candidate.TryConsumeTransmitCompletion(
+                    _phase92OldEpisodeRequestId) !=
+                    ManagedE1000AsyncTxResult.InvalidOrStale ||
+                candidate._asyncTxLedger.Outstanding !=
+                    outstandingBeforeOldEpisodeQuery ||
+                candidate._asyncTxAccepted != acceptedBeforeOldEpisodeQuery ||
+                candidate._asyncTxCompleted != completedBeforeOldEpisodeQuery ||
+                candidate._asyncTxLedger.ConsumedCompletions !=
+                    consumedBeforeOldEpisodeQuery ||
+                candidate._asyncTxLedger.OwnershipAt(sameSlotIndex) !=
+                    ManagedE1000AsyncTxOwnership.Free ||
+                !KernelLog.Write(
+                    "GXOS_NET10:PHASE92_OLD_EPISODE_ID_REJECTED_AFTER_RESTART=1\r\n"u8))
+                return false;
+        }
 
         Span<ulong> restartedIds = stackalloc ulong[(int)AsyncTxCapacity];
         restartCompletionBase = candidate._asyncTxCompleted;
@@ -2772,6 +3107,11 @@ internal sealed class ManagedE1000Driver
                 ManagedE1000AsyncTxResult.InvalidOrStale ||
             !KernelLog.Write(
                 "GXOS_NET10:PHASE91_RESTART_ASYNC_FOUR_COMPLETED_CONSUMED=1\r\n"u8))
+            return false;
+
+        if (candidate._phase92Requested &&
+            !candidate.TryRunPhase92EnduranceEpisode(
+                2, 0x92020000U, 128))
             return false;
 
         uint syncSequence = 0x91000401U;
@@ -2957,7 +3297,39 @@ internal sealed class ManagedE1000Driver
 
         candidate._phase91Passed = KernelLog.Write(
             "GXOS_NET10:PHASE91_RESTART_TX_RX_LIVENESS=PASS\r\n"u8);
-        return candidate._phase91Passed;
+        if (candidate._phase92Requested)
+        {
+            if (candidate._asyncTxLedger.Outstanding != 0 ||
+                candidate._asyncTxLedger.HardwareOwned != 0 ||
+                candidate._asyncTxLedger.CompletedUnconsumed != 0 ||
+                candidate._asyncTxLedger.ExposedCompletions !=
+                    candidate._asyncTxLedger.ConsumedCompletions)
+                return false;
+            for (uint index = 0; index != ManagedE1000Protocol.RingCount; ++index)
+                if (candidate._asyncTxLedger.OwnershipAt(index) !=
+                    ManagedE1000AsyncTxOwnership.Free)
+                    return false;
+            candidate._phase92Passed = candidate._phase91Passed &&
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE92_FINAL_OUTSTANDING=0x"u8,
+                    candidate._asyncTxLedger.Outstanding) &&
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE92_FINAL_HARDWARE_OWNED=0x"u8,
+                    candidate._asyncTxLedger.HardwareOwned) &&
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE92_FINAL_COMPLETED_UNCONSUMED=0x"u8,
+                    candidate._asyncTxLedger.CompletedUnconsumed) &&
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE92_FINAL_EXPOSED=0x"u8,
+                    candidate._asyncTxLedger.ExposedCompletions) &&
+                KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE92_FINAL_CONSUMED=0x"u8,
+                    candidate._asyncTxLedger.ConsumedCompletions) &&
+                KernelLog.Write(
+                    "GXOS_NET10:PHASE92_GUEST_RESOURCE_DRAIN_PASS=1\r\n"u8);
+        }
+        return candidate._phase91Passed &&
+            (!candidate._phase92Requested || candidate._phase92Passed);
     }
 
     private bool TrySubmitAndCompletePhase90Frame(uint sequence,
