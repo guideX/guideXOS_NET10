@@ -4,6 +4,8 @@
 
 The deterministic hosted endurance qualification passed. The managed source and both Gate4 C fixtures compile. A final NativeAOT payload could not be produced because this machine has no Windows native linker (link.exe), so the Phase 92 Gate4 image could not be built from the current source. No Phase 92 QEMU boot or host packet capture was started. The worktree is preserved and uncommitted.
 
+That Outcome E text records the initial Phase 92 attempt. The later Phase 92R recovery audit and current qualification status are recorded at the end of this report.
+
 ## Starting repository state
 
 - Repository: D:\dev\guideXOS_NET10_nativeaot-managed-kernel-integration.
@@ -106,3 +108,100 @@ The hardware regression matrix (Phases 14, 16, 91, 92, 85, 87, and 89) was not r
 - The worktree remains dirty with the Phase 92 fixture, host suite, runner/build updates, and this report. Generated evidence and smoke artifacts remain under artifacts/; they were not staged.
 
 Phase 81 accepted: No. Phase 81R2 accepted: No. Scheduler waits added: No. Async timeouts introduced: No. Phase 93 started: No.
+
+## Phase 92R recovery audit — 2026-10-15
+
+**Current result: Outcome C — partial qualification.** The NativeAOT toolchain was recovered, the hosted suites passed, and Phase 92 passed three fresh isolated hardware boots. Phase 14, Phase 16, Phase 85, Phase 87, and Phase 89 hardware regressions each passed three fresh boots. The formal three-boot Phase 91 hardware regression remains incomplete: its runner refused preflight after detecting a QEMU process owned by a separate workspace. That process was left untouched. The earlier Outcome E remains the historical result of the initial attempt above.
+
+### Starting repository state and toolchain recovery
+
+- Recovery started from branch `nativeaot-managed-kernel-integration`, HEAD `066bb2ac580145bf766fab1fb95010c062220351`, with a clean worktree and upstream tracking at 0/0. This is the user’s committed baseline. HEAD remains unchanged because the complete required regression matrix did not finish; no commit or push was made.
+- `link.exe` was installed in Visual Studio Community 2026 but absent from the base shell’s PATH. VS instance `18.10.12306.391` includes the C++ x64 tools and Windows SDK. A process-local `VsDevCmd.bat -arch=x64 -host_arch=x64` environment exposed `cl.exe` 19.51.36260 and Hostx64/x64 `link.exe` 14.51.36260.0 at `C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64\link.exe`. Windows SDK 10.0.26100.0 and its x64 UCRT/UM libraries were present. No global PATH or system installation was changed.
+- The repository pins .NET SDK 10.0.302, which was not installed under `C:\Program Files\dotnet`. The complete SDK archive was already staged under ignored `artifacts/phase92-toolchain-10.0.302/`: 297,545,270 bytes, SHA-512 `7D170ED75FA9AF34C00646621D92011DBD71943952E2787CD15DF9BE78E6452B55DADEF34D7EFF77B802E6AF4959E071A55855AC649AFEAC70901C3A2A258716` (the staged archive had previously been checked against Microsoft release metadata). MSBuild 18.6.11.33009 built the final candidate using an explicit SDK-directory override. `tools/Build-ManagedKernel.ps1` now accepts that override through the existing host-toolchain resolver.
+- A separate build using installed SDK 10.0.402 linked successfully, but its QEMU startup attempt stalled at the managed driver-worker readiness wait and timed out after 300 seconds. This is recorded as an observed SDK/environment difference; it does not establish that SDK 10.0.402 caused the stall. Its payload was 4,946,432 bytes, SHA-256 `0354ACA643CCDB1096B0967C62458CA4E5379E8F9EAC2F010523D47BE1DB6F96` and was not used for acceptance.
+
+### Final Phase 92 candidate and hardware results
+
+- SDK 10.0.302 NativeAOT Release publish completed with 0 warnings and 0 errors. The candidate `gxos-managed-kernel.dll` is 4,946,432 bytes, SHA-256 `3F0E921E05E6C24434EDD5D76DFFBFED9E4378E5AF536B030D70118DF4145E26`. The Phase 92 Gate4 ESP contains a byte-identical payload with the same size and hash.
+- The normal Gate4 EFI built with the `ManagedKernelPhase11` scenario is 746,194 bytes, SHA-256 `CE5011C4D226251EE87D1EE57D50B187EF2ABDF4443E23C6E88E41ACCB3BBAF0`. The Phase 92 Gate4 EFI is 749,887 bytes, SHA-256 `1F669B27625057D44924966A5F98FFC2C75309E8B8F14BA82809FEAA4769346A`.
+- After the first `.302` boot exposed a host-runner ordering defect, the runner’s Phase 92 final-counter check was moved until after the post-restart RX frame injection, RX-liveness markers, and lifecycle reconciliation. It still checks the Phase 91 stop counters and expected capture count before packet capture. This was an acceptance-harness repair; no production TX ownership or lifecycle behavior changed.
+- The repaired Phase 92 runner passed three consecutive fresh isolated boots against the same payload. Every boot emitted `PHASE92_ASYNC_TX_ENDURANCE_PASS=1`; each persisted capture is 18,176 bytes and independently reconciles 284 unique frames, including all 256 Phase 92 frames. Each episode accepted, completed, transmitted, exposed, and consumed 128 frames; exercised 32 Busy probes; wrapped the descriptor ring 9 times; reached but did not exceed four outstanding requests; and drained to zero. Capacity was restored after each drain. At the stop boundary, four DD-completed unconsumed requests were invalidated only after DMA quiescence, with zero hardware-owned requests. The final ledger reconciled 133 exposed/consumed restart requests and zero outstanding, hardware-owned, or completed-unconsumed resources.
+- The three boots also passed TXDW route, bounded interrupt, COM1 independence, synchronous TX DD-polling, driver restart, stale-ID rejection, and post-restart RX-liveness checks. Phase 92 evidence is under ignored `artifacts/phase92r-20261015-run-2/phase92-hardware-3boot-pinned-fixed/`.
+- The SDK 10.0.302 Phase 91 startup diagnostic passed one boot, including restart RX injection and TX/RX liveness. The requested three-boot Phase 91 regression was not run because of the later isolation gate.
+
+### Hosted and completed hardware regressions
+
+- Phase 14 hosted E1000: PASS. Phase 16 hosted networking: PASS, 139 cases. Phase 90 has no standalone host-test runner; Phase 14 covers its frame helper and Phase 92 covers asynchronous ownership.
+- Phase 91 hosted lifecycle: PASS, 60 checks. Phase 92 hosted endurance: PASS, 178,774 checks, seed `0x92C0FFEE`, 10,000 lifecycles, and 2,500 Busy probes.
+- Managed interrupts: PASS, 36/36 assertions and source-completeness check. Native interrupts: PASS. Driver binding: PASS. Network service / Phase 23: PASS, 60 cases, using the existing narrow isolated project adaptation to include `ManagedInterruptEvent.cs`. Host services, service host, owner/status, and worker suites: PASS.
+- Phase 14 E1000 hardware: PASS, 3/3 fresh boots. Phase 16 networking hardware: PASS, 3/3 fresh boots with all four ARP exchange frames validated in each PCAP. Both used the exact `.302` NativeAOT payload hash above.
+- Phase 85, Phase 87, and Phase 89 Gate4 regression images were built from that same payload and their staged hashes matched. After the unrelated QEMU process was no longer present, each regression passed three fresh isolated boots with the common runner validating its guest markers and packet exchanges. Evidence is under ignored `artifacts/phase92r-20261015-run-2/regressions/hardware/phase85-arp-resumed/`, `phase87-icmp-resumed/`, and `phase89-udp-resumed/`. Phase 85 validated hardware ARP ingress and replies, Phase 87 validated three captured ICMP Echo Replies per boot, and Phase 89 validated UDP ingress on all three boots.
+- The first Phase 14 and Phase 16 diagnostic attempts used a normal Gate4 image without the specific Phase 11 / Phase 15 regression compile options; their timeouts were fixture-selection errors. Those logs were retained and are not counted. Rebuilt scenario-specific fixtures passed Phase 14 and Phase 16 as listed above.
+
+### Isolation, checks, and final state
+
+- Phase 92 and the completed Phase 14/16/85/87/89 formal boot preflight and postflight inventories were clear. At the later Phase 91 runner preflight, QEMU process PID 25832 was classified `UNRELATED`; its command line used `out/validation/settings-s14-20261015/production/guest-acceptance-complete`. The Phase 91 runner refused to start, wrote the inventory to `artifacts/phase92r-20261015-run-2/regressions/hardware/phase91-lifecycle-resumed/qemu-process-preflight.log`, and did not stop or modify the process. The formal Phase 91 three-boot regression remains at the isolation gate.
+- PowerShell parsing passed for the five modified scripts, and `git diff --check` passed (Git reported only the repository’s LF-to-CRLF working-copy notices). The Phase 14, Phase 16, and service-host runners gained optional output-directory parameters so fresh evidence did not overwrite prior output locations.
+- Phase 91 remains accepted from its prior qualification. Phase 81 accepted: No. Phase 81R2 accepted: No. Synchronous TX still uses DD polling. No scheduler wait work or asynchronous timeout was added. Phase 93 was not started.
+
+## Phase 92R2 closure — 2026-10-16
+
+**Current result: Outcome E — environment blocker. Phase 92 is not accepted.** The Phase 91 current-source three-boot regression did not start because another workspace held QEMU throughout the permitted 20-minute isolation wait. Its process was not attached to, stopped, or modified. The prior Phase 92 3/3 hardware evidence and its artifact hashes remain valid. The prior Phase 91 acceptance remains intact, but the required Phase 91 rerun against the Phase 92 production source is still incomplete.
+
+### Preflight and source provenance
+
+- R2 started and ended at HEAD `066bb2ac580145bf766fab1fb95010c062220351` on `nativeaot-managed-kernel-integration`, tracking `origin/nativeaot-managed-kernel-integration` at 0/0 divergence. The Phase 92 commit is a direct child of the historical accepted Phase 91 commit `fea0d44477be4787399d8ba1f7ec50f02c6cea57`; that Phase 91 commit has parent `4f9e99421383fe098c787b520505e6f5e6ebf32e`. No branch or repository topology changed.
+- The six Phase 92 worktree modifications from the prior recovery were preserved. R2 added one small harness-only change to `Run-ManagedKernelPhase91.ps1`: an optional `-SdkDirectory` is forwarded to the existing build script, allowing the accepted pinned SDK to be selected explicitly. No production source or acceptance predicate changed. The Phase 91 build/boot wrapper was not invoked because QEMU remained occupied.
+- The recovered toolchain is process-local Visual Studio Community 2026: MSVC linker 14.51.36260.0, compiler 19.51.36260, and Windows SDK 10.0.26100.0. The final NativeAOT candidate was produced with .NET SDK 10.0.302 via an explicit SDK-directory override; its authoritative `publish.stdout.log` reports 0 warnings and 0 errors. The older `toolchain-provenance.txt` in the recovery directory records an earlier SDK 10.0.402 attempt and is not provenance for the final candidate.
+- Production sources under `src/ManagedKernel` have no worktree diff from the qualified source commit. The 4,946,432-byte payload at that commit is SHA-256 `3F0E921E05E6C24434EDD5D76DFFBFED9E4378E5AF536B030D70118DF4145E26`, matching the payload embedded beside the Phase 92 Gate4 fixture and the payload recorded by each prior Phase 92 host-capture validation. It is distinct from the historical Phase 91 payload `8C4DF010039756BEF928344F96EFA53EEE84574341933829314B8929E40DFAFB`.
+- Full hashes were recalculated from the retained files and recorded in `artifacts/phase92r2-20261016/phase92-final-artifact-manifest.txt`; no separate named manifest existed in the earlier Phase 92 run directory. Verified identities are:
+
+| Artifact | Bytes | SHA-256 | Use |
+|---|---:|---|---|
+| Current-source NativeAOT payload | 4,946,432 | `3F0E921E05E6C24434EDD5D76DFFBFED9E4378E5AF536B030D70118DF4145E26` | Phase 92 production source |
+| Normal Gate4 EFI | 746,194 | `CE5011C4D226251EE87D1EE57D50B187EF2ABDF4443E23C6E88E41ACCB3BBAF0` | Phase 11 fixture |
+| Phase 92 Gate4 EFI | 749,887 | `1F669B27625057D44924966A5F98FFC2C75309E8B8F14BA82809FEAA4769346A` | Prior 3-boot Phase 92 acceptance |
+| Existing Phase 91 Gate4 EFI | 749,887 | `154F17D57143F1B3059727C092AF4E7CDBE86D1082739724539FC36B9CFAECC3` | Prior one-boot current-source diagnostic only; not R2 acceptance |
+
+The Phase 92 payload and EFI hashes match the saved build outputs and are not reconstructed from abbreviated values. The Phase 91 fixture's EFI identity is listed separately from the production payload identity.
+
+### Preserved Phase 92 hardware evidence and ownership totals
+
+- The existing pinned-SDK Phase 92 image passed three fresh isolated boots. Each saved host-validation record reports `PHASE92_ASYNC_TX_ENDURANCE_PASS=1`, 284 unique captured frames, all 256 endurance frames, zero duplicate frame identifiers, valid payload padding, reconciled request accounting, guest resource drain, TXDW/COM1 checks, RX liveness, and teardown. Each capture is 18,176 bytes with SHA-256 `F1311EA75197285EADF7A2BFE495DE893C0360FA6B1617083C15D8D9E6258621`.
+- Each of the two endurance episodes accepted, completed, transmitted, exposed, and consumed 128 requests; recorded 32 Busy probes and nine descriptor wraps; reached four outstanding requests and drained to zero. At the teardown boundary, four completed-but-unconsumed requests were invalidated after DMA quiescence and zero hardware-owned requests remained. The final restart ledger reported 133 exposed and consumed requests, with zero outstanding, hardware-owned, or completed-unconsumed requests.
+- The existing Phase 92 SDK 10.0.302 run directory remains `artifacts/phase92r-20261015-run-2/phase92-hardware-3boot-pinned-fixed/`. R2 did not rebuild Phase 92 or rerun its endurance boots.
+
+### Phase 91 isolation attempt
+
+- Fresh inventories at 16:24:27 and 16:44:33 PDT, plus the intervening checks listed in `artifacts/phase92r2-20261016/qemu-isolation-hold-inventory.txt`, continued to show one QEMU process: PID 10488, created 16:21:08, executable `C:\Program Files\qemu\qemu-system-x86_64.exe`, owner `LEON2_RDT\guideX`, with its ESP and serial/trace paths under `D:\dev\guideXOSServer_DiskManagerImprovements`. The final snapshot was six seconds after the 20-minute deadline because the preceding check at 16:44:03 still showed the process; no QEMU work was started during that interval.
+- The process was classified `UNRELATED` to this repository. It remained active through every recorded hold check and was still present on the 16:44:33 final snapshot, six seconds after the 20-minute deadline. It was left untouched. No Phase 91 build, QEMU launch, or hardware boot was attempted during the hold. The Phase 91 three-boot result for the current Phase 92 source is therefore **0/3; blocked before boot**, not failed and not passed. No R2 Phase 91 serial log, host capture, guest failure stage, or per-boot counters exist.
+- The existing Phase 91 runner continues to enforce clean QEMU isolation before each boot and checks for unexpected QEMU processes during the run. The modified scripts, including the SDK forwarding change, all passed PowerShell parser validation. `git diff --check` passed.
+
+### Complete regression matrix at R2 closure
+
+| Gate | Result |
+|---|---|
+| Phase 14 hosted E1000 | PASS |
+| Phase 16 hosted networking | PASS, 139 cases |
+| Phase 91 hosted lifecycle/proof | PASS, 60 checks |
+| Phase 92 hosted endurance | PASS, 10,000 lifecycles and 178,774 checks |
+| Managed interrupts | PASS, 36/36 assertions and source completeness |
+| Native interrupts; driver binding | PASS |
+| Network service / Phase 23 | PASS, 60 cases |
+| Host services; service host; owner/status; service worker | PASS |
+| Phase 90 standalone host suite | No standalone runner; frame/TX helpers covered by Phase 14, async ownership by Phases 91/92 host suites |
+| Phase 14 hardware | PASS, 3/3 fresh boots |
+| Phase 16 hardware | PASS, 3/3 fresh boots |
+| Phase 85 ARP hardware | PASS, 3/3 fresh boots |
+| Phase 87 ICMP hardware | PASS, 3/3 fresh boots |
+| Phase 89 UDP hardware | PASS, 3/3 fresh boots |
+| Phase 91 historical accepted candidate | PASS, 3/3 in Phase 91R3; this remains the prior Phase 91 acceptance |
+| Phase 91 rerun against Phase 92 source | BLOCKED before build/boot, 0/3; unrelated QEMU occupied through the bounded wait |
+| Phase 92 hardware endurance | PASS, 3/3; 284 unique frames per boot |
+| PowerShell parser checks; `git diff --check` | PASS |
+
+### R2 final state and remaining limits
+
+- Current classification is Outcome E because QEMU isolation prevented the only outstanding qualification run. No production repair was made or supported by new failure evidence. Previously passing hosted and hardware evidence was preserved without rerunning it.
+- The worktree remains uncommitted. HEAD is unchanged at `066bb2ac580145bf766fab1fb95010c062220351`; the seven coherent Phase 92 tracked files are modified, and generated verification records remain under ignored `artifacts/`. No commit or push was attempted because Phase 92 did not reach Outcome A or B.
+- Phase 91 remains accepted from its earlier qualification. Phase 81 remains unaccepted. Phase 81R2 remains unaccepted. Normal synchronous TX retains DD polling. No scheduler wait implementation or asynchronous timeout was added. Phase 93 was not started.

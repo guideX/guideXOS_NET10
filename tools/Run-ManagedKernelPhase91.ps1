@@ -2,6 +2,7 @@
 param(
     [string]$BuildDirectory = '',
     [string]$EvidenceDirectory = '',
+    [string]$SdkDirectory = '',
     [int]$TimeoutSeconds = 240,
     [switch]$EnablePhase91Diagnostics
 )
@@ -34,6 +35,9 @@ function ReadCounter91([string]$serial, [string]$name) {
 }
 
 $managedBuildParameters = @{ OutputDirectory = $managedDirectory }
+if (-not [string]::IsNullOrWhiteSpace($SdkDirectory)) {
+    $managedBuildParameters.SdkDirectory = $SdkDirectory
+}
 if ($EnablePhase91Diagnostics) {
     $managedBuildParameters.EnablePhase91Diagnostics = $true
 }

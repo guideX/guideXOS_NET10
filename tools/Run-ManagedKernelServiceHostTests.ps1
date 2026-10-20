@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$PayloadPath = ''
+    [string]$PayloadPath = '',
+    [string]$OutputDirectory = ''
 )
 
 Set-StrictMode -Version Latest
@@ -10,7 +11,10 @@ if ([string]::IsNullOrWhiteSpace($PayloadPath)) {
     $PayloadPath = Join-Path $root 'artifacts\managed-kernel\publish\gxos-managed-kernel.dll'
 }
 $payload = [IO.Path]::GetFullPath($PayloadPath)
-$out = Join-Path $root 'artifacts\managed-kernel-service-host-tests'
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    $OutputDirectory = Join-Path $root 'artifacts\managed-kernel-service-host-tests'
+}
+$out = [IO.Path]::GetFullPath($OutputDirectory)
 $exe = Join-Path $out 'managed_kernel_service_host_tests.exe'
 $gcc = Get-Command gcc -ErrorAction Stop
 if (-not (Test-Path -LiteralPath $payload)) {

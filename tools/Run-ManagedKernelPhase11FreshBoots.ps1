@@ -4510,62 +4510,6 @@ try {
                         $restartConsumed -eq $restartExposed) `
                         'Restart async accepted/completed/transmitted/consumed accounting disagrees.'
 
-                    if ($EnablePhase92AsyncTxEndurance) {
-                        Require11 ($preStopAsyncAccepted -eq 149 -and
-                            $preStopAsyncCompleted -eq 149 -and
-                            $preStopAsyncTransmitted -eq 149 -and
-                            $atStop -eq 4 -and $completedUnconsumed -eq 4 -and
-                            $hardwareOwned -eq 0 -and $invalidated -eq 4 -and
-                            $exposedBeforeStop -eq 149 -and $consumedBeforeStop -eq 145 -and
-                            $restartAsyncAccepted -eq 133 -and
-                            $restartAsyncCompleted -eq 133 -and
-                            $restartAsyncTransmitted -eq 133 -and
-                            $restartExposed -eq 133 -and $restartConsumed -eq 133) `
-                            'Phase 92 per-episode request and teardown invalidation counts disagree.'
-                        $phase92CounterNames = @(
-                            'PHASE92_EPISODE1_ACCEPTED', 'PHASE92_EPISODE1_COMPLETED',
-                            'PHASE92_EPISODE1_SUCCESSFUL_FRAMES', 'PHASE92_EPISODE1_EXPOSED',
-                            'PHASE92_EPISODE1_CONSUMED', 'PHASE92_EPISODE1_BUSY_PROBES',
-                            'PHASE92_EPISODE1_DESCRIPTOR_WRAPS',
-                            'PHASE92_EPISODE1_FINAL_OUTSTANDING', 'PHASE92_EPISODE1_MAX_OUTSTANDING',
-                            'PHASE92_EPISODE2_ACCEPTED', 'PHASE92_EPISODE2_COMPLETED',
-                            'PHASE92_EPISODE2_SUCCESSFUL_FRAMES', 'PHASE92_EPISODE2_EXPOSED',
-                            'PHASE92_EPISODE2_CONSUMED', 'PHASE92_EPISODE2_BUSY_PROBES',
-                            'PHASE92_EPISODE2_DESCRIPTOR_WRAPS',
-                            'PHASE92_EPISODE2_FINAL_OUTSTANDING', 'PHASE92_EPISODE2_MAX_OUTSTANDING',
-                            'PHASE92_FINAL_OUTSTANDING', 'PHASE92_FINAL_HARDWARE_OWNED',
-                            'PHASE92_FINAL_COMPLETED_UNCONSUMED', 'PHASE92_FINAL_EXPOSED',
-                            'PHASE92_FINAL_CONSUMED')
-                        $phase92Counters = @{}
-                        foreach ($counterName in $phase92CounterNames) {
-                            $counterPrefix = [regex]::Escape("GXOS_NET10:${counterName}=0x")
-                            $counterMatch = [regex]::Match($serialSnapshot,
-                                $counterPrefix + '([0-9A-Fa-f]{16})')
-                            Require11 $counterMatch.Success `
-                                "Phase 92 semantic counter is missing: $counterName"
-                            $phase92Counters[$counterName] = [Convert]::ToUInt64(
-                                $counterMatch.Groups[1].Value, 16)
-                        }
-                        foreach ($episodeName in @('EPISODE1', 'EPISODE2')) {
-                            Require11 ($phase92Counters["PHASE92_${episodeName}_ACCEPTED"] -eq 128 -and
-                                $phase92Counters["PHASE92_${episodeName}_COMPLETED"] -eq 128 -and
-                                $phase92Counters["PHASE92_${episodeName}_SUCCESSFUL_FRAMES"] -eq 128 -and
-                                $phase92Counters["PHASE92_${episodeName}_EXPOSED"] -eq 128 -and
-                                $phase92Counters["PHASE92_${episodeName}_CONSUMED"] -eq 128 -and
-                                $phase92Counters["PHASE92_${episodeName}_BUSY_PROBES"] -eq 32 -and
-                                $phase92Counters["PHASE92_${episodeName}_DESCRIPTOR_WRAPS"] -ge 7 -and
-                                $phase92Counters["PHASE92_${episodeName}_FINAL_OUTSTANDING"] -eq 0 -and
-                                $phase92Counters["PHASE92_${episodeName}_MAX_OUTSTANDING"] -eq 4) `
-                                "Phase 92 $episodeName ledger accounting did not reconcile."
-                        }
-                        Require11 ($phase92Counters['PHASE92_FINAL_OUTSTANDING'] -eq 0 -and
-                            $phase92Counters['PHASE92_FINAL_HARDWARE_OWNED'] -eq 0 -and
-                            $phase92Counters['PHASE92_FINAL_COMPLETED_UNCONSUMED'] -eq 0 -and
-                            $phase92Counters['PHASE92_FINAL_EXPOSED'] -eq
-                                $phase92Counters['PHASE92_FINAL_CONSUMED']) `
-                            'Phase 92 final resource drain did not reconcile.'
-                    }
-
                     $expectedCaptureCount = [int](
                         $preStopAsyncTransmitted +
                         $phase91Counters['PHASE90_SYNC_TX_DD_POLL_FRAMES'] +
@@ -4720,6 +4664,61 @@ try {
                     Wait-Marker11 'GXOS_NET10:PHASE91_LIFECYCLE_RECONCILED=1' `
                         $deadline $process $stream $logStream $text $buffer
                     if ($EnablePhase92AsyncTxEndurance) {
+                        $serialSnapshot = $text.ToString()
+                        Require11 ($preStopAsyncAccepted -eq 149 -and
+                            $preStopAsyncCompleted -eq 149 -and
+                            $preStopAsyncTransmitted -eq 149 -and
+                            $atStop -eq 4 -and $completedUnconsumed -eq 4 -and
+                            $hardwareOwned -eq 0 -and $invalidated -eq 4 -and
+                            $exposedBeforeStop -eq 149 -and $consumedBeforeStop -eq 145 -and
+                            $restartAsyncAccepted -eq 133 -and
+                            $restartAsyncCompleted -eq 133 -and
+                            $restartAsyncTransmitted -eq 133 -and
+                            $restartExposed -eq 133 -and $restartConsumed -eq 133) `
+                            'Phase 92 per-episode request and teardown invalidation counts disagree.'
+                        $phase92CounterNames = @(
+                            'PHASE92_EPISODE1_ACCEPTED', 'PHASE92_EPISODE1_COMPLETED',
+                            'PHASE92_EPISODE1_SUCCESSFUL_FRAMES', 'PHASE92_EPISODE1_EXPOSED',
+                            'PHASE92_EPISODE1_CONSUMED', 'PHASE92_EPISODE1_BUSY_PROBES',
+                            'PHASE92_EPISODE1_DESCRIPTOR_WRAPS',
+                            'PHASE92_EPISODE1_FINAL_OUTSTANDING', 'PHASE92_EPISODE1_MAX_OUTSTANDING',
+                            'PHASE92_EPISODE2_ACCEPTED', 'PHASE92_EPISODE2_COMPLETED',
+                            'PHASE92_EPISODE2_SUCCESSFUL_FRAMES', 'PHASE92_EPISODE2_EXPOSED',
+                            'PHASE92_EPISODE2_CONSUMED', 'PHASE92_EPISODE2_BUSY_PROBES',
+                            'PHASE92_EPISODE2_DESCRIPTOR_WRAPS',
+                            'PHASE92_EPISODE2_FINAL_OUTSTANDING', 'PHASE92_EPISODE2_MAX_OUTSTANDING',
+                            'PHASE92_FINAL_OUTSTANDING', 'PHASE92_FINAL_HARDWARE_OWNED',
+                            'PHASE92_FINAL_COMPLETED_UNCONSUMED', 'PHASE92_FINAL_EXPOSED',
+                            'PHASE92_FINAL_CONSUMED')
+                        $phase92Counters = @{}
+                        foreach ($counterName in $phase92CounterNames) {
+                            $counterPrefix = [regex]::Escape("GXOS_NET10:${counterName}=0x")
+                            $counterMatch = [regex]::Match($serialSnapshot,
+                                $counterPrefix + '([0-9A-Fa-f]{16})')
+                            Require11 $counterMatch.Success `
+                                "Phase 92 semantic counter is missing: $counterName"
+                            $phase92Counters[$counterName] = [Convert]::ToUInt64(
+                                $counterMatch.Groups[1].Value, 16)
+                        }
+                        foreach ($episodeName in @('EPISODE1', 'EPISODE2')) {
+                            Require11 ($phase92Counters["PHASE92_${episodeName}_ACCEPTED"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_COMPLETED"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_SUCCESSFUL_FRAMES"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_EXPOSED"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_CONSUMED"] -eq 128 -and
+                                $phase92Counters["PHASE92_${episodeName}_BUSY_PROBES"] -eq 32 -and
+                                $phase92Counters["PHASE92_${episodeName}_DESCRIPTOR_WRAPS"] -ge 7 -and
+                                $phase92Counters["PHASE92_${episodeName}_FINAL_OUTSTANDING"] -eq 0 -and
+                                $phase92Counters["PHASE92_${episodeName}_MAX_OUTSTANDING"] -eq 4) `
+                                "Phase 92 $episodeName ledger accounting did not reconcile."
+                        }
+                        Require11 ($phase92Counters['PHASE92_FINAL_OUTSTANDING'] -eq 0 -and
+                            $phase92Counters['PHASE92_FINAL_HARDWARE_OWNED'] -eq 0 -and
+                            $phase92Counters['PHASE92_FINAL_COMPLETED_UNCONSUMED'] -eq 0 -and
+                            $phase92Counters['PHASE92_FINAL_EXPOSED'] -eq
+                                $phase92Counters['PHASE92_FINAL_CONSUMED']) `
+                            'Phase 92 final resource drain did not reconcile.'
+
                         $lateDuplicateProbeUntil = [DateTime]::UtcNow.AddMilliseconds(1000)
                         while ([DateTime]::UtcNow -lt $lateDuplicateProbeUntil) {
                             [byte[]]$lateFrame = Receive-Phase85QemuDatagram11 $peerUdp 50

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = '',
-    [switch]$EnablePhase91Diagnostics
+    [switch]$EnablePhase91Diagnostics,
+    [string]$SdkDirectory = ''
 )
 
 Set-StrictMode -Version Latest
@@ -15,30 +16,23 @@ $project = Join-Path $root 'src\ManagedKernel\ManagedKernel.csproj'
 $publish = Join-Path $out 'publish'
 $binlog = Join-Path $out 'managed-kernel.binlog'
 $dotnet = Get-Command dotnet -ErrorAction Stop
-$sdkRoot = Join-Path (Split-Path -Parent $dotnet.Source) 'sdk'
-$sdkDirectory = Get-ChildItem -LiteralPath $sdkRoot -Directory |
-    Where-Object { $_.Name -match '^10\.0\.\d+$' } |
-    Sort-Object { [Version]$_.Name } -Descending |
-    Select-Object -First 1 -ExpandProperty FullName
-if ([string]::IsNullOrWhiteSpace($sdkDirectory)) {
-    throw "No installed .NET 10 SDK was found under $sdkRoot"
-}
-$msbuild = Join-Path $sdkDirectory 'MSBuild.dll'
-if (-not (Test-Path -LiteralPath $msbuild)) {
-    throw "The installed .NET 10 SDK MSBuild entry point is missing: $msbuild"
-}
+. (Join-Path $PSScriptRoot 'Resolve-ManagedKernelHostToolchain.ps1')
+$toolchain = Resolve-ManagedKernelHostToolchain `
+    -DotNetPath $dotnet.Source -SdkDirectoryOverride $SdkDirectory
+$sdkDirectory = $toolchain.SdkDirectory
+$msbuild = $toolchain.MSBuildPath
 
 New-Item -ItemType Directory -Force -Path $out,$publish | Out-Null
 
-# The repository pins 10.0.302 for the accepted foundation.  This machine
-# currently has 10.0.400, so invoke from the parent of the checkout to use the
-# installed fallback without changing global.json or the foundation project.
+# The repository pins 10.0.302. Use the complete installed fallback when no
+# SDK directory is supplied; callers can select a staged SDK explicitly without
+# changing global.json or the foundation project.
 $parent = Split-Path -Parent $root
 Push-Location $parent
 $previousDotnetHostPath = $env:DOTNET_HOST_PATH
 try {
     $env:DOTNET_HOST_PATH = $dotnet.Source
-    $sdkVersion = "$(Split-Path -Leaf $sdkDirectory) (installed fallback; direct MSBuild entry point)"
+    $sdkVersion = "$($toolchain.SdkVersion) ($($toolchain.SelectionSource); direct MSBuild entry point)"
     $sdkInfo = & dotnet $msbuild '/version' 2>&1
     $sdkVersion | Set-Content -LiteralPath (Join-Path $out 'dotnet-version.log')
     $sdkInfo | Set-Content -LiteralPath (Join-Path $out 'dotnet-info.log')

@@ -1,10 +1,16 @@
 [CmdletBinding()]
-param([string]$SdkDirectory = '')
+param(
+    [string]$SdkDirectory = '',
+    [string]$OutputDirectory = ''
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$out = Join-Path $root 'artifacts\managed-kernel-phase14-host-tests'
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+    $OutputDirectory = Join-Path $root 'artifacts\managed-kernel-phase14-host-tests'
+}
+$out = [IO.Path]::GetFullPath($OutputDirectory)
 $project = Join-Path $root 'src\ManagedKernelPhase14HostTests\ManagedKernelPhase14HostTests.csproj'
 $dotnet = Get-Command dotnet -ErrorAction Stop
 . (Join-Path $PSScriptRoot 'Resolve-ManagedKernelHostToolchain.ps1')
