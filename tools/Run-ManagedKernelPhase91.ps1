@@ -4,11 +4,15 @@ param(
     [string]$EvidenceDirectory = '',
     [string]$SdkDirectory = '',
     [int]$TimeoutSeconds = 240,
+    [string]$QacCliPath = 'D:\dev\guideXOS_QAC\src\GuideXOS.QAC.Cli\bin\Debug\net10.0-windows\GuideXOS.QAC.Cli.exe',
     [switch]$EnablePhase91Diagnostics
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+function Require91([bool]$condition, [string]$message) {
+    if (!$condition) { throw $message }
+}
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
     $BuildDirectory = Join-Path $root 'artifacts\phase91-build'
@@ -23,10 +27,30 @@ $normalGate = Join-Path $build 'gate4-normal'
 $phase91Gate = Join-Path $build 'gate4-phase91'
 $payload = Join-Path $managedDirectory 'publish\gxos-managed-kernel.dll'
 New-Item -ItemType Directory -Force -Path $build | Out-Null
-
-function Require91([bool]$condition, [string]$message) {
-    if (!$condition) { throw $message }
+$qacCli = [IO.Path]::GetFullPath($QacCliPath)
+Require91 (Test-Path -LiteralPath $qacCli -PathType Leaf) "QAC CLI executable is missing: $qacCli"
+$qacPreflight = Join-Path $build 'qac-preflight'
+New-Item -ItemType Directory -Force -Path $qacPreflight | Out-Null
+$qacHelp = @(& $qacCli --help 2> (Join-Path $qacPreflight 'help.stderr.log'))
+$qacHelpExitCode = $LASTEXITCODE
+$qacHelp | Set-Content -LiteralPath (Join-Path $qacPreflight 'help.stdout.log') -Encoding utf8
+Require91 ($qacHelpExitCode -eq 0 -and ($qacHelp -join "`n").Contains('qac run --project')) `
+    'QAC CLI help did not expose the supported direct QEMU qac run contract.'
+foreach ($command in @('status', 'list', 'queue')) {
+    $commandOutput = @(& $qacCli $command 2> (Join-Path $qacPreflight "$command.stderr.log"))
+    $commandExitCode = $LASTEXITCODE
+    $commandOutput | Set-Content -LiteralPath (Join-Path $qacPreflight "$command.stdout.log") -Encoding utf8
+    Require91 ($commandExitCode -eq 0) "QAC $command preflight failed (exit $commandExitCode)."
 }
+[ordered]@{
+    cliPath = $qacCli
+    cliSha256 = (Get-FileHash -LiteralPath $qacCli -Algorithm SHA256).Hash.ToUpperInvariant()
+    helpExitCode = $qacHelpExitCode
+    status = (Get-Content -LiteralPath (Join-Path $qacPreflight 'status.stdout.log') -Raw)
+    observedUtc = [datetime]::UtcNow.ToString('o')
+} | ConvertTo-Json -Depth 4 |
+    Set-Content -LiteralPath (Join-Path $qacPreflight 'preflight.json') -Encoding utf8
+
 function ReadCounter91([string]$serial, [string]$name) {
     $prefix = [regex]::Escape("GXOS_NET10:${name}=0x")
     $match = [regex]::Match($serial, $prefix + '([0-9A-Fa-f]{16})')
@@ -72,14 +96,40 @@ $phase91Output = @(& (Join-Path $PSScriptRoot 'Build-Gate4Harness.ps1') `
 $phase91Output | Set-Content -LiteralPath `
     (Join-Path $build 'gate4-phase91-build-output.log') -Encoding ascii
 
-$runnerOutput = @(& (Join-Path $PSScriptRoot 'Run-ManagedKernelPhase11FreshBoots.ps1') `
+$stagedPayload = Join-Path $phase91Gate 'ESP\GXOS\gxos-managed-kernel.dll'
+$phase91Efi = Join-Path $phase91Gate 'ESP\EFI\BOOT\BOOTX64.EFI'
+Require91 ((Test-Path -LiteralPath $stagedPayload -PathType Leaf) -and
+    (Test-Path -LiteralPath $phase91Efi -PathType Leaf)) `
+    'Phase 91 Gate4 staged payload or EFI is missing.'
+$stagedPayloadHash = (Get-FileHash -LiteralPath $stagedPayload -Algorithm SHA256).Hash.ToUpperInvariant()
+$stagedPayloadSize = (Get-Item -LiteralPath $stagedPayload).Length
+Require91 ($stagedPayloadHash -eq $payloadHash -and $stagedPayloadSize -eq $payloadSize) `
+    'Phase 91 staged NativeAOT payload does not match the freshly built production payload.'
+$espFiles = @(Get-ChildItem -LiteralPath (Join-Path $phase91Gate 'ESP') -File -Recurse |
+    Sort-Object FullName |
+    ForEach-Object {
+        $relative = $_.FullName.Substring((Join-Path $phase91Gate 'ESP').Length).TrimStart('\', '/')
+        '{0}|{1}|{2}' -f $relative, $_.Length,
+            (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+    })
+@(
+    "NATIVEAOT_PAYLOAD|$payload|$payloadSize|$payloadHash",
+    "STAGED_PAYLOAD|$stagedPayload|$stagedPayloadSize|$stagedPayloadHash",
+    "PHASE91_GATE4_EFI|$phase91Efi|$((Get-Item -LiteralPath $phase91Efi).Length)|$((Get-FileHash -LiteralPath $phase91Efi -Algorithm SHA256).Hash.ToUpperInvariant())"
+) + @($espFiles | ForEach-Object { "ESP_FILE|$_" }) |
+    Set-Content -LiteralPath (Join-Path $build 'phase91-candidate-manifest.txt') -Encoding ascii
+
+Copy-Item -LiteralPath $qacPreflight -Destination (Join-Path $build 'qac-preflight-retained') -Recurse -Force
+
+& (Join-Path $PSScriptRoot 'Run-ManagedKernelPhase11FreshBoots.ps1') `
     -GateDirectory $phase91Gate -EvidenceDirectory $evidence `
     -PayloadSha256 $payloadHash -PayloadSize $payloadSize `
     -RunCount 3 -TimeoutSeconds $TimeoutSeconds `
     -PostPhase11Marker 'GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS' `
-    -EnablePhase80E1000 -EnablePhase91AsyncTxLifecycle)
-$runnerOutput | Set-Content -LiteralPath `
-    (Join-Path $build 'qemu-runner-output.log') -Encoding ascii
+    -QacCliPath $qacCli -QacProject 'guideXOS_NET10' `
+    -SourcePayloadPath $payload `
+    -EnablePhase80E1000 -EnablePhase91AsyncTxLifecycle 2>&1 |
+    Tee-Object -FilePath (Join-Path $build 'qemu-runner-output.log')
 
 $summaries = @()
 for ($boot = 1; $boot -le 3; ++$boot) {

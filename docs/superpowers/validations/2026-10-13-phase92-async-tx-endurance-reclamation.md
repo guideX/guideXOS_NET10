@@ -205,3 +205,181 @@ The Phase 92 payload and EFI hashes match the saved build outputs and are not re
 - Current classification is Outcome E because QEMU isolation prevented the only outstanding qualification run. No production repair was made or supported by new failure evidence. Previously passing hosted and hardware evidence was preserved without rerunning it.
 - The worktree remains uncommitted. HEAD is unchanged at `066bb2ac580145bf766fab1fb95010c062220351`; the seven coherent Phase 92 tracked files are modified, and generated verification records remain under ignored `artifacts/`. No commit or push was attempted because Phase 92 did not reach Outcome A or B.
 - Phase 91 remains accepted from its earlier qualification. Phase 81 remains unaccepted. Phase 81R2 remains unaccepted. Normal synchronous TX retains DD polling. No scheduler wait implementation or asynchronous timeout was added. Phase 93 was not started.
+
+## Phase 92R3 QAC retry audit — 2026-10-20
+
+**Current result: Outcome E — blocked before execution by the Phase 91 runner's missing QAC integration.** The fresh QEMU census was clear, but the required QAC launch contract cannot run the existing PowerShell orchestrator. No Phase 91 build or QEMU boot was started.
+
+### Fresh preflight and QAC status
+
+- The retry started on `nativeaot-managed-kernel-integration` at HEAD `bcc25361b89b132de40217ef2d0ca6ec8552d5ab`, tracking `origin/nativeaot-managed-kernel-integration` at 0/0 divergence. The worktree was clean at preflight. This is the current baseline; the older R2 state above is retained as history.
+- A fresh `Win32_Process` census found zero QEMU processes. QAC status independently reported zero QEMU processes and zero foreign processes.
+- The installed CLI apphost at `D:\dev\guideXOS_QAC\src\GuideXOS.QAC.Cli\bin\Debug\net10.0-windows\GuideXOS.QAC.Cli.exe` passed `--help`, `status`, and `list` with exit code 0. The coordinator was online as QAC 2.0.0 (PID 408), with zero reservations, zero managed sessions, zero queued or blocked requests, and development limit 2. The `qac` command alias was not on PATH.
+- No lease was acquired. The appropriate formal lease would be exclusive `acceptance`; it was not acquired because the existing runner cannot launch through QAC's supported child contract. No `qac run` was invoked, no runner invocation occurred, and there was no lease to release.
+
+### QAC and runner integration constraint
+
+- The requested runner is `tools/Run-ManagedKernelPhase91.ps1`; it builds the Phase 91 fixture from the current production payload and delegates to `tools/Run-ManagedKernelPhase11FreshBoots.ps1` for three boots.
+- The existing Phase 11 runner launches QEMU directly with PowerShell `Start-Process` at line 4061 of `Run-ManagedKernelPhase11FreshBoots.ps1`. It does not accept or call a QAC CLI.
+- The installed QAC CLI's `run` implementation accepts only a direct `qemu-system-*.exe` child and explicitly rejects wrappers and scripts. Its reservation is tied to that child's lifetime; it does not provide a single acceptance reservation that can attach the runner's sequential QEMU children across all three boots.
+- Therefore `qac run` cannot launch the complete existing PowerShell runner while preserving its current arguments, exit behavior, and evidence flow. Running the script directly under a separate lease would bypass the required QAC child registration. QAC was not changed, and no direct QEMU fallback was used.
+
+### Source and retained artifact provenance
+
+- The qualified production source commit `066bb2ac580145bf766fab1fb95010c062220351` is an ancestor of current HEAD. The diff from that candidate commit to current HEAD contains no changes under `src/ManagedKernel`; the previously qualified Phase 92 production payload remains applicable.
+- Recalculated files match `artifacts/phase92r2-20261016/phase92-final-artifact-manifest.txt`:
+
+| Artifact | Bytes | SHA-256 | Qualification |
+|---|---:|---|---|
+| NativeAOT production payload | 4,946,432 | `3F0E921E05E6C24434EDD5D76DFFBFED9E4378E5AF536B030D70118DF4145E26` | Phase 92 production source |
+| Phase 92 Gate4 EFI | 749,887 | `1F669B27625057D44924966A5F98FFC2C75309E8B8F14BA82809FEAA4769346A` | Existing Phase 92 3-boot evidence |
+| Phase 91 Gate4 EFI | 749,887 | `154F17D57143F1B3059727C092AF4E7CDBE86D1082739724539FC36B9CFAECC3` | Prior one-boot current-source diagnostic, not 3-boot acceptance |
+
+- Existing Phase 92 evidence remains 3/3 boots, with 284 unique captured frames per boot including 256 endurance frames, no duplicate identifiers, and zero outstanding requests after teardown. Existing Phase 92 hosted endurance remains 10,000 lifecycles and 178,774 checks. None of this evidence was rerun during R3.
+
+### Regression matrix and R3 result
+
+| Gate | Result at R3 |
+|---|---|
+| Phase 14 hosted E1000 | PASS |
+| Phase 16 hosted networking | PASS, 139 cases |
+| Phase 91 hosted lifecycle/proof | PASS, 60 checks |
+| Phase 92 hosted endurance | PASS, 10,000 lifecycles and 178,774 checks |
+| Managed interrupts | PASS, 36/36 assertions and source completeness |
+| Native interrupts; driver binding | PASS |
+| Network service / Phase 23 | PASS, 60 cases |
+| Host services, service host, owner/status, and service worker | PASS |
+| Phase 90 standalone host suite | No standalone runner; covered through Phase 14, 91, and 92 host suites |
+| Phase 14, 16, 85, 87, and 89 hardware | PASS, 3/3 boots each |
+| Phase 91 historical accepted candidate | PASS, 3/3 in Phase 91R3; prior acceptance remains intact |
+| Phase 91 against current Phase 92 production source | BLOCKED before build/boot, 0/3; QAC cannot launch the unintegrated runner |
+| Phase 92 hardware endurance | PASS, 3/3; 284 unique frames per boot |
+| Earlier PowerShell parser and `git diff --check` qualification checks | PASS; no Phase 91 test scripts were changed in R3 |
+
+The R3 attempt was **not a QEMU isolation failure**: the fresh census and operational QAC coordinator both showed no QEMU processes. It remains Outcome E because the test entry point has no supported QAC integration and QAC's direct-child restriction prevents an external wrapper from supplying one.
+
+### R3 final state
+
+- Phase 91 remains 0/3 for the current Phase 92 source, blocked before build and boot. It is neither passed nor failed.
+- No production or harness source changed. No commit or push was made. The report update is uncommitted; QAC itself was not installed, modified, or reconfigured.
+- QAC record: CLI apphost verified; coordinator online; intended lease type `acceptance` not acquired; `qac run` and the Phase 91 runner were not invoked; release outcome not applicable because no lease was created.
+- Phase 81 remains unaccepted. Phase 81R2 remains unaccepted. Normal synchronous TX retains DD polling. No scheduler wait implementation or asynchronous timeout was added. Phase 93 was not started.
+
+## Phase 92R4 QAC-managed Phase 91 acceptance audit — 2026-10-22
+
+**Current result: Outcome E — the live QAC API cannot keep one exclusive acceptance reservation while registering the Phase 91 runner's three sequential QEMU children.** QAC was available and granted a legitimate childless acceptance reservation after normal queueing, but no Phase 91 build or QEMU boot was started because the granted lease could not own the required multi-boot process sequence. Phase 91 against the Phase 92 source remains 0/3, blocked before build and boot. Phase 92 is not accepted.
+
+### Repository and source preflight
+
+- R4 started on `nativeaot-managed-kernel-integration` at HEAD `bcc25361b89b132de40217ef2d0ca6ec8552d5ab`, tracking `origin/nativeaot-managed-kernel-integration` at 0/0 divergence. The only modified tracked file was this qualification report, already carrying the uncommitted R3 audit; there were no untracked files. The earlier Phase 92 implementation files are part of the current HEAD. No branch, history, `.phase` file, or other project was changed.
+- The Phase 92 production candidate commit `066bb2ac580145bf766fab1fb95010c062220351` remains an ancestor of HEAD. `git diff 066bb2ac580145bf766fab1fb95010c062220351 HEAD -- src/ManagedKernel` is empty, so the previously accepted Phase 92 production-source evidence remains applicable.
+- The Phase 91 wrapper still builds the current NativeAOT payload and its Phase 91 Gate4 fixture, then calls `Run-ManagedKernelPhase11FreshBoots.ps1` for three fresh boots. The latter starts QEMU directly with `Start-Process`; it requires a single QEMU PID for isolation checks and separate per-boot firmware, endpoints, captures, and logs.
+
+### Live QAC implementation and admission
+
+- QAC source HEAD was `8ff500c60393e5e38fa4b8cd4d83f213b17df0f0` (`main`, two commits ahead of `origin/main`, clean worktree). The verified CLI apphost is `D:\dev\guideXOS_QAC\src\GuideXOS.QAC.Cli\bin\Debug\net10.0-windows\GuideXOS.QAC.Cli.exe`, SHA-256 `F7089D508C1D8307E11DE1B944B6E1087C038C4901333E8228EC117291CA8DF6`. `qac --help`, `status`, `list`, `queue`, and `inspect` succeeded; status identified QAC 2.0.0. Supported reservation modes are `development` and `acceptance`. QAC accepts a runtime project identifier rather than maintaining a project-registration catalog; R4 used the repository's existing identity `guideXOS_NET10`.
+- The live README and QAC2 design document specify `qac run --project <name> --mode <development|acceptance> -- <qemu-system-*.exe> [arguments...]`. It starts only a direct QEMU child, preserves its argument boundaries and exit code, and rejects wrappers and scripts. `qac request` can hold a childless reservation while its CLI owner remains alive. Existing Developer Studio acceptance and Server launcher examples use the direct-child `qac run` contract for a single QEMU execution; they do not define a multi-child acceptance session.
+- The IPC implementation records one child on a reservation: `prepareLaunch` moves a granted reservation to `Starting`; `registerChild` accepts only that state and records the direct child; `complete` releases the reservation after that child exits. `release` also makes a granted childless reservation terminal. There is no supported operation to clear a completed child and attach the next QEMU under the same acceptance reservation. The QAC FIFO acceptance barrier orders pending reservations, but it is not a batch/session contract that atomically spans this three-boot workload. Three separate `qac run` reservations therefore cannot be claimed as one uninterrupted exclusive Phase 91 acceptance session.
+- A fresh QAC census at 14:42 PDT showed the healthy managed `guideXOSServer` acceptance reservation `8ce67ff290d2479fafcf516b145f556d`, QEMU PID 3512, and zero foreign QEMU. The independent Windows process census agreed. That session was left untouched. Following the documented occupied-session procedure, R4 submitted `qac request --project guideXOS_NET10 --mode acceptance`; reservation `435a9c5e294b43b7b1f35737cc112dd1` entered `Waiting` at queue position 1 with verified owner PID 22656. QAC granted it at `2026-10-22T21:43:51.3058393Z` after about 33 seconds. Because it had no registered QEMU child and the API could not cover the boot series, it was promptly released through `qac release`; QAC reported `Released` with reason `Released by authenticated local user`. This reservation is admission evidence only, not guest acceptance evidence.
+- Final `qac list` reported zero reservations and managed sessions; `queue` reported zero queued requests; `status` reported zero QEMU processes and zero foreign processes. The final independent Windows census also reported zero QEMU. The request, queue, grant, release, and final census records are retained under ignored `artifacts/phase92r4-20261022/qac-admission/`. No `qac run` or Phase 91 runner invocation occurred.
+
+### Preserved Phase 92 artifact provenance
+
+The saved R2 manifest at `artifacts/phase92r2-20261016/phase92-final-artifact-manifest.txt` was checked against the retained files. Hashes and sizes match:
+
+| Artifact | Bytes | SHA-256 | R4 use |
+|---|---:|---|---|
+| Current-source NativeAOT payload | 4,946,432 | `3F0E921E05E6C24434EDD5D76DFFBFED9E4378E5AF536B030D70118DF4145E26` | Existing Phase 92 production candidate |
+| Phase 92 Gate4 EFI | 749,887 | `1F669B27625057D44924966A5F98FFC2C75309E8B8F14BA82809FEAA4769346A` | Existing Phase 92 3-boot acceptance |
+| Phase 91 Gate4 EFI | 749,887 | `154F17D57143F1B3059727C092AF4E7CDBE86D1082739724539FC36B9CFAECC3` | Retained current-source one-boot diagnostic only; not Phase 91 acceptance |
+
+The payload embedded in that Phase 91 diagnostic EFI is byte-identical to the saved NativeAOT payload and has the same SHA-256. No new Phase 91 artifact was built in R4. Each of the three retained Phase 92 captures is 18,176 bytes with SHA-256 `F1311EA75197285EADF7A2BFE495DE893C0360FA6B1617083C15D8D9E6258621`; each saved host-validation log contains `PHASE92_ASYNC_TX_ENDURANCE_PASS=1`, and the existing reconciliation records 284 unique frames including 256 endurance transmissions per boot.
+
+### Regression matrix and R4 result
+
+| Gate | Current result |
+|---|---|
+| Phase 14 hosted E1000 | PASS |
+| Phase 16 hosted networking | PASS, 139 cases |
+| Phase 91 hosted lifecycle | PASS, 60 checks |
+| Phase 92 hosted endurance | PASS, 10,000 lifecycles and 178,774 checks |
+| Managed interrupts; native interrupts; driver binding | PASS; managed suite 36/36 assertions |
+| Network service / Phase 23; host services; service host; owner/status; service worker | PASS; Phase 23 has 60 cases |
+| Phase 90 standalone host suite | No standalone runner; covered by Phase 14, 91, and 92 host suites |
+| Phase 14, 16, 85, 87, and 89 hardware | PASS, 3/3 boots each |
+| Historical Phase 91 accepted candidate | PASS, 3/3; prior acceptance remains intact |
+| Phase 91 against current Phase 92 source | BLOCKED before build/boot, 0/3; no supported multi-child QAC acceptance contract |
+| Phase 92 hardware endurance | PASS, 3/3; 284 unique frames per boot and 256 endurance transmissions per boot |
+| Phase 91 runner PowerShell parse; `git diff --check` | PASS; no runner source was changed |
+
+### R4 final state
+
+- Outcome E is an API capability blocker, not a Phase 91 guest failure and not foreign QEMU contention. The current QAC API can admit and own one QEMU child per reservation; it cannot maintain the required single exclusive acceptance session across three sequential QEMU children. No second scheduler, unmanaged launch, QAC change, or acceptance-logic weakening was introduced.
+- The QAC reservation was released, the requesting CLI exited, and no QEMU remained active. Prior Phase 92 hardware and hosted qualification were preserved without rerunning them. No focused QAC adapter test exists because no compliant adapter can be implemented against the available API.
+- The worktree remains uncommitted at `bcc25361b89b132de40217ef2d0ca6ec8552d5ab`; only this report is modified. No commit or push was attempted because the outcome is E. Phase 91 remains accepted on its earlier candidate; Phase 81 and Phase 81R2 remain unaccepted. Synchronous TX still DD-polls. No scheduler waits, async timeout infrastructure, or Phase 93 work was added.
+
+## Phase 92R5 QAC per-boot admission and final closeout — 2026-10-22
+
+**Final result: Outcome B — Accepted with runner/adapter repair.** The current-source Phase 91 E1000 lifecycle regression passed three independent cold boots. Each QEMU process was QAC 2.0.0's direct child under its own `guideXOS_NET10` acceptance reservation, each used the same freshly built candidate, and each reservation was released after a zero-exit child. The earlier Phase 92 endurance candidate and its retained 3/3 hardware evidence remain valid. No production driver or QAC code was changed.
+
+### Repository, build, and candidate
+
+- R5 started on `nativeaot-managed-kernel-integration` at `bcc25361b89b132de40217ef2d0ca6ec8552d5ab`, tracking its upstream at 0/0 divergence. The only tracked change before R5 was this report, which retained the complete R3/R4 blocker history. No branch, worktree, history, or unrelated project was altered. At closeout, `src/ManagedKernel` still has no diff.
+- The Phase 91 candidate was built once from current source with the recovered process-local Visual Studio environment: .NET SDK 10.0.302 and MSVC linker 14.51.36260.0. The build succeeded with 0 errors and 4 compiler warnings at `ManagedIpv4Layer.cs:386,395`, `ManagedKernel.cs:2869`, and `ManagedKernel.cs:4081`; those source lines were not changed. Boot 2 and boot 3 reused the built files and did not rebuild production or fixture binaries.
+- This fresh Phase 91 regression candidate is distinct from the retained Phase 92 candidate. Its NativeAOT payload is 4,946,432 bytes, SHA-256 `DA65B072CDA3E62565B03086F18B449ACC076619631A7133076EAAF12716EC5D`; the staged payload has the same size and hash. The Phase 91 Gate4 EFI is 749,887 bytes, SHA-256 `154F17D57143F1B3059727C092AF4E7CDBE86D1082739724539FC36B9CFAECC3`.
+- The common Phase 91 ESP manifest hash is `F383D53521695BD0BEB9091931D0A4C1854B782C0D66B2A08F3E386B9D6FEC34`. It contains `EFI\BOOT\BOOTX64.EFI` (749,887 bytes, hash above), `GXOS\gxos-managed-kernel.dll` (4,946,432 bytes, hash above), and `startup.nsh` (27 bytes, SHA-256 `6A231F5CF395B72E9A38EF0A8B00B69CDB410F160E9E941414EA53E04E969CCE`). QEMU used this FAT ESP with the same immutable OVMF code input (3,653,632 bytes, SHA-256 `33090CC07675BAA5190D9F1E84BF5176B33BCBFA9BACAC522961150CDB6DBB2A`) and pristine OVMF vars template (540,672 bytes, SHA-256 `5D2AC383371B408398ACCEE7EC27C8C09EA5B74A0DE0CEEA6513388B15BE5D1E`). Each boot received a separate writable copy of the vars template; only those per-run copies changed during guest execution. The source payload, staged payload, EFI, ESP, OVMF code, and pristine template remained at their recorded hashes throughout all three boots.
+- The freshly produced Phase 91 EFI is a regression fixture, not the retained Phase 92 EFI. No Phase 92 endurance tests were repeated.
+
+### QAC contract and runner repair
+
+- The verified QAC CLI apphost is `D:\dev\guideXOS_QAC\src\GuideXOS.QAC.Cli\bin\Debug\net10.0-windows\GuideXOS.QAC.Cli.exe`, SHA-256 `F7089D508C1D8307E11DE1B944B6E1087C038C4901333E8228EC117291CA8DF6`; the coordinator reported version 2.0.0. The runner used the documented `qac run --project guideXOS_NET10 --mode acceptance -- <qemu-system-x86_64.exe> [arguments...]` form. It passed the exact QEMU argument list via `ProcessStartInfo.ArgumentList`; QAC, not PowerShell or another wrapper, launched QEMU as its direct child. `qac --help`, `status`, `list`, `queue`, and per-reservation `inspect` were used and retained.
+- A narrow QAC-only guard incorrectly rejected the supported one-reservation/one-QEMU Phase 91 run form. It now permits one per-boot lifecycle invocation or the existing three-boot suite, while retaining the Phase 91 mode, freshly built source identity, QAC project, direct-child, exclusive-isolation, guest, and host validation checks. The post-exit owner-record path now reads the persisted QAC release verification rather than relying on a transient completion object. The prelaunch failure path records a cancelled/failed admission with its reservation and owner details and does not run child-release verification when no child was launched.
+- Boot 1's QEMU and QAC processes both exited 0 and its reservation was `Released`; the first outer invocation then exited 1 while finalizing the owner JSON. Its raw serial, capture, direct-child ownership, QAC release, and exit evidence were retained. The owner record was reconciled from the captured ownership and release JSON, then all unchanged outer Phase 91 markers, counters, and 28-frame assertions were independently rechecked and passed. The narrow owner-record repair was applied to the runner before boots 2 and 3, and both subsequent runs completed through the runner's normal success path.
+- One later request was cancelled before admission because its invocation waited for the already-emitted Phase 11 marker instead of the original wrapper's final `GXOS_NET10:MANAGED_KERNEL_PHASE12_PASS` marker. QAC reservation `24d93af17abb49219c98ae41837698e7` remained queued at position 1, was cancelled through QAC, ended `Cancelled`, and never launched a QEMU child. That prelaunch request is preserved under `artifacts/phase92r5-20261022-boot2-evidence/` and is not counted as a boot or a guest failure. The corrected boot 2 request used the original Phase 12 completion marker.
+
+### Three independent QAC-managed Phase 91 boots
+
+| Boot | QAC acceptance reservation | Admission | Direct QAC owner → QEMU child | Reservation/exit | Guest and host result |
+|---|---|---|---|---|---|
+| 1 | `0f37ceae580d4f3bbbbae088133a5ef6` | Queue 1 | PID 10040 → PID 5244; owner `2026-10-22T22:08:26.5634777Z`, QEMU `2026-10-22T22:09:26.6044722Z` | Released; owner 0, QEMU 0 | PASS; 28/28 unique frames |
+| 2 | `122f34dbf0714718a56acc40ef95ec0b` | Queue 2 | PID 26348 → PID 15768; owner `2026-10-22T22:21:44.3320098Z`, QEMU `2026-10-22T22:29:29.6430917Z` | Released; owner 0, QEMU 0 | PASS; 28/28 unique frames |
+| 3 | `1aa745169b6c446cb82897b69286d685` | Immediate; no queued position | PID 8588 → PID 17944; owner `2026-10-22T22:30:23.1153695Z`, QEMU `2026-10-22T22:30:23.2868458Z` | Released; owner 0, QEMU 0 | PASS; 28/28 unique frames |
+
+For each boot, QAC `list` verified the owner and direct QEMU child, and QAC `status` reported exactly one QEMU with zero foreign processes while the boot was active. The recorded QEMU executable was `C:\Program Files\qemu\qemu-system-x86_64.exe`, and its parent PID matched the QAC CLI PID. Per-reservation `inspect` reported `Released`; the QAC owner and that boot's QEMU process identity were absent after completion. QAC reported no QEMU, queued request, or managed session after the final run. Between the independent reservations, other projects were admitted in FIFO order as permitted by the corrected contract.
+
+All three boots passed the 19 unchanged outer Phase 91 required markers, exactly one `MANAGED_KERNEL_PHASE11_PASS`, and the final `MANAGED_KERNEL_PHASE12_PASS`. Each captured 28 frames in a 1,792-byte capture file, with 28 unique sequence IDs. Each recorded the same guest accounting: pre-stop async acceptance/completion/transmission `21/21/21`; stop-boundary outstanding and completed-unconsumed `4`, hardware-owned-not-DD `0`, invalidated `4`; restart async acceptance/completion/transmission `5/5/5`; one pre-stop and one restart synchronous DD-poll TX frame; one fresh post-restart TXDW notification for synchronous TX; and 9 native interrupt entries, within the bounded no-storm envelope. The stale FIFO, safe request IDs, stale-ID rejection, same-slot descriptor reuse, restored four-request async capacity, route teardown/restoration, post-restart RX liveness, COM1 independence, TXDW routing, and no-interrupt-storm markers passed on every boot.
+
+| Boot | Serial SHA-256 | Capture SHA-256 | Capture log SHA-256 | Injection log SHA-256 | Timeline SHA-256 |
+|---|---|---|---|---|---|
+| 1 | `4329788E2E7ED78CE6D29CB2588DDEF50065725C5DD329B7DEDF603A7DC6A79E` | `77D0D3A217CDE6421F732BBCF4FA4402B79B449D9E2307126BE93C85199E8AFC` | `DAC29CC1379890D701A3FC450D4E75500EBCD130911A124AD6FB34B4F00767E0` | `F3F1DAFAA81834AE069BAE18D0B21C684AEBC845CC783A35F6CEFB46F7C40246` | `E2F0EC6FAC28123BA63143A96C39C145E657C0E58454C635EA59E44E5A3E7E3F` |
+| 2 | `8B753F192838724079B2C8C03625447E60F72F4B99438E52B78B1811710899FE` | `77D0D3A217CDE6421F732BBCF4FA4402B79B449D9E2307126BE93C85199E8AFC` | `DAC29CC1379890D701A3FC450D4E75500EBCD130911A124AD6FB34B4F00767E0` | `945E0AE604F5DFE103B774E87012FC2663AB14CACDAB24CDC1C0DF97BB8F25F3` | `B40B3162B0EACCB535225F38B0B36ACFE60CC21BC1DF504E90FB7B83A008758F` |
+| 3 | `8DABC820AB99DF9939A524ECF9CCBBD4EAAB5D48EDF43569865D4EBF11C13D0E` | `77D0D3A217CDE6421F732BBCF4FA4402B79B449D9E2307126BE93C85199E8AFC` | `DAC29CC1379890D701A3FC450D4E75500EBCD130911A124AD6FB34B4F00767E0` | `35C744417FE7A3406ED20D7AD396E282C64415159CDECF9154357067774B8818` | `8CA1A22CD69E31CC8B855D0F6453F294B0F6DB89DC51EEE12DCC06D009FCB2EB` |
+
+The complete per-boot serial, packet captures, QAC invocation/output, active-owner census, release verification, timelines, and post-run reconciliation are under `artifacts/phase92r5-20261022-evidence/`, `artifacts/phase92r5-20261022-boot2-accepted-evidence/`, and `artifacts/phase92r5-20261022-boot3-evidence/`. The separate prelaunch cancellation and its QAC inspect record are under `artifacts/phase92r5-20261022-boot2-evidence/`.
+
+### Prior Phase 92 evidence and final regression matrix
+
+The existing `artifacts/phase92r2-20261016/phase92-final-artifact-manifest.txt` was recalculated against its retained files and still matches. Its 4,946,432-byte Phase 92 NativeAOT payload remains SHA-256 `3F0E921E05E6C24434EDD5D76DFFBFED9E4378E5AF536B030D70118DF4145E26`; the accepted Phase 92 EFI remains SHA-256 `1F669B27625057D44924966A5F98FFC2C75309E8B8F14BA82809FEAA4769346A`. Each of the three retained Phase 92 captures remains 18,176 bytes with SHA-256 `F1311EA75197285EADF7A2BFE495DE893C0360FA6B1617083C15D8D9E6258621`, and its saved host validation reports PASS. The retained Phase 92 hardware evidence is still 3/3 boots and 284 unique frames per boot, including 256 endurance transmissions, with zero outstanding, hardware-owned, and completed-unconsumed requests at final teardown. Hosted Phase 92 endurance remains 10,000 async lifecycles and 178,774 checks. These results were verified from the saved manifests and validation records; the endurance suite was not repeated.
+
+| Qualification gate | R5 result |
+|---|---|
+| Phase 14 hosted E1000 | PASS |
+| Phase 16 hosted networking | PASS, 139 cases |
+| Phase 91 hosted lifecycle/proof | PASS, 60 checks |
+| Phase 92 hosted endurance | PASS, 10,000 lifecycles and 178,774 checks; retained |
+| Managed interrupts | PASS, 36/36 assertions and source completeness; retained |
+| Native interrupts and driver binding | PASS; retained |
+| Network service / Phase 23 | PASS, 60 cases; retained |
+| Host services, service host, owner/status, and service worker | PASS; retained |
+| Phase 90 standalone host suite | No separate runner; covered through Phase 14, 91, and 92 host suites |
+| Phase 14, 16, 85, 87, and 89 hardware | PASS, 3/3 each; retained |
+| Historical accepted Phase 91 candidate | PASS, 3/3; remains accepted |
+| Current-source Phase 91 lifecycle under QAC | PASS, 3/3 independent reservations and cold boots |
+| Phase 92 hardware endurance | PASS, 3/3; 284 unique frames per boot; retained |
+| PowerShell parsing and `git diff --check` | PASS |
+
+### R5 closeout
+
+Outcome B applies because narrow Phase 91 runner/adapter defects in per-boot invocation, post-exit QAC owner reporting, and no-child admission cleanup were corrected; all three hardware boots passed on one unchanged candidate. No E1000 production behavior or QAC admission/fairness semantics changed. Synchronous TX continues to use DD polling; no scheduler waits or asynchronous timeouts were added.
+
+Phase 91 accepted: **Yes** (the prior qualification remains intact, and current-source hardware regression is now 3/3). Phase 81 accepted: **No**. Phase 81R2 accepted: **No**. Synchronous TX still DD-polls: **Yes**. Scheduler waits added: **No**. Async timeouts added: **No**. Phase 93 started: **No**.

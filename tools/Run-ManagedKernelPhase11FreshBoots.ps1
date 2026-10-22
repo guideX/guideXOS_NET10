@@ -4,6 +4,7 @@ param(
     [Parameter(Mandatory = $true)] [string]$EvidenceDirectory,
     [Parameter(Mandatory = $true)] [string]$PayloadSha256,
     [Parameter(Mandatory = $true)] [long]$PayloadSize,
+    [string]$SourcePayloadPath = '',
     [int]$RunCount = 3,
     [int]$TimeoutSeconds = 180,
     [string]$PostPhase11Marker = '',
@@ -18,6 +19,8 @@ param(
     [switch]$EnablePhase90AsyncTx,
     [switch]$EnablePhase91AsyncTxLifecycle,
     [switch]$EnablePhase92AsyncTxEndurance,
+    [string]$QacCliPath = '',
+    [string]$QacProject = 'guideXOS_NET10',
     [string]$Phase15InjectorPath = '',
     [string]$Phase89InjectorPath = '',
     [ValidateSet('dgram', 'user')]
@@ -80,6 +83,12 @@ $script:phase11QemuInventoryPath = $null
 $script:phase11LastIsolationCheckUtc = [datetime]::MinValue
 $script:phase11RunDeadline = $null
 $script:phase11StderrPath = $null
+$script:phase91QacManaged = -not [string]::IsNullOrWhiteSpace($QacCliPath)
+$script:phase91QacCliPath = if ($script:phase91QacManaged) { [IO.Path]::GetFullPath($QacCliPath) } else { '' }
+$script:phase91QacProject = $QacProject
+$script:phase91QacReservationId = ''
+$script:phase91Monitor = $null
+$script:phase91MonitorPort = 0
 if ($EnablePhase32NegativeControl -and -not $EnablePhase32Protocol) {
     throw '-EnablePhase32NegativeControl requires -EnablePhase32Protocol.'
 }
@@ -253,6 +262,7 @@ $evidence = [IO.Path]::GetFullPath($EvidenceDirectory)
 $efi = Join-Path $gate 'ESP\EFI\BOOT\BOOTX64.EFI'
 $payload = Join-Path $gate 'ESP\GXOS\gxos-managed-kernel.dll'
 $expectedHash = $PayloadSha256.ToUpperInvariant()
+$sourcePayload = if ([string]::IsNullOrWhiteSpace($SourcePayloadPath)) { '' } else { [IO.Path]::GetFullPath($SourcePayloadPath) }
 $phase15Injector = if ([string]::IsNullOrEmpty($Phase15InjectorPath)) {
     Join-Path $PSScriptRoot 'Inject-ManagedE1000Phase15Frame.ps1'
 } else { [IO.Path]::GetFullPath($Phase15InjectorPath) }
@@ -262,6 +272,111 @@ $phase89Injector = if ([string]::IsNullOrEmpty($Phase89InjectorPath)) {
 
 function Require11([bool]$condition, [string]$message) {
     if (!$condition) { throw $message }
+}
+
+function Get-EspManifest11([string]$directory) {
+    $records = @(
+        Get-ChildItem -LiteralPath $directory -File -Recurse |
+            Sort-Object FullName |
+            ForEach-Object {
+                $relative = $_.FullName.Substring($directory.Length).TrimStart('\', '/')
+                $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+                '{0}|{1}|{2}' -f $relative, $_.Length, $hash
+            })
+    $text = [string]::Join("`n", [string[]]$records)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $fingerprint = [Convert]::ToHexString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))
+    } finally { $sha.Dispose() }
+    return [pscustomobject]@{ Records = $records; Sha256 = $fingerprint }
+}
+
+function Get-QacDirectQemuChild11([int]$ownerProcessId, [string]$expectedExecutable) {
+    $qemuName = [IO.Path]::GetFileName($expectedExecutable)
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ownerProcessId" |
+        Where-Object { $_.Name -ieq $qemuName })
+    $exact = @($children | Where-Object {
+        [string]::Equals([string]$_.ExecutablePath, $expectedExecutable,
+            [StringComparison]::OrdinalIgnoreCase)
+    })
+    Require11 ($children.Count -eq $exact.Count -and $exact.Count -le 1) `
+        "QAC process $ownerProcessId has an unexpected or duplicate QEMU direct child."
+    if ($exact.Count -eq 0) { return $null }
+    return $exact[0]
+}
+
+function Complete-QacManagedRun11(
+    [System.Diagnostics.Process]$ownerProcess,
+    [System.Threading.Tasks.Task]$stdoutCopyTask,
+    [System.Threading.Tasks.Task]$stderrCopyTask,
+    [IO.FileStream]$stdoutFile,
+    [IO.FileStream]$stderrFile,
+    [string]$cliPath,
+    [string]$reservationId,
+    [int]$qemuProcessId,
+    [int]$qemuExitCode,
+    [string]$runDirectory) {
+    if ($null -eq $ownerProcess) { return $null }
+    if (-not $ownerProcess.HasExited -and -not $ownerProcess.WaitForExit(15000)) {
+        throw "QAC run process $($ownerProcess.Id) did not complete after its QEMU child exited."
+    }
+    if (-not $ownerProcess.HasExited) {
+        throw "QAC run process $($ownerProcess.Id) remains active; its reservation is not released."
+    }
+    if ($null -ne $stdoutCopyTask) { $stdoutCopyTask.GetAwaiter().GetResult() }
+    if ($null -ne $stderrCopyTask) { $stderrCopyTask.GetAwaiter().GetResult() }
+    if ($null -ne $stdoutFile) { $stdoutFile.Flush(); $stdoutFile.Dispose() }
+    if ($null -ne $stderrFile) { $stderrFile.Flush(); $stderrFile.Dispose() }
+
+    $stdoutPath = Join-Path $runDirectory 'qemu.stdout.log'
+    $stderrPath = Join-Path $runDirectory 'qemu.stderr.log'
+    $qacText = [IO.File]::ReadAllText($stdoutPath) + "`n" + [IO.File]::ReadAllText($stderrPath)
+    if ([string]::IsNullOrWhiteSpace($reservationId)) {
+        $reservationFromLaunch = [regex]::Match($qacText,
+            '(?i)QAC QEMU launched: reservation=([0-9a-f]{32}) pid=' + $qemuProcessId + '\b')
+        if ($reservationFromLaunch.Success) { $reservationId = $reservationFromLaunch.Groups[1].Value.ToLowerInvariant() }
+    }
+    Require11 (-not [string]::IsNullOrWhiteSpace($reservationId)) `
+        'QAC output did not expose the per-boot reservation identifier.'
+    Require11 ($qacText -match "(?i)QAC QEMU launched: reservation=$([regex]::Escape($reservationId)) pid=$qemuProcessId\b") `
+        "QAC launch evidence does not prove direct-child registration for reservation $reservationId and PID $qemuProcessId."
+    Require11 ($qacText -match "(?im)^QAC QEMU exited: reservation=$([regex]::Escape($reservationId)) pid=$qemuProcessId\b[^\r\n]*exitCode=$qemuExitCode\b") `
+        "QAC exit evidence does not match QEMU PID $qemuProcessId and exit code $qemuExitCode."
+    Require11 ($qacText -match "(?i)QAC reservation released: id=$([regex]::Escape($reservationId)) pid=$qemuProcessId\b") `
+        "QAC did not report reservation release for $reservationId."
+
+    $inspectStdoutPath = Join-Path $runDirectory 'qac-inspect.json'
+    $inspectStderrPath = Join-Path $runDirectory 'qac-inspect.stderr.log'
+    $inspectLines = @(& $cliPath inspect $reservationId 2> $inspectStderrPath)
+    $inspectExitCode = $LASTEXITCODE
+    $inspectText = [string]::Join([Environment]::NewLine, [string[]]$inspectLines)
+    $inspectText | Set-Content -LiteralPath $inspectStdoutPath -Encoding utf8
+    Require11 ($inspectExitCode -eq 0) `
+        "QAC inspect failed for reservation $reservationId (exit $inspectExitCode)."
+    $reservation = $inspectText | ConvertFrom-Json -ErrorAction Stop
+    Require11 ([string]$reservation.state -eq 'Released') `
+        "QAC reservation $reservationId ended in state '$($reservation.state)', not Released."
+    Require11 ($ownerProcess.ExitCode -eq $qemuExitCode) `
+        "QAC run returned exit $($ownerProcess.ExitCode), but QEMU returned $qemuExitCode."
+
+    $queueMatch = [regex]::Match($qacText,
+        "(?i)QAC queued for exclusive acceptance: id=$([regex]::Escape($reservationId)) position=(\d+)")
+    $release = [ordered]@{
+        reservationId = $reservationId
+        reservationState = [string]$reservation.state
+        queuePosition = if ($queueMatch.Success) { [int]$queueMatch.Groups[1].Value } else { $null }
+        ownerProcessId = $ownerProcess.Id
+        ownerExitCode = $ownerProcess.ExitCode
+        qemuProcessId = $qemuProcessId
+        qemuExitCode = $qemuExitCode
+        inspectExitCode = $inspectExitCode
+        qacStdoutSha256 = (Get-FileHash -LiteralPath $stdoutPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        qacStderrSha256 = (Get-FileHash -LiteralPath $stderrPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        completedUtc = [datetime]::UtcNow.ToString('o')
+    }
+    $release | ConvertTo-Json -Depth 5 |
+        Set-Content -LiteralPath (Join-Path $runDirectory 'qac-release-verification.json') -Encoding utf8
+    return [pscustomobject]$release
 }
 
 function Get-QemuInventory11 {
@@ -384,9 +499,54 @@ function Stop-OwnedQemu11([System.Diagnostics.Process]$process) {
     try { $process.Refresh() } catch { }
     try {
         if (!$process.HasExited) {
+            if ($script:phase91QacManaged) {
+                $monitor = $script:phase91Monitor
+                $temporaryMonitor = $false
+                if ($null -eq $monitor -or -not $monitor.Connected) {
+                    $connectDeadline = [datetime]::UtcNow.AddSeconds(5)
+                    while ($null -eq $monitor -and
+                        [datetime]::UtcNow -lt $connectDeadline -and -not $process.HasExited) {
+                        $candidateMonitor = [Net.Sockets.TcpClient]::new()
+                        try {
+                            $candidateMonitor.Connect('127.0.0.1', $script:phase91MonitorPort)
+                            $monitor = $candidateMonitor
+                            $temporaryMonitor = $true
+                        } catch {
+                            $candidateMonitor.Dispose()
+                            Start-Sleep -Milliseconds 50
+                        }
+                    }
+                    if ($null -eq $monitor -or -not $monitor.Connected) {
+                        throw "Could not connect to the monitor for QAC-owned QEMU $($process.Id)."
+                    }
+                }
+                try {
+                    $monitor.Client.NoDelay = $true
+                    $bytes = [Text.Encoding]::ASCII.GetBytes("quit`n")
+                    $monitor.GetStream().Write($bytes, 0, $bytes.Length)
+                    $monitor.GetStream().Flush()
+                    if ($null -ne $script:phase11Timeline) {
+                        Write-Timeline11 $script:phase11Timeline 'QEMU_QUIT_REQUESTED' `
+                            "pid=$($process.Id) owner=qac-direct-child"
+                    }
+                } finally {
+                    if ($temporaryMonitor) { $monitor.Dispose() }
+                }
+                if (-not $process.WaitForExit(15000)) {
+                    throw "QAC-owned QEMU $($process.Id) did not exit after the runner's monitor quit request. The runner did not terminate the QAC child directly."
+                }
+                if ($null -ne $script:phase11Timeline) {
+                    Write-Timeline11 $script:phase11Timeline 'QEMU_EXITED' `
+                        "pid=$($process.Id) exit_code=$($process.ExitCode) owner=qac-direct-child"
+                }
+                return
+            }
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         }
     } catch { }
+    if ($script:phase91QacManaged -and !$process.HasExited) {
+        throw "QAC-owned QEMU $($process.Id) is still active; direct process termination is not permitted."
+    }
     try { $process.WaitForExit(5000) | Out-Null } catch { }
     if (Get-Process -Id $process.Id -ErrorAction SilentlyContinue) {
         throw "Owned QEMU process remained: $($process.Id)"
@@ -3655,10 +3815,28 @@ $qemuCommand = Get-Command qemu-system-x86_64.exe -ErrorAction SilentlyContinue
 $qemu = if ($null -ne $qemuCommand) { [IO.Path]::GetFullPath($qemuCommand.Source) } `
     else { 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
 Require11 (Test-Path -LiteralPath $qemu) 'qemu-system-x86_64.exe is required.'
+if ($script:phase91QacManaged) {
+    Require11 ($EnablePhase91AsyncTxLifecycle -and ($RunCount -eq 1 -or $RunCount -eq 3)) `
+        'QAC acceptance mode is restricted to one or three Phase 91 lifecycle boots.'
+    Require11 (Test-Path -LiteralPath $script:phase91QacCliPath -PathType Leaf) `
+        "QAC CLI executable is missing: $script:phase91QacCliPath"
+    Require11 (Test-Path -LiteralPath $sourcePayload -PathType Leaf) `
+        'The freshly built source NativeAOT payload path is required for QAC acceptance.'
+    Require11 ((Get-Item -LiteralPath $sourcePayload).Length -eq $PayloadSize -and
+        (Get-FileHash -LiteralPath $sourcePayload -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedHash) `
+        'The freshly built source NativeAOT payload does not match the requested Phase 91 candidate.'
+    Require11 (-not [string]::IsNullOrWhiteSpace($QacProject)) `
+        'QAC project identity must not be empty.'
+}
 $share = Join-Path (Split-Path -Parent $qemu) 'share'
 $ovmf = Join-Path $share 'edk2-x86_64-code.fd'
 $varsTemplate = Join-Path $share 'edk2-i386-vars.fd'
 Require11 ((Test-Path -LiteralPath $ovmf) -and (Test-Path -LiteralPath $varsTemplate)) 'OVMF firmware is required.'
+$expectedEspManifest = Get-EspManifest11 (Join-Path $gate 'ESP')
+$expectedEfiHash = (Get-FileHash -LiteralPath $efi -Algorithm SHA256).Hash.ToUpperInvariant()
+$expectedStagedPayloadHash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant()
+$expectedOvmfHash = (Get-FileHash -LiteralPath $ovmf -Algorithm SHA256).Hash.ToUpperInvariant()
+$expectedVarsTemplateHash = (Get-FileHash -LiteralPath $varsTemplate -Algorithm SHA256).Hash.ToUpperInvariant()
 if ($EnablePhase15Rx) {
     Require11 (Test-Path -LiteralPath $phase15Injector) "Phase 15 injector is missing: $phase15Injector"
 }
@@ -3799,8 +3977,21 @@ if ($Phase15EnableQemuReceiveTrace) {
         'Phase 15 QEMU receive tracing requires an active RX backend.'
 }
 New-Item -ItemType Directory -Force -Path $evidence | Out-Null
-Ensure-CleanQemuState11 (Join-Path $evidence 'qemu-process-preflight.log') 'RUNNER_PREFLIGHT'
+if ($script:phase91QacManaged) {
+    Write-QemuInventory11 (Join-Path $evidence 'qemu-process-preflight.log') 'RUNNER_PREFLIGHT_BEFORE_QAC_QUEUE'
+} else {
+    Ensure-CleanQemuState11 (Join-Path $evidence 'qemu-process-preflight.log') 'RUNNER_PREFLIGHT'
+}
 New-Item -ItemType Directory -Force -Path (Join-Path $evidence 'runs') | Out-Null
+@(
+    "NATIVEAOT_SOURCE_PAYLOAD|$sourcePayload|$PayloadSize|$expectedHash",
+    "NATIVEAOT_STAGED_PAYLOAD|$payload|$PayloadSize|$expectedHash",
+    "PHASE91_GATE4_EFI|$efi|$((Get-Item -LiteralPath $efi).Length)|$expectedEfiHash",
+    "OVMF_CODE|$ovmf|$((Get-Item -LiteralPath $ovmf).Length)|$expectedOvmfHash",
+    "OVMF_VARS_TEMPLATE|$varsTemplate|$((Get-Item -LiteralPath $varsTemplate).Length)|$expectedVarsTemplateHash",
+    "ESP_MANIFEST_SHA256|$($expectedEspManifest.Sha256)"
+) + @($expectedEspManifest.Records | ForEach-Object { "ESP_FILE|$_" }) |
+    Set-Content -LiteralPath (Join-Path $evidence 'candidate-input-manifest.txt') -Encoding ascii
 (& $qemu --version 2>&1) | Set-Content -LiteralPath (Join-Path $evidence 'qemu-version.log') -Encoding ascii
 
 $requiredMarkers = @(
@@ -3885,7 +4076,13 @@ try {
     for ($sequence = 1; $sequence -le $RunCount; $sequence++) {
         $run = Join-Path $evidence ("runs\run-{0}" -f $sequence)
         New-Item -ItemType Directory -Force -Path $run | Out-Null
-        Ensure-CleanQemuState11 (Join-Path $run 'qemu-process-preflight.log') ("BOOT_{0}_PREFLIGHT" -f $sequence)
+        if ($script:phase91QacManaged) {
+            Write-QemuInventory11 (Join-Path $run 'qemu-process-preflight.log') `
+                ("BOOT_{0}_PREFLIGHT_BEFORE_QAC_ADMISSION" -f $sequence)
+        } else {
+            Ensure-CleanQemuState11 (Join-Path $run 'qemu-process-preflight.log') `
+                ("BOOT_{0}_PREFLIGHT" -f $sequence)
+        }
         $script:phase11QemuInventoryPath = Join-Path $run 'qemu-process-preflight.log'
         $script:phase11ExpectedQemuPid = 0
         $script:phase11LastIsolationCheckUtc = [datetime]::MinValue
@@ -3927,6 +4124,17 @@ try {
         $traceEventsPath = if ($Phase15EnableQemuReceiveTrace) {
             Join-Path $run 'qemu-trace-events.txt'
         } else { '' }
+        Require11 ((Get-FileHash -LiteralPath $ovmf -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedOvmfHash) `
+            'OVMF code firmware changed after the candidate manifest was established.'
+        Require11 ((Get-FileHash -LiteralPath $varsTemplate -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedVarsTemplateHash) `
+            'OVMF variables template changed after the candidate manifest was established.'
+        $espBeforeBoot = Get-EspManifest11 (Join-Path $gate 'ESP')
+        Require11 ($espBeforeBoot.Sha256 -eq $expectedEspManifest.Sha256) `
+            "Phase 91 ESP candidate changed before boot $sequence."
+        Require11 ((Get-FileHash -LiteralPath $efi -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedEfiHash) `
+            "Phase 91 Gate4 EFI changed before boot $sequence."
+        Require11 ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedStagedPayloadHash) `
+            "Staged NativeAOT payload changed before boot $sequence."
         Copy-Item -LiteralPath $ovmf -Destination $code
         Copy-Item -LiteralPath $varsTemplate -Destination $vars
         $codeHash = (Get-FileHash -LiteralPath $code -Algorithm SHA256).Hash.ToUpperInvariant()
@@ -3956,6 +4164,7 @@ try {
             $peerUdp = [Net.Sockets.UdpClient]::new([Net.Sockets.AddressFamily]::InterNetwork)
             $peerUdp.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $peerPort))
         }
+        $script:phase91MonitorPort = $monitorPort
         $arguments = @(
             '-machine', 'q35', '-accel', 'tcg,thread=single', '-m', '128M',
             '-drive', "if=pflash,format=raw,readonly=on,file=$code",
@@ -4041,6 +4250,11 @@ try {
         }
         Set-Content -LiteralPath $commandLinePath -Value ('"{0}" {1}' -f $qemu, ($arguments -join ' ')) -Encoding ascii
         $process = $null; $client = $null; $monitor = $null; $stream = $null
+        $qacProcess = $null; $qacStdoutFile = $null; $qacStderrFile = $null
+        $qacStdoutCopyTask = $null; $qacStderrCopyTask = $null
+        $qacReservationId = ''; $qacQemuExitCode = -1
+        $qacAdmissionFailureHandled = $false
+        $qacReleaseInfo = $null; $qacCleanupError = $null
         $logStream = $null; $injectionLog = $null; $timeline = $null
         $phase15Outcome = ''
         try {
@@ -4054,21 +4268,212 @@ try {
             Write-Timeline11 $timeline 'HOST_LISTENERS_READY' $listenerDetail
             Write-Timeline11 $timeline 'HOST_FIXTURE_READY' 'protocol=phase15-dgram-tcp-tls-http state=clean-peer-bound'
             Write-Timeline11 $timeline 'FIRMWARE_IDENTITY' "code_sha256=$codeHash vars_sha256=$varsHash"
-            if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
-                Ensure-CleanQemuState11 $script:phase11QemuInventoryPath `
-                    ("BOOT_{0}_LAUNCH_PREFLIGHT" -f $sequence)
+            if ($script:phase91QacManaged) {
+                Write-QemuInventory11 $script:phase11QemuInventoryPath `
+                    ("BOOT_{0}_BEFORE_QAC_ACCEPTANCE_REQUEST" -f $sequence)
+                $qacArguments = @('run', '--project', $script:phase91QacProject,
+                    '--mode', 'acceptance', '--', $qemu) + @($arguments)
+                $qacInvocation = [ordered]@{
+                    executable = $script:phase91QacCliPath
+                    arguments = $qacArguments
+                    workingDirectory = $gate
+                    project = $script:phase91QacProject
+                    mode = 'acceptance'
+                    childExecutable = $qemu
+                    childArguments = $arguments
+                    startedUtc = [datetime]::UtcNow.ToString('o')
+                }
+                $qacInvocation | ConvertTo-Json -Depth 5 |
+                    Set-Content -LiteralPath (Join-Path $run 'qac-invocation.json') -Encoding utf8
+                $qacStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+                $qacStartInfo.FileName = $script:phase91QacCliPath
+                $qacStartInfo.WorkingDirectory = $gate
+                $qacStartInfo.UseShellExecute = $false
+                $qacStartInfo.CreateNoWindow = $true
+                $qacStartInfo.RedirectStandardOutput = $true
+                $qacStartInfo.RedirectStandardError = $true
+                foreach ($argument in $qacArguments) { $qacStartInfo.ArgumentList.Add([string]$argument) }
+                $qacProcess = [System.Diagnostics.Process]::new()
+                $qacProcess.StartInfo = $qacStartInfo
+                Require11 ($qacProcess.Start()) 'QAC managed run process did not start.'
+                $qacStdoutFile = [IO.File]::Open($stdout, [IO.FileMode]::Create,
+                    [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+                $qacStderrFile = [IO.File]::Open($stderr, [IO.FileMode]::Create,
+                    [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+                $qacStdoutCopyTask = $qacProcess.StandardOutput.BaseStream.CopyToAsync($qacStdoutFile)
+                $qacStderrCopyTask = $qacProcess.StandardError.BaseStream.CopyToAsync($qacStderrFile)
+                $qacProcessStartUtc = $qacProcess.StartTime.ToUniversalTime().ToString('o')
+                $qacOwnerPid = $qacProcess.Id
+                [ordered]@{
+                    processId = $qacOwnerPid
+                    processStartTimeUtc = $qacProcessStartUtc
+                    executable = $script:phase91QacCliPath
+                    project = $script:phase91QacProject
+                    mode = 'acceptance'
+                    state = 'Requesting'
+                } | ConvertTo-Json -Depth 4 |
+                    Set-Content -LiteralPath (Join-Path $run 'qac-owner-process.json') -Encoding utf8
+                Write-Output ("PHASE91_QAC_ACCEPTANCE_REQUESTED boot={0} project={1} owner_pid={2}" -f `
+                    $sequence, $script:phase91QacProject, $qacOwnerPid)
+
+                $qacChild = $null
+                while (-not $qacProcess.HasExited) {
+                    $qacChild = Get-QacDirectQemuChild11 $qacOwnerPid $qemu
+                    if ($null -ne $qacChild) { break }
+                    Start-Sleep -Milliseconds 500
+                }
+                if ($null -eq $qacChild) {
+                    if (-not $qacProcess.HasExited) { $qacProcess.WaitForExit() }
+                    if ($null -ne $qacStdoutCopyTask) { $qacStdoutCopyTask.GetAwaiter().GetResult() }
+                    if ($null -ne $qacStderrCopyTask) { $qacStderrCopyTask.GetAwaiter().GetResult() }
+                    $qacStdoutFile.Flush(); $qacStdoutFile.Dispose(); $qacStdoutFile = $null
+                    $qacStderrFile.Flush(); $qacStderrFile.Dispose(); $qacStderrFile = $null
+                    $qacText = [IO.File]::ReadAllText($stdout) + "`n" + [IO.File]::ReadAllText($stderr)
+                    $requestMatch = [regex]::Match($qacText,
+                        '(?i)QAC reservation requested: id=([0-9a-f]{32})')
+                    if ($requestMatch.Success) { $qacReservationId = $requestMatch.Groups[1].Value.ToLowerInvariant() }
+                    $queueMatch = [regex]::Match($qacText,
+                        '(?i)QAC queued for exclusive acceptance: id=' +
+                        [regex]::Escape($qacReservationId) + ' position=(\d+)')
+                    $admissionState = 'NotCreated'
+                    $admissionInspectExitCode = $null
+                    $admissionInspectPath = Join-Path $run 'qac-admission-inspect.json'
+                    if (-not [string]::IsNullOrWhiteSpace($qacReservationId)) {
+                        $inspectErrorPath = Join-Path $run 'qac-admission-inspect.stderr.log'
+                        $inspectLines = @(& $script:phase91QacCliPath inspect $qacReservationId 2> $inspectErrorPath)
+                        $admissionInspectExitCode = $LASTEXITCODE
+                        $inspectText = [string]::Join([Environment]::NewLine, [string[]]$inspectLines)
+                        $inspectText | Set-Content -LiteralPath $admissionInspectPath -Encoding utf8
+                        if ($admissionInspectExitCode -eq 0) {
+                            $admissionReservation = $inspectText | ConvertFrom-Json -ErrorAction Stop
+                            $admissionState = [string]$admissionReservation.state
+                        } else { $admissionState = 'InspectFailed' }
+                    }
+                    $admissionOwner = [ordered]@{
+                        processId = $qacOwnerPid
+                        processStartTimeUtc = $qacProcessStartUtc
+                        processExitCode = $qacProcess.ExitCode
+                        executable = $script:phase91QacCliPath
+                        project = $script:phase91QacProject
+                        mode = 'acceptance'
+                        childLaunched = $false
+                        reservationId = if ([string]::IsNullOrWhiteSpace($qacReservationId)) { $null } else { $qacReservationId }
+                        reservationState = $admissionState
+                        queuePosition = if ($queueMatch.Success) { [int]$queueMatch.Groups[1].Value } else { $null }
+                        inspectExitCode = $admissionInspectExitCode
+                        completedUtc = [datetime]::UtcNow.ToString('o')
+                    }
+                    [ordered]@{
+                        processId = $qacOwnerPid
+                        processStartTimeUtc = $qacProcessStartUtc
+                        processExitCode = $qacProcess.ExitCode
+                        childLaunched = $false
+                        reservationId = if ([string]::IsNullOrWhiteSpace($qacReservationId)) { $null } else { $qacReservationId }
+                        reservationState = $admissionState
+                        queuePosition = if ($queueMatch.Success) { [int]$queueMatch.Groups[1].Value } else { $null }
+                        inspectExitCode = $admissionInspectExitCode
+                        inspectEvidence = if ([string]::IsNullOrWhiteSpace($qacReservationId)) { $null } else { $admissionInspectPath }
+                        qacOutput = $qacText.Trim()
+                        stdoutSha256 = (Get-FileHash -LiteralPath $stdout -Algorithm SHA256).Hash.ToUpperInvariant()
+                        stderrSha256 = (Get-FileHash -LiteralPath $stderr -Algorithm SHA256).Hash.ToUpperInvariant()
+                    } | ConvertTo-Json -Depth 4 |
+                        Set-Content -LiteralPath (Join-Path $run 'qac-admission-failure.json') -Encoding utf8
+                    $admissionOwner | ConvertTo-Json -Depth 5 |
+                        Set-Content -LiteralPath (Join-Path $run 'qac-owner-process.json') -Encoding utf8
+                    $qacAdmissionFailureHandled = $true
+                    throw "QAC ended before launching a direct QEMU child for boot $sequence (exit $($qacProcess.ExitCode)); inspect retained QAC logs."
+                }
+                $process = [System.Diagnostics.Process]::GetProcessById([int]$qacChild.ProcessId)
+                $owned += $process
+                $childStartUtc = $process.StartTime.ToUniversalTime().ToString('o')
+                $script:phase91QacReservationId = ''
+                $script:phase91QacProcess = $qacProcess
+                $script:phase91Monitor = $null
+
+                $qacListPath = Join-Path $run 'qac-active-list.txt'
+                $qacListErrorPath = Join-Path $run 'qac-active-list.stderr.log'
+                $qacStatusPath = Join-Path $run 'qac-active-status.txt'
+                $qacStatusErrorPath = Join-Path $run 'qac-active-status.stderr.log'
+                $reservationRow = $null
+                $qacListText = ''
+                for ($attempt = 0; $attempt -lt 20; ++$attempt) {
+                    $qacList = @(& $script:phase91QacCliPath list 2> $qacListErrorPath)
+                    $qacListExitCode = $LASTEXITCODE
+                    $qacListText = [string]::Join([Environment]::NewLine, [string[]]$qacList)
+                    $qacListText | Set-Content -LiteralPath $qacListPath -Encoding utf8
+                    $reservationRow = [regex]::Match($qacListText,
+                        "(?im)^\s*([0-9a-f]{32})\s*\|\s*$([regex]::Escape($script:phase91QacProject))\s*\|\s*acceptance\s*\|\s*Running\b")
+                    $childListed = $qacListText -match "(?i)QEMU PID\s+$($process.Id)\s+\|" -and
+                        $qacListText -match "(?i)owner Verified \| child PID\s+$($process.Id)\b" -and
+                        $qacListText -match "(?i)\(PID\s+$qacOwnerPid\)"
+                    if ($qacListExitCode -eq 0 -and $reservationRow.Success -and $childListed) { break }
+                    Start-Sleep -Milliseconds 250
+                }
+                Require11 ($null -ne $reservationRow -and $reservationRow.Success) `
+                    "QAC did not list a Running acceptance reservation for boot $sequence and project $script:phase91QacProject."
+                Require11 $childListed `
+                    "QAC did not verify owner PID $qacOwnerPid and direct QEMU child PID $($process.Id) for boot $sequence."
+                $qacReservationId = $reservationRow.Groups[1].Value.ToLowerInvariant()
+                $script:phase91QacReservationId = $qacReservationId
+                $qacStatus = @(& $script:phase91QacCliPath status 2> $qacStatusErrorPath)
+                $qacStatusExitCode = $LASTEXITCODE
+                $qacStatusText = [string]::Join([Environment]::NewLine, [string[]]$qacStatus)
+                $qacStatusText | Set-Content -LiteralPath $qacStatusPath -Encoding utf8
+                Require11 ($qacStatusExitCode -eq 0 -and
+                    $qacStatusText -match 'QEMU processes:\s*1\s+\(0 foreign\)') `
+                    "QAC did not report exclusive QEMU ownership for boot $sequence; status is retained in $qacStatusPath."
+                Require11 ([int]$qacChild.ParentProcessId -eq $qacOwnerPid) `
+                    'The QEMU process is not a direct child of the QAC run process.'
+                $qacChildIdentity = [ordered]@{
+                    reservationId = $qacReservationId
+                    project = $script:phase91QacProject
+                    mode = 'acceptance'
+                    ownerProcessId = $qacOwnerPid
+                    ownerProcessStartTimeUtc = $qacProcessStartUtc
+                    ownerExecutable = $script:phase91QacCliPath
+                    qemuProcessId = $process.Id
+                    qemuParentProcessId = [int]$qacChild.ParentProcessId
+                    qemuProcessStartTimeUtc = $childStartUtc
+                    qemuCreationDate = [string]$qacChild.CreationDate
+                    qemuExecutable = [string]$qacChild.ExecutablePath
+                    qemuCommandLine = [string]$qacChild.CommandLine
+                    sourceNativeAotPayload = $sourcePayload
+                    sourceNativeAotPayloadSha256 = $expectedHash
+                    sourceNativeAotPayloadSize = $PayloadSize
+                    gate4Efi = $efi
+                    gate4EfiSha256 = $expectedEfiHash
+                    stagedPayload = $payload
+                    stagedPayloadSha256 = $expectedStagedPayloadHash
+                    qemuCommandLineRecord = $commandLinePath
+                    qacListEvidence = $qacListPath
+                    qacStatusEvidence = $qacStatusPath
+                }
+                $qacChildIdentity | ConvertTo-Json -Depth 6 |
+                    Set-Content -LiteralPath (Join-Path $run 'qac-process-ownership.json') -Encoding utf8
+                Write-Timeline11 $timeline 'QAC_ACCEPTANCE_GRANTED' `
+                    "reservation=$qacReservationId project=$script:phase91QacProject owner_pid=$qacOwnerPid queue_position=recorded-in-qac-log exclusive=verified"
+                Write-Timeline11 $timeline 'QEMU_STARTED' `
+                    "pid=$($process.Id) parent_pid=$qacOwnerPid reservation=$qacReservationId executable=$qemu"
+                Write-Output ("PHASE91_QAC_CHILD_RUNNING boot={0} reservation={1} qac_pid={2} qemu_pid={3}" -f `
+                    $sequence, $qacReservationId, $qacOwnerPid, $process.Id)
+            } else {
+                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
+                    Ensure-CleanQemuState11 $script:phase11QemuInventoryPath `
+                        ("BOOT_{0}_LAUNCH_PREFLIGHT" -f $sequence)
+                }
+                $process = Start-Process -FilePath $qemu -ArgumentList $arguments -WorkingDirectory $gate `
+                    -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
+                $owned += $process
+                Write-Timeline11 $timeline 'QEMU_STARTED' "pid=$($process.Id)"
             }
-            $process = Start-Process -FilePath $qemu -ArgumentList $arguments -WorkingDirectory $gate `
-                -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
-            $owned += $process
             $script:phase11ExpectedQemuPid = $process.Id
             $script:phase11LastIsolationCheckUtc = [datetime]::MinValue
             $script:phase11StderrPath = $stderr
-            Write-Timeline11 $timeline 'QEMU_STARTED' "pid=$($process.Id)"
             $script:phase11RunDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
             $deadline = $script:phase11RunDeadline
             $client = Connect-Tcp11 $serialPort $process $deadline 'serial'
             $monitor = Connect-Tcp11 $monitorPort $process $deadline 'monitor'
+            if ($script:phase91QacManaged) { $script:phase91Monitor = $monitor }
             Write-Timeline11 $timeline 'SERIAL_AND_MONITOR_CONNECTED'
             $stream = $client.GetStream()
             $logStream = [IO.File]::Open($serial, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
@@ -6531,24 +6936,87 @@ try {
             }
             $finalText = $text.ToString()
         } finally {
+            if ($script:phase91QacManaged) {
+                try { Stop-OwnedQemu11 $process }
+                catch { $qacCleanupError = $_ }
+            }
             if ($null -ne $injectionLog) { $injectionLog.Dispose() }
             if ($null -ne $logStream) { $logStream.Dispose() }
             if ($null -ne $stream) { $stream.Dispose() }
             if ($null -ne $client) { $client.Dispose() }
             if ($null -ne $peerUdp) { $peerUdp.Dispose() }
             if ($null -ne $monitor) { $monitor.Dispose() }
-            Stop-OwnedQemu11 $process
+            $script:phase91Monitor = $null
+            if (-not $script:phase91QacManaged) { Stop-OwnedQemu11 $process }
             if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
                 $script:phase11ExpectedQemuPid = 0
                 Write-QemuInventory11 $script:phase11QemuInventoryPath ("BOOT_{0}_AFTER" -f $sequence)
-                Require11 (@(Get-QemuInventory11).Count -eq 0) `
-                    "Phase 91 isolation was lost before boot $sequence closed; see $($script:phase11QemuInventoryPath)."
+                if ($script:phase91QacManaged) {
+                    $remainingChild = if ($null -ne $qacProcess) {
+                        Get-QacDirectQemuChild11 $qacProcess.Id $qemu
+                    } else { $null }
+                    Require11 ($null -eq $remainingChild) `
+                        "QAC owner $($qacProcess.Id) still has a direct QEMU child after boot $sequence."
+                } else {
+                    Require11 (@(Get-QemuInventory11).Count -eq 0) `
+                        "Phase 91 isolation was lost before boot $sequence closed; see $($script:phase11QemuInventoryPath)."
+                }
+            }
+            if ($script:phase91QacManaged -and $null -ne $qacProcess -and -not $qacAdmissionFailureHandled) {
+                try {
+                    $null = Complete-QacManagedRun11 $qacProcess `
+                        $qacStdoutCopyTask $qacStderrCopyTask $qacStdoutFile `
+                        $qacStderrFile $script:phase91QacCliPath $qacReservationId `
+                        $(if ($null -ne $process) { $process.Id } else { 0 }) `
+                        $(if ($null -ne $process -and $process.HasExited) { $process.ExitCode } else { -1 }) $run
+                    $qacStdoutFile = $null; $qacStderrFile = $null
+                    $qacStdoutCopyTask = $null; $qacStderrCopyTask = $null
+                    $qacReleaseInfo = Get-Content -LiteralPath `
+                        (Join-Path $run 'qac-release-verification.json') -Raw |
+                        ConvertFrom-Json -ErrorAction Stop
+                    if ($null -ne $qacReleaseInfo) {
+                        [ordered]@{
+                            processId = $qacProcess.Id
+                            processStartTimeUtc = $qacProcess.StartTime.ToUniversalTime().ToString('o')
+                            processExitCode = $qacProcess.ExitCode
+                            childLaunched = ($null -ne $process)
+                            reservationId = $qacReleaseInfo.reservationId
+                            reservationState = $qacReleaseInfo.reservationState
+                            queuePosition = $qacReleaseInfo.queuePosition
+                            qemuProcessId = $qacReleaseInfo.qemuProcessId
+                            qemuExitCode = $qacReleaseInfo.qemuExitCode
+                            releasedUtc = $qacReleaseInfo.completedUtc
+                        } | ConvertTo-Json -Depth 5 |
+                            Set-Content -LiteralPath (Join-Path $run 'qac-owner-process.json') -Encoding utf8
+                    }
+                } catch {
+                    if ($null -eq $qacCleanupError) { $qacCleanupError = $_ }
+                }
             }
             if ($null -ne $timeline) { $timeline.Dispose() }
             $script:phase11Timeline = $null
             $script:phase11RunDeadline = $null
             $script:phase11StderrPath = $null
+            if ($null -ne $qacCleanupError) { throw $qacCleanupError }
         }
+        $espAfterBoot = Get-EspManifest11 (Join-Path $gate 'ESP')
+        Require11 ($espAfterBoot.Sha256 -eq $expectedEspManifest.Sha256) `
+            "Phase 91 ESP candidate changed during boot $sequence."
+        Require11 ((Get-FileHash -LiteralPath $efi -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedEfiHash) `
+            "Phase 91 Gate4 EFI changed during boot $sequence."
+        Require11 ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedStagedPayloadHash) `
+            "Staged NativeAOT payload changed during boot $sequence."
+        if ($script:phase91QacManaged) {
+            Require11 ((Get-Item -LiteralPath $sourcePayload).Length -eq $PayloadSize -and
+                (Get-FileHash -LiteralPath $sourcePayload -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedHash) `
+                "Freshly built source NativeAOT payload changed during boot $sequence."
+        }
+        Require11 ((Get-FileHash -LiteralPath $ovmf -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedOvmfHash) `
+            "OVMF code firmware changed during boot $sequence."
+        Require11 ((Get-FileHash -LiteralPath $varsTemplate -Algorithm SHA256).Hash.ToUpperInvariant() -eq $expectedVarsTemplateHash) `
+            "OVMF variables template changed during boot $sequence."
+        Require11 ($null -eq $qacReleaseInfo -or $qacReleaseInfo.reservationState -eq 'Released') `
+            "QAC reservation was not released after boot $sequence."
         if ($Phase15EnableFilterDump) {
             Require11 (Test-Path -LiteralPath $pcapPath) `
                 "QEMU filter-dump did not create the PCAP for boot $sequence."
