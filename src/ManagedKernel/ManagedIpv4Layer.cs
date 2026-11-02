@@ -381,6 +381,61 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         PublishNetworkServiceStatus();
     }
 
+    internal bool TryStartPhase93DiagnosticService(ushort port)
+    {
+        if (_active || _networkService == null || port == 0 ||
+            !ManagedArpProtocol.IsUsableIpv4(_localIpv4))
+            return false;
+        _networkService.BeginBoot();
+        _dns.ResetForDhcp();
+        _tcp.ResetForTeardown();
+        _pending.Clear();
+        _udpEndpoints.Clear();
+        _active = true;
+        if (!PublishNetworkServiceStatus() ||
+            _networkService.BindUdpEndpoint(port) != NetworkOperationResult.Started)
+        {
+            _active = false;
+            _udpEndpoints.Clear();
+            return false;
+        }
+        ManagedNetworkServiceBackend.SetLiveIpv4(this);
+        return true;
+    }
+
+    internal bool TryRunPhase93InitialServiceProof(
+        out ulong pendingRequestId)
+    {
+        pendingRequestId = 0;
+        if (!_active || _networkService == null) return false;
+        var consumer = new ManagedPhase93DiagnosticUdpEchoConsumer(
+            _networkService);
+        if (!consumer.TryRunInitial()) return false;
+        pendingRequestId = consumer.LastAcceptedRequestId;
+        return pendingRequestId != 0;
+    }
+
+    internal bool TryRunPhase93PostRestartServiceProof(
+        ulong staleRequestId, uint invalidatedPending)
+    {
+        if (!_active || _networkService == null) return false;
+        var consumer = new ManagedPhase93DiagnosticUdpEchoConsumer(
+            _networkService);
+        return consumer.TryRunAfterRestart(staleRequestId,
+                                           invalidatedPending);
+    }
+
+    internal bool TryRunPhase93PendingServiceRequest(out ulong requestId)
+    {
+        requestId = 0;
+        if (!_active || _networkService == null) return false;
+        var consumer = new ManagedPhase93DiagnosticUdpEchoConsumer(
+            _networkService);
+        if (!consumer.TryAcceptPendingRequestForStop()) return false;
+        requestId = consumer.LastAcceptedRequestId;
+        return requestId != 0;
+    }
+
     internal NetworkOperationResult BindPhase89UdpPort(ushort port)
     {
         return _networkService.BindUdpEndpoint(port);
@@ -1802,7 +1857,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         if (parsed.Protocol == ManagedTcpProtocol.Protocol)
             return TryHandleTcp(parsed);
         if (parsed.Protocol == ManagedUdpProtocol.Protocol)
-            return TryHandleUdp(parsed);
+            return TryHandleUdp(parsed, ethernetSourceMac);
         if (!ManagedIcmpv4Protocol.TryParse(parsed.Payload,
                                             out ManagedIcmpv4Packet icmp))
         {
@@ -1997,6 +2052,36 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         return true;
     }
 
+    internal ManagedServiceAsyncTxSubmitResult TryServiceSendUdpEchoAsync(
+        Ipv4Address source, Ipv4Address destination,
+        ushort sourcePort, ushort destinationPort,
+        ReadOnlySpan<byte> sourceMac, ReadOnlySpan<byte> payload,
+        out ulong requestId)
+    {
+        requestId = 0;
+        if (!_active || !_ethernet.DriverReady)
+            return ManagedServiceAsyncTxSubmitResult.Unavailable;
+        if (!source.IsUsable || source.Value !=
+                ManagedEthernetProtocol.ReadUInt32Network(_arp.HostIpv4, 0) ||
+            destination.Value != _localIpv4Value || sourcePort == 0 ||
+            destinationPort == 0 || payload.Length >
+                ManagedNetworkService.MaximumUdpPayloadLength ||
+            !_udpEndpoints.TryLookup(destinationPort,
+                out ManagedUdpEndpointHandler handler) ||
+            handler != ManagedUdpEndpointHandler.Phase21Service)
+            return ManagedServiceAsyncTxSubmitResult.Invalid;
+
+        ManagedServiceAsyncTxSubmitResult result =
+            _ethernet.TrySubmitServiceUdpEcho(
+                _txPacket, _txUdp, sourceMac,
+                new Ipv4Address(_localIpv4Value), source,
+                destinationPort, sourcePort, payload,
+                (ushort)(0x9300U + _serviceUdpTxCount), out requestId);
+        if (result == ManagedServiceAsyncTxSubmitResult.Accepted)
+            _serviceUdpTxCount++;
+        return result;
+    }
+
     internal bool TryBeginServiceTcpConnect(Ipv4Address destination,
                                              ushort destinationPort)
     {
@@ -2124,7 +2209,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         };
     }
 
-    private ManagedIpv4HandleResult TryHandleUdp(ManagedIpv4Packet packet)
+    private ManagedIpv4HandleResult TryHandleUdp(
+        ManagedIpv4Packet packet, ReadOnlySpan<byte> ethernetSourceMac)
     {
         if (!ManagedUdpProtocol.TryParse(
                 packet.Payload, packet.SourceAddress, packet.DestinationAddress,
@@ -2167,7 +2253,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
         if (handler == ManagedUdpEndpointHandler.DnsResolver)
             return TryHandleDnsUdp(packet, datagram);
         if (handler == ManagedUdpEndpointHandler.Phase21Service)
-            return TryHandleServiceUdp(packet, datagram);
+            return TryHandleServiceUdp(packet, datagram, ethernetSourceMac);
         if (handler != ManagedUdpEndpointHandler.Phase18Echo)
             return ManagedIpv4HandleResult.Ignored;
         return TryHandlePhase18Udp(packet, datagram);
@@ -2204,7 +2290,8 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
     }
 
     private ManagedIpv4HandleResult TryHandleServiceUdp(
-        ManagedIpv4Packet packet, ManagedUdpDatagram datagram)
+        ManagedIpv4Packet packet, ManagedUdpDatagram datagram,
+        ReadOnlySpan<byte> ethernetSourceMac)
     {
         if (_networkService == null) return ManagedIpv4HandleResult.Failed;
         Ipv4Address source = new Ipv4Address(
@@ -2213,7 +2300,7 @@ internal sealed class ManagedIpv4Layer : IManagedTcpPacketSender
             ManagedEthernetProtocol.ReadUInt32Network(packet.DestinationAddress, 0));
         bool captured = _networkService.TryCaptureReceivedUdp(
             source, destination, datagram.SourcePort,
-            datagram.DestinationPort, datagram.Payload);
+            datagram.DestinationPort, ethernetSourceMac, datagram.Payload);
         if (_phase89ObserverEnabled &&
             !TryObservePhase89Datagram(packet, in datagram, true))
             return ManagedIpv4HandleResult.Failed;

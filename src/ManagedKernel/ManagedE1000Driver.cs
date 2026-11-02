@@ -17,7 +17,7 @@ internal enum ManagedE1000DriverState : uint
 /* Bounded polling driver for the QEMU e1000e/82574L-compatible device.  The
    driver owns policy and descriptor bytes; native owns only validated MMIO,
    PCI command, and DMA capabilities. */
-internal sealed class ManagedE1000Driver
+internal sealed class ManagedE1000Driver : IManagedE1000AsyncTxTransport
 {
     internal const uint DriverId = 0xD014;
     private const uint PollLimit = 100000;
@@ -63,6 +63,7 @@ internal sealed class ManagedE1000Driver
     private static bool s_phase90AsyncTxModeEnabled;
     private static bool s_phase91LifecycleModeEnabled;
     private static bool s_phase92EnduranceModeEnabled;
+    private static bool s_phase93ManagedServiceAsyncTxModeEnabled;
     private static uint s_nextDriverEpisode;
 
     private readonly ManagedDevice _device;
@@ -200,6 +201,11 @@ internal sealed class ManagedE1000Driver
     private bool _phase92Requested;
     private bool _phase92FirstEpisodePassed;
     private bool _phase92Passed;
+    private bool _phase93Requested;
+    private bool _phase93InitialPassed;
+    private bool _phase93Passed;
+    private ulong _phase93LastServiceRequestId;
+    private uint _phase93ServiceInvalidated;
     private uint _phase92BusyProbes;
     private uint _phase92DescriptorWraps;
     private ulong _phase92OldEpisodeRequestId;
@@ -249,6 +255,22 @@ internal sealed class ManagedE1000Driver
     }
 
     internal ManagedE1000DriverState State => _state;
+    internal uint DriverEpisode => _driverEpisode;
+    uint IManagedE1000AsyncTxTransport.DriverEpisode => _driverEpisode;
+    bool IManagedE1000AsyncTxTransport.IsAsyncTxReady =>
+        _state == ManagedE1000DriverState.Running &&
+        _phase90AsyncTxRequested && _interruptSubscribed &&
+        _txRing != null && _txBuffers != null;
+    ManagedE1000AsyncTxSubmitResult
+        IManagedE1000AsyncTxTransport.TrySubmitFrame(
+            byte[]? frame, int length, out ulong requestId) =>
+        TrySubmitFrame(frame, length, out requestId);
+    ManagedE1000AsyncTxResult
+        IManagedE1000AsyncTxTransport.TryGetTransmitCompletion(
+            ulong requestId) => TryGetTransmitCompletion(requestId);
+    ManagedE1000AsyncTxResult
+        IManagedE1000AsyncTxTransport.TryConsumeTransmitCompletion(
+            ulong requestId) => TryConsumeTransmitCompletion(requestId);
     internal ulong MacValue => _macValue;
     internal ulong TxRingBusAddress => _txRing?.BusAddress ?? 0;
     internal ulong RxRingBusAddress => _rxRing?.BusAddress ?? 0;
@@ -295,6 +317,11 @@ internal sealed class ManagedE1000Driver
     internal bool Phase90AsyncTxPassed => _phase90AsyncTxPassed;
     internal bool Phase91Passed => _phase91Passed;
     internal bool Phase92Passed => _phase92Passed;
+    internal bool Phase93InitialPassed => _phase93InitialPassed;
+    internal bool Phase93Passed => _phase93Passed;
+    internal ulong Phase93LastServiceRequestId =>
+        _phase93LastServiceRequestId;
+    internal uint Phase93ServiceInvalidated => _phase93ServiceInvalidated;
     internal uint AsyncTxOutstanding => _asyncTxLedger.Outstanding;
     internal uint AsyncTxCompleted => _asyncTxCompleted;
     internal uint AsyncTxUnmatchedTxdw => _asyncTxUnmatchedTxdw;
@@ -474,6 +501,12 @@ internal sealed class ManagedE1000Driver
         EnablePhase91LifecycleMode();
     }
 
+    internal static void EnablePhase93ManagedServiceAsyncTxMode()
+    {
+        s_phase93ManagedServiceAsyncTxModeEnabled = true;
+        EnablePhase91LifecycleMode();
+    }
+
     internal static ManagedE1000Driver? TryCreate()
     {
         ManagedDeviceInventory? inventory =
@@ -526,6 +559,7 @@ internal sealed class ManagedE1000Driver
         _phase90AsyncTxRequested = s_phase90AsyncTxModeEnabled;
         _phase91Requested = s_phase91LifecycleModeEnabled;
         _phase92Requested = s_phase92EnduranceModeEnabled;
+        _phase93Requested = s_phase93ManagedServiceAsyncTxModeEnabled;
         return TryStartCore();
     }
 
@@ -950,15 +984,21 @@ internal sealed class ManagedE1000Driver
         if (_interruptSubscribed &&
             !ManagedSerialDriverSubsystem.TryUnsubscribeE1000Interrupt(this))
             safe = false;
-        if (_ethernet != null)
+        ManagedEthernetLayer? stoppedEthernet = _ethernet;
+        if (stoppedEthernet != null)
         {
-            safe = _ethernet.TryStop() && safe;
+            safe = stoppedEthernet.TryStop() && safe;
             _ethernet = null;
         }
         if (_pciCommandLive && _mmio != null)
             safe = DisableEngines() && DisableBusMaster() && safe;
         if (!safe) return false;
         if (!_asyncTxLedger.InvalidateAfterDmaQuiesced()) return false;
+        if (stoppedEthernet != null &&
+            !stoppedEthernet.OnDriverDmaQuiesced(_driverEpisode)) return false;
+        if (stoppedEthernet != null && _phase93Requested)
+            _phase93ServiceInvalidated =
+                stoppedEthernet.ServiceAsyncTxStatistics.Invalidated;
         if (!safe) return false;
         ManagedDmaAllocation?[] allocations =
             { _txRing, _rxRing, _txBuffers, _rxBuffers };
@@ -1076,6 +1116,11 @@ internal sealed class ManagedE1000Driver
                       DisableEngines() && DisableBusMaster();
         if (!result) return false;
         if (!_asyncTxLedger.InvalidateAfterDmaQuiesced()) return false;
+        if (ethernet != null &&
+            !ethernet.OnDriverDmaQuiesced(_driverEpisode)) return false;
+        if (ethernet != null && _phase93Requested)
+            _phase93ServiceInvalidated =
+                ethernet.ServiceAsyncTxStatistics.Invalidated;
         if (_phase91Requested &&
             (_asyncTxLedger.Outstanding != 0 ||
              TryGetTransmitCompletion(_phase91StopProbeId) !=
@@ -1106,6 +1151,7 @@ internal sealed class ManagedE1000Driver
         s_phase90AsyncTxModeEnabled = false;
         s_phase91LifecycleModeEnabled = false;
         s_phase92EnduranceModeEnabled = false;
+        s_phase93ManagedServiceAsyncTxModeEnabled = false;
         return KernelLog.Write("GXOS_NET10:MANAGED_KERNEL_PHASE14_ACCOUNTING_RESTORED\r\n"u8);
     }
 
@@ -2247,6 +2293,16 @@ internal sealed class ManagedE1000Driver
         return passed;
     }
 
+    internal bool TryRunPhase93InitialServiceProof()
+    {
+        if (!_phase93Requested || !_phase90AsyncTxPassed ||
+            _ethernet == null || _phase93InitialPassed)
+            return false;
+        _phase93InitialPassed = _ethernet.TryRunPhase93InitialProof(
+            out _phase93LastServiceRequestId);
+        return _phase93InitialPassed && _phase93LastServiceRequestId != 0;
+    }
+
     internal bool TryRunPhase92FirstEpisode()
     {
         if (!_phase92Requested || !_phase90AsyncTxPassed ||
@@ -2800,6 +2856,7 @@ internal sealed class ManagedE1000Driver
     {
         restarted = null;
         if (!_phase91Requested || !_phase90AsyncTxPassed ||
+            (_phase93Requested && !_phase93InitialPassed) ||
             (_phase92Requested && !_phase92FirstEpisodePassed) ||
             _state != ManagedE1000DriverState.Running ||
             _asyncTxLedger.Outstanding != 0 || _txRing == null ||
@@ -2828,6 +2885,14 @@ internal sealed class ManagedE1000Driver
         for (uint request = 0; request != AsyncTxCapacity; ++request)
             if (TryGetTransmitCompletion(teardownIds[(int)request]) !=
                 ManagedE1000AsyncTxResult.Success) return false;
+
+        if (_phase93Requested &&
+            (TryConsumeTransmitCompletion(teardownIds[0]) !=
+                 ManagedE1000AsyncTxResult.Success || _ethernet == null ||
+             !_ethernet.TryRunPhase93PendingRequestBeforeStop(
+                 out _phase93LastServiceRequestId) ||
+             _phase93LastServiceRequestId == 0))
+            return false;
 
         uint outstandingAtStop = _asyncTxLedger.Outstanding;
         uint completedUnconsumedAtStop =
@@ -2862,6 +2927,9 @@ internal sealed class ManagedE1000Driver
             !KernelLog.WriteHexLine(
                 "GXOS_NET10:PHASE91_COMPLETIONS_CONSUMED_BEFORE_STOP=0x"u8,
                 _asyncTxLedger.ConsumedCompletions) ||
+            (_phase93Requested && !KernelLog.WriteHexLine(
+                "GXOS_NET10:PHASE93_STOP_PENDING_REQUEST_ID=0x"u8,
+                _phase93LastServiceRequestId)) ||
             !KernelLog.WriteHexLine(
                 "GXOS_NET10:PHASE91_INVALIDATED_BY_STOP=0x"u8,
                 outstandingAtStop) ||
@@ -2912,7 +2980,8 @@ internal sealed class ManagedE1000Driver
         if (!KernelLog.Write(
                 "GXOS_NET10:PHASE91_RESTART_BEGINS=1\r\n"u8))
             return false;
-        if (_phase92Requested) EnablePhase92EnduranceMode();
+        if (_phase93Requested) EnablePhase93ManagedServiceAsyncTxMode();
+        else if (_phase92Requested) EnablePhase92EnduranceMode();
         else EnablePhase91LifecycleMode();
         ManagedE1000Driver? candidate = TryCreate();
         if (candidate == null || candidate._driverEpisode == _driverEpisode ||
@@ -2925,6 +2994,8 @@ internal sealed class ManagedE1000Driver
             return false;
         candidate._phase80Passed = _phase80Passed;
         candidate._phase90AsyncTxPassed = true;
+        candidate._phase93ServiceInvalidated = _phase93ServiceInvalidated;
+        candidate._phase93LastServiceRequestId = _phase93LastServiceRequestId;
         candidate._phase92OldEpisodeRequestId = _phase92OldEpisodeRequestId;
         /* Native interrupt sequence numbers are global to the route. The new
            driver must begin below its first post-subscription event rather
@@ -3295,6 +3366,36 @@ internal sealed class ManagedE1000Driver
         }
         else return false;
 
+        if (candidate._phase93Requested)
+        {
+            if (_phase93LastServiceRequestId == 0 ||
+                _phase93ServiceInvalidated != 1 ||
+                candidate._ethernet == null ||
+                !candidate._ethernet.TryRunPhase93PostRestartProof(
+                    _phase93LastServiceRequestId,
+                    _phase93ServiceInvalidated) ||
+                candidate._ethernet.ServiceAsyncTxOutstanding != 0 ||
+                candidate._asyncTxLedger.Outstanding != 0 ||
+                candidate._asyncTxLedger.HardwareOwned != 0 ||
+                candidate._asyncTxLedger.CompletedUnconsumed != 0 ||
+                !KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE93_FINAL_SERVICE_OUTSTANDING=0x"u8,
+                    (uint)candidate._ethernet.ServiceAsyncTxOutstanding) ||
+                !KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE93_FINAL_DRIVER_OUTSTANDING=0x"u8,
+                    candidate._asyncTxLedger.Outstanding) ||
+                !KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE93_FINAL_HARDWARE_OWNED=0x"u8,
+                    candidate._asyncTxLedger.HardwareOwned) ||
+                !KernelLog.WriteHexLine(
+                    "GXOS_NET10:PHASE93_INVALIDATED_PENDING=0x"u8,
+                    _phase93ServiceInvalidated) ||
+                !KernelLog.Write(
+                    "GXOS_NET10:PHASE93_MANAGED_SERVICE_ASYNC_TX_PASS=1\r\n"u8))
+                return false;
+            candidate._phase93Passed = true;
+        }
+
         candidate._phase91Passed = KernelLog.Write(
             "GXOS_NET10:PHASE91_RESTART_TX_RX_LIVENESS=PASS\r\n"u8);
         if (candidate._phase92Requested)
@@ -3329,7 +3430,8 @@ internal sealed class ManagedE1000Driver
                     "GXOS_NET10:PHASE92_GUEST_RESOURCE_DRAIN_PASS=1\r\n"u8);
         }
         return candidate._phase91Passed &&
-            (!candidate._phase92Requested || candidate._phase92Passed);
+            (!candidate._phase92Requested || candidate._phase92Passed) &&
+            (!candidate._phase93Requested || candidate._phase93Passed);
     }
 
     private bool TrySubmitAndCompletePhase90Frame(uint sequence,

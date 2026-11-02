@@ -15,6 +15,7 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
     private readonly byte[] _broadcastMac;
     private readonly byte[] _txFrame;
     private readonly byte[] _rxFrame;
+    private readonly ManagedNetworkServiceAsyncTxAdapter _serviceAsyncTx;
     private uint _unknownEtherTypeCount;
     private uint _malformedFrameCount;
     private uint _receivedFrameCount;
@@ -39,6 +40,7 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
         _rxFrame = new byte[ManagedEthernetProtocol.MaximumFrameLength];
         _arp = new ManagedArpLayer(this);
         _ipv4 = new ManagedIpv4Layer(this, _arp);
+        _serviceAsyncTx = new ManagedNetworkServiceAsyncTxAdapter(transport);
         _networkService = new ManagedNetworkService(
             new ManagedNetworkServiceBackend(this, _ipv4));
         ((ManagedNetworkServiceBackend)_networkService.Backend)
@@ -115,6 +117,81 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
     internal bool IsAccepting => _accepting;
     internal bool DriverReady => _transport.State == ManagedE1000DriverState.Running;
     internal ManagedNetworkService NetworkService => _networkService!;
+    internal int ServiceAsyncTxOutstanding => _serviceAsyncTx.Outstanding;
+    internal ManagedServiceAsyncTxStatistics ServiceAsyncTxStatistics =>
+        _serviceAsyncTx.Statistics;
+    internal ulong ServiceAsyncTxLastRequestId =>
+        _serviceAsyncTx.LastAcceptedRequestId;
+
+    internal bool TryStartPhase93DiagnosticService(ushort port) =>
+        _arp.TryInstallLocalIpv4(_arp.LocalIpv4) &&
+        _ipv4.TryStartPhase93DiagnosticService(port);
+
+    internal bool TryRunPhase93InitialProof(out ulong pendingRequestId)
+    {
+        pendingRequestId = 0;
+        _phase34Polling = true;
+        _phase34PollLimit = 64;
+        if (!TryStartPhase93DiagnosticService(
+                ManagedPhase93DiagnosticUdpEchoConsumer.LocalPort))
+            return false;
+        return _ipv4.TryRunPhase93InitialServiceProof(
+            out pendingRequestId);
+    }
+
+    internal bool TryRunPhase93PostRestartProof(
+        ulong staleRequestId, uint invalidatedPending)
+    {
+        _phase34Polling = true;
+        _phase34PollLimit = 64;
+        return TryStartPhase93DiagnosticService(
+                   ManagedPhase93DiagnosticUdpEchoConsumer.LocalPort) &&
+               _ipv4.TryRunPhase93PostRestartServiceProof(
+                   staleRequestId, invalidatedPending);
+    }
+
+    internal bool TryRunPhase93PendingRequestBeforeStop(
+        out ulong requestId)
+    {
+        requestId = 0;
+        _phase34Polling = true;
+        _phase34PollLimit = 64;
+        return _ipv4.TryRunPhase93PendingServiceRequest(out requestId);
+    }
+
+    internal ManagedServiceAsyncTxSubmitResult TrySubmitServiceUdpEcho(
+        Span<byte> ipv4Packet, Span<byte> udpDatagram,
+        ReadOnlySpan<byte> peerMac, Ipv4Address localIpv4,
+        Ipv4Address peerIpv4, ushort localPort, ushort peerPort,
+        ReadOnlySpan<byte> payload, ushort ipIdentifier,
+        out ulong requestId)
+    {
+        requestId = 0;
+        if (!_accepting || !DriverReady)
+            return ManagedServiceAsyncTxSubmitResult.Unavailable;
+        if (!ManagedUdpEchoReplyFrameBuilder.TryBuild(
+                _txFrame, ipv4Packet, udpDatagram, _localMac, peerMac,
+                localIpv4, peerIpv4, localPort, peerPort, payload,
+                ipIdentifier, out ushort frameLength))
+            return ManagedServiceAsyncTxSubmitResult.Invalid;
+        return _serviceAsyncTx.TrySubmitFrame(_txFrame, frameLength,
+                                              out requestId);
+    }
+
+    internal int PumpServiceAsyncTxCompletions() =>
+        _serviceAsyncTx.PumpCompletions();
+
+    internal ManagedE1000AsyncTxResult TryGetServiceTxCompletion(
+        ulong requestId) => _serviceAsyncTx.TryGetCompletion(requestId);
+
+    internal ManagedE1000AsyncTxResult TryConsumeServiceTxCompletion(
+        ulong requestId) => _serviceAsyncTx.TryConsumeCompletion(requestId);
+
+    internal void CloseServiceAsyncTxAdmission() =>
+        _serviceAsyncTx.CloseAdmission();
+
+    internal bool OnDriverDmaQuiesced(uint episode) =>
+        _serviceAsyncTx.OnDmaQuiesced(episode);
 
     internal bool TryRunPhase16()
     {
@@ -653,6 +730,7 @@ internal sealed class ManagedEthernetLayer : IManagedArpEthernet
     internal bool TryStop()
     {
         _accepting = false;
+        _serviceAsyncTx.CloseAdmission();
         ManagedNetworkService service =
             ManagedNetworkServiceBackend.LiveService ?? _networkService;
         ManagedIpv4Layer ipv4 =

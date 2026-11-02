@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PathMap>$(MSBuildProjectDirectory)=/gxos/src/ManagedKernelPhase93HostTests</PathMap>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\ManagedKernel\ManagedE1000Protocol.cs" Link="ManagedE1000Protocol.cs" />
+    <Compile Include="..\ManagedKernel\ManagedE1000AsyncTxLedger.cs" Link="ManagedE1000AsyncTxLedger.cs" />
+    <Compile Include="..\ManagedKernel\ManagedInterruptEvent.cs" Link="ManagedInterruptEvent.cs" />
+    <Compile Include="..\ManagedKernel\ManagedEthernet.cs" Link="ManagedEthernet.cs" />
+    <Compile Include="..\ManagedKernel\ManagedIpv4.cs" Link="ManagedIpv4.cs" />
+    <Compile Include="..\ManagedKernel\ManagedUdp.cs" Link="ManagedUdp.cs" />
+    <Compile Include="..\ManagedKernel\ManagedNetworkService.cs" Link="ManagedNetworkService.cs" />
+    <Compile Include="..\ManagedKernel\ManagedNetworkServiceAsyncTx.cs" Link="ManagedNetworkServiceAsyncTx.cs" />
+    <Compile Include="..\ManagedKernel\ManagedTcp.cs" Link="ManagedTcp.cs" />
+    <Compile Include="..\ManagedKernel\ManagedTcpConnection.cs" Link="ManagedTcpConnection.cs" />
+  </ItemGroup>
+</Project>

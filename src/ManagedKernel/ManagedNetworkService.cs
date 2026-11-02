@@ -189,6 +189,70 @@ internal interface IManagedNetworkServiceBackend
     bool Teardown();
 }
 
+/* Kept separate so unrelated service test doubles and consumers do not need
+   to implement the diagnostic-only asynchronous echo operation. */
+internal interface IManagedNetworkServiceAsyncTxBackend
+{
+    ManagedServiceAsyncTxSubmitResult SendReceivedUdpEchoAsync(
+        Ipv4Address source, Ipv4Address destination,
+        ushort sourcePort, ushort destinationPort,
+        ReadOnlySpan<byte> sourceMac, ReadOnlySpan<byte> payload,
+        out ulong requestId);
+    ManagedServiceAsyncTxStatistics GetAsyncTxStatistics();
+    ManagedServiceAsyncTxCompletionResult TryGetServiceTxCompletion(
+        ulong requestId);
+    ManagedServiceAsyncTxCompletionResult TryConsumeServiceTxCompletion(
+        ulong requestId);
+}
+
+internal enum ManagedServiceAsyncTxSubmitResult : byte
+{
+    Accepted = 0,
+    Busy = 1,
+    Invalid = 2,
+    Unavailable = 3
+}
+
+internal enum ManagedServiceAsyncTxCompletionResult : byte
+{
+    Pending = 0,
+    Success = 1,
+    HardwareError = 2,
+    InvalidOrStale = 3,
+    AlreadyConsumed = 4
+}
+
+internal readonly struct ManagedServiceAsyncTxStatistics
+{
+    internal ManagedServiceAsyncTxStatistics(
+        uint accepted, uint busy, uint invalid, uint unavailable,
+        uint completed, uint failed, uint consumed, uint invalidated,
+        uint reclamationFailures, int outstanding)
+    {
+        Accepted = accepted;
+        Busy = busy;
+        Invalid = invalid;
+        Unavailable = unavailable;
+        Completed = completed;
+        Failed = failed;
+        Consumed = consumed;
+        Invalidated = invalidated;
+        ReclamationFailures = reclamationFailures;
+        Outstanding = outstanding;
+    }
+
+    internal uint Accepted { get; }
+    internal uint Busy { get; }
+    internal uint Invalid { get; }
+    internal uint Unavailable { get; }
+    internal uint Completed { get; }
+    internal uint Failed { get; }
+    internal uint Consumed { get; }
+    internal uint Invalidated { get; }
+    internal uint ReclamationFailures { get; }
+    internal int Outstanding { get; }
+}
+
 public sealed class ManagedNetworkService : IManagedTcpApplicationSink
 {
     public const int MaximumHostnameLength = 253;
@@ -218,10 +282,16 @@ public sealed class ManagedNetworkService : IManagedTcpApplicationSink
     private bool _receiveReady;
     private Ipv4Address _receiveSource;
     private Ipv4Address _receiveDestination;
+    private readonly byte[] _receiveSourceMac =
+        new byte[ManagedEthernetProtocol.MacLength];
     private ushort _receiveSourcePort;
     private ushort _receiveDestinationPort;
     private ushort _receiveLength;
     private uint _receiveOverflowCount;
+    private uint _udpEchoAcceptedCount;
+    private uint _udpEchoBusyDropCount;
+    private uint _udpEchoRejectedCount;
+    private uint _udpEchoUnavailableCount;
     private readonly byte[] _tcpReceiveSlot = new byte[MaximumTcpPayloadLength];
     private bool _tcpReceiveReady;
     private Ipv4Address _tcpReceiveSource;
@@ -252,6 +322,13 @@ public sealed class ManagedNetworkService : IManagedTcpApplicationSink
     public NetworkPingState PingState => _pingState;
     public bool HasReceivedUdp => _receiveReady;
     public uint ReceiveOverflowCount => _receiveOverflowCount;
+    internal uint UdpEchoAcceptedCount => _udpEchoAcceptedCount;
+    internal uint UdpEchoBusyDropCount => _udpEchoBusyDropCount;
+    internal uint UdpEchoRejectedCount => _udpEchoRejectedCount;
+    internal uint UdpEchoUnavailableCount => _udpEchoUnavailableCount;
+    internal ManagedServiceAsyncTxStatistics AsyncTxStatistics =>
+        _backend is IManagedNetworkServiceAsyncTxBackend asyncBackend
+            ? asyncBackend.GetAsyncTxStatistics() : default;
     public int BoundEndpointCount => _boundPortCount;
     public NetworkTcpState TcpState => _tcpState;
     public bool HasReceivedTcp => _tcpReceiveReady;
@@ -448,7 +525,65 @@ public sealed class ManagedNetworkService : IManagedTcpApplicationSink
         _receiveSlot.AsSpan(0, _receiveLength).CopyTo(destination);
         _receiveReady = false;
         _receiveLength = 0;
+        _receiveSourceMac.AsSpan().Clear();
         return true;
+    }
+
+    /* Narrow internal consumer operation: echo only the validated, bound UDP
+       datagram currently owned by this service's single receive slot. */
+    internal ManagedServiceAsyncTxSubmitResult TrySendReceivedUdpEchoAsync(
+        out ulong requestId)
+    {
+        requestId = 0;
+        if (_tornDown || !IsAvailable)
+        {
+            if (_receiveReady) ClearReceivedUdp();
+            _udpEchoUnavailableCount++;
+            return ManagedServiceAsyncTxSubmitResult.Unavailable;
+        }
+        if (!_receiveReady || !IsBound(_receiveDestinationPort) ||
+            _backend is not IManagedNetworkServiceAsyncTxBackend asyncBackend)
+        {
+            if (_receiveReady) ClearReceivedUdp();
+            _udpEchoRejectedCount++;
+            return ManagedServiceAsyncTxSubmitResult.Invalid;
+        }
+
+        NetworkStatus status = GetStatus();
+        if (!status.Configured || !status.Ipv4Address.IsUsable ||
+            _receiveDestination != status.Ipv4Address ||
+            !_receiveSource.IsUsable || _receiveSourcePort == 0 ||
+            _receiveDestinationPort == 0 ||
+            !ManagedEthernetProtocol.IsUsableSourceMac(_receiveSourceMac))
+        {
+            ClearReceivedUdp();
+            _udpEchoRejectedCount++;
+            return ManagedServiceAsyncTxSubmitResult.Invalid;
+        }
+
+        ManagedServiceAsyncTxSubmitResult result =
+            asyncBackend.SendReceivedUdpEchoAsync(
+                _receiveSource, _receiveDestination, _receiveSourcePort,
+                _receiveDestinationPort, _receiveSourceMac,
+                _receiveSlot.AsSpan(0, _receiveLength), out ulong acceptedId);
+        ClearReceivedUdp();
+        if (result == ManagedServiceAsyncTxSubmitResult.Accepted)
+        {
+            if (acceptedId == 0)
+            {
+                _udpEchoRejectedCount++;
+                return ManagedServiceAsyncTxSubmitResult.Unavailable;
+            }
+            _udpEchoAcceptedCount++;
+            requestId = acceptedId;
+        }
+        else if (result == ManagedServiceAsyncTxSubmitResult.Busy)
+            _udpEchoBusyDropCount++;
+        else if (result == ManagedServiceAsyncTxSubmitResult.Invalid)
+            _udpEchoRejectedCount++;
+        else
+            _udpEchoUnavailableCount++;
+        return result;
     }
 
     public bool TryReceiveTcp(Span<byte> destination, out Ipv4Address source,
@@ -502,11 +637,14 @@ public sealed class ManagedNetworkService : IManagedTcpApplicationSink
                                         Ipv4Address destination,
                                         ushort sourcePort,
                                         ushort destinationPort,
+                                        ReadOnlySpan<byte> sourceMac,
                                         ReadOnlySpan<byte> payload)
     {
-        if (_tornDown || !IsBound(destinationPort) || _receiveReady) return false;
+        if (_tornDown || !IsBound(destinationPort) || _receiveReady ||
+            !ManagedEthernetProtocol.IsUsableSourceMac(sourceMac)) return false;
         if (payload.Length > MaximumUdpPayloadLength) return false;
         payload.CopyTo(_receiveSlot);
+        sourceMac.CopyTo(_receiveSourceMac);
         _receiveSource = source;
         _receiveDestination = destination;
         _receiveSourcePort = sourcePort;
@@ -514,6 +652,21 @@ public sealed class ManagedNetworkService : IManagedTcpApplicationSink
         _receiveLength = (ushort)payload.Length;
         _receiveReady = true;
         return true;
+    }
+
+    /* Existing service contract tests do not model Ethernet metadata. Keep
+       their input helper source-compatible; production ingress always uses
+       the overload above with the parsed source MAC. */
+    internal bool TryCaptureReceivedUdp(Ipv4Address source,
+                                        Ipv4Address destination,
+                                        ushort sourcePort,
+                                        ushort destinationPort,
+                                        ReadOnlySpan<byte> payload)
+    {
+        ReadOnlySpan<byte> fixtureMac = stackalloc byte[]
+            { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+        return TryCaptureReceivedUdp(source, destination, sourcePort,
+            destinationPort, fixtureMac, payload);
     }
 
     bool IManagedTcpApplicationSink.TryCaptureReceivedTcp(
@@ -544,8 +697,17 @@ public sealed class ManagedNetworkService : IManagedTcpApplicationSink
         _resolvedAddress = default;
         _receiveReady = false;
         _receiveLength = 0;
+        _receiveSource = default;
+        _receiveDestination = default;
+        _receiveSourcePort = 0;
+        _receiveDestinationPort = 0;
+        _receiveSourceMac.AsSpan().Clear();
         _boundPortCount = 0;
         _receiveOverflowCount = 0;
+        _udpEchoAcceptedCount = 0;
+        _udpEchoBusyDropCount = 0;
+        _udpEchoRejectedCount = 0;
+        _udpEchoUnavailableCount = 0;
         _tcpReceiveReady = false;
         _tcpReceiveLength = 0;
         _tcpState = NetworkTcpState.Closed;
@@ -588,6 +750,8 @@ public sealed class ManagedNetworkService : IManagedTcpApplicationSink
         _tcpReceiveLength = 0;
         _tcpState = NetworkTcpState.Closed;
         _tcpReceiveSlot.AsSpan().Clear();
+        _receiveSlot.AsSpan().Clear();
+        _receiveSourceMac.AsSpan().Clear();
         for (int index = 0; index != _boundPorts.Length; ++index) _boundPorts[index] = 0;
         _boundPortCount = 0;
     }
@@ -597,6 +761,18 @@ public sealed class ManagedNetworkService : IManagedTcpApplicationSink
         for (int index = 0; index != _boundPortCount; ++index)
             if (_boundPorts[index] == port) return true;
         return false;
+    }
+
+    private void ClearReceivedUdp()
+    {
+        _receiveReady = false;
+        _receiveSource = default;
+        _receiveDestination = default;
+        _receiveSourcePort = 0;
+        _receiveDestinationPort = 0;
+        _receiveLength = 0;
+        _receiveSourceMac.AsSpan().Clear();
+        _receiveSlot.AsSpan().Clear();
     }
 
     private bool IsAvailable => _runtimeStatusValid

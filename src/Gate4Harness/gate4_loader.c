@@ -14157,6 +14157,9 @@ static uint32_t managed_kernel_e1000_interrupt_mask(void)
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE
     mask |= GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_RXT0;
 #endif
+#ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE93_SERVICE_ASYNC_TX
+    mask |= GXOS_MANAGED_KERNEL_E1000_INTERRUPT_MASK_RXT0;
+#endif
     return mask;
 }
 
@@ -16063,6 +16066,10 @@ static void managed_kernel_phase14_driver(
     status = run_phase14(37U);
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase89-udp-mode");
     serial_text("GXOS_NET10:PHASE89_UDP_MODE_SELECTED=1\r\n");
+#elif defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE93_SERVICE_ASYNC_TX)
+    status = run_phase14(42U);
+    if (status != GX_MANAGED_OK) fail("managed-kernel-phase93-mode");
+    serial_text("GXOS_NET10:PHASE93_MANAGED_SERVICE_ASYNC_TX_MODE_SELECTED=1\r\n");
 #elif defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE)
     status = run_phase14(41U);
     if (status != GX_MANAGED_OK) fail("managed-kernel-phase92-mode");
@@ -16098,6 +16105,7 @@ static void managed_kernel_phase14_driver(
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE89_UDP) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE91_LIFECYCLE) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE) || \
+    defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE93_SERVICE_ASYNC_TX) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE90_ASYNC_TX) || \
     defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE83_RX)
 #ifndef GXOS_ENABLE_MANAGED_KERNEL_PHASE82
@@ -16643,6 +16651,8 @@ static void managed_kernel_phase14_driver(
             hardware_after <= phase91_hardware_before ||
 #ifdef GXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE
             hardware_after - phase91_hardware_before > 256U ||
+#elif defined(GXOS_ENABLE_MANAGED_KERNEL_PHASE93_SERVICE_ASYNC_TX)
+            hardware_after - phase91_hardware_before > 128U ||
 #else
             hardware_after - phase91_hardware_before > 32U ||
 #endif

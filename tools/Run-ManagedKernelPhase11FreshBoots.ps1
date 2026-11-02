@@ -19,6 +19,7 @@ param(
     [switch]$EnablePhase90AsyncTx,
     [switch]$EnablePhase91AsyncTxLifecycle,
     [switch]$EnablePhase92AsyncTxEndurance,
+    [switch]$EnablePhase93ManagedServiceAsyncTx,
     [string]$QacCliPath = '',
     [string]$QacProject = 'guideXOS_NET10',
     [string]$Phase15InjectorPath = '',
@@ -77,7 +78,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:phase11RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$script:phase91RequireQemuIsolation = [bool]($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance)
+$script:phase91RequireQemuIsolation = [bool]($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance -or $EnablePhase93ManagedServiceAsyncTx)
 $script:phase11ExpectedQemuPid = 0
 $script:phase11QemuInventoryPath = $null
 $script:phase11LastIsolationCheckUtc = [datetime]::MinValue
@@ -154,6 +155,13 @@ if ($EnablePhase92AsyncTxEndurance -and (-not $EnablePhase80E1000 -or
     $EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle -or
     $RunCount -ne 3)) {
     throw 'Phase 92 endurance requires the Phase 80 route, exactly three fresh boots, and no other E1000 fixture.'
+}
+if ($EnablePhase93ManagedServiceAsyncTx -and (-not $EnablePhase80E1000 -or
+    $EnablePhase83 -or $EnablePhase82 -or $EnablePhase85Arp -or
+    $EnablePhase86Ipv4 -or $EnablePhase87Icmpv4 -or $EnablePhase89Udp -or
+    $EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle -or
+    $EnablePhase92AsyncTxEndurance -or ($RunCount -ne 1 -and $RunCount -ne 3))) {
+    throw 'Phase 93 service async TX requires the Phase 80 route, one diagnostic or three fresh boots, and no other E1000 fixture.'
 }
 if ($EnablePhase82 -and -not $EnablePhase80E1000) {
     throw '-EnablePhase82 requires the existing Phase 80 e1000e fixture.'
@@ -269,6 +277,7 @@ $phase15Injector = if ([string]::IsNullOrEmpty($Phase15InjectorPath)) {
 $phase89Injector = if ([string]::IsNullOrEmpty($Phase89InjectorPath)) {
     Join-Path $PSScriptRoot 'Inject-ManagedKernelPhase89Udp.ps1'
 } else { [IO.Path]::GetFullPath($Phase89InjectorPath) }
+$phase93Injector = Join-Path $PSScriptRoot 'Inject-ManagedKernelPhase93Udp.ps1'
 
 function Require11([bool]$condition, [string]$message) {
     if (!$condition) { throw $message }
@@ -1087,6 +1096,160 @@ function Receive-Phase85QemuDatagram11([Net.Sockets.UdpClient]$peerUdp,
             [Net.Sockets.SocketError]::WouldBlock)) { return $null }
         throw
     }
+}
+
+function Test-Phase93UdpReply11([byte[]]$frame, [byte[]]$guestMac,
+                                [uint32]$expectedIdentifier) {
+    [byte[]]$peerMac = @(0x02, 0x15, 0, 0, 0, 1)
+    [byte[]]$guestIp = @(10, 15, 0, 1)
+    [byte[]]$peerIp = @(10, 15, 0, 2)
+    Require11 ($frame.Length -eq 60 -and $frame[12] -eq 0x08 -and
+        $frame[13] -eq 0x00 -and $frame[14] -eq 0x45) `
+        'Phase 93 host capture received a noncanonical UDP echo frame.'
+    Require11 ((Bytes-Equal16 $frame 0 $peerMac) -and
+        (Bytes-Equal16 $frame 6 $guestMac)) `
+        'Phase 93 UDP reply Ethernet addresses are incorrect.'
+    Require11 ((Read-U16-Phase17 $frame 16) -eq 40 -and
+        $frame[23] -eq 17 -and (Compute-Checksum-Phase17 $frame 14 20) -eq 0) `
+        'Phase 93 UDP reply IPv4 length, protocol, or checksum is invalid.'
+    for ($index = 0; $index -lt 4; ++$index) {
+        Require11 ($frame[26 + $index] -eq $guestIp[$index] -and
+            $frame[30 + $index] -eq $peerIp[$index]) `
+            'Phase 93 UDP reply IPv4 source or destination is incorrect.'
+    }
+    Require11 ((Read-U16-Phase17 $frame 34) -eq 15930 -and
+        (Read-U16-Phase17 $frame 36) -eq 24001 -and
+        (Read-U16-Phase17 $frame 38) -eq 20 -and
+        (Read-U16-Phase17 $frame 40) -ne 0) `
+        'Phase 93 UDP reply ports, length, or checksum field is invalid.'
+    [byte[]]$pseudo = New-Object byte[] 32
+    [Array]::Copy($frame, 26, $pseudo, 0, 8)
+    $pseudo[9] = 17
+    $pseudo[11] = 20
+    [Array]::Copy($frame, 34, $pseudo, 12, 20)
+    Require11 ((Compute-Checksum-Phase17 $pseudo 0 $pseudo.Length) -eq 0) `
+        'Phase 93 UDP reply pseudoheader checksum is invalid.'
+    [byte[]]$expectedPayload = [byte[]]@(0x93, 0xA5, 0x5A, 0xC3,
+        (($expectedIdentifier -shr 24) -band 0xFF),
+        (($expectedIdentifier -shr 16) -band 0xFF),
+        (($expectedIdentifier -shr 8) -band 0xFF),
+        ($expectedIdentifier -band 0xFF), 0x91, 0x17, 0x00, 0xFF)
+    for ($index = 0; $index -lt $expectedPayload.Length; ++$index) {
+        Require11 ($frame[42 + $index] -eq $expectedPayload[$index]) `
+            'Phase 93 UDP reply payload was not echoed byte-for-byte.'
+    }
+}
+
+function Test-Phase93RequestCaptureFrame11([byte[]]$frame,
+                                            [byte[]]$guestMac,
+                                            [int]$recordIndex) {
+    [byte[]]$peerMac = @(0x02, 0x15, 0, 0, 0, 1)
+    [byte[]]$peerIp = @(10, 15, 0, 2)
+    [byte[]]$localIp = if ($recordIndex -eq 2) { @(10, 15, 0, 99) } else { @(10, 15, 0, 1) }
+    [uint32]$identifier = switch ($recordIndex) {
+        0 { [Convert]::ToUInt32('93FFFF01', 16); break }
+        1 { [Convert]::ToUInt32('93FFFF02', 16); break }
+        2 { [Convert]::ToUInt32('93FFFF03', 16); break }
+        default { [uint32]($recordIndex - 2); break }
+    }
+    [int]$destinationPort = if ($recordIndex -eq 0) { 15931 } else { 15930 }
+    Require11 ($frame.Length -eq 60 -and $frame[12] -eq 8 -and
+        $frame[13] -eq 0 -and $frame[14] -eq 0x45 -and
+        (Read-U16-Phase17 $frame 16) -eq 40 -and $frame[23] -eq 17 -and
+        (Compute-Checksum-Phase17 $frame 14 20) -eq 0 -and
+        (Bytes-Equal16 $frame 0 $guestMac) -and
+        (Bytes-Equal16 $frame 6 $peerMac)) `
+        "Phase 93 persisted inbound request record $recordIndex has invalid Ethernet or IPv4 framing."
+    Require11 ((Read-U16-Phase17 $frame 34) -eq 24001 -and
+        (Read-U16-Phase17 $frame 36) -eq $destinationPort -and
+        (Read-U16-Phase17 $frame 38) -eq 20) `
+        "Phase 93 persisted inbound request record $recordIndex has invalid UDP framing."
+    for ($octet = 0; $octet -lt 4; ++$octet) {
+        Require11 ($frame[26 + $octet] -eq $peerIp[$octet] -and
+            $frame[30 + $octet] -eq $localIp[$octet]) `
+            "Phase 93 persisted inbound request record $recordIndex has incorrect IPv4 endpoints."
+    }
+    [byte[]]$pseudo = New-Object byte[] 32
+    [Array]::Copy($frame, 26, $pseudo, 0, 8)
+    $pseudo[9] = 17
+    $pseudo[11] = 20
+    [Array]::Copy($frame, 34, $pseudo, 12, 20)
+    [uint16]$udpChecksum = Compute-Checksum-Phase17 $pseudo 0 $pseudo.Length
+    Require11 (($recordIndex -eq 1 -and $udpChecksum -ne 0) -or
+        ($recordIndex -ne 1 -and $udpChecksum -eq 0)) `
+        "Phase 93 inbound request record $recordIndex did not match its valid/invalid UDP checksum fixture."
+    [byte[]]$expectedPayload = [byte[]]@(0x93, 0xA5, 0x5A, 0xC3,
+        (($identifier -shr 24) -band 0xFF), (($identifier -shr 16) -band 0xFF),
+        (($identifier -shr 8) -band 0xFF), ($identifier -band 0xFF),
+        0x91, 0x17, 0x00, 0xFF)
+    for ($index = 0; $index -lt $expectedPayload.Length; ++$index) {
+        Require11 ($frame[42 + $index] -eq $expectedPayload[$index]) `
+            "Phase 93 inbound request record $recordIndex payload identifier changed."
+    }
+}
+
+function Write-Phase93UdpCapture11([string]$logPath, [string]$binaryPath,
+                                   [uint32]$identifier, [byte[]]$frame,
+                                   [string]$kind) {
+    $hash = [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData($frame))
+    Add-Content -LiteralPath $logPath -Encoding ascii -Value (
+        'PHASE93_UDP_REPLY_CAPTURED=PASS kind={0} identifier=0x{1:X8} length={2} destination_mac=021500000001 source_mac={3} source_ipv4=10.15.0.1 destination_ipv4=10.15.0.2 source_port=15930 destination_port=24001 ipv4_checksum=valid udp_checksum=valid payload=exact sha256={4}' -f `
+        $kind, $identifier, $frame.Length,
+        ([BitConverter]::ToString($frame, 6, 6)).Replace('-', ''), $hash)
+    $binary = [IO.File]::Open($binaryPath, [IO.FileMode]::Append,
+        [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        [byte[]]$prefix = [BitConverter]::GetBytes([uint32]$frame.Length)
+        $binary.Write($prefix, 0, $prefix.Length)
+        $binary.Write($frame, 0, $frame.Length)
+        $binary.Flush()
+    } finally { $binary.Dispose() }
+}
+
+function Get-Phase93UdpReplyIdentifier11([byte[]]$frame,
+                                         [byte[]]$guestMac) {
+    if ($frame.Length -lt 42 -or $frame[12] -ne 0x08 -or
+        $frame[13] -ne 0x00) { return $null }
+    $guestSource = Bytes-Equal16 $frame 6 $guestMac
+    if (-not $guestSource -or $frame[23] -ne 17) { return $null }
+    [byte[]]$guestIp = @(10, 15, 0, 1)
+    $fromGuest = $true
+    for ($index = 0; $index -lt 4; ++$index) {
+        if ($frame[26 + $index] -ne $guestIp[$index]) { $fromGuest = $false }
+    }
+    if (-not $fromGuest) { return $null }
+    Require11 ($frame.Length -eq 60) `
+        'Phase 93 host capture received a truncated or oversized diagnostic UDP reply.'
+    Require11 ((Read-U16-Phase17 $frame 16) -eq 40 -and
+        (Read-U16-Phase17 $frame 34) -eq 15930 -and
+        (Read-U16-Phase17 $frame 36) -eq 24001) `
+        'Phase 93 guest emitted an unintended UDP frame or wrong endpoint reply.'
+    [uint32]$identifier = ([uint32]$frame[46] -shl 24) -bor
+        ([uint32]$frame[47] -shl 16) -bor
+        ([uint32]$frame[48] -shl 8) -bor [uint32]$frame[49]
+    return $identifier
+}
+
+function Process-Phase93Datagram11([byte[]]$frame, [byte[]]$guestMac,
+                                    [Collections.Generic.HashSet[uint32]]$expected,
+                                    [Collections.Generic.HashSet[uint32]]$seen,
+                                    [Collections.Generic.List[byte[]]]$deferredPhase90,
+                                    [string]$captureLog, [string]$captureBinary,
+                                    [string]$kind) {
+    if ($frame.Length -ge 29 -and $frame[12] -eq 0x88 -and
+        $frame[13] -eq 0xB5 -and
+        [Text.Encoding]::ASCII.GetString($frame, 14, 15) -eq 'GXOS_PHASE90_TX') {
+        $deferredPhase90.Add($frame)
+        return
+    }
+    $identifier = Get-Phase93UdpReplyIdentifier11 $frame $guestMac
+    if ($null -eq $identifier) { return }
+    [uint32]$replyId = $identifier
+    Require11 ($expected.Contains($replyId) -and $seen.Add($replyId)) `
+        ('Phase 93 host capture found an unexpected or duplicate UDP reply identifier 0x{0:X8}.' -f $replyId)
+    Test-Phase93UdpReply11 $frame $guestMac $replyId
+    Write-Phase93UdpCapture11 $captureLog $captureBinary $replyId $frame $kind
 }
 
 function Write-Phase85QemuDatagram11([string]$captureLogPath,
@@ -3800,7 +3963,7 @@ function Write-Phase18Frame([IO.StreamWriter]$log, [string]$name,
     $log.Flush()
 }
 
-Require11 ($RunCount -ge 3 -or $EnablePhase45CapacityControl -or $EnablePhase46CapacityControl -or $EnablePhase51ResetReuseControl -or $EnablePhase52BadPngCrcControl -or (($EnablePhase89Udp -or $EnablePhase91AsyncTxLifecycle) -and $RunCount -eq 1)) `
+Require11 ($RunCount -ge 3 -or $EnablePhase45CapacityControl -or $EnablePhase46CapacityControl -or $EnablePhase51ResetReuseControl -or $EnablePhase52BadPngCrcControl -or (($EnablePhase89Udp -or $EnablePhase91AsyncTxLifecycle -or $EnablePhase93ManagedServiceAsyncTx) -and $RunCount -eq 1)) `
     'Three fresh ManagedKernel Phase 11 boots are required unless running a single capacity negative control or the Phase 51 reset/reuse lifecycle proof.'
 if ($EnablePhase89Udp) { Require11 ($RunCount -eq 1 -or $RunCount -eq 3) 'Phase 89 diagnostic/acceptance boot count is invalid.' }
 Require11 ((Test-Path -LiteralPath $efi) -and (Test-Path -LiteralPath $payload)) `
@@ -3816,8 +3979,8 @@ $qemu = if ($null -ne $qemuCommand) { [IO.Path]::GetFullPath($qemuCommand.Source
     else { 'C:\Program Files\qemu\qemu-system-x86_64.exe' }
 Require11 (Test-Path -LiteralPath $qemu) 'qemu-system-x86_64.exe is required.'
 if ($script:phase91QacManaged) {
-    Require11 ($EnablePhase91AsyncTxLifecycle -and ($RunCount -eq 1 -or $RunCount -eq 3)) `
-        'QAC acceptance mode is restricted to one or three Phase 91 lifecycle boots.'
+    Require11 (($EnablePhase91AsyncTxLifecycle -or $EnablePhase93ManagedServiceAsyncTx) -and ($RunCount -eq 1 -or $RunCount -eq 3)) `
+        'QAC acceptance mode is restricted to one or three Phase 91/93 lifecycle boots.'
     Require11 (Test-Path -LiteralPath $script:phase91QacCliPath -PathType Leaf) `
         "QAC CLI executable is missing: $script:phase91QacCliPath"
     Require11 (Test-Path -LiteralPath $sourcePayload -PathType Leaf) `
@@ -3843,6 +4006,9 @@ if ($EnablePhase15Rx) {
 if ($EnablePhase89Udp) {
     Require11 (Test-Path -LiteralPath $phase89Injector) "Phase 89 UDP injector is missing: $phase89Injector"
 }
+if ($EnablePhase93ManagedServiceAsyncTx) {
+    Require11 (Test-Path -LiteralPath $phase93Injector) "Phase 93 UDP injector is missing: $phase93Injector"
+}
 if ($EnablePhase90AsyncTx) {
     $requiredMarkers += @(
         'GXOS_NET10:PHASE90_ASYNC_TX_MODE_SELECTED=1',
@@ -3851,7 +4017,7 @@ if ($EnablePhase90AsyncTx) {
         'PHASE90_ASYNC_TX_COMPLETION_PASS=1',
         'GXOS_NET10:PHASE90_COM1_ROUTE_ACTIVE=1')
 }
-if ($EnablePhase91AsyncTxLifecycle) {
+if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase93ManagedServiceAsyncTx) {
     $requiredMarkers += @(
         'GXOS_NET10:PHASE90_PENDING_AND_CAPACITY_PASS=1',
         'GXOS_NET10:PHASE90_SYNC_TX_REGRESSION=PASS',
@@ -3894,6 +4060,23 @@ if ($EnablePhase91AsyncTxLifecycle) {
         'GXOS_NET10:PHASE91_NO_INTERRUPT_STORM=1',
         'GXOS_NET10:PHASE91_FINAL_TEARDOWN_RECONCILED=1',
         'PHASE91_ASYNC_TX_RESET_CONTAINMENT_PASS=1')
+}
+if ($EnablePhase93ManagedServiceAsyncTx) {
+    $requiredMarkers += @(
+        'GXOS_NET10:PHASE93_MANAGED_SERVICE_ASYNC_TX_MODE_SELECTED=1',
+        'GXOS_NET10:PHASE93_SERVICE_UDP_ECHO_READY=1',
+        'GXOS_NET10:PHASE93_INITIAL_SERVICE_DRAIN_PASS=1',
+        'GXOS_NET10:PHASE93_DRIVER_STOP_PENDING_REQUEST_READY=1',
+        'GXOS_NET10:PHASE93_DRIVER_STOP_PENDING_ACCEPTED=1',
+        'GXOS_NET10:PHASE93_STALE_SERVICE_ID_REJECTED=1',
+        'GXOS_NET10:PHASE93_INVALIDATED_PENDING_AT_RESTART=0x00000001',
+        'GXOS_NET10:PHASE93_POST_RESTART_SERVICE_READY=1',
+        'GXOS_NET10:PHASE93_POST_RESTART_SERVICE_LIVENESS_PASS=1',
+        'GXOS_NET10:PHASE93_FINAL_SERVICE_OUTSTANDING=0x0000000000000000',
+        'GXOS_NET10:PHASE93_FINAL_DRIVER_OUTSTANDING=0x0000000000000000',
+        'GXOS_NET10:PHASE93_FINAL_HARDWARE_OWNED=0x0000000000000000',
+        'GXOS_NET10:PHASE93_INVALIDATED_PENDING=0x0000000000000001',
+        'GXOS_NET10:PHASE93_MANAGED_SERVICE_ASYNC_TX_PASS=1')
 }
 if ($EnablePhase92AsyncTxEndurance) {
     $requiredMarkers += @(
@@ -4106,9 +4289,19 @@ try {
         $phase90CaptureLog = Join-Path $run 'phase90-tx-capture.log'
         $phase90CaptureBinary = Join-Path $run 'phase90-tx-capture.bin'
         if ($EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle -or
-            $EnablePhase92AsyncTxEndurance) {
+            $EnablePhase92AsyncTxEndurance -or $EnablePhase93ManagedServiceAsyncTx) {
             [IO.File]::WriteAllText($phase90CaptureLog, '')
             [IO.File]::WriteAllBytes($phase90CaptureBinary, [byte[]]@())
+        }
+        $phase93CaptureLog = Join-Path $run 'phase93-udp-reply-capture.log'
+        $phase93CaptureBinary = Join-Path $run 'phase93-udp-reply-capture.bin'
+        $phase93RequestCaptureBinary = Join-Path $run 'phase93-udp-request-capture.bin'
+        $phase93DeferredPhase90Frames = [Collections.Generic.List[byte[]]]::new()
+        $phase93StopReplyCaptured = $false
+        if ($EnablePhase93ManagedServiceAsyncTx) {
+            [IO.File]::WriteAllText($phase93CaptureLog, '')
+            [IO.File]::WriteAllBytes($phase93CaptureBinary, [byte[]]@())
+            [IO.File]::WriteAllBytes($phase93RequestCaptureBinary, [byte[]]@())
         }
         $timelinePath = Join-Path $run 'timeline.log'
         $commandLinePath = Join-Path $run 'qemu-commandline.log'
@@ -4150,14 +4343,16 @@ try {
         $peerPort = 0
         if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
             $EnablePhase83 -or $EnablePhase90AsyncTx -or
-            $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
+            $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance -or
+            $EnablePhase93ManagedServiceAsyncTx) {
             $rxPort = Get-FreeUdpPort11
             $peerPort = Get-FreeUdpPort11
         }
         $peerUdp = $null
         if (($EnablePhase15Rx -and $Phase15NetworkBackend -eq 'dgram') -or
             $EnablePhase83 -or $EnablePhase90AsyncTx -or
-            $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
+            $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance -or
+            $EnablePhase93ManagedServiceAsyncTx) {
             # QEMU's dgram backend requires a live remote endpoint. Keep the
             # host peer bound before QEMU starts so E1000 TX cannot stall; the
             # controlled RX frames are sent later after the guest is ready.
@@ -4176,7 +4371,8 @@ try {
             '-monitor', "tcp:127.0.0.1:$monitorPort,server=on,wait=on",
             '-display', $(if ($CaptureQemuScreen) { 'gtk' } else { 'none' }), '-no-reboot', '-no-shutdown')
         if ($EnablePhase83 -or $EnablePhase90AsyncTx -or
-            $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
+            $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance -or
+            $EnablePhase93ManagedServiceAsyncTx) {
             $arguments += @('-nic', 'none')
             $arguments += @(
                 '-netdev', "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$rxPort,remote.type=inet,remote.host=127.0.0.1,remote.port=$peerPort")
@@ -4457,7 +4653,8 @@ try {
                 Write-Output ("PHASE91_QAC_CHILD_RUNNING boot={0} reservation={1} qac_pid={2} qemu_pid={3}" -f `
                     $sequence, $qacReservationId, $qacOwnerPid, $process.Id)
             } else {
-                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
+                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance -or
+                    $EnablePhase93ManagedServiceAsyncTx) {
                     Ensure-CleanQemuState11 $script:phase11QemuInventoryPath `
                         ("BOOT_{0}_LAUNCH_PREFLIGHT" -f $sequence)
                 }
@@ -4816,7 +5013,8 @@ try {
                 }
             }
             if ($EnablePhase90AsyncTx -or $EnablePhase91AsyncTxLifecycle -or
-                $EnablePhase92AsyncTxEndurance) {
+                $EnablePhase92AsyncTxEndurance -or
+                $EnablePhase93ManagedServiceAsyncTx) {
                 Wait-Marker11 'PHASE90_ASYNC_TX_COMPLETION_PASS=1' `
                     $deadline $process $stream $logStream $text $buffer
                 $macMatch = [regex]::Match($text.ToString(),
@@ -4826,9 +5024,86 @@ try {
                     [Convert]::ToByte(($macMatch.Groups[1].Value +
                         $macMatch.Groups[2].Value).Substring($macOffset, 2), 16)
                 }
+                $destinationMac = $macMatch.Groups[1].Value +
+                                  $macMatch.Groups[2].Value
+                if ($EnablePhase93ManagedServiceAsyncTx) {
+                    Wait-Marker11 'GXOS_NET10:PHASE93_SERVICE_UDP_ECHO_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $phase93ExpectedInitial = [Collections.Generic.HashSet[uint32]]::new()
+                    $phase93SeenReplies = [Collections.Generic.HashSet[uint32]]::new()
+                    foreach ($identifier in 1..32) {
+                        [void]$phase93ExpectedInitial.Add([uint32]$identifier)
+                    }
+                    $injectorOutput = @(& $phase93Injector -PeerUdp $peerUdp `
+                        -GuestPort $rxPort `
+                        -GuestMac $destinationMac -FirstIdentifier 1 -Count 32 `
+                        -IncludeNegativeControls -CapturePath $phase93RequestCaptureBinary)
+                    foreach ($line in $injectorOutput) {
+                        $injectionLog.WriteLine([string]$line)
+                    }
+                    $injectionLog.Flush()
+                    Write-Timeline11 $timeline 'PHASE93_UDP_REQUESTS_INJECTED' `
+                        'diagnostic_port=15930 valid=32 negative=3 pace_ms=40 backend=dgram'
+                    Wait-Marker11 'GXOS_NET10:PHASE93_INITIAL_SERVICE_DRAIN_PASS=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $phase93CaptureDeadline = [DateTime]::UtcNow.AddSeconds(20)
+                    while ($phase93SeenReplies.Count -lt 32 -and
+                        [DateTime]::UtcNow -lt $phase93CaptureDeadline) {
+                        [byte[]]$captured = Receive-Phase85QemuDatagram11 $peerUdp 250
+                        if ($null -ne $captured) {
+                            Process-Phase93Datagram11 $captured $guestMac `
+                                $phase93ExpectedInitial $phase93SeenReplies `
+                                $phase93DeferredPhase90Frames $phase93CaptureLog `
+                                $phase93CaptureBinary 'initial'
+                        }
+                    }
+                    Require11 ($phase93SeenReplies.Count -eq 32) `
+                        "Phase 93 host captured $($phase93SeenReplies.Count)/32 initial service UDP replies."
+                    $negativeControlDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
+                    while ([DateTime]::UtcNow -lt $negativeControlDeadline) {
+                        [byte[]]$extra = Receive-Phase85QemuDatagram11 $peerUdp 50
+                        if ($null -ne $extra) {
+                            Process-Phase93Datagram11 $extra $guestMac `
+                                $phase93ExpectedInitial $phase93SeenReplies `
+                                $phase93DeferredPhase90Frames $phase93CaptureLog `
+                                $phase93CaptureBinary 'negative-control-window'
+                        }
+                    }
+                    Wait-Marker11 'GXOS_NET10:PHASE93_DRIVER_STOP_PENDING_REQUEST_READY=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    $pendingOutput = @(& $phase93Injector -PeerUdp $peerUdp `
+                        -GuestPort $rxPort `
+                        -GuestMac $destinationMac -FirstIdentifier 33 -Count 1 `
+                        -CapturePath $phase93RequestCaptureBinary)
+                    foreach ($line in $pendingOutput) {
+                        $injectionLog.WriteLine([string]$line)
+                    }
+                    $injectionLog.Flush()
+                    Wait-Marker11 'GXOS_NET10:PHASE93_DRIVER_STOP_PENDING_ACCEPTED=1' `
+                        $deadline $process $stream $logStream $text $buffer
+                    Write-Timeline11 $timeline 'PHASE93_STOP_PENDING_REQUEST_ACCEPTED' `
+                        'identifier=0x00000021 service_owned=true teardown_reconciliation=required'
+                    $phase93ExpectedPending = [Collections.Generic.HashSet[uint32]]::new()
+                    [void]$phase93ExpectedPending.Add([uint32]33)
+                    $pendingCaptureDeadline = [DateTime]::UtcNow.AddMilliseconds(500)
+                    while ([DateTime]::UtcNow -lt $pendingCaptureDeadline) {
+                        [byte[]]$captured = Receive-Phase85QemuDatagram11 $peerUdp 50
+                        if ($null -ne $captured) {
+                            $before = $phase93SeenReplies.Count
+                            Process-Phase93Datagram11 $captured $guestMac `
+                                $phase93ExpectedPending $phase93SeenReplies `
+                                $phase93DeferredPhase90Frames $phase93CaptureLog `
+                                $phase93CaptureBinary 'stop-pending-optional'
+                            if ($phase93SeenReplies.Count -gt $before) {
+                                $phase93StopReplyCaptured = $true
+                            }
+                        }
+                    }
+                }
                 $seenSequences = [Collections.Generic.HashSet[uint32]]::new()
                 $expectedSequences = [Collections.Generic.HashSet[uint32]]::new()
-                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
+                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance -or
+                    $EnablePhase93ManagedServiceAsyncTx) {
                     foreach ($expected in 1..18) {
                         [void]$expectedSequences.Add([uint32]$expected)
                     }
@@ -4853,7 +5128,8 @@ try {
                     }
                     $expectedCaptureCount = 18
                 }
-                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
+                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance -or
+                    $EnablePhase93ManagedServiceAsyncTx) {
                     Wait-Marker11 'GXOS_NET10:PHASE91_RESTART_RX_READY=1' `
                         $deadline $process $stream $logStream $text $buffer
                     $serialSnapshot = $text.ToString()
@@ -4899,36 +5175,66 @@ try {
                     $restartExposed = $phase91Counters['PHASE91_RESTART_COMPLETIONS_EXPOSED']
                     $restartConsumed = $phase91Counters['PHASE91_RESTART_COMPLETIONS_CONSUMED']
 
-                    Require11 ($preStopAsyncAccepted -eq $preStopAsyncCompleted -and
-                        $preStopAsyncCompleted -eq $preStopAsyncTransmitted) `
-                        'Pre-stop async accepted/completed/transmitted accounting disagrees.'
-                    Require11 ($atStop -eq $completedUnconsumed + $hardwareOwned -and
-                        $invalidated -eq $atStop -and
-                        $completedUnconsumed -eq $atStop -and $hardwareOwned -eq 0) `
-                        'Stop-boundary requests were not all DD-complete and accounted.'
-                    Require11 ($exposedBeforeStop -eq $preStopAsyncCompleted -and
-                        $consumedBeforeStop + $atStop -eq $exposedBeforeStop) `
-                        'Pre-stop exposed/consumed/outstanding completion accounting disagrees.'
+                    if ($EnablePhase93ManagedServiceAsyncTx) {
+                        Require11 ($preStopAsyncAccepted -eq 54 -and
+                            $preStopAsyncCompleted -eq $preStopAsyncTransmitted -and
+                            $preStopAsyncCompleted -le $preStopAsyncAccepted -and
+                            $preStopAsyncAccepted - $preStopAsyncCompleted -le 1) `
+                            'Phase 93 pre-stop submission, DD, and transmission counters do not account for the one unpumped pending service request.'
+                        Require11 ($atStop -eq 4 -and
+                            $atStop -eq $completedUnconsumed + $hardwareOwned -and
+                            $invalidated -eq 4 -and $completedUnconsumed -ge 3 -and
+                            $hardwareOwned -le 1) `
+                            'Phase 93 stop boundary did not reconcile three completed direct requests and the pending service request.'
+                        Require11 ($exposedBeforeStop -ge $consumedBeforeStop + 3 -and
+                            $exposedBeforeStop -le $consumedBeforeStop + 4 -and
+                            $exposedBeforeStop -le $preStopAsyncCompleted) `
+                            'Phase 93 pre-stop completion exposure or ownership accounting disagrees.'
+                    } else {
+                        Require11 ($preStopAsyncAccepted -eq $preStopAsyncCompleted -and
+                            $preStopAsyncCompleted -eq $preStopAsyncTransmitted) `
+                            'Pre-stop async accepted/completed/transmitted accounting disagrees.'
+                        Require11 ($atStop -eq $completedUnconsumed + $hardwareOwned -and
+                            $invalidated -eq $atStop -and
+                            $completedUnconsumed -eq $atStop -and $hardwareOwned -eq 0) `
+                            'Stop-boundary requests were not all DD-complete and accounted.'
+                        Require11 ($exposedBeforeStop -eq $preStopAsyncCompleted -and
+                            $consumedBeforeStop + $atStop -eq $exposedBeforeStop) `
+                            'Pre-stop exposed/consumed/outstanding completion accounting disagrees.'
+                    }
                     Require11 ($restartAsyncAccepted -eq $restartAsyncCompleted -and
                         $restartAsyncCompleted -eq $restartAsyncTransmitted -and
                         $restartExposed -eq $restartAsyncCompleted -and
                         $restartConsumed -eq $restartExposed) `
                         'Restart async accepted/completed/transmitted/consumed accounting disagrees.'
 
-                    $expectedCaptureCount = [int](
-                        $preStopAsyncTransmitted +
-                        $phase91Counters['PHASE90_SYNC_TX_DD_POLL_FRAMES'] +
-                        $restartAsyncTransmitted +
-                        $phase91Counters['PHASE91_RESTART_SYNC_TX_DD_POLL_FRAMES'])
+                    if ($EnablePhase93ManagedServiceAsyncTx) {
+                        $expectedCaptureCount = $expectedSequences.Count
+                    } else {
+                        $expectedCaptureCount = [int](
+                            $preStopAsyncTransmitted +
+                            $phase91Counters['PHASE90_SYNC_TX_DD_POLL_FRAMES'] +
+                            $restartAsyncTransmitted +
+                            $phase91Counters['PHASE91_RESTART_SYNC_TX_DD_POLL_FRAMES'])
+                    }
                     Require11 ($expectedCaptureCount -eq $expectedSequences.Count) `
                         "Lifecycle accounting expects $expectedCaptureCount frames, but the fixture sentinel set has $($expectedSequences.Count)."
                 }
                 $captureWaitSeconds = if ($EnablePhase92AsyncTxEndurance) { 120 } `
-                    elseif ($EnablePhase91AsyncTxLifecycle) { 60 } else { 20 }
+                    elseif ($EnablePhase91AsyncTxLifecycle -or
+                        $EnablePhase93ManagedServiceAsyncTx) { 60 } else { 20 }
                 $captureDeadline = [DateTime]::UtcNow.AddSeconds($captureWaitSeconds)
+                $deferredPhase90Index = 0
                 while ($seenSequences.Count -lt $expectedCaptureCount -and
                        [DateTime]::UtcNow -lt $captureDeadline) {
-                    [byte[]]$candidate = Receive-Phase85QemuDatagram11 $peerUdp 250
+                    [byte[]]$candidate = $null
+                    if ($EnablePhase93ManagedServiceAsyncTx -and
+                        $deferredPhase90Index -lt $phase93DeferredPhase90Frames.Count) {
+                        $candidate = $phase93DeferredPhase90Frames[$deferredPhase90Index]
+                        ++$deferredPhase90Index
+                    } else {
+                        $candidate = Receive-Phase85QemuDatagram11 $peerUdp 250
+                    }
                     if ($null -eq $candidate) { continue }
                     if ($candidate.Length -lt 34 -or
                         $candidate[12] -ne 0x88 -or $candidate[13] -ne 0xB5) { continue }
@@ -5043,7 +5349,8 @@ try {
                         $phase92SequenceCount -eq 256) `
                         'Phase 92 persisted capture evidence did not independently reconcile 284 unique frames including all 256 endurance frames.'
                 }
-                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance) {
+                if ($EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance -or
+                    $EnablePhase93ManagedServiceAsyncTx) {
                     $destinationMac = $macMatch.Groups[1].Value +
                                       $macMatch.Groups[2].Value
                     [byte[]]$rxFrame = New-Phase83RxFrame11 `
@@ -5064,6 +5371,66 @@ try {
                     $injectionLog.Flush()
                     Wait-Marker11 'GXOS_NET10:PHASE83_RX_ACCEPTED=0x0000000000000001' `
                         $deadline $process $stream $logStream $text $buffer
+                    if ($EnablePhase93ManagedServiceAsyncTx) {
+                        Wait-Marker11 'GXOS_NET10:PHASE93_POST_RESTART_SERVICE_READY=1' `
+                            $deadline $process $stream $logStream $text $buffer
+                        $phase93ExpectedPending = [Collections.Generic.HashSet[uint32]]::new()
+                        [void]$phase93ExpectedPending.Add([uint32]33)
+                        $pendingDrainUntil = [DateTime]::UtcNow.AddMilliseconds(300)
+                        while ([DateTime]::UtcNow -lt $pendingDrainUntil) {
+                            [byte[]]$captured = Receive-Phase85QemuDatagram11 $peerUdp 50
+                            if ($null -ne $captured) {
+                                $before = $phase93SeenReplies.Count
+                                Process-Phase93Datagram11 $captured $guestMac `
+                                    $phase93ExpectedPending $phase93SeenReplies `
+                                    $phase93DeferredPhase90Frames $phase93CaptureLog `
+                                    $phase93CaptureBinary 'stop-pending-optional'
+                                if ($phase93SeenReplies.Count -gt $before) {
+                                    $phase93StopReplyCaptured = $true
+                                }
+                            }
+                        }
+                        $postRestartOutput = @(& $phase93Injector -PeerUdp $peerUdp `
+                            -GuestPort $rxPort `
+                            -GuestMac $destinationMac -FirstIdentifier 34 -Count 1 `
+                            -CapturePath $phase93RequestCaptureBinary)
+                        foreach ($line in $postRestartOutput) {
+                            $injectionLog.WriteLine([string]$line)
+                        }
+                        $injectionLog.Flush()
+                        $phase93ExpectedRestart = [Collections.Generic.HashSet[uint32]]::new()
+                        [void]$phase93ExpectedRestart.Add([uint32]34)
+                        Wait-Marker11 'GXOS_NET10:PHASE93_POST_RESTART_SERVICE_LIVENESS_PASS=1' `
+                            $deadline $process $stream $logStream $text $buffer
+                        $restartCaptureDeadline = [DateTime]::UtcNow.AddSeconds(10)
+                        while (-not $phase93SeenReplies.Contains([uint32]34) -and
+                            [DateTime]::UtcNow -lt $restartCaptureDeadline) {
+                            [byte[]]$captured = Receive-Phase85QemuDatagram11 $peerUdp 250
+                            if ($null -ne $captured) {
+                                Process-Phase93Datagram11 $captured $guestMac `
+                                    $phase93ExpectedRestart $phase93SeenReplies `
+                                    $phase93DeferredPhase90Frames $phase93CaptureLog `
+                                    $phase93CaptureBinary 'post-restart'
+                            }
+                        }
+                        Require11 ($phase93SeenReplies.Contains([uint32]34)) `
+                            'Phase 93 did not capture the post-restart service UDP reply.'
+                        $phase93FinalQuietUntil = [DateTime]::UtcNow.AddMilliseconds(500)
+                        while ([DateTime]::UtcNow -lt $phase93FinalQuietUntil) {
+                            [byte[]]$extra = Receive-Phase85QemuDatagram11 $peerUdp 50
+                            if ($null -ne $extra) {
+                                Process-Phase93Datagram11 $extra $guestMac `
+                                    $phase93ExpectedRestart $phase93SeenReplies `
+                                    $phase93DeferredPhase90Frames $phase93CaptureLog `
+                                    $phase93CaptureBinary 'final-drain'
+                            }
+                        }
+                        Require11 ($phase93SeenReplies.Count -eq 33 -or
+                            $phase93SeenReplies.Count -eq 34) `
+                            'Phase 93 host UDP reply count is not the 32 initial plus post-restart reply, with at most one stop-boundary reply.'
+                        Write-Timeline11 $timeline 'PHASE93_HOST_REPLY_RECONCILED' `
+                            "initial=32 stop_pending_optional=$([int]$phase93StopReplyCaptured) post_restart=1 total=$($phase93SeenReplies.Count)"
+                    }
                     Wait-Marker11 'GXOS_NET10:PHASE91_RESTART_TX_RX_LIVENESS=PASS' `
                         $deadline $process $stream $logStream $text $buffer
                     Wait-Marker11 'GXOS_NET10:PHASE91_LIFECYCLE_RECONCILED=1' `
@@ -7373,6 +7740,145 @@ try {
         foreach ($marker in $requiredMarkers) { Require11 $finalText.Contains($marker) "Boot $sequence missing marker: $marker" }
         Require11 (([regex]::Matches($finalText, 'GXOS_NET10:MANAGED_KERNEL_PHASE11_PASS')).Count -eq 1) 'Phase 11 pass marker count was not one.'
         Require11 ($finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_ENQUEUED_COUNT=0x0000000000000009') -and $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DRAINED_COUNT=0x0000000000000009') -and $finalText.Contains('GXOS_NET10:MANAGED_KERNEL_INTERRUPT_DROPPED_COUNT=0x0000000000000000')) "Boot $sequence did not account for nine shared events without drops."
+        if ($EnablePhase93ManagedServiceAsyncTx) {
+            $phase93Counters = @{}
+            foreach ($counterName in @(
+                'PHASE93_INITIAL_ASYNC_ACCEPTED',
+                'PHASE93_INITIAL_COMPLETION_OBSERVED',
+                'PHASE93_INITIAL_COMPLETION_SUCCEEDED',
+                'PHASE93_INITIAL_COMPLETION_FAILED',
+                'PHASE93_INITIAL_COMPLETION_CONSUMED',
+                'PHASE93_INITIAL_SERVICE_OUTSTANDING',
+                'PHASE93_INITIAL_BUSY', 'PHASE93_INITIAL_INVALID',
+                'PHASE93_INITIAL_UNAVAILABLE', 'PHASE93_INITIAL_INVALIDATED',
+                'PHASE93_INITIAL_RECLAMATION_FAILURES',
+                'PHASE93_RESTART_ASYNC_ACCEPTED',
+                'PHASE93_RESTART_COMPLETION_OBSERVED',
+                'PHASE93_RESTART_COMPLETION_SUCCEEDED',
+                'PHASE93_RESTART_COMPLETION_FAILED',
+                'PHASE93_RESTART_COMPLETION_CONSUMED',
+                'PHASE93_RESTART_SERVICE_OUTSTANDING',
+                'PHASE93_RESTART_BUSY', 'PHASE93_RESTART_INVALID',
+                'PHASE93_RESTART_UNAVAILABLE', 'PHASE93_RESTART_INVALIDATED',
+                'PHASE93_RESTART_RECLAMATION_FAILURES')) {
+                $counterMatch = [regex]::Match($finalText,
+                    [regex]::Escape("GXOS_NET10:${counterName}=0x") +
+                    '([0-9A-Fa-f]{16})')
+                Require11 $counterMatch.Success `
+                    "Phase 93 service counter is missing: $counterName"
+                $phase93Counters[$counterName] = [Convert]::ToUInt64(
+                    $counterMatch.Groups[1].Value, 16)
+            }
+            foreach ($phaseName in @('INITIAL', 'RESTART')) {
+                $prefix = "PHASE93_${phaseName}_"
+                $acceptedCount = if ($phaseName -eq 'INITIAL') { 32 } else { 1 }
+                Require11 ($phase93Counters["${prefix}ASYNC_ACCEPTED"] -eq $acceptedCount -and
+                    $phase93Counters["${prefix}COMPLETION_OBSERVED"] -eq $acceptedCount -and
+                    $phase93Counters["${prefix}COMPLETION_SUCCEEDED"] -eq $acceptedCount -and
+                    $phase93Counters["${prefix}COMPLETION_FAILED"] -eq 0 -and
+                    $phase93Counters["${prefix}COMPLETION_CONSUMED"] -eq $acceptedCount -and
+                    $phase93Counters["${prefix}SERVICE_OUTSTANDING"] -eq 0 -and
+                    $phase93Counters["${prefix}BUSY"] -eq 0 -and
+                    $phase93Counters["${prefix}INVALID"] -eq 0 -and
+                    $phase93Counters["${prefix}UNAVAILABLE"] -eq 0 -and
+                    $phase93Counters["${prefix}INVALIDATED"] -eq 0 -and
+                    $phase93Counters["${prefix}RECLAMATION_FAILURES"] -eq 0) `
+                    "Phase 93 $phaseName service request/completion/reclamation counters did not reconcile."
+            }
+            Require11 ($phase93SeenReplies.Count -in @(33, 34) -and
+                ($phase93StopReplyCaptured -eq
+                    $phase93SeenReplies.Contains([uint32]33)) -and
+                $phase93SeenReplies.Contains([uint32]34)) `
+                'Phase 93 host packet capture did not contain exactly 32 initial and one post-restart reply, with the pending reply optional.'
+            Require11 ($phase91Counters['PHASE91_RESTART_ACCEPTED_SUBMISSIONS'] -eq 4 -and
+                $phase91Counters['PHASE91_RESTART_DD_COMPLETIONS'] -eq 4 -and
+                $phase91Counters['PHASE91_RESTART_ASYNC_TX_SUCCESSFUL_FRAMES'] -eq 4 -and
+                $phase91Counters['PHASE91_RESTART_COMPLETIONS_EXPOSED'] -eq 4 -and
+                $phase91Counters['PHASE91_RESTART_COMPLETIONS_CONSUMED'] -eq 4) `
+                'Phase 93 replacement driver did not restore and drain the existing Phase 91 async capacity.'
+            [byte[]]$requestCapture = [IO.File]::ReadAllBytes(
+                $phase93RequestCaptureBinary)
+            $requestOffset = 0
+            $requestRecords = 0
+            while ($requestOffset -lt $requestCapture.Length) {
+                Require11 ($requestOffset + 4 -le $requestCapture.Length) `
+                    'Phase 93 raw request capture ended inside a length prefix.'
+                [uint32]$requestLength = [BitConverter]::ToUInt32(
+                    $requestCapture, $requestOffset)
+                Require11 ($requestLength -eq 60 -and
+                    $requestOffset + 4 + $requestLength -le $requestCapture.Length) `
+                    'Phase 93 raw request capture contains a truncated or invalid frame.'
+                [byte[]]$requestFrame = [byte[]]::new([int]$requestLength)
+                [Array]::Copy($requestCapture, $requestOffset + 4,
+                    $requestFrame, 0, [int]$requestLength)
+                Test-Phase93RequestCaptureFrame11 $requestFrame $guestMac `
+                    $requestRecords
+                ++$requestRecords
+                $requestOffset += 4 + [int]$requestLength
+            }
+            Require11 ($requestRecords -eq 37) `
+                "Phase 93 raw request capture contains $requestRecords/37 injected frames."
+            [byte[]]$replyCapture = [IO.File]::ReadAllBytes(
+                $phase93CaptureBinary)
+            $replyOffset = 0
+            $replyRecords = 0
+            $persistedReplyIds = [Collections.Generic.HashSet[uint32]]::new()
+            while ($replyOffset -lt $replyCapture.Length) {
+                Require11 ($replyOffset + 4 -le $replyCapture.Length) `
+                    'Phase 93 raw reply capture ended inside a length prefix.'
+                [uint32]$replyLength = [BitConverter]::ToUInt32(
+                    $replyCapture, $replyOffset)
+                Require11 ($replyLength -eq 60 -and
+                    $replyOffset + 4 + $replyLength -le $replyCapture.Length) `
+                    'Phase 93 raw reply capture contains a truncated or invalid frame.'
+                [byte[]]$replyFrame = [byte[]]::new([int]$replyLength)
+                [Array]::Copy($replyCapture, $replyOffset + 4,
+                    $replyFrame, 0, [int]$replyLength)
+                $replyIdentifier = Get-Phase93UdpReplyIdentifier11 $replyFrame $guestMac
+                Require11 ($null -ne $replyIdentifier -and
+                    $phase93SeenReplies.Contains([uint32]$replyIdentifier) -and
+                    $persistedReplyIds.Add([uint32]$replyIdentifier)) `
+                    'Phase 93 raw reply capture has an unexpected or duplicate frame identifier.'
+                Test-Phase93UdpReply11 $replyFrame $guestMac `
+                    ([uint32]$replyIdentifier)
+                ++$replyRecords
+                $replyOffset += 4 + [int]$replyLength
+            }
+            Require11 ($replyRecords -eq $phase93SeenReplies.Count -and
+                $persistedReplyIds.Count -eq $phase93SeenReplies.Count) `
+                'Phase 93 raw reply capture does not reconcile with independently observed frames.'
+            $phase93CaptureHash = (Get-FileHash -LiteralPath $phase93CaptureBinary `
+                -Algorithm SHA256).Hash.ToUpperInvariant()
+            $phase93RequestCaptureHash = (Get-FileHash -LiteralPath $phase93RequestCaptureBinary `
+                -Algorithm SHA256).Hash.ToUpperInvariant()
+            $phase93HostValidationPath = Join-Path $run 'phase93-host-validation.log'
+            $phase93HostLines = @(
+                'PHASE93_HOST_PACKET_VALIDATION=PASS',
+                ('BOOT={0}' -f $sequence),
+                ('PAYLOAD_SHA256={0}' -f $expectedHash),
+                'DIAGNOSTIC_ENDPOINT=10.15.0.1:15930',
+                'VALID_REQUESTS_INJECTED=32',
+                'NEGATIVE_CONTROLS_INJECTED=3',
+                'INITIAL_REPLIES_CAPTURED_AND_VALIDATED=32',
+                ('STOP_PENDING_REPLY_CAPTURED_OPTIONALLY={0}' -f [int]$phase93StopReplyCaptured),
+                'POST_RESTART_REPLIES_CAPTURED_AND_VALIDATED=1',
+                ('TOTAL_VALIDATED_REPLIES={0}' -f $phase93SeenReplies.Count),
+                'DUPLICATE_OR_UNEXPECTED_REPLIES=0',
+                'IPV4_UDP_HEADERS_CHECKSUMS_AND_PAYLOAD=VALIDATED',
+                ('RAW_REQUEST_FRAMES=37 capture_sha256={0}' -f $phase93RequestCaptureHash),
+                'SERVICE_INITIAL_ACCEPTED_COMPLETED_CONSUMED=32',
+                'SERVICE_RESTART_ACCEPTED_COMPLETED_CONSUMED=1',
+                'FINAL_SERVICE_OUTSTANDING=0',
+                'FINAL_DRIVER_OUTSTANDING=0',
+                'STALE_REQUEST_REJECTED=1',
+                ('UDP_CAPTURE_SHA256={0}' -f $phase93CaptureHash),
+                'PHASE93_MANAGED_SERVICE_ASYNC_TX_PASS=1')
+            [IO.File]::WriteAllLines($phase93HostValidationPath,
+                [string[]]$phase93HostLines, [Text.Encoding]::ASCII)
+            Write-Output ('PHASE93_MANAGED_SERVICE_ASYNC_TX_PASS=1 boot={0} requests=32 replies={1} stop_pending_reply={2} post_restart=1 capture_sha256={3}' -f `
+                $sequence, $phase93SeenReplies.Count,
+                [int]$phase93StopReplyCaptured, $phase93CaptureHash)
+        }
         if ($EnablePhase92AsyncTxEndurance) {
             $phase92HostValidationPath = Join-Path $run 'phase92-host-validation.log'
             Require11 (!(Test-Path -LiteralPath $phase92HostValidationPath)) `

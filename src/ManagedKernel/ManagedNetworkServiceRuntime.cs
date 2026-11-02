@@ -2,7 +2,8 @@ using System;
 
 namespace GuideXOS.Net10.ManagedKernel;
 
-internal sealed class ManagedNetworkServiceBackend : IManagedNetworkServiceBackend
+internal sealed class ManagedNetworkServiceBackend :
+    IManagedNetworkServiceBackend, IManagedNetworkServiceAsyncTxBackend
 {
     private static bool s_runtimeStatusValid;
     private static NetworkStatus s_runtimeStatus;
@@ -47,8 +48,8 @@ internal sealed class ManagedNetworkServiceBackend : IManagedNetworkServiceBacke
     private ManagedEthernetLayer Ethernet => s_runtimeEthernet ?? _ethernet;
     private ManagedIpv4Layer Ipv4 => s_runtimeIpv4 ?? _ipv4;
 
-    public bool IsAvailable => s_runtimeStatusValid
-        ? s_runtimeStatus.LinkReady : Ethernet.IsAccepting;
+    public bool IsAvailable => Ethernet.IsAccepting && Ethernet.DriverReady &&
+        (!s_runtimeStatusValid || s_runtimeStatus.LinkReady);
 
     public ManagedTcpConnectionState TcpState => Ipv4.TcpState;
 
@@ -92,6 +93,7 @@ internal sealed class ManagedNetworkServiceBackend : IManagedNetworkServiceBacke
     public bool Poll(out ManagedNetworkServiceBackendEvent serviceEvent)
     {
         serviceEvent = ManagedNetworkServiceBackendEvent.None;
+        Ethernet.PumpServiceAsyncTxCompletions();
         if (!Ethernet.TryReceiveAndDispatch(out ManagedNetworkDispatchResult result))
         {
             /* A bounded RX poll with no completed descriptor is an idle
@@ -168,6 +170,54 @@ internal sealed class ManagedNetworkServiceBackend : IManagedNetworkServiceBacke
             return ManagedNetworkServiceBackendResult.NoResource;
         return ManagedNetworkServiceBackendResult.Success;
     }
+
+    public ManagedServiceAsyncTxSubmitResult SendReceivedUdpEchoAsync(
+        Ipv4Address source, Ipv4Address destination,
+        ushort sourcePort, ushort destinationPort,
+        ReadOnlySpan<byte> sourceMac, ReadOnlySpan<byte> payload,
+        out ulong requestId)
+    {
+        requestId = 0;
+        if (!IsAvailable) return ManagedServiceAsyncTxSubmitResult.Unavailable;
+        return Ipv4.TryServiceSendUdpEchoAsync(
+            source, destination, sourcePort, destinationPort,
+            sourceMac, payload, out requestId);
+    }
+
+    public ManagedServiceAsyncTxStatistics GetAsyncTxStatistics() =>
+        Ethernet.ServiceAsyncTxStatistics;
+
+    public ManagedServiceAsyncTxCompletionResult TryGetServiceTxCompletion(
+        ulong requestId) => MapServiceCompletion(
+            Ethernet.TryGetServiceTxCompletion(requestId));
+
+    public ManagedServiceAsyncTxCompletionResult TryConsumeServiceTxCompletion(
+        ulong requestId)
+    {
+        /* Explicit service consumers may reclaim one request. The normal
+           cooperative Poll pump uses the same adapter operation. */
+        ManagedE1000AsyncTxResult result =
+            Ethernet.TryGetServiceTxCompletion(requestId);
+        if (result != ManagedE1000AsyncTxResult.Success &&
+            result != ManagedE1000AsyncTxResult.HardwareError)
+            return MapServiceCompletion(result);
+        return MapServiceCompletion(
+            Ethernet.TryConsumeServiceTxCompletion(requestId));
+    }
+
+    private static ManagedServiceAsyncTxCompletionResult MapServiceCompletion(
+        ManagedE1000AsyncTxResult result) => result switch
+    {
+        ManagedE1000AsyncTxResult.Pending =>
+            ManagedServiceAsyncTxCompletionResult.Pending,
+        ManagedE1000AsyncTxResult.Success =>
+            ManagedServiceAsyncTxCompletionResult.Success,
+        ManagedE1000AsyncTxResult.HardwareError =>
+            ManagedServiceAsyncTxCompletionResult.HardwareError,
+        ManagedE1000AsyncTxResult.AlreadyConsumed =>
+            ManagedServiceAsyncTxCompletionResult.AlreadyConsumed,
+        _ => ManagedServiceAsyncTxCompletionResult.InvalidOrStale
+    };
 
     public ManagedNetworkServiceBackendResult BeginTcpConnect(
         Ipv4Address destination, ushort destinationPort)

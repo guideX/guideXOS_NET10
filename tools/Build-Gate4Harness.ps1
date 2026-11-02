@@ -70,6 +70,7 @@ param(
     [switch]$EnablePhase90AsyncTx,
     [switch]$EnablePhase91AsyncTxLifecycle,
     [switch]$EnablePhase92AsyncTxEndurance,
+    [switch]$EnablePhase93ManagedServiceAsyncTx,
     [switch]$EnablePhase91Diagnostics,
     [switch]$EnablePhase15NetworkingRegression,
     [switch]$AssumeUnspecifiedTimezoneUtc
@@ -182,6 +183,15 @@ if ($EnablePhase92AsyncTxEndurance -and
      $EnablePhase86ManagedIpv4 -or $EnablePhase87ManagedIcmpv4 -or
      $EnablePhase89ManagedUdp)) {
     throw 'Phase 92 endurance requires the ManagedKernel Phase 11 payload and is exclusive with Phase 82 through Phase 91 fixture modes.'
+}
+if ($EnablePhase93ManagedServiceAsyncTx -and
+    ($PayloadMode -ne 'ManagedKernel' -or -not $EnableNativeAotStartup -or
+     $Scenario -ne 'ManagedKernelPhase11' -or $EnablePhase90AsyncTx -or
+     $EnablePhase91AsyncTxLifecycle -or $EnablePhase92AsyncTxEndurance -or
+     $EnablePhase82ConcurrentManagedInterrupts -or $EnablePhase83E1000Rx -or
+     $EnablePhase85ManagedArp -or $EnablePhase86ManagedIpv4 -or
+     $EnablePhase87ManagedIcmpv4 -or $EnablePhase89ManagedUdp)) {
+    throw 'Phase 93 service async TX requires the ManagedKernel Phase 11 payload and is exclusive with Phase 82 through Phase 92 fixture modes.'
 }
 if ($EnablePhase15NetworkingRegression -and
     ($PayloadMode -ne 'ManagedKernel' -or -not $EnableNativeAotStartup -or
@@ -1798,6 +1808,11 @@ if ($EnablePhase92AsyncTxEndurance) {
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE90_ASYNC_TX'
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE91_LIFECYCLE'
     $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE92_ASYNC_TX_ENDURANCE'
+}
+if ($EnablePhase93ManagedServiceAsyncTx) {
+    $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE90_ASYNC_TX'
+    $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE91_LIFECYCLE'
+    $gccArguments += '-DGXOS_ENABLE_MANAGED_KERNEL_PHASE93_SERVICE_ASYNC_TX'
 }
 if ($EnablePhase91Diagnostics) {
     if (-not $EnablePhase91AsyncTxLifecycle) {
